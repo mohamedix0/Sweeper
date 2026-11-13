@@ -162,6 +162,33 @@ pub fn is_protected_container_root(path: &CanonicalPath) -> bool {
     false
 }
 
+/// Returns true if `path` is blocked by protected-container-root selection rules.
+///
+/// - Drive roots: exact identity blocked only.
+/// - `C:\Windows`, `C:\Users`, `C:\ProgramData`: exact identity and all descendants blocked from
+///   Custom Path / Analyzer selection (non-Allowlist descendants).
+/// - Any user profile root (`C:\Users\<name>`): exact identity and all descendants blocked.
+/// - Browser `User Data` and profile roots (`Default`, `Profile *` under `User Data`): exact
+///   identity and all descendants blocked.
+pub fn is_under_protected_container_root(path: &CanonicalPath) -> bool {
+    if path.is_drive_root() {
+        return true;
+    }
+    for root in [r"C:\Windows", r"C:\Users", r"C:\ProgramData"] {
+        if let Ok(r) = CanonicalPath::parse_lexical(root) {
+            if r.is_self_or_ancestor_of(path) {
+                return true;
+            }
+        }
+    }
+    // Browser container roots: "User Data" and descendants, and profile roots under User Data.
+    let segs: Vec<&str> = path.segments().collect();
+    if segs.iter().any(|s| s.eq_ignore_ascii_case("User Data")) {
+        return true;
+    }
+    false
+}
+
 fn eq_ci(path: &CanonicalPath, lit: &str) -> bool {
     if let Ok(p) = CanonicalPath::parse_lexical(lit) {
         path.is_same_path(&p)
@@ -254,15 +281,19 @@ pub fn is_subtree_protected(path: &CanonicalPath) -> bool {
     matches_fixed_subtree_protected(path)
 }
 
-/// Combined check: protected for Custom Path / Analyzer selection?
-/// - any subtree-protected path
-/// - any ancestor of subtree-protected path (cannot be selected as target root/custom path)
-/// - any protected container root (exact identity)
+/// Combined lexical check: protected for Custom Path / Analyzer selection?
+/// - any subtree-protected path (including known pattern-based segments like `.git`/`.ssh`)
+/// - any ancestor of fixed subtree-protected paths (cannot be selected as target root/custom path)
+/// - any path at or under a protected container root (container roots have exact identity protected
+///   and non-Allowlist descendants blocked from selection; Custom Paths are never allowlisted)
+///
+/// Note: this is lexical-only. It cannot prove absence of pattern-protected descendants inside an
+/// otherwise-unprotected directory; full on-disk [`validate_custom_path`] performs that check.
 pub fn is_protected_for_selection(path: &CanonicalPath) -> bool {
     if is_subtree_protected(path) {
         return true;
     }
-    if is_protected_container_root(path) {
+    if is_under_protected_container_root(path) {
         return true;
     }
     if is_ancestor_of_subtree_protected(path) {
@@ -271,8 +302,13 @@ pub fn is_protected_for_selection(path: &CanonicalPath) -> bool {
     false
 }
 
-/// Lexical-only custom path validation (no filesystem access). Useful for fuzz/property tests
-/// and early rejection. A path passing lexical checks still must pass on-disk validation.
+/// Lexical-only custom path validation (no filesystem access).
+///
+/// Useful for fuzz/property tests and early rejection. **Lexical checks cannot detect
+/// pattern-based subtree-protected descendants that may exist on disk** (e.g. a directory
+/// containing a `.git`, `.ssh`, etc.). A path passing lexical checks must still pass full
+/// on-disk validation via [`validate_custom_path`], which scans descendants without following
+/// link points and rejects paths containing subtree-protected descendants.
 pub fn validate_custom_path_lexical(input: &str) -> ValidationVerdict {
     let path = match CanonicalPath::parse_lexical(input) {
         Ok(p) => p,

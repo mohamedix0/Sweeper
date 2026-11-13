@@ -458,6 +458,20 @@ fn dir_entry_from_find_data(dir: &Path, data: &WIN32_FIND_DATAW, name: OsString)
 }
 
 fn to_wide(path: &Path) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        let s = path.as_os_str();
+        let text = s.to_string_lossy();
+        // For absolute drive paths, use extended-length prefix to support >260 chars reliably.
+        if text.len() >= 260
+            && !text.starts_with(r"\\?\")
+            && !text.starts_with(r"\\.\")
+            && text.as_bytes().get(1).copied() == Some(b':')
+        {
+            let prefixed = format!(r"\\?\{}", text);
+            return to_wide_os(OsStr::new(&prefixed));
+        }
+    }
     to_wide_os(path.as_os_str())
 }
 

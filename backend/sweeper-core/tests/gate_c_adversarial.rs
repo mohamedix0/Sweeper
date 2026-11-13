@@ -14,10 +14,7 @@ fn rejects_traversal_and_dots() {
             CanonicalPath::parse_lexical(s).is_err(),
             "should reject {s}"
         );
-        assert!(
-            !policy::validate_custom_path_lexical(s).allowed,
-            "{s}"
-        );
+        assert!(!policy::validate_custom_path_lexical(s).allowed, "{s}");
     }
 }
 
@@ -137,8 +134,17 @@ fn protected_container_and_subtree_rules() {
     }
     let p = CanonicalPath::parse_lexical(r"C:\Windows\System32").unwrap();
     assert!(policy::is_subtree_protected(&p));
+    // Arbitrary descendants under protected container roots (e.g. C:\Windows, C:\Users, ProgramData, User Data) are blocked.
+    let under_win = CanonicalPath::parse_lexical(r"C:\Windows\SomeRandomDir\Cache").unwrap();
+    assert!(policy::is_protected_for_selection(&under_win));
+    let under_users = CanonicalPath::parse_lexical(r"C:\Users\Alice\AppData\Local\TempX").unwrap();
+    assert!(policy::is_protected_for_selection(&under_users));
+    let under_profile = CanonicalPath::parse_lexical(r"C:\Users\Alice\Random\Deep\Path").unwrap();
+    assert!(policy::is_protected_for_selection(&under_profile));
     let safeish = CanonicalPath::parse_lexical(r"C:\Windows.old\Temp\Cache").unwrap();
     assert!(!policy::is_protected_for_selection(&safeish));
+    let safeish2 = CanonicalPath::parse_lexical(r"C:\Tools\Cache\Temp").unwrap();
+    assert!(!policy::is_protected_for_selection(&safeish2));
 }
 
 #[test]

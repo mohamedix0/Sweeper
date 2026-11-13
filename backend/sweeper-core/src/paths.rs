@@ -45,6 +45,9 @@ pub enum PathError {
     /// Control, bidi, or otherwise disallowed Unicode.
     #[error("disallowed Unicode characters")]
     DisallowedUnicode,
+    /// 8.3 short-name alias usage (input differs from canonical resolved name).
+    #[error("8.3 short-name alias is not allowed")]
+    ShortNameAlias,
     /// Path exceeds maximum supported length.
     #[error("path exceeds maximum length")]
     TooLong,
@@ -482,7 +485,7 @@ fn reject_short_name_alias(
     }
     // Also allow if only prefix differs (e.g. \\?\) already stripped by caller; but resolved_canonical has no prefix.
     // A differing name with '~' present implies short-name aliasing -> reject.
-    Err(PathError::DisallowedUnicode)
+    Err(PathError::ShortNameAlias)
 }
 
 /// Segment-aware, case-insensitive check: does `candidate` start at/under `base`?
@@ -521,5 +524,15 @@ mod tests {
         assert!(!is_same_or_under(&b, &base));
         assert!(is_same_or_under(&c, &base));
         assert!(is_same_or_under(&base, &base));
+    }
+
+    #[test]
+    fn rejects_short_name_alias_marker_when_mismatched() {
+        // Directly exercise alias rejection helper behavior.
+        assert!(matches!(
+            reject_short_name_alias(r"C:\PROGRA~1\Foo", r"C:\Program Files\Foo"),
+            Err(PathError::ShortNameAlias)
+        ));
+        assert!(reject_short_name_alias(r"C:\Temp\LongName", r"C:\Temp\LongName").is_ok());
     }
 }
