@@ -4,9 +4,9 @@ use std::time::{Duration, SystemTime};
 
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::policy;
-use sweeper_core::scanner;
+use sweeper_core::scanner::{self, TempGuard};
 use sweeper_knowledge::{KnownFolder, Risk, Scope, TargetDefinition, Tier};
-use sweeper_testkit::CanaryTree;
+use sweeper_testkit::{CanaryTree, Sandbox};
 
 fn set_file_mtime(path: &std::path::Path, t: SystemTime) {
     let dt = humantime_like_rfc3339(t);
@@ -185,21 +185,150 @@ fn wildcard_intermediate_segment_expansion_scans_matching_dirs_only() {
 }
 
 #[test]
-fn redirected_temp_guard_disables_unsafe_or_identical_targets() {
-    // We can't reliably mutate real %TEMP% safely here, but we can validate guard behavior indirectly:
-    // evaluate by scanning embedded targets should never mark redirected-temp as safe when identical to user-temp.
+fn redirected_temp_guard_deterministic_sandbox_and_end_to_end_scan() {
+    let local = sweeper_winfs::resolve_known_folder(sweeper_winfs::KnownFolderId::LocalAppData)
+        .expect("resolve LocalAppData");
+    let user_temp = CanonicalPath::from_existing_path(&local.join("Temp").to_string_lossy())
+        .expect("canonical user-temp")
+        .into_canonical();
+
+    // (a) Drive root / depth < 3 -> auto-disabled
+    match scanner::evaluate_redirected_temp_candidate(Some(r"C:\"), &user_temp) {
+        TempGuard::Disabled(reason) => assert!(
+            reason.contains("depth < 3")
+                || reason.contains("protected")
+                || reason.contains("unresolved"),
+            "{reason}"
+        ),
+        TempGuard::Use(p) => panic!("drive root must be disabled, got {p}"),
+    }
+
+    // (b) User profile root (Protected Container Root) -> auto-disabled
+    let profile = sweeper_winfs::resolve_known_folder(sweeper_winfs::KnownFolderId::UserProfile)
+        .expect("resolve profile");
+    match scanner::evaluate_redirected_temp_candidate(Some(&profile.to_string_lossy()), &user_temp)
+    {
+        TempGuard::Disabled(reason) => assert!(
+            reason.contains("protected") || reason.contains("depth < 3"),
+            "{reason}"
+        ),
+        TempGuard::Use(p) => panic!("profile root must be disabled, got {p}"),
+    }
+
+    // (c) Documents (Subtree-Protected Path) -> auto-disabled
+    let documents = profile.join("Documents");
+    if documents.exists() {
+        match scanner::evaluate_redirected_temp_candidate(
+            Some(&documents.to_string_lossy()),
+            &user_temp,
+        ) {
+            TempGuard::Disabled(reason) => assert!(
+                reason.contains("protected") || reason.contains("unresolved"),
+                "{reason}"
+            ),
+            TempGuard::Use(p) => panic!("Documents must be disabled, got {p}"),
+        }
+        let documents_temp = documents.join("Temp");
+        if documents_temp.exists() {
+            match scanner::evaluate_redirected_temp_candidate(
+                Some(&documents_temp.to_string_lossy()),
+                &user_temp,
+            ) {
+                TempGuard::Disabled(reason) => assert!(reason.contains("protected"), "{reason}"),
+                TempGuard::Use(p) => panic!("Documents\\Temp must be disabled, got {p}"),
+            }
+        }
+    }
+
+    // (d) Link Point / junction (direct and child inside junction ancestor) -> auto-disabled, zero traversal
+    let sandbox = Sandbox::new().expect("sandbox");
+    let canary = CanaryTree::seed_external("gate-e-rt-junc").expect("seed canary");
+    let direct_link_parent = sandbox.guarded_path(r"a\b");
+    fs::create_dir_all(&direct_link_parent).unwrap();
+    let direct_link = direct_link_parent.join("direct-temp-link");
+    sweeper_testkit::create_junction(&direct_link, canary.root()).expect("create direct junction");
+    match scanner::evaluate_redirected_temp_candidate(
+        Some(&direct_link.to_string_lossy()),
+        &user_temp,
+    ) {
+        TempGuard::Disabled(reason) => assert!(
+            reason.contains("link point")
+                || reason.contains("unresolved")
+                || reason.contains("travers"),
+            "direct junction must be disabled: {reason}"
+        ),
+        TempGuard::Use(p) => panic!("direct junction must be disabled, got {p}"),
+    }
+    canary
+        .verify()
+        .expect("canary intact after direct junction guard evaluation");
+
+    let junction_parent_parent = sandbox.guarded_path(r"a\c");
+    fs::create_dir_all(&junction_parent_parent).unwrap();
+    let junction_parent = junction_parent_parent.join("junc-parent");
+    sweeper_testkit::create_junction(&junction_parent, canary.root())
+        .expect("create ancestor junction");
+    let child_under_junction = junction_parent.join("child-temp");
+    match scanner::evaluate_redirected_temp_candidate(
+        Some(&child_under_junction.to_string_lossy()),
+        &user_temp,
+    ) {
+        TempGuard::Disabled(reason) => assert!(
+            reason.contains("link point")
+                || reason.contains("travers")
+                || reason.contains("unresolved"),
+            "child inside junction ancestor must be disabled: {reason}"
+        ),
+        TempGuard::Use(p) => panic!("child inside junction ancestor must be disabled, got {p}"),
+    }
+    canary
+        .verify()
+        .expect("canary intact after ancestor junction guard evaluation");
+
+    // (e) Valid existing non-protected directory (depth >= 3), differing from user-temp -> Use and scanned
+    let valid = sandbox.guarded_path("a/b/redirected-temp-ok");
+    fs::create_dir_all(&valid).unwrap();
+    fs::write(valid.join("x.txt"), b"x").unwrap();
+    set_file_mtime(
+        &valid.join("x.txt"),
+        SystemTime::now() - Duration::from_secs(48 * 3600),
+    );
+    match scanner::evaluate_redirected_temp_candidate(Some(&valid.to_string_lossy()), &user_temp) {
+        TempGuard::Use(p) => assert!(p.segment_count() >= 3),
+        TempGuard::Disabled(reason) => panic!("valid redirected temp must be accepted: {reason}"),
+    }
+    let rt_target = make_target("redirected-temp", KnownFolder::LocalAppData, "Temp", 24);
+    let report = scanner::scan_targets_with_redirected_temp_override(
+        vec![rt_target],
+        24,
+        Some(&valid.to_string_lossy()),
+    )
+    .expect("scan with redirected temp override");
+    assert_eq!(report.targets.len(), 1);
+    let t = &report.targets[0];
+    assert!(t.scanned, "status: {:?}", t.status_reason);
+    assert!(!t.resolved_paths.is_empty());
+    assert_eq!(t.file_count, 1, "items: {:?}", t.items);
+
+    // (f) Identical to user-temp -> auto-disabled
+    match scanner::evaluate_redirected_temp_candidate(Some(user_temp.as_str()), &user_temp) {
+        TempGuard::Disabled(reason) => assert!(reason.contains("identical"), "{reason}"),
+        TempGuard::Use(p) => panic!("identical user-temp must be disabled, got {p}"),
+    }
+}
+
+#[test]
+fn redirected_temp_guard_disables_unsafe_or_identical_targets_embedded_scan() {
+    // Indirect real-env check: embedded scan must never enable redirected-temp unsafely.
     let report = scanner::scan_tier1_tier2(24).expect("scan");
     if let Some(rt) = report
         .targets
         .iter()
         .find(|t| t.target_id == "redirected-temp")
     {
-        // On typical systems %TEMP% == LocalAppData\Temp so redirected-temp must be disabled.
-        // If different and safe, it may be scanned; but must never be unsafe.
         if let Some(status) = &rt.status_reason {
             assert!(status.contains("redirected-temp disabled") || status.contains("not present"));
         } else {
-            // scanned: ensure resolved roots are not protected and depth>=3
             for p in &rt.resolved_paths {
                 let c = CanonicalPath::from_existing_path(p)
                     .unwrap()

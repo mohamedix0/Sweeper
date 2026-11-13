@@ -40,6 +40,15 @@ impl SkipReason {
     }
 }
 
+/// Result of redirected `%TEMP%` guard evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TempGuard {
+    /// Use the provided canonical redirected temp path.
+    Use(CanonicalPath),
+    /// Redirected temp must be auto-disabled for safety/redundancy.
+    Disabled(String),
+}
+
 /// Metadata for a scannable/observed item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanItem {
@@ -88,6 +97,9 @@ pub struct TargetScanResult {
     pub skipped_count: u64,
     /// Skipped reason counts.
     pub skipped_reasons: BTreeMap<String, u64>,
+    /// Detailed skip diagnostics (e.g. unreadable path/error context) for Gate E/reporting.
+    #[serde(default)]
+    pub skipped_diagnostics: Vec<String>,
     /// Per-item metadata.
     pub items: Vec<ScanItem>,
 }
@@ -128,6 +140,20 @@ pub fn scan_targets(
     targets: Vec<TargetDefinition>,
     min_age_hours: u32,
 ) -> Result<ScanReport, ScanError> {
+    scan_targets_with_redirected_temp_override(targets, min_age_hours, None)
+}
+
+/// Scan a provided set of targets (read-only) with an optional injected redirected `%TEMP%`
+/// candidate path for deterministic/testing scenarios.
+///
+/// When `redirected_temp_candidate` is `Some`, it is used instead of reading process `%TEMP%`
+/// for `redirected-temp` guard evaluation.
+pub fn scan_targets_with_redirected_temp_override(
+    targets: Vec<TargetDefinition>,
+    min_age_hours: u32,
+    redirected_temp_candidate: Option<&str>,
+) -> Result<ScanReport, ScanError> {
+    validate_target_definitions(&targets).map_err(ScanError::Targets)?;
     let now = SystemTime::now();
     let started_unix_secs = system_time_to_unix_secs(now);
     let min_age = Duration::from_secs(u64::from(min_age_hours) * 3600);
@@ -161,6 +187,7 @@ pub fn scan_targets(
             eligible_count: 0,
             skipped_count: 0,
             skipped_reasons: BTreeMap::new(),
+            skipped_diagnostics: Vec::new(),
             items: Vec::new(),
         };
 
@@ -175,7 +202,23 @@ pub fn scan_targets(
 
         // Special-case: redirected-temp conditional target.
         if target.id == "redirected-temp" {
-            match evaluate_redirected_temp(&base_root) {
+            let temp_guard = match redirected_temp_candidate {
+                Some(candidate) => {
+                    let user_temp = match join_and_canonicalize(&base_root, "Temp") {
+                        Ok(p) => p,
+                        Err(e) => {
+                            out.status_reason = Some(format!(
+                                "redirected-temp disabled: failed to resolve user-temp: {e}"
+                            ));
+                            results.push(out);
+                            continue;
+                        }
+                    };
+                    evaluate_redirected_temp_candidate(Some(candidate), &user_temp)
+                }
+                None => evaluate_redirected_temp(&base_root),
+            };
+            match temp_guard {
                 TempGuard::Use(path) => {
                     // scanned below using resolved path override
                     match validate_and_collect_roots_for_target(&target, &base_root, Some(&path)) {
@@ -285,8 +328,12 @@ fn scan_one_root_iterative(
     while let Some(dir) = ctx.stack.pop() {
         let entries = match sweeper_winfs::read_dir_entries(&dir) {
             Ok(v) => v,
-            Err(_) => {
-                bump_skip(ctx.out, SkipReason::Unreadable);
+            Err(e) => {
+                bump_skip_with_context(
+                    ctx.out,
+                    SkipReason::Unreadable,
+                    format!("read_dir_entries {}: {e}", dir.to_string_lossy()),
+                );
                 continue;
             }
         };
@@ -331,8 +378,12 @@ fn process_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
                 return;
             }
             Ok(ReparseTagClass::NotReparse) => {}
-            Err(_) => {
-                bump_skip(ctx.out, SkipReason::Unreadable);
+            Err(e) => {
+                bump_skip_with_context(
+                    ctx.out,
+                    SkipReason::Unreadable,
+                    format!("inspect_reparse_point {}: {e}", ent.path.to_string_lossy()),
+                );
                 return;
             }
         }
@@ -376,12 +427,20 @@ fn process_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
 }
 
 fn bump_skip(out: &mut TargetScanResult, reason: SkipReason) {
+    bump_skip_with_context(out, reason, String::new());
+}
+
+fn bump_skip_with_context(out: &mut TargetScanResult, reason: SkipReason, context: String) {
     out.skipped_count = out.skipped_count.saturating_add(1);
     let entry = out
         .skipped_reasons
         .entry(reason.as_str().to_string())
         .or_insert(0);
     *entry = entry.saturating_add(1);
+    if !context.is_empty() {
+        out.skipped_diagnostics
+            .push(format!("{}: {}", reason.as_str(), context));
+    }
 }
 
 fn validate_and_collect_roots_for_target(
@@ -609,25 +668,36 @@ fn path_has_link_point_ancestor(path: &CanonicalPath) -> Result<bool, String> {
     Ok(false)
 }
 
-enum TempGuard {
-    Use(CanonicalPath),
-    Disabled(String),
-}
-
 fn evaluate_redirected_temp(local_appdata_root: &CanonicalPath) -> TempGuard {
-    let temp_env = match sweeper_winfs::env_var("TEMP") {
-        Some(v) if !v.trim().is_empty() => v,
-        _ => return TempGuard::Disabled("%TEMP% not set".to_string()),
-    };
-    let temp_canon = match CanonicalPath::from_existing_path(&temp_env) {
-        Ok(v) => v.into_canonical(),
-        Err(e) => return TempGuard::Disabled(format!("%TEMP% unresolved: {e}")),
-    };
     let user_temp = match join_and_canonicalize(local_appdata_root, "Temp") {
         Ok(p) => p,
         Err(e) => return TempGuard::Disabled(format!("failed to resolve user-temp: {e}")),
     };
-    if temp_canon.is_same_path(&user_temp) {
+    let temp_env = sweeper_winfs::env_var("TEMP").filter(|v| !v.trim().is_empty());
+    evaluate_redirected_temp_candidate(temp_env.as_deref(), &user_temp)
+}
+
+/// Evaluate redirected `%TEMP%` guard for an injected candidate path and canonical user-temp root.
+///
+/// This is a deterministic, testable seam (no global env mutation). `temp_candidate` should be the
+/// `%TEMP%` path value to validate, or `None` when unset/empty.
+pub fn evaluate_redirected_temp_candidate(
+    temp_candidate: Option<&str>,
+    user_temp_canonical: &CanonicalPath,
+) -> TempGuard {
+    let Some(temp_env) = temp_candidate.filter(|v| !v.trim().is_empty()) else {
+        return TempGuard::Disabled("%TEMP% not set".to_string());
+    };
+    if let Ok(root) = crate::paths::parse_drive_root(temp_env.trim()) {
+        // Drive root (e.g. C:\) is always depth < 3 and protected; auto-disable deterministically.
+        let _ = root;
+        return TempGuard::Disabled("depth < 3 (drive root)".to_string());
+    }
+    let temp_canon = match CanonicalPath::from_existing_path(temp_env) {
+        Ok(v) => v.into_canonical(),
+        Err(e) => return TempGuard::Disabled(format!("%TEMP% unresolved: {e}")),
+    };
+    if temp_canon.is_same_path(user_temp_canonical) {
         return TempGuard::Disabled("identical to user-temp".to_string());
     }
     if temp_canon.segment_count() < 3 {
@@ -726,9 +796,53 @@ pub fn format_report(report: &ScanReport) -> String {
                 out.push_str(&format!("    - {k}: {v}\n"));
             }
         }
+        if !t.skipped_diagnostics.is_empty() {
+            out.push_str("  skipped_diagnostics:\n");
+            for d in &t.skipped_diagnostics {
+                out.push_str(&format!("    - {d}\n"));
+            }
+        }
         out.push('\n');
     }
     out
+}
+
+fn validate_target_definitions(targets: &[TargetDefinition]) -> Result<(), String> {
+    let lint_targets: Vec<sweeper_knowledge::LintTarget> = targets
+        .iter()
+        .map(target_definition_to_lint_target)
+        .collect();
+    sweeper_knowledge::lint_targets(&lint_targets).map_err(|e| e.to_string())
+}
+
+fn target_definition_to_lint_target(t: &TargetDefinition) -> sweeper_knowledge::LintTarget {
+    sweeper_knowledge::LintTarget {
+        id: t.id.clone(),
+        name: t.name.clone(),
+        tier: match t.tier {
+            Tier::Tier1 => "Tier1".to_string(),
+            Tier::Tier2 => "Tier2".to_string(),
+            Tier::Tier3 => "Tier3".to_string(),
+        },
+        risk: match t.risk {
+            Risk::Safe => "Safe".to_string(),
+            Risk::Caution => "Caution".to_string(),
+            Risk::Unknown => "Unknown".to_string(),
+            Risk::Protected => "Protected".to_string(),
+        },
+        known_folder: match t.known_folder {
+            KnownFolder::LocalAppData => "LocalAppData".to_string(),
+            KnownFolder::RoamingAppData => "RoamingAppData".to_string(),
+            KnownFolder::UserProfile => "UserProfile".to_string(),
+            KnownFolder::Windows => "Windows".to_string(),
+            KnownFolder::ProgramData => "ProgramData".to_string(),
+        },
+        relative_subpath: t.relative_subpath.clone(),
+        scope: "contents".to_string(),
+        min_age_hours: t.min_age_hours,
+        description: t.description.clone(),
+        requires_elevation: t.requires_elevation,
+    }
 }
 
 /// Verify Gate E read-only invariants against a scan report produced from embedded Tier 1/2 targets.
@@ -793,4 +907,82 @@ pub fn gate_e_violations(report: &ScanReport) -> Vec<String> {
         // We assert no impossible state here; scanner never traverses link points.
     }
     violations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sweeper_knowledge::{KnownFolder, Risk, Scope, Tier};
+
+    fn sample_target(id: &str, rel: &str) -> TargetDefinition {
+        TargetDefinition {
+            id: id.to_string(),
+            name: id.to_string(),
+            tier: Tier::Tier1,
+            risk: Risk::Safe,
+            known_folder: KnownFolder::LocalAppData,
+            relative_subpath: rel.to_string(),
+            scope: Scope::Contents,
+            min_age_hours: 24,
+            description: "test".to_string(),
+            requires_elevation: false,
+        }
+    }
+
+    #[test]
+    fn rejects_caller_supplied_target_shapes_via_lint() {
+        let bad = vec![sample_target("bad", "Foo\\**\\Bar")];
+        let err = scan_targets(bad, 24).unwrap_err().to_string();
+        assert!(err.contains("**") || err.contains("glob"), "{err}");
+    }
+
+    #[test]
+    fn redirected_temp_guard_depth_lt_3_drive_root_disabled() {
+        let local = sweeper_winfs::resolve_known_folder(KnownFolderId::LocalAppData)
+            .expect("resolve local appdata");
+        let user_temp = CanonicalPath::from_existing_path(&local.join("Temp").to_string_lossy())
+            .expect("user temp")
+            .into_canonical();
+        let guard = evaluate_redirected_temp_candidate(Some(r"C:\"), &user_temp);
+        match guard {
+            TempGuard::Disabled(reason) => assert!(reason.contains("depth < 3"), "{reason}"),
+            TempGuard::Use(p) => panic!("expected disabled, got {p}"),
+        }
+    }
+
+    #[test]
+    fn redirected_temp_guard_identical_to_user_temp_disabled() {
+        let local = sweeper_winfs::resolve_known_folder(KnownFolderId::LocalAppData)
+            .expect("resolve local appdata");
+        let user_temp = CanonicalPath::from_existing_path(&local.join("Temp").to_string_lossy())
+            .expect("user temp")
+            .into_canonical();
+        let guard = evaluate_redirected_temp_candidate(Some(user_temp.as_str()), &user_temp);
+        match guard {
+            TempGuard::Disabled(reason) => assert!(reason.contains("identical"), "{reason}"),
+            TempGuard::Use(p) => panic!("expected disabled, got {p}"),
+        }
+    }
+
+    #[test]
+    fn redirected_temp_guard_profile_root_disabled_as_protected_container() {
+        let local = sweeper_winfs::resolve_known_folder(KnownFolderId::LocalAppData)
+            .expect("resolve local appdata");
+        let user_temp = CanonicalPath::from_existing_path(&local.join("Temp").to_string_lossy())
+            .expect("user temp")
+            .into_canonical();
+        let profile = sweeper_winfs::resolve_known_folder(KnownFolderId::UserProfile)
+            .expect("resolve profile");
+        let guard =
+            evaluate_redirected_temp_candidate(Some(&profile.to_string_lossy()), &user_temp);
+        match guard {
+            TempGuard::Disabled(reason) => {
+                assert!(
+                    reason.contains("protected") || reason.contains("depth < 3"),
+                    "{reason}"
+                )
+            }
+            TempGuard::Use(p) => panic!("expected disabled, got {p}"),
+        }
+    }
 }
