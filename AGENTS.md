@@ -6,7 +6,7 @@ Safety-first Windows desktop disk cleaner (Tauri 2 + Rust + React/TypeScript) th
 
 - **Safety over features and speed:** Deny-by-default (`Allowlist` + validated `Custom Path`), non-disableable `Protected Path`s, handle-based removal with moment-of-deletion re-validation, `Link Point`s never followed, cloud placeholders always `Skipped`, and gated releases (`proptest`, `cargo-fuzz`, `cargo-mutants` ≥ 95%, sandbox TOCTOU/canary tests).
 - **Three separated parts:** `backend/` (pure Rust safety & NTFS logic; `unsafe` confined to `sweeper-winfs`), `bridge/` (`sweeper-contract` single source of truth + `sweeper-desktop` Tauri shell; ID-only deletion IPC), and `frontend/` (React/TS UI only; zero `fs`/`shell` plugins).
-- **Gated execution:** Wait for explicit user approval before starting any implementation phase or creating code.
+- **Autonomous execution:** The owner has granted full standing approval for all phases (0–6). Drive `$to-spec` → `$to-tickets` → `$implement-spec` → `$code-review` → `$retro` continuously via sub-agents without pausing for permission. Live deletion on real `C:` user/system paths outside the sentinel test sandbox remains strictly forbidden until manual release verification.
 
 ## Context Pointers
 

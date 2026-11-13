@@ -22,7 +22,7 @@ The Orchestrator operates strictly as the **coordinator and decision-maker**:
   - Decomposing phases and tasks into bounded, well-scoped briefs anchored to [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) and [GLOSSARY.md](../GLOSSARY.md).
   - Dispatching sub-agents via `delegate_task` with explicit constraints and acceptance gates.
   - Reviewing sub-agent outputs, verifying gate results, resolving cross-module/architectural decisions, and reporting clearly to the user.
-  - Enforcing the rule that **no implementation phase starts without explicit user approval**.
+  - Driving `$to-spec` → `$to-tickets` → `$implement-spec` → `$code-review` → `$retro` continuously across Phases 0–6 under standing owner approval, pausing only if a genuine human-only irreversible action (such as running live deletion outside the sentinel test sandbox on real `C:` data) is encountered.
 
 ## 3. Standard Sub-Agent Model Configuration
 

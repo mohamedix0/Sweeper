@@ -1,6 +1,6 @@
 # Sweeper — Implementation Plan
 
-> Status: Draft for final review. No implementation code has been written yet.
+> Status: Approved for autonomous execution (Phases 0–6 via sub-agents). No implementation code has been written yet.
 > Domain terms are defined in [GLOSSARY.md](../GLOSSARY.md) (`Target`, `Allowlist`, `Protected Path`, `Custom Path`, `Knowledge Base`, `Risk`, `Safe`, `Caution`, `Unknown`, `Protected`, `Tier`, `Scan`, `Preview`, `Clean`, `Analyzer`, `Minimum Age`, `Skipped`, `Link Point`).
 > Architectural decisions: [ADR 0001](./adr/0001-deny-by-default-allowlist.md), [ADR 0002](./adr/0002-three-part-separation.md), [ADR 0003](./adr/0003-handle-based-removal.md).
 > Orchestration & delegation policy: [DELEGATION.md](./DELEGATION.md).
@@ -315,7 +315,7 @@ Entries above require review before entering `allowlist.toml`. Any newly discove
 
 ---
 
-## 9. Author-Added Defaults (For Review)
+## 9. Standing Technical Defaults (Approved)
 
 1. Session & token lifetimes: `ScanSession` TTL is **15 minutes** (invalidated immediately on scan-affecting `update_settings`); `preview_token` TTL is **10 minutes** (single-use, bounded by session expiry).
 2. **120% circuit breaker:** `Clean` aborts if actual deleted bytes exceed 120% of the `Preview` estimate.
@@ -329,8 +329,8 @@ Entries above require review before entering `allowlist.toml`. Any newly discove
 
 ---
 
-## 10. Open Decisions
+## 10. Settled Technical Decisions
 
-- `windows-sys` vs `windows` crate: recommend `windows-sys` (lighter, sufficient for handle APIs).
-- Represent Known Folders as a closed enum in `sweeper-knowledge`: recommend yes.
-- Full-drive `Analyzer` speed on `C:`: benchmark in Phase 4; consider optional elevated MFT scan only if walk exceeds ~2 minutes.
+- **`windows-sys` crate:** Selected over `windows` (lighter dependency surface, sufficient for Win32 handle APIs).
+- **Known Folders enum:** Closed enum in `sweeper-knowledge` mapping to `FOLDERID_*` constants in `sweeper-winfs`.
+- **Full-drive `Analyzer` speed on `C:`:** Use parallel `FindFirstFileEx` (`FIND_FIRST_EX_LARGE_FETCH`) in Phase 4 and benchmark; defer any optional elevated MFT acceleration to post-v1 unless Phase 4 benchmarks exceed ~2 minutes and require reopening.
