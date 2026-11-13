@@ -1,0 +1,9 @@
+# Static Gate A: ban deletion primitives in production code (backend/ and bridge/).
+# `std::fs::remove_*` is banned everywhere in these crates; sweeper-winfs deletion
+# primitives are banned everywhere except a single audited #[allow] inside core::remover
+# (remover does not exist in Phase 0; the ban is established now).
+disallowed-methods = [
+  { path = "std::fs::remove_file", reason = "Gate A: use handle-based removal in sweeper-core::remover only (no deletion in Phase 0)" },
+  { path = "std::fs::remove_dir", reason = "Gate A: use handle-based removal in sweeper-core::remover only (no deletion in Phase 0)" },
+  { path = "std::fs::remove_dir_all", reason = "Gate A: use handle-based removal in sweeper-core::remover only (no deletion in Phase 0)" },
+]

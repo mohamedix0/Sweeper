@@ -1,0 +1,18 @@
+[package]
+name = "sweeper-winfs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints.rust]
+# Sole crate permitted to contain unsafe (ADR 0003). Every unsafe block requires // SAFETY:
+unsafe_code = "allow"
+
+[lints.clippy]
+disallowed_methods = "deny"
+
+[dependencies]
+windows-sys = { workspace = true }
+thiserror = { workspace = true }

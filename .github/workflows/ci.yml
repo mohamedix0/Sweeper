@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  gate-a:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: Gate A grep checks
+        shell: pwsh
+        run: ./scripts/gate-a-check.ps1
+
+      - name: cargo clippy (workspace, all targets)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace --locked
+
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Frontend install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile=false
+
+      - name: pnpm audit
+        working-directory: frontend
+        run: pnpm audit --audit-level=high
+
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: pnpm run typecheck
+
+      - name: Frontend lint
+        working-directory: frontend
+        run: pnpm run lint

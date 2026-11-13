@@ -1,0 +1,16 @@
+[package]
+name = "sweeper-desktop"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sweeper-contract = { workspace = true }
+sweeper-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
