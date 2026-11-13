@@ -1,10 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
-import { createClient, formatContractError, type CleanProgressEvent, type ExecuteCleanResponse, type ScanResults, type SweeperClient } from './api/client';
-import type { ContractError, RiskDto, TargetScanResultDto } from './contract/bindings';
+import {
+  createClient,
+  formatContractError,
+  type AnalyzerProgressEvent,
+  type CleanProgressEvent,
+  type ExecuteCleanResponse,
+  type ScanResults,
+  type StartAnalyzerResult,
+  type SweeperClient,
+} from './api/client';
+import type { AnalyzerNodeDto, ContractError, RiskDto, TargetScanResultDto } from './contract/bindings';
 import { formatBytes, formatUnixSeconds, sumDecimalStrings } from './utils/format';
 
-type View = 'scan' | 'settings' | 'logs';
+type View = 'scan' | 'analyzer' | 'settings' | 'logs';
 
 type ExplainState = { itemId: string; title: string; description: string; risk: RiskDto } | null;
 type PreviewResult = {
@@ -57,6 +66,35 @@ function TtlIndicator({ label, issuedAtMs, ttlMs }: { label: string; issuedAtMs:
   );
 }
 
+function ExplainDrawer({ explain, onClose }: { explain: ExplainState; onClose: () => void }) {
+  if (!explain) return null;
+  return (
+    <div className="drawer-backdrop" role="presentation" onClick={onClose}>
+      <aside
+        className="drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="explain-title"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose();
+        }}
+      >
+        <div className="row">
+          <h3 id="explain-title">Explain: {explain.title}</h3>
+          <div className="spacer" />
+          <button className="btn" onClick={onClose} aria-label="Close explanation">Close</button>
+        </div>
+        <p><span className={riskClass(explain.risk)}>Risk: {explain.risk}</span></p>
+        <p>{explain.description}</p>
+        <dl className="kv">
+          <dt>Item ID</dt><dd>{explain.itemId}</dd>
+        </dl>
+      </aside>
+    </div>
+  );
+}
+
 function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOpenLog: (logId: string) => void }) {
   const [tier1, setTier1] = useState(true);
   const [tier2, setTier2] = useState(true);
@@ -80,11 +118,7 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
 
   const selectedBytes = useMemo(() => {
     const sizes: string[] = [];
-    for (const t of targets) {
-      for (const item of t.items) {
-        if (selectedIds.has(item.id)) sizes.push(item.size);
-      }
-    }
+    for (const t of targets) for (const item of t.items) if (selectedIds.has(item.id)) sizes.push(item.size);
     return sumDecimalStrings(sizes);
   }, [targets, selectedIds]);
 
@@ -108,15 +142,8 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
   }
 
   async function runScan() {
-    setError(null);
-    setInfo(null);
-    setPreview(null);
-    setExplain(null);
-    setSelectedIds(new Set());
-    setResults(null);
-    setCleanSummary(null);
-    setCleanProgress(null);
-    setScanning(true);
+    setError(null); setInfo(null); setPreview(null); setExplain(null); setSelectedIds(new Set());
+    setResults(null); setCleanSummary(null); setCleanProgress(null); setScanning(true);
     setScanStatus('Starting Scan…');
     const tiers = [tier1 ? 'Tier1' : null, tier2 ? 'Tier2' : null].filter(Boolean) as ('Tier1' | 'Tier2')[];
     try {
@@ -126,8 +153,7 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
         if (ev.kind === 'failed') setScanStatus('Scan failed.');
       });
       setSessionId(sid);
-      const started = Date.now();
-      setScanStartedAt(started);
+      setScanStartedAt(Date.now());
       const data = await client.getScanResults(sid);
       setResults(data);
       setInfo('Scan complete. Select eligible items, run Preview, then Clean Permanently if you confirm.');
@@ -142,34 +168,18 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
 
   function toggleItem(itemId: string, targetRisk: RiskDto, ageEligible: boolean) {
     if (!isSelectableItem({ ageEligible }, targetRisk)) return;
-    setPreview(null);
-    setCleanSummary(null);
-    setCleanProgress(null);
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(itemId)) next.delete(itemId);
-      else next.add(itemId);
-      return next;
-    });
+    setPreview(null); setCleanSummary(null); setCleanProgress(null);
+    setSelectedIds((prev) => { const next = new Set(prev); if (next.has(itemId)) next.delete(itemId); else next.add(itemId); return next; });
   }
 
   async function onExplain(itemId: string) {
     setError(null);
-    try {
-      const res = await client.explainItem(itemId);
-      setExplain(res);
-    } catch (e) {
-      setError(formatContractError(e));
-    }
+    try { setExplain(await client.explainItem(itemId)); } catch (e) { setError(formatContractError(e)); }
   }
 
   async function runPreview() {
     if (!sessionId) return;
-    setError(null);
-    setInfo(null);
-    setPreviewLoading(true);
-    setCleanSummary(null);
-    setCleanProgress(null);
+    setError(null); setInfo(null); setPreviewLoading(true); setCleanSummary(null); setCleanProgress(null);
     try {
       const confirmations = requiresConfirmation ? { typedConfirmation: confirmText || null } : null;
       const res = await client.previewClean(sessionId, Array.from(selectedIds), confirmations);
@@ -178,53 +188,30 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
     } catch (e) {
       const ce = e as ContractError | undefined;
       setError(formatContractError(e));
-      if (ce?.code === 'sessionInvalid') {
-        resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
-      } else if (ce?.code === 'previewTokenInvalid') {
-        setPreview(null);
-      }
-    } finally {
-      setPreviewLoading(false);
-    }
+      if (ce?.code === 'sessionInvalid') resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
+      else if (ce?.code === 'previewTokenInvalid') setPreview(null);
+    } finally { setPreviewLoading(false); }
   }
 
   async function runClean() {
     if (!preview) return;
-    setError(null);
-    setInfo(null);
-    setCleaning(true);
-    setCleanProgress(null);
-    setCleanSummary(null);
+    setError(null); setInfo(null); setCleaning(true); setCleanProgress(null); setCleanSummary(null);
     try {
       const res = await client.executeClean(preview.previewToken, (ev) => setCleanProgress(ev));
       setCleanSummary(res);
       setPreview(null);
       setSelectedIds(new Set());
       setInfo('Clean completed. Review the summary and operation log below.');
-      if (sessionId) {
-        try {
-          const refreshed = await client.getScanResults(sessionId);
-          setResults(refreshed);
-        } catch {
-          // ignore
-        }
-      }
+      if (sessionId) { try { setResults(await client.getScanResults(sessionId)); } catch { /* ignore */ } }
     } catch (e) {
       const ce = e as ContractError | undefined;
       setError(formatContractError(e));
-      if (ce?.code === 'sessionInvalid') {
-        resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
-      } else if (ce?.code === 'previewTokenInvalid') {
-        setPreview(null);
-        setInfo('Preview token is invalid, expired, or already used. Run Preview again.');
-      }
-    } finally {
-      setCleaning(false);
-    }
+      if (ce?.code === 'sessionInvalid') resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
+      else if (ce?.code === 'previewTokenInvalid') { setPreview(null); setInfo('Preview token is invalid, expired, or already used. Run Preview again.'); }
+    } finally { setCleaning(false); }
   }
 
-  const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning &&
-    (!requiresConfirmation || confirmText.trim().length > 0);
+  const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning && (!requiresConfirmation || confirmText.trim().length > 0);
   const canClean = !!preview && !scanning && !previewLoading && !cleaning;
 
   return (
@@ -294,19 +281,11 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
                   return (
                     <div key={item.id} className="item-row">
                       <label className="checkbox">
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${item.path}`}
-                          checked={checked}
-                          disabled={!selectable || cleaning}
-                          onChange={() => toggleItem(item.id, t.risk, item.ageEligible)}
-                        />
+                        <input type="checkbox" aria-label={`Select ${item.path}`} checked={checked} disabled={!selectable || cleaning} onChange={() => toggleItem(item.id, t.risk, item.ageEligible)} />
                       </label>
                       <div>
                         <div className="item-path">{item.path}</div>
-                        <div className="item-status">
-                          {!selectable ? `Skipped/Not selectable: ${reason}` : 'Eligible for Preview selection'}
-                        </div>
+                        <div className="item-status">{!selectable ? `Skipped/Not selectable: ${reason}` : 'Eligible for Preview selection'}</div>
                       </div>
                       <div className="item-size">{formatBytes(item.size)}</div>
                       <button className="btn" onClick={() => onExplain(item.id)}>Explain</button>
@@ -330,12 +309,7 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
                 </div>
               </div>
             )}
-            <div className="row">
-              <button className="btn primary" onClick={runPreview} disabled={!canPreview}>
-                {previewLoading ? 'Generating Preview…' : 'Preview Clean'}
-              </button>
-            </div>
-
+            <div className="row"><button className="btn primary" onClick={runPreview} disabled={!canPreview}>{previewLoading ? 'Generating Preview…' : 'Preview Clean'}</button></div>
             {preview && (
               <div aria-live="polite">
                 <h4 className="section-title">Preview Breakdown</h4>
@@ -346,50 +320,28 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
                 </div>
                 <p><strong>Total selected:</strong> {preview.totalSelectedCount} item(s), {formatBytes(preview.totalSelectedBytes)}</p>
                 <table className="table" aria-label="Preview breakdown by Target">
-                  <thead>
-                    <tr><th>Target</th><th>Selected count</th><th>Selected bytes</th></tr>
-                  </thead>
+                  <thead><tr><th>Target</th><th>Selected count</th><th>Selected bytes</th></tr></thead>
                   <tbody>
                     {preview.breakdown.map((b) => (
-                      <tr key={b.targetId}>
-                        <td>{b.targetName} <span className="muted">({b.targetId})</span></td>
-                        <td>{b.selectedCount}</td>
-                        <td>{formatBytes(b.selectedBytes)}</td>
-                      </tr>
+                      <tr key={b.targetId}><td>{b.targetName} <span className="muted">({b.targetId})</span></td><td>{b.selectedCount}</td><td>{formatBytes(b.selectedBytes)}</td></tr>
                     ))}
                   </tbody>
                 </table>
-
-                <div className="notice warn" role="alert" aria-live="polite">
-                  <strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.
-                </div>
-                <div className="row">
-                  <button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">
-                    {cleaning ? 'Cleaning…' : 'Clean Permanently'}
-                  </button>
-                </div>
+                <div className="notice warn" role="alert" aria-live="polite"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
+                <div className="row"><button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">{cleaning ? 'Cleaning…' : 'Clean Permanently'}</button></div>
                 {cleaning && (
                   <div className="notice info" role="status" aria-live="polite">
                     <div>Cleaning in progress…</div>
-                    {cleanProgress && (
-                      <div>
-                        Progress: {cleanProgress.completedItems} / {cleanProgress.totalItems} items — {formatBytes(cleanProgress.bytesFreedSoFar)} freed so far ({cleanProgress.status})
-                      </div>
-                    )}
+                    {cleanProgress && <div>Progress: {cleanProgress.completedItems} / {cleanProgress.totalItems} items — {formatBytes(cleanProgress.bytesFreedSoFar)} freed so far ({cleanProgress.status})</div>}
                     <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
                   </div>
                 )}
               </div>
             )}
-
             {cleanSummary && (
               <div className="panel" aria-labelledby="clean-summary-heading" role="status">
                 <h4 id="clean-summary-heading" className="section-title">Clean Summary</h4>
-                {cleanSummary.aborted && (
-                  <div className="notice error" role="alert">
-                    <strong>Clean aborted.</strong> {cleanSummary.abortReason || 'The operation was aborted.'}
-                  </div>
-                )}
+                {cleanSummary.aborted && <div className="notice error" role="alert"><strong>Clean aborted.</strong> {cleanSummary.abortReason || 'The operation was aborted.'}</div>}
                 <dl className="kv">
                   <dt>Bytes freed</dt><dd>{formatBytes(cleanSummary.bytesFreed)}</dd>
                   <dt>Deleted count</dt><dd>{cleanSummary.deletedCount}</dd>
@@ -397,53 +349,322 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
                 </dl>
                 <div>
                   <strong>Skipped reasons</strong>
-                  {cleanSummary.skippedReasons.length === 0 ? (
-                    <p className="muted" aria-label="Skipped reasons">None.</p>
-                  ) : (
-                    <ul aria-label="Skipped reasons">
-                      {cleanSummary.skippedReasons.map((r, idx) => (
-                        <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>
-                      ))}
-                    </ul>
+                  {cleanSummary.skippedReasons.length === 0 ? <p className="muted" aria-label="Skipped reasons">None.</p> : (
+                    <ul aria-label="Skipped reasons">{cleanSummary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
                   )}
                 </div>
-                {cleanSummary.logId && (
-                  <div className="row" style={{ marginTop: '0.5rem' }}>
-                    <button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button>
-                    <span className="muted">Log: {cleanSummary.logId}</span>
-                  </div>
-                )}
+                {cleanSummary.logId && <div className="row" style={{ marginTop: '0.5rem' }}><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
               </div>
             )}
           </section>
         </section>
       )}
+      <ExplainDrawer explain={explain} onClose={() => setExplain(null)} />
+    </div>
+  );
+}
 
-      {explain && (
-        <div className="drawer-backdrop" role="presentation" onClick={() => setExplain(null)}>
-          <aside
-            className="drawer"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="explain-title"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') setExplain(null);
-            }}
-          >
-            <div className="row">
-              <h3 id="explain-title">Explain: {explain.title}</h3>
-              <div className="spacer" />
-              <button className="btn" onClick={() => setExplain(null)} aria-label="Close explanation">Close</button>
-            </div>
-            <p><span className={riskClass(explain.risk)}>Risk: {explain.risk}</span></p>
-            <p>{explain.description}</p>
-            <dl className="kv">
-              <dt>Item ID</dt><dd>{explain.itemId}</dd>
-            </dl>
-          </aside>
+type FlatAnalyzerRow = { node: AnalyzerNodeDto; depth: number };
+
+function flattenVisible(root: AnalyzerNodeDto, expanded: Set<string>): FlatAnalyzerRow[] {
+  const rows: FlatAnalyzerRow[] = [];
+  const walk = (node: AnalyzerNodeDto, depth: number) => {
+    rows.push({ node, depth });
+    if (node.isDir && expanded.has(node.id) && node.children && node.children.length > 0) {
+      for (const c of node.children) walk(c, depth + 1);
+    }
+  };
+  walk(root, 0);
+  return rows;
+}
+
+function isNodeSelectable(node: AnalyzerNodeDto): boolean {
+  return !!node.selectable && !node.displayOnly && !node.isLinkPoint && !node.isCloudPlaceholder && node.risk !== 'Protected';
+}
+
+function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog: (logId: string) => void }) {
+  const [rootPath, setRootPath] = useState('C:\\');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [progress, setProgress] = useState<AnalyzerProgressEvent | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [result, setResult] = useState<StartAnalyzerResult | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [explain, setExplain] = useState<ExplainState>(null);
+  const [preview, setPreview] = useState<PreviewResult | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanProgress, setCleanProgress] = useState<CleanProgressEvent | null>(null);
+  const [cleanSummary, setCleanSummary] = useState<ExecuteCleanResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+
+  const nodesById = useMemo(() => {
+    const map = new Map<string, AnalyzerNodeDto>();
+    const walk = (n: AnalyzerNodeDto) => { map.set(n.id, n); for (const c of n.children ?? []) walk(c); };
+    if (result?.root) walk(result.root);
+    return map;
+  }, [result]);
+
+  const flatRows = useMemo(() => (result ? flattenVisible(result.root, expanded) : []), [result, expanded]);
+  const rowHeight = 34;
+  const viewportHeight = 420;
+  const overscan = 8;
+  const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+  const endIndex = Math.min(flatRows.length, startIndex + visibleCount);
+  const visibleRows = flatRows.slice(startIndex, endIndex);
+  const topPad = startIndex * rowHeight;
+  const bottomPad = Math.max(0, (flatRows.length - endIndex) * rowHeight);
+
+  const selectedNodes = useMemo(() => Array.from(selectedIds).map((id) => nodesById.get(id)).filter(Boolean) as AnalyzerNodeDto[], [selectedIds, nodesById]);
+  const selectedBytes = useMemo(() => selectedNodes.reduce((a, n) => a + BigInt(n.sizeBytes), 0n).toString(), [selectedNodes]);
+  const requiresConfirmation = useMemo(() => selectedNodes.some((n) => n.risk === 'Unknown' || !n.targetId), [selectedNodes]);
+
+  function resetAnalyzerSession(msg?: string) {
+    setSessionId(null); setStartedAt(null); setResult(null); setSelectedIds(new Set()); setExpanded(new Set());
+    setPreview(null); setConfirmText(''); setCleanProgress(null);
+    if (msg) setInfo(msg);
+  }
+
+  async function runAnalyzer() {
+    setError(null); setInfo(null); setPreview(null); setCleanSummary(null); setCleanProgress(null);
+    setSelectedIds(new Set()); setResult(null); setExpanded(new Set()); setAnalyzing(true); setProgress(null);
+    try {
+      const res = await client.startAnalyzer(rootPath || null, (p) => setProgress(p));
+      setResult(res);
+      setSessionId(res.sessionId);
+      setStartedAt(Date.now());
+      setExpanded(new Set([res.root.id]));
+      setInfo('Analyzer complete. Review the tree, select eligible nodes, then Preview Selected to continue through the standard Clean flow.');
+    } catch (e) {
+      setError(formatContractError(e));
+    } finally { setAnalyzing(false); }
+  }
+
+  function toggleExpand(node: AnalyzerNodeDto) {
+    if (!node.isDir || !node.children || node.children.length === 0) return;
+    setExpanded((prev) => { const next = new Set(prev); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; });
+  }
+
+  function toggleSelect(node: AnalyzerNodeDto) {
+    if (!isNodeSelectable(node)) return;
+    setPreview(null); setCleanSummary(null); setCleanProgress(null);
+    setSelectedIds((prev) => { const next = new Set(prev); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; });
+  }
+
+  async function onExplain(itemId: string) {
+    setError(null);
+    try { setExplain(await client.explainItem(itemId)); } catch (e) { setError(formatContractError(e)); }
+  }
+
+  async function runPreview() {
+    if (!sessionId) return;
+    setError(null); setInfo(null); setPreviewLoading(true); setCleanSummary(null); setCleanProgress(null);
+    try {
+      const confirmations = requiresConfirmation ? { typedConfirmation: confirmText || null } : null;
+      const res = await client.previewClean(sessionId, Array.from(selectedIds), confirmations);
+      setPreview({ ...res, issuedAtMs: Date.now() });
+      setInfo('Preview ready. Review the breakdown and the permanent deletion warning before cleaning.');
+    } catch (e) {
+      const ce = e as ContractError | undefined;
+      setError(formatContractError(e));
+      if (ce?.code === 'sessionInvalid') resetAnalyzerSession('Analyzer session expired or was invalidated. Run Analyze again.');
+      else if (ce?.code === 'previewTokenInvalid') setPreview(null);
+    } finally { setPreviewLoading(false); }
+  }
+
+  async function runClean() {
+    if (!preview) return;
+    setError(null); setInfo(null); setCleaning(true); setCleanProgress(null); setCleanSummary(null);
+    try {
+      const res = await client.executeClean(preview.previewToken, (ev) => setCleanProgress(ev));
+      setCleanSummary(res);
+      setPreview(null);
+      setSelectedIds(new Set());
+      setInfo('Clean completed. Review the summary and operation log below.');
+    } catch (e) {
+      const ce = e as ContractError | undefined;
+      setError(formatContractError(e));
+      if (ce?.code === 'sessionInvalid') resetAnalyzerSession('Analyzer session expired or was invalidated. Run Analyze again.');
+      else if (ce?.code === 'previewTokenInvalid') { setPreview(null); setInfo('Preview token is invalid, expired, or already used. Run Preview Selected again.'); }
+    } finally { setCleaning(false); }
+  }
+
+  const canPreview = !!sessionId && selectedIds.size > 0 && !analyzing && !previewLoading && !cleaning && (!requiresConfirmation || confirmText.trim().length > 0);
+  const canClean = !!preview && !analyzing && !previewLoading && !cleaning;
+
+  return (
+    <div>
+      <section className="panel" aria-labelledby="analyzer-heading">
+        <h2 id="analyzer-heading">Analyzer</h2>
+        <p className="muted">Analyze a folder to build an expandable tree of space usage. Select eligible nodes and route them through the standard Preview &rarr; Clean flow (no direct delete).</p>
+        <div className="row">
+          <label htmlFor="analyzer-root" className="muted">Root path</label>
+          <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} style={{ minWidth: 280 }} />
+          <button className="btn primary" onClick={runAnalyzer} disabled={analyzing || cleaning || !rootPath.trim()}>Analyze</button>
         </div>
+        {analyzing && (
+          <div role="status" aria-live="polite" className="notice info">
+            Analyzing… {progress ? `dirs ${progress.scannedDirs}, files ${progress.scannedFiles}, ${formatBytes(progress.scannedBytes)}${progress.currentPath ? ` — ${progress.currentPath}` : ''}` : 'Starting…'}
+            <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
+          </div>
+        )}
+        {sessionId && startedAt && (
+          <div className="row muted" aria-label="Analyzer session status">
+            <span>Session: {sessionId}</span>
+            <TtlIndicator label="Analyzer session TTL (15m)" issuedAtMs={startedAt} ttlMs={SESSION_TTL_MS} />
+          </div>
+        )}
+      </section>
+
+      {error && <div className="notice error" role="alert">{error}</div>}
+      {info && <div className="notice info" role="status">{info}</div>}
+
+      {result && (
+        <section className="panel" aria-labelledby="analyzer-tree-heading">
+          <div className="row">
+            <h3 id="analyzer-tree-heading">Analyzer Tree</h3>
+            <div className="spacer" />
+            <span className="muted">Total: {formatBytes(result.totalBytes)} ({result.totalItems} items)</span>
+            <span className="muted">Selected: {selectedIds.size} ({formatBytes(selectedBytes)})</span>
+          </div>
+          <div
+            ref={viewportRef}
+            className="analyzer-viewport"
+            role="tree"
+            aria-label="Analyzer results tree"
+            tabIndex={0}
+            onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+          >
+            <div style={{ height: topPad }} />
+            {visibleRows.map(({ node, depth }) => {
+              const selectable = isNodeSelectable(node);
+              const checked = selectedIds.has(node.id);
+              const hasChildren = node.isDir && (node.children?.length ?? 0) > 0;
+              const isExpanded = expanded.has(node.id);
+              const reasons: string[] = [];
+              if (node.risk === 'Protected') reasons.push('Protected');
+              if (node.isLinkPoint) reasons.push('Link Point');
+              if (node.isCloudPlaceholder) reasons.push('Cloud placeholder (Skipped)');
+              if (node.displayOnly) reasons.push('Display-only');
+              if (node.reason) reasons.push(node.reason);
+              if (node.path.toLowerCase().endsWith('.vhdx')) reasons.push('.vhdx');
+              return (
+                <div
+                  key={node.id}
+                  role="treeitem"
+                  aria-expanded={hasChildren ? isExpanded : undefined}
+                  aria-selected={checked}
+                  aria-level={depth + 1}
+                  className="analyzer-row"
+                  style={{ paddingLeft: 8 + depth * 18, height: rowHeight }}
+                >
+                  <button
+                    type="button"
+                    className="tree-toggle"
+                    onClick={() => toggleExpand(node)}
+                    aria-label={hasChildren ? (isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`) : `Leaf ${node.name}`}
+                    disabled={!hasChildren}
+                  >
+                    {hasChildren ? (isExpanded ? '▾' : '▸') : '•'}
+                  </button>
+                  <label className="checkbox" title={selectable ? 'Select for Preview/Clean' : 'Not selectable'}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select analyzer node ${node.path}`}
+                      checked={checked}
+                      disabled={!selectable || cleaning}
+                      onChange={() => toggleSelect(node)}
+                    />
+                  </label>
+                  <div className="analyzer-node-main">
+                    <div className="item-path">{node.name} <span className="muted">({node.path})</span></div>
+                    <div className="item-status">
+                      {selectable ? 'Selectable' : `Not selectable${reasons.length ? `: ${reasons.join(', ')}` : ''}`}
+                    </div>
+                  </div>
+                  <div className="item-size">{formatBytes(node.sizeBytes)}</div>
+                  <div className="muted">{node.itemCount}</div>
+                  <button className="btn" onClick={() => onExplain(node.id)}>Explain</button>
+                  <span className={riskClass(node.risk)} aria-label={`Risk ${node.risk}`}>{node.risk}</span>
+                  {node.tier && <span className="badge">{node.tier}</span>}
+                  {node.isLinkPoint && <span className="badge">Link Point</span>}
+                  {node.displayOnly && <span className="badge">Display-only</span>}
+                </div>
+              );
+            })}
+            <div style={{ height: bottomPad }} />
+            {flatRows.length === 0 && <div className="muted" style={{ padding: 12 }}>No nodes.</div>}
+          </div>
+
+          <section aria-labelledby="analyzer-preview-heading" className="panel" style={{ marginTop: 12 }}>
+            <h3 id="analyzer-preview-heading">Preview Selected</h3>
+            <p className="muted">Selection total: <strong>{formatBytes(selectedBytes)}</strong> ({selectedIds.size} node(s)). Analyzer selections go through the standard Preview &rarr; Clean flow only.</p>
+            {requiresConfirmation && (
+              <div className="notice warn" role="note">
+                <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path nodes). Enter <code>DELETE</code> to request Preview.</div>
+                <div className="field">
+                  <label htmlFor="analyzer-confirm-delete">Typed confirmation</label>
+                  <input id="analyzer-confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="Type DELETE" autoComplete="off" disabled={cleaning} />
+                </div>
+              </div>
+            )}
+            <div className="row"><button className="btn primary" onClick={runPreview} disabled={!canPreview}>{previewLoading ? 'Generating Preview…' : 'Preview Selected'}</button></div>
+            {preview && (
+              <div aria-live="polite">
+                <h4 className="section-title">Preview Breakdown</h4>
+                <div className="row">
+                  <span>Preview token: <code>{preview.previewToken}</code></span>
+                  <TtlIndicator label="Preview token TTL (10m)" issuedAtMs={preview.issuedAtMs} ttlMs={PREVIEW_TTL_MS} />
+                  {startedAt && <TtlIndicator label="Analyzer session TTL (15m)" issuedAtMs={startedAt} ttlMs={SESSION_TTL_MS} />}
+                </div>
+                <p><strong>Total selected:</strong> {preview.totalSelectedCount} item(s), {formatBytes(preview.totalSelectedBytes)}</p>
+                <table className="table" aria-label="Preview breakdown by Target">
+                  <thead><tr><th>Target</th><th>Selected count</th><th>Selected bytes</th></tr></thead>
+                  <tbody>
+                    {preview.breakdown.map((b) => (
+                      <tr key={b.targetId}><td>{b.targetName} <span className="muted">({b.targetId})</span></td><td>{b.selectedCount}</td><td>{formatBytes(b.selectedBytes)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="notice warn" role="alert" aria-live="polite"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
+                <div className="row"><button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">{cleaning ? 'Cleaning…' : 'Clean Permanently'}</button></div>
+                {cleaning && (
+                  <div className="notice info" role="status" aria-live="polite">
+                    <div>Cleaning in progress…</div>
+                    {cleanProgress && <div>Progress: {cleanProgress.completedItems} / {cleanProgress.totalItems} items — {formatBytes(cleanProgress.bytesFreedSoFar)} freed so far ({cleanProgress.status})</div>}
+                    <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
+                  </div>
+                )}
+              </div>
+            )}
+            {cleanSummary && (
+              <div className="panel" aria-labelledby="analyzer-clean-summary-heading" role="status">
+                <h4 id="analyzer-clean-summary-heading" className="section-title">Clean Summary</h4>
+                {cleanSummary.aborted && <div className="notice error" role="alert"><strong>Clean aborted.</strong> {cleanSummary.abortReason || 'The operation was aborted.'}</div>}
+                <dl className="kv">
+                  <dt>Bytes freed</dt><dd>{formatBytes(cleanSummary.bytesFreed)}</dd>
+                  <dt>Deleted count</dt><dd>{cleanSummary.deletedCount}</dd>
+                  <dt>Skipped count</dt><dd>{cleanSummary.skippedCount}</dd>
+                </dl>
+                <div>
+                  <strong>Skipped reasons</strong>
+                  {cleanSummary.skippedReasons.length === 0 ? <p className="muted" aria-label="Skipped reasons">None.</p> : (
+                    <ul aria-label="Skipped reasons">{cleanSummary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
+                  )}
+                </div>
+                {cleanSummary.logId && <div className="row" style={{ marginTop: '0.5rem' }}><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
+              </div>
+            )}
+          </section>
+        </section>
       )}
+      <ExplainDrawer explain={explain} onClose={() => setExplain(null)} />
     </div>
   );
 }
@@ -488,9 +709,7 @@ function LogsView({ client, focusLogId, onFocusConsumed }: { client: SweeperClie
     }
   }, [client]);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  useEffect(() => { void refresh(); }, [refresh]);
 
   useEffect(() => {
     if (!focusLogId) return;
@@ -507,18 +726,12 @@ function LogsView({ client, focusLogId, onFocusConsumed }: { client: SweeperClie
         if (!cancelled) onFocusConsumed?.();
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [focusLogId, client, refresh, onFocusConsumed]);
 
   async function openLog(id: string) {
     setError(null);
-    try {
-      setSelected(await client.readLog(id));
-    } catch (e) {
-      setError(formatContractError(e));
-    }
+    try { setSelected(await client.readLog(id)); } catch (e) { setError(formatContractError(e)); }
   }
 
   return (
@@ -579,12 +792,14 @@ export function App() {
         <div className="brand">Sweeper</div>
         <nav className="nav" aria-label="Primary">
           <button aria-current={view === 'scan' ? 'page' : undefined} onClick={() => setView('scan')}>Scan &amp; Preview</button>
+          <button aria-current={view === 'analyzer' ? 'page' : undefined} onClick={() => setView('analyzer')}>Analyzer</button>
           <button aria-current={view === 'settings' ? 'page' : undefined} onClick={() => setView('settings')}>Settings</button>
           <button aria-current={view === 'logs' ? 'page' : undefined} onClick={() => setView('logs')}>Logs</button>
         </nav>
       </header>
       <main className="main">
         {view === 'scan' && <ScanAndPreviewView client={client} onOpenLog={openLog} />}
+        {view === 'analyzer' && <AnalyzerView client={client} onOpenLog={openLog} />}
         {view === 'settings' && <SettingsView client={client} />}
         {view === 'logs' && <LogsView client={client} focusLogId={focusLogId} onFocusConsumed={() => setFocusLogId(null)} />}
       </main>

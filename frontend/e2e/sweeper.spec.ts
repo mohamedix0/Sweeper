@@ -55,6 +55,7 @@ test.describe('Sweeper Scan/Preview/Clean (mock sandbox)', () => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: 'Primary' });
     await expect(nav).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Analyzer' })).toBeVisible();
     await expect(page.getByLabel('Tier 1 (system temp and caches)')).toBeVisible();
     await expect(page.getByLabel('Tier 2 (developer caches)')).toBeVisible();
 
@@ -69,4 +70,28 @@ test.describe('Sweeper Scan/Preview/Clean (mock sandbox)', () => {
     await page.getByRole('button', { name: 'Scan & Preview' }).focus();
     await expect(page.getByRole('button', { name: 'Scan & Preview' })).toBeFocused();
   });
+
+  test('Analyzer tree, selection rules, and Preview Selected -> Clean flow', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Analyzer' }).click();
+    await expect(page.getByRole('heading', { name: 'Analyzer' })).toBeVisible();
+    await expect(page.getByLabel('Analyzer root path')).toHaveValue('C:\\');
+
+    await page.getByRole('button', { name: 'Analyze', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Analyzer Tree' })).toBeVisible();
+    await expect(page.getByRole('tree', { name: 'Analyzer results tree' })).toBeVisible();
+
+    await expect(page.getByRole('checkbox', { name: /dev-machine\.vhdx/ })).toBeDisabled();
+    await expect(page.getByRole('checkbox', { name: /\\\.git/ })).toBeDisabled();
+
+    await page.getByRole('button', { name: 'Expand Temp' }).click();
+    await page.getByRole('checkbox', { name: /Temp\\a\.tmp/ }).check();
+    await page.getByRole('button', { name: 'Preview Selected' }).click();
+    await expect(page.getByText('Preview Breakdown')).toBeVisible();
+    await expect(page.getByText(/Permanent deletion \(bypasses Recycle Bin\)/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Clean Permanently' }).click();
+    await expect(page.getByRole('heading', { name: 'Clean Summary' })).toBeVisible();
+    await expect(page.getByText('Bytes freed')).toBeVisible();
+  });
 });

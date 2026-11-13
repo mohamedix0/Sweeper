@@ -4,9 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
-    CleanProgressEvent, ContractError, ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto,
-    LogReadResponse, PreviewCleanResponse, PreviewConfirmationsDto, ScanResultsDto, SettingsDto,
-    StartScanResponse, TierDto, U64String,
+    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ExecuteCleanResponse,
+    ExplainItemResponse, LogMetadataDto, LogReadResponse, PreviewCleanResponse,
+    PreviewConfirmationsDto, ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse,
+    TierDto, U64String, ValidateCustomPathResponse,
 };
 
 use crate::clock::Clock;
@@ -99,6 +100,28 @@ pub fn explain_item<C: Clock>(
     sessions.explain_item(&state.clock, &item_id, settings_gen)
 }
 
+/// `start_analyzer` implementation.
+pub fn start_analyzer<C, F>(
+    state: &AppState<C>,
+    root: Option<String>,
+    on_progress: Option<F>,
+) -> Result<StartAnalyzerResponse, ContractError>
+where
+    C: Clock,
+    F: Fn(AnalyzerProgressEvent) + Send + Sync + 'static,
+{
+    let (settings, settings_gen) = {
+        let s = state.settings.lock().map_err(|_| ContractError::Internal {
+            reason: "state unavailable".into(),
+        })?;
+        (s.get(), s.generation())
+    };
+    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
+        reason: "state unavailable".into(),
+    })?;
+    sessions.start_analyzer(&state.clock, root, &settings, settings_gen, on_progress)
+}
+
 /// `get_settings` implementation.
 pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, ContractError> {
     let settings = state
@@ -109,6 +132,38 @@ pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, Contra
         })?
         .get();
     Ok(settings)
+}
+
+/// `update_settings` implementation.
+pub fn update_settings<C: Clock>(
+    state: &AppState<C>,
+    settings: SettingsDto,
+) -> Result<SettingsDto, ContractError> {
+    let mut store = state.settings.lock().map_err(|_| ContractError::Internal {
+        reason: "state unavailable".into(),
+    })?;
+    Ok(store.update(settings))
+}
+
+/// `validate_custom_path` implementation.
+pub fn validate_custom_path<C: Clock>(
+    _state: &AppState<C>,
+    path: String,
+) -> Result<ValidateCustomPathResponse, ContractError> {
+    if path.trim().is_empty() {
+        return Err(ContractError::InvalidInput {
+            reason: "path is required".into(),
+        });
+    }
+    let verdict = sweeper_core::policy::validate_custom_path(&path);
+    let normalized = sweeper_core::paths::CanonicalPath::parse_lexical(&path)
+        .map(|p| p.to_string())
+        .unwrap_or_else(|_| path.clone());
+    Ok(ValidateCustomPathResponse {
+        path: normalized,
+        allowed: verdict.allowed,
+        reason: verdict.reason,
+    })
 }
 
 fn default_logs_dir() -> Option<PathBuf> {

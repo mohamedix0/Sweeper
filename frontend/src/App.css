@@ -76,3 +76,10 @@ input[type="text"] { border: 1px solid var(--border); border-radius: 6px; paddin
 .field { display: grid; gap: 6px; margin: 8px 0; }
 .error-text { color: var(--danger); font-size: 0.9rem; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+.analyzer-viewport { border: 1px solid var(--border); border-radius: 8px; height: 420px; overflow: auto; background: #fff; }
+.analyzer-row { display: grid; grid-template-columns: 28px 28px 1fr auto auto auto auto auto auto; gap: 8px; align-items: center; border-bottom: 1px solid #eef2f6; padding-right: 8px; }
+.analyzer-row:hover { background: #f8fafc; }
+.analyzer-node-main { min-width: 0; }
+.tree-toggle { border: none; background: transparent; cursor: pointer; width: 24px; height: 24px; line-height: 1; color: var(--muted); }
+.tree-toggle:disabled { cursor: default; opacity: 0.5; }
+@media (max-width: 1100px) { .analyzer-row { grid-template-columns: 28px 28px 1fr; height: auto !important; padding-top: 6px; padding-bottom: 6px; } }

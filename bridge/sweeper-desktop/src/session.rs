@@ -2,13 +2,19 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use sweeper_contract::{
-    ContractError, ExecuteCleanResponse, PreviewCleanResponse, PreviewConfirmationsDto,
-    PreviewTargetBreakdownDto, RiskDto, ScanItemDto, ScanResultsDto, SettingsDto, SkippedReasonDto,
-    StartScanResponse, TargetScanResultDto, TierDto, U64String,
+    AnalyzerNodeDto, AnalyzerProgressEvent, ContractError, ExecuteCleanResponse,
+    PreviewCleanResponse, PreviewConfirmationsDto, PreviewTargetBreakdownDto, RiskDto, ScanItemDto,
+    ScanResultsDto, SettingsDto, SkippedReasonDto, StartAnalyzerResponse, StartScanResponse,
+    TargetScanResultDto, TierDto, U64String,
+};
+use sweeper_core::analyzer::{
+    self, AnalyzerNode, AnalyzerOptions, AnalyzerProgress, AnalyzerResult,
 };
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::remover::{self, CleanOptions, CleanProgress, ValidatedItem};
@@ -58,6 +64,21 @@ pub struct ScanSession {
     pub min_age_hours: u32,
 }
 
+/// Analyzer session state.
+#[derive(Debug, Clone)]
+pub struct AnalyzerSession {
+    /// Session id.
+    pub id: String,
+    /// Creation time (unix secs).
+    pub created_at: u64,
+    /// Settings generation at creation (invalidate if changed).
+    pub settings_generation: u64,
+    /// Analyzer result (tree + progress metadata).
+    pub result: AnalyzerResult,
+    /// Minimum age hours at time of analysis (for clean options).
+    pub min_age_hours: u32,
+}
+
 /// Preview token state.
 #[derive(Debug, Clone)]
 pub struct PreviewTokenState {
@@ -83,6 +104,7 @@ pub struct PreviewTokenState {
 #[derive(Debug, Default)]
 pub struct SessionStore {
     sessions: HashMap<String, ScanSession>,
+    analyzer_sessions: HashMap<String, AnalyzerSession>,
     preview_tokens: HashMap<String, PreviewTokenState>,
     counter: u64,
 }
@@ -98,15 +120,28 @@ impl SessionStore {
         let now = clock.now_unix_secs();
         self.sessions
             .retain(|_, s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS);
-        let valid_sessions: HashSet<String> = self.sessions.keys().cloned().collect();
+        self.analyzer_sessions
+            .retain(|_, s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS);
+        let valid_sessions: HashSet<String> = self
+            .sessions
+            .keys()
+            .cloned()
+            .chain(self.analyzer_sessions.keys().cloned())
+            .collect();
         self.preview_tokens.retain(|_, t| {
             if !valid_sessions.contains(&t.session_id) {
                 return false;
             }
             let age_ok = now.saturating_sub(t.issued_at) <= PREVIEW_TOKEN_TTL_SECS;
-            let session = self.sessions.get(&t.session_id);
-            let within_session = session
+            let within_session = self
+                .sessions
+                .get(&t.session_id)
                 .map(|s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS)
+                .or_else(|| {
+                    self.analyzer_sessions
+                        .get(&t.session_id)
+                        .map(|s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS)
+                })
                 .unwrap_or(false);
             age_ok && within_session && !t.used
         });
@@ -187,7 +222,7 @@ impl SessionStore {
         Ok(StartScanResponse { session_id })
     }
 
-    /// Get scan results for a valid session.
+    /// Get scan results for a valid scan session.
     pub fn get_scan_results<C: Clock>(
         &mut self,
         clock: &C,
@@ -195,8 +230,58 @@ impl SessionStore {
         current_settings_generation: u64,
     ) -> Result<ScanResultsDto, ContractError> {
         self.cleanup(clock);
-        let session = self.get_valid_session(clock, session_id, current_settings_generation)?;
+        let session =
+            self.get_valid_scan_session(clock, session_id, current_settings_generation)?;
         Ok(session.results.clone())
+    }
+
+    /// Start a read-only analyzer session and store it for Preview/Clean routing.
+    pub fn start_analyzer<C, P>(
+        &mut self,
+        clock: &C,
+        root: Option<String>,
+        settings: &SettingsDto,
+        settings_generation: u64,
+        progress_cb: Option<P>,
+    ) -> Result<StartAnalyzerResponse, ContractError>
+    where
+        C: Clock,
+        P: Fn(AnalyzerProgressEvent) + Send + Sync + 'static,
+    {
+        self.cleanup(clock);
+        let now = clock.now_unix_secs();
+        let session_id = self.next_id("analyzer", now);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sid_for_progress = session_id.clone();
+        let progress = progress_cb.map(|cb| {
+            Arc::new(move |p: AnalyzerProgress| {
+                cb(AnalyzerProgressEvent {
+                    session_id: sid_for_progress.clone(),
+                    scanned_dirs: U64String(p.scanned_dirs),
+                    scanned_files: U64String(p.scanned_files),
+                    scanned_bytes: U64String(p.scanned_bytes),
+                    current_path: p.current_path,
+                });
+            }) as Arc<dyn Fn(AnalyzerProgress) + Send + Sync>
+        });
+        let options = AnalyzerOptions {
+            allow_unknown: settings.allow_delete_unknown,
+            ..AnalyzerOptions::default()
+        };
+        let result = analyzer::analyze_path(root.as_deref(), cancel, progress, options)
+            .map_err(map_analyzer_error)?;
+        let dto = map_analyzer_result_to_dto(&session_id, &result);
+        self.analyzer_sessions.insert(
+            session_id,
+            AnalyzerSession {
+                id: dto.session_id.clone(),
+                created_at: now,
+                settings_generation,
+                result,
+                min_age_hours: settings.min_age_hours,
+            },
+        );
+        Ok(dto)
     }
 
     /// Create a preview token for selected item IDs (no clean).
@@ -209,16 +294,46 @@ impl SessionStore {
         current_settings_generation: u64,
     ) -> Result<PreviewCleanResponse, ContractError> {
         self.cleanup(clock);
-        let now = clock.now_unix_secs();
-        let session = self
-            .get_valid_session(clock, session_id, current_settings_generation)?
-            .clone();
-
         if item_ids.is_empty() {
             return Err(ContractError::InvalidInput {
                 reason: "no items selected".to_string(),
             });
         }
+        if self.sessions.contains_key(session_id) {
+            return self.preview_clean_scan_session(
+                clock,
+                session_id,
+                item_ids,
+                confirmations,
+                current_settings_generation,
+            );
+        }
+        if self.analyzer_sessions.contains_key(session_id) {
+            return self.preview_clean_analyzer_session(
+                clock,
+                session_id,
+                item_ids,
+                confirmations,
+                current_settings_generation,
+            );
+        }
+        Err(ContractError::SessionInvalid {
+            reason: "session not found".to_string(),
+        })
+    }
+
+    fn preview_clean_scan_session<C: Clock>(
+        &mut self,
+        clock: &C,
+        session_id: &str,
+        item_ids: Vec<String>,
+        confirmations: Option<PreviewConfirmationsDto>,
+        current_settings_generation: u64,
+    ) -> Result<PreviewCleanResponse, ContractError> {
+        let now = clock.now_unix_secs();
+        let session = self
+            .get_valid_scan_session(clock, session_id, current_settings_generation)?
+            .clone();
 
         let mut selected: Vec<&StoredItem> = Vec::with_capacity(item_ids.len());
         let mut unknown = 0u64;
@@ -237,7 +352,8 @@ impl SessionStore {
         let needs_confirmation = selected.iter().any(|i| i.requires_typed_confirmation);
         if needs_confirmation {
             let ok = confirmations
-                .and_then(|c| c.typed_confirmation)
+                .as_ref()
+                .and_then(|c| c.typed_confirmation.as_deref())
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
             if !ok {
@@ -306,20 +422,179 @@ impl SessionStore {
             )
             .collect::<Vec<_>>();
 
-        let selection_hash = hash_selection(session_id, &item_ids);
+        self.issue_preview_token(
+            now,
+            session_id,
+            &item_ids,
+            validated_items,
+            total_count,
+            total_bytes,
+            breakdown,
+        )
+    }
+
+    fn preview_clean_analyzer_session<C: Clock>(
+        &mut self,
+        clock: &C,
+        session_id: &str,
+        item_ids: Vec<String>,
+        confirmations: Option<PreviewConfirmationsDto>,
+        current_settings_generation: u64,
+    ) -> Result<PreviewCleanResponse, ContractError> {
+        let now = clock.now_unix_secs();
+        let session = self
+            .get_valid_analyzer_session(clock, session_id, current_settings_generation)?
+            .clone();
+
+        // Validate all selected IDs exist in analyzer result and detect custom-path confirmations.
+        let index = index_analyzer_nodes(&session.result.root);
+        let mut unknown = 0u64;
+        let mut needs_confirmation = false;
+        for id in &item_ids {
+            match index.get(id) {
+                Some(node) => {
+                    if node.target_id.is_none() {
+                        // Custom-path-root candidate in analyzer conversion seam requires typed confirmation in Phase 4.
+                        needs_confirmation = true;
+                    }
+                }
+                None => unknown += 1,
+            }
+        }
+        if unknown > 0 {
+            return Err(ContractError::UnknownItem {
+                count: U64String(unknown),
+            });
+        }
+        if needs_confirmation {
+            let ok = confirmations
+                .as_ref()
+                .and_then(|c| c.typed_confirmation.as_deref())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !ok {
+                return Err(ContractError::InvalidInput {
+                    reason: "typed confirmation required".to_string(),
+                });
+            }
+        }
+
+        let scan_items = analyzer::build_scan_items_from_analyzer(&session.result, &item_ids)
+            .map_err(|msg| ContractError::InvalidInput {
+                reason: sanitize_reason(&msg),
+            })?;
+
+        let mut by_target: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
+        let mut total_count = 0u64;
+        let mut total_bytes = 0u64;
+        let mut validated_items: Vec<ValidatedItem> = Vec::with_capacity(scan_items.len());
+
+        for (idx, si) in scan_items.into_iter().enumerate() {
+            let original_id = item_ids.get(idx).cloned().unwrap_or_else(|| si.id.clone());
+            let node = index.get(&original_id);
+            let is_custom = si.target_id == "custom-path";
+            let group_id = if is_custom {
+                "custom-path".to_string()
+            } else {
+                si.target_id.clone()
+            };
+            let group_name = if is_custom {
+                "Custom Path".to_string()
+            } else {
+                lookup_target_description(&si.target_id)
+                    .or_else(|| node.map(|n| n.name.clone()))
+                    .unwrap_or_else(|| si.target_id.clone())
+            };
+            let entry = by_target
+                .entry(group_id.clone())
+                .or_insert_with(|| (group_name, 0u64, 0u64));
+            entry.1 = entry.1.saturating_add(1);
+            entry.2 = entry.2.saturating_add(si.size);
+            total_count += 1;
+            total_bytes = total_bytes.saturating_add(si.size);
+
+            if is_custom {
+                let validated = ValidatedItem::from_custom_path_root(
+                    original_id.clone(),
+                    si.path.clone(),
+                    si.size,
+                )
+                .map_err(|_| ContractError::InvalidInput {
+                    reason: "selected custom path item failed validation".to_string(),
+                })?;
+                validated_items.push(validated);
+                continue;
+            }
+
+            // Find matching resolved allowlist target root for containment.
+            let target_roots = analyzer_target_roots_for_node(node, &si.target_id);
+            let target_root = find_containing_root(&target_roots, &si.path).ok_or_else(|| {
+                ContractError::InvalidInput {
+                    reason: "selected item is not within a resolved target root".to_string(),
+                }
+            })?;
+            let mtime = si.mtime_unix_secs;
+            let validated = ValidatedItem::from_allowlisted_scan(
+                original_id.clone(),
+                si.target_id.clone(),
+                target_root,
+                si.path.clone(),
+                si.size,
+                Some(mtime),
+            )
+            .map_err(|_| ContractError::InvalidInput {
+                reason: "selected item failed validation".to_string(),
+            })?;
+            validated_items.push(validated);
+        }
+
+        let breakdown = by_target
+            .into_iter()
+            .map(
+                |(target_id, (target_name, count, bytes))| PreviewTargetBreakdownDto {
+                    target_id,
+                    target_name,
+                    selected_count: U64String(count),
+                    selected_bytes: U64String(bytes),
+                },
+            )
+            .collect::<Vec<_>>();
+
+        self.issue_preview_token(
+            now,
+            session_id,
+            &item_ids,
+            validated_items,
+            total_count,
+            total_bytes,
+            breakdown,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_preview_token(
+        &mut self,
+        now: u64,
+        session_id: &str,
+        item_ids: &[String],
+        validated_items: Vec<ValidatedItem>,
+        total_count: u64,
+        total_bytes: u64,
+        breakdown: Vec<PreviewTargetBreakdownDto>,
+    ) -> Result<PreviewCleanResponse, ContractError> {
+        let selection_hash = hash_selection(session_id, item_ids);
         let token = self.next_id("preview", now);
         let state = PreviewTokenState {
             token: token.clone(),
             session_id: session_id.to_string(),
             issued_at: now,
             selection_hash,
-            item_ids: item_ids.clone(),
+            item_ids: item_ids.to_vec(),
             validated_items,
             preview_estimated_bytes: total_bytes,
             used: false,
         };
         self.preview_tokens.insert(token.clone(), state);
-
         Ok(PreviewCleanResponse {
             preview_token: token,
             breakdown,
@@ -334,7 +609,7 @@ impl SessionStore {
         clock: &C,
         preview_token: &str,
         current_settings_generation: u64,
-    ) -> Result<(ScanSession, Vec<ValidatedItem>, u64), ContractError> {
+    ) -> Result<(u32, Vec<ValidatedItem>, u64), ContractError> {
         self.cleanup(clock);
         let now = clock.now_unix_secs();
         let (
@@ -366,15 +641,14 @@ impl SessionStore {
                 reason: "token already used".to_string(),
             });
         }
-        let session = self
-            .get_valid_session(clock, &session_id, current_settings_generation)?
-            .clone();
+        let (created_at, min_age_hours) =
+            self.get_valid_session_meta(clock, &session_id, current_settings_generation)?;
         if now.saturating_sub(issued_at) > PREVIEW_TOKEN_TTL_SECS {
             return Err(ContractError::PreviewTokenInvalid {
                 reason: "token expired".to_string(),
             });
         }
-        if now.saturating_sub(session.created_at) > SCAN_SESSION_TTL_SECS {
+        if now.saturating_sub(created_at) > SCAN_SESSION_TTL_SECS {
             return Err(ContractError::SessionInvalid {
                 reason: "session expired".to_string(),
             });
@@ -393,7 +667,7 @@ impl SessionStore {
             }
             t.used = true;
         }
-        Ok((session, validated_items, preview_estimated_bytes))
+        Ok((min_age_hours, validated_items, preview_estimated_bytes))
     }
 
     /// Execute clean for a preview token (consumes token atomically).
@@ -409,14 +683,14 @@ impl SessionStore {
         C: Clock,
         F: FnMut(sweeper_contract::CleanProgressEvent),
     {
-        let (session, validated_items, preview_estimated_bytes) = self
+        let (min_age_hours, validated_items, preview_estimated_bytes) = self
             .consume_preview_token_for_execute(clock, preview_token, current_settings_generation)?;
 
-        let total_items = validated_items.len() as u64;
+        let _total_items = validated_items.len() as u64;
         let now = UNIX_EPOCH + Duration::from_secs(clock.now_unix_secs());
         let opts = CleanOptions {
             preview_estimated_bytes,
-            min_age: Duration::from_secs(u64::from(session.min_age_hours) * 3600),
+            min_age: Duration::from_secs(u64::from(min_age_hours) * 3600),
             now,
             journal_base_dir: journal_base_dir.clone(),
         };
@@ -469,8 +743,6 @@ impl SessionStore {
             })
             .collect::<Vec<_>>();
 
-        let _ = (session, total_items);
-
         Ok(ExecuteCleanResponse {
             bytes_freed: U64String(report.bytes_freed),
             deleted_count: U64String(deleted_count),
@@ -482,7 +754,7 @@ impl SessionStore {
         })
     }
 
-    /// Explain an item by id (scan item id or target/knowledge id).
+    /// Explain an item by id (scan item id, analyzer node id, or target/knowledge id).
     pub fn explain_item<C: Clock>(
         &mut self,
         clock: &C,
@@ -492,7 +764,7 @@ impl SessionStore {
         self.cleanup(clock);
         let now = clock.now_unix_secs();
         for s in self.sessions.values() {
-            if !session_valid_at(s, now, current_settings_generation) {
+            if !scan_session_valid_at(s, now, current_settings_generation) {
                 continue;
             }
             if let Some(item) = s.items.get(item_id) {
@@ -504,16 +776,32 @@ impl SessionStore {
                     risk: risk_to_dto(item.risk),
                 });
             }
-            if s.results.targets.iter().any(|t| t.target_id == item_id) {
-                if let Some(t) = s.results.targets.iter().find(|t| t.target_id == item_id) {
-                    return Ok(sweeper_contract::ExplainItemResponse {
-                        item_id: item_id.to_string(),
-                        title: t.target_name.clone(),
-                        description: lookup_target_description(item_id)
-                            .unwrap_or_else(|| "Target.".to_string()),
-                        risk: t.risk,
-                    });
-                }
+            if let Some(t) = s.results.targets.iter().find(|t| t.target_id == item_id) {
+                return Ok(sweeper_contract::ExplainItemResponse {
+                    item_id: item_id.to_string(),
+                    title: t.target_name.clone(),
+                    description: lookup_target_description(item_id)
+                        .unwrap_or_else(|| "Target.".to_string()),
+                    risk: t.risk,
+                });
+            }
+        }
+        for s in self.analyzer_sessions.values() {
+            if !analyzer_session_valid_at(s, now, current_settings_generation) {
+                continue;
+            }
+            if let Some(node) = find_analyzer_node(&s.result.root, item_id) {
+                let title = if node.name.is_empty() {
+                    node.path.clone()
+                } else {
+                    node.name.clone()
+                };
+                return Ok(sweeper_contract::ExplainItemResponse {
+                    item_id: item_id.to_string(),
+                    title,
+                    description: node.description.clone(),
+                    risk: risk_to_dto(node.risk),
+                });
             }
         }
         if let Some(k) = sweeper_knowledge::builtin_knowledge_entries()
@@ -543,7 +831,7 @@ impl SessionStore {
         })
     }
 
-    fn get_valid_session<C: Clock>(
+    fn get_valid_scan_session<C: Clock>(
         &self,
         clock: &C,
         session_id: &str,
@@ -556,16 +844,79 @@ impl SessionStore {
                 .ok_or_else(|| ContractError::SessionInvalid {
                     reason: "session not found".to_string(),
                 })?;
-        if !session_valid_at(session, now, current_settings_generation) {
+        if !scan_session_valid_at(session, now, current_settings_generation) {
             return Err(ContractError::SessionInvalid {
                 reason: "session expired or invalidated".to_string(),
             });
         }
         Ok(session)
     }
+
+    fn get_valid_analyzer_session<C: Clock>(
+        &self,
+        clock: &C,
+        session_id: &str,
+        current_settings_generation: u64,
+    ) -> Result<&AnalyzerSession, ContractError> {
+        let now = clock.now_unix_secs();
+        let session = self.analyzer_sessions.get(session_id).ok_or_else(|| {
+            ContractError::SessionInvalid {
+                reason: "session not found".to_string(),
+            }
+        })?;
+        if !analyzer_session_valid_at(session, now, current_settings_generation) {
+            return Err(ContractError::SessionInvalid {
+                reason: "session expired or invalidated".to_string(),
+            });
+        }
+        Ok(session)
+    }
+
+    fn get_valid_session_meta<C: Clock>(
+        &self,
+        clock: &C,
+        session_id: &str,
+        current_settings_generation: u64,
+    ) -> Result<(u64, u32), ContractError> {
+        let now = clock.now_unix_secs();
+        if let Some(s) = self.sessions.get(session_id) {
+            if !scan_session_valid_at(s, now, current_settings_generation) {
+                return Err(ContractError::SessionInvalid {
+                    reason: "session expired or invalidated".to_string(),
+                });
+            }
+            return Ok((s.created_at, s.min_age_hours));
+        }
+        if let Some(s) = self.analyzer_sessions.get(session_id) {
+            if !analyzer_session_valid_at(s, now, current_settings_generation) {
+                return Err(ContractError::SessionInvalid {
+                    reason: "session expired or invalidated".to_string(),
+                });
+            }
+            return Ok((s.created_at, s.min_age_hours));
+        }
+        Err(ContractError::SessionInvalid {
+            reason: "session not found".to_string(),
+        })
+    }
 }
 
-fn session_valid_at(session: &ScanSession, now: u64, current_settings_generation: u64) -> bool {
+fn scan_session_valid_at(
+    session: &ScanSession,
+    now: u64,
+    current_settings_generation: u64,
+) -> bool {
+    if session.settings_generation != current_settings_generation {
+        return false;
+    }
+    now.saturating_sub(session.created_at) <= SCAN_SESSION_TTL_SECS
+}
+
+fn analyzer_session_valid_at(
+    session: &AnalyzerSession,
+    now: u64,
+    current_settings_generation: u64,
+) -> bool {
     if session.settings_generation != current_settings_generation {
         return false;
     }
@@ -619,6 +970,196 @@ fn tier_to_dto(t: Tier) -> TierDto {
         Tier::Tier2 => TierDto::Tier2,
         Tier::Tier3 => TierDto::Tier3,
     }
+}
+
+fn option_tier_to_dto(t: Option<Tier>) -> Option<TierDto> {
+    t.map(tier_to_dto)
+}
+
+fn map_analyzer_error(e: analyzer::AnalyzerError) -> ContractError {
+    match e {
+        analyzer::AnalyzerError::InvalidRoot(reason) | analyzer::AnalyzerError::Walk(reason) => {
+            ContractError::InvalidInput { reason }
+        }
+        analyzer::AnalyzerError::NotFound(reason) => ContractError::NotFound { reason },
+        analyzer::AnalyzerError::NotADirectory(reason) => ContractError::InvalidInput { reason },
+    }
+}
+
+fn map_analyzer_result_to_dto(session_id: &str, result: &AnalyzerResult) -> StartAnalyzerResponse {
+    StartAnalyzerResponse {
+        session_id: session_id.to_string(),
+        root_path: result.root.path.clone(),
+        total_bytes: U64String(result.root.size_bytes),
+        total_items: U64String(result.root.item_count),
+        scanned_dirs: U64String(result.progress.scanned_dirs),
+        scanned_files: U64String(result.progress.scanned_files),
+        cancelled: result.cancelled,
+        warnings: Vec::new(),
+        root: map_analyzer_node_to_dto(&result.root),
+    }
+}
+
+fn map_analyzer_node_to_dto(node: &AnalyzerNode) -> AnalyzerNodeDto {
+    AnalyzerNodeDto {
+        id: node.id.clone(),
+        name: node.name.clone(),
+        path: node.path.clone(),
+        is_dir: node.is_dir,
+        size_bytes: U64String(node.size_bytes),
+        item_count: U64String(node.item_count),
+        risk: risk_to_dto(node.risk),
+        description: node.description.clone(),
+        reason: node.selection_reason.clone(),
+        tier: option_tier_to_dto(node.tier),
+        target_id: node.target_id.clone(),
+        is_link_point: node.is_link_point,
+        is_cloud_placeholder: node.is_cloud_placeholder,
+        display_only: node.display_only,
+        selectable: node.selectable,
+        children: node.children.iter().map(map_analyzer_node_to_dto).collect(),
+    }
+}
+
+fn index_analyzer_nodes(root: &AnalyzerNode) -> HashMap<String, AnalyzerNode> {
+    fn rec(node: &AnalyzerNode, map: &mut HashMap<String, AnalyzerNode>) {
+        map.insert(node.id.clone(), node.clone());
+        for c in &node.children {
+            rec(c, map);
+        }
+    }
+    let mut map = HashMap::new();
+    rec(root, &mut map);
+    map
+}
+
+fn find_analyzer_node<'a>(root: &'a AnalyzerNode, id: &str) -> Option<&'a AnalyzerNode> {
+    if root.id == id {
+        return Some(root);
+    }
+    for c in &root.children {
+        if let Some(n) = find_analyzer_node(c, id) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn analyzer_target_roots_for_node(node: Option<&AnalyzerNode>, target_id: &str) -> Vec<String> {
+    // Prefer resolved roots from embedded target definitions. Core conversion already validated
+    // allowlist-backed selections; this resolves containment for ValidatedItem construction.
+    let Some(target) = sweeper_knowledge::embedded_targets()
+        .into_iter()
+        .find(|t| t.id == target_id)
+    else {
+        return node.map(|n| vec![n.path.clone()]).unwrap_or_default();
+    };
+    resolve_target_roots_for_definition(&target)
+}
+
+fn resolve_target_roots_for_definition(
+    target: &sweeper_knowledge::TargetDefinition,
+) -> Vec<String> {
+    use std::path::PathBuf;
+    let base = match resolve_known_folder_path(target.known_folder) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    if target.relative_subpath.contains('*') {
+        resolve_wildcard_target_roots(&base, &target.relative_subpath)
+    } else {
+        let mut p = PathBuf::from(base);
+        for seg in target.relative_subpath.split('\\') {
+            p.push(seg);
+        }
+        if !p.exists() {
+            return Vec::new();
+        }
+        match CanonicalPath::parse_lexical(&p.to_string_lossy()) {
+            Ok(c) => vec![c.to_string()],
+            Err(_) => vec![p.to_string_lossy().to_string()],
+        }
+    }
+}
+
+fn resolve_known_folder_path(kf: sweeper_knowledge::KnownFolder) -> Option<String> {
+    let id = match kf {
+        sweeper_knowledge::KnownFolder::LocalAppData => sweeper_winfs::KnownFolderId::LocalAppData,
+        sweeper_knowledge::KnownFolder::RoamingAppData => {
+            sweeper_winfs::KnownFolderId::RoamingAppData
+        }
+        sweeper_knowledge::KnownFolder::UserProfile => sweeper_winfs::KnownFolderId::UserProfile,
+        sweeper_knowledge::KnownFolder::Windows => sweeper_winfs::KnownFolderId::Windows,
+        sweeper_knowledge::KnownFolder::ProgramData => sweeper_winfs::KnownFolderId::ProgramData,
+    };
+    sweeper_winfs::resolve_known_folder(id)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+fn resolve_wildcard_target_roots(base: &str, relative_subpath: &str) -> Vec<String> {
+    use std::path::PathBuf;
+    let segments: Vec<&str> = relative_subpath.split('\\').collect();
+    let mut candidates = vec![PathBuf::from(base)];
+    for seg in segments {
+        if seg.contains('*') {
+            let mut next = Vec::new();
+            for cand in candidates {
+                let entries = match sweeper_winfs::read_dir_entries(&cand) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                for ent in entries {
+                    if !ent.is_dir {
+                        continue;
+                    }
+                    if !matches!(ent.reparse, sweeper_winfs::ReparseTagClass::NotReparse) {
+                        continue;
+                    }
+                    let name = ent.name.to_string_lossy();
+                    if !segment_pattern_matches(&name, seg) {
+                        continue;
+                    }
+                    next.push(ent.path);
+                }
+            }
+            candidates = next;
+        } else {
+            for c in &mut candidates {
+                c.push(seg);
+            }
+        }
+    }
+    let mut roots = Vec::new();
+    for c in candidates {
+        if !c.exists() {
+            continue;
+        }
+        if let Ok(canon) = CanonicalPath::parse_lexical(&c.to_string_lossy()) {
+            roots.push(canon.to_string());
+        } else {
+            roots.push(c.to_string_lossy().to_string());
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn segment_pattern_matches(name: &str, pattern: &str) -> bool {
+    if !pattern.contains('*') {
+        return name.eq_ignore_ascii_case(pattern);
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let (prefix, suffix) = (parts[0], parts[1]);
+    if name.len() < prefix.len() + suffix.len() {
+        return false;
+    }
+    name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 fn risk_to_dto(r: Risk) -> RiskDto {

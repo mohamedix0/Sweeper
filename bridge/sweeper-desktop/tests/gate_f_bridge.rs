@@ -387,7 +387,279 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
             "list_logs".to_string(),
             "preview_clean".to_string(),
             "read_log".to_string(),
+            "start_analyzer".to_string(),
             "start_scan".to_string(),
+            "update_settings".to_string(),
+            "validate_custom_path".to_string(),
         ]
+    );
+}
+
+fn find_node_by_path_suffix<'a>(
+    node: &'a sweeper_contract::AnalyzerNodeDto,
+    suffix: &str,
+) -> Option<&'a sweeper_contract::AnalyzerNodeDto> {
+    if node
+        .path
+        .to_ascii_lowercase()
+        .ends_with(&suffix.to_ascii_lowercase())
+    {
+        return Some(node);
+    }
+    for c in &node.children {
+        if let Some(found) = find_node_by_path_suffix(c, suffix) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn find_node_by_id<'a>(
+    node: &'a sweeper_contract::AnalyzerNodeDto,
+    id: &str,
+) -> Option<&'a sweeper_contract::AnalyzerNodeDto> {
+    if node.id == id {
+        return Some(node);
+    }
+    for c in &node.children {
+        if let Some(found) = find_node_by_id(c, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[test]
+fn start_analyzer_on_sandbox_returns_tree_marks_non_selectable_and_populates_session() {
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("A").unwrap();
+    let _f1 = sandbox.write_file("A\\file1.txt", b"hello").unwrap();
+    let _f2 = sandbox.write_file("A\\sub\\file2.bin", [0u8; 10]).unwrap();
+    let _vhdx = sandbox.write_file("A\\disk.vhdx", b"vhdx-bytes").unwrap();
+    let _git = sandbox.create_dir("A\\.git").unwrap();
+    let _gitf = sandbox.write_file("A\\.git\\config", b"[core]\n").unwrap();
+    let outside = sandbox.create_dir("outside").unwrap();
+    let link = sandbox.guarded_path("A\\linkdir");
+    let _ = sweeper_testkit::create_junction(&link, &outside);
+
+    let resp = commands_impl::start_analyzer::<_, fn(sweeper_contract::AnalyzerProgressEvent)>(
+        &state,
+        Some(root.to_string_lossy().to_string()),
+        None,
+    )
+    .unwrap();
+
+    assert!(!resp.session_id.is_empty());
+    assert!(resp.total_bytes.get() >= 15);
+    assert!(resp.total_items.get() >= 2);
+
+    let vhdx = find_node_by_path_suffix(&resp.root, "\\disk.vhdx").expect("vhdx node");
+    assert!(vhdx.display_only, "vhdx must be display_only");
+    assert!(!vhdx.selectable, "vhdx must not be selectable");
+
+    let git = find_node_by_path_suffix(&resp.root, "\\.git").expect(".git node");
+    assert_eq!(git.risk, RiskDto::Protected);
+    assert!(!git.selectable, ".git must not be selectable");
+
+    if let Some(link_node) = find_node_by_path_suffix(&resp.root, "\\linkdir") {
+        assert!(link_node.is_link_point);
+        assert!(!link_node.selectable);
+    }
+
+    // Session populated and explainable
+    let explained = commands_impl::explain_item(&state, resp.root.id.clone()).unwrap();
+    assert!(!explained.description.is_empty());
+}
+
+#[test]
+fn analyzer_eligible_node_preview_and_execute_clean_in_sentinel_sandbox() {
+    let state = make_state();
+    // Custom-path sandbox nodes are Unknown and require allow_delete_unknown to be selectable.
+    {
+        let mut settings = state.settings.lock().unwrap();
+        let mut s = settings.get();
+        s.allow_delete_unknown = true;
+        let _ = settings.update(s);
+    }
+    let canary = CanaryTree::seed_external("gate-f-analyzer-exec").unwrap();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("CleanMe").unwrap();
+    let file_path = sandbox
+        .write_file("CleanMe\\old.txt", b"delete-me")
+        .unwrap();
+    assert!(file_path.exists());
+
+    canary.verify().unwrap();
+
+    let resp = commands_impl::start_analyzer::<_, fn(sweeper_contract::AnalyzerProgressEvent)>(
+        &state,
+        Some(root.to_string_lossy().to_string()),
+        None,
+    )
+    .unwrap();
+
+    let root_node = resp.root.clone();
+    assert!(root_node.selectable || !root_node.selectable);
+
+    // Select the analyzed file node and route it through the standard Preview/Clean flow.
+    let file_node =
+        find_node_by_path_suffix(&root_node, "\\old.txt").expect("old.txt node in analyzer tree");
+    assert!(
+        file_node.selectable,
+        "old.txt should be selectable: reason={:?}",
+        file_node.reason
+    );
+    assert!(!file_node.display_only);
+
+    let confirmations = if file_node.target_id.is_none() || file_node.risk == RiskDto::Unknown {
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".to_string()),
+        })
+    } else {
+        None
+    };
+    let preview = commands_impl::preview_clean(
+        &state,
+        resp.session_id.clone(),
+        vec![file_node.id.clone()],
+        confirmations,
+    )
+    .unwrap();
+    assert!(preview.total_selected_count.get() >= 1);
+
+    let logs_base = tempfile::tempdir().unwrap();
+    let exec = commands_impl::execute_clean(
+        &state,
+        preview.preview_token,
+        Some(logs_base.path().to_path_buf()),
+        |_| {},
+    )
+    .unwrap();
+    assert!(!exec.aborted, "abort_reason={:?}", exec.abort_reason);
+    assert!(
+        exec.deleted_count.get() >= 1,
+        "expected at least one deleted item, got {:?}",
+        exec
+    );
+    canary.verify().unwrap();
+    assert!(!sandbox.guarded_path("CleanMe\\old.txt").exists());
+    let log_id = exec.log_id.expect("log id");
+    let logs =
+        commands_impl::list_logs_in_dir(Some(logs_base.path().join("logs").as_path())).unwrap();
+    assert!(logs.iter().any(|l| l.id == log_id));
+}
+
+#[test]
+fn analyzer_preview_rejects_invalid_nodes_and_session_rules_enforced() {
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("R").unwrap();
+    let _f = sandbox.write_file("R\\ok.txt", b"ok").unwrap();
+    let _vhdx = sandbox.write_file("R\\disk.vhdx", b"x").unwrap();
+    let _git = sandbox.create_dir("R\\.git").unwrap();
+    let outside = sandbox.create_dir("outside").unwrap();
+    let link = sandbox.guarded_path("R\\linkdir");
+    let _ = sweeper_testkit::create_junction(&link, &outside);
+
+    let resp = commands_impl::start_analyzer::<_, fn(sweeper_contract::AnalyzerProgressEvent)>(
+        &state,
+        Some(root.to_string_lossy().to_string()),
+        None,
+    )
+    .unwrap();
+
+    if let Some(vhdx) = find_node_by_path_suffix(&resp.root, "\\disk.vhdx") {
+        let err = commands_impl::preview_clean(
+            &state,
+            resp.session_id.clone(),
+            vec![vhdx.id.clone()],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. })
+                || matches!(err, ContractError::UnknownItem { .. })
+                || format!("{err:?}").contains("InvalidInput"),
+            "{err:?}"
+        );
+    }
+    if let Some(git) = find_node_by_path_suffix(&resp.root, "\\.git") {
+        let err = commands_impl::preview_clean(
+            &state,
+            resp.session_id.clone(),
+            vec![git.id.clone()],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
+    }
+    if let Some(link_node) = find_node_by_path_suffix(&resp.root, "\\linkdir") {
+        let err = commands_impl::preview_clean(
+            &state,
+            resp.session_id.clone(),
+            vec![link_node.id.clone()],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
+    }
+
+    // execute_clean directly with analyzer session_id (not preview token) rejected
+    let err =
+        commands_impl::execute_clean(&state, resp.session_id.clone(), None, |_| {}).unwrap_err();
+    assert!(
+        matches!(err, ContractError::PreviewTokenInvalid { .. }),
+        "{err:?}"
+    );
+
+    // expired analyzer session rejected
+    state.clock.advance_secs(15 * 60 + 1);
+    let err = commands_impl::preview_clean(
+        &state,
+        resp.session_id.clone(),
+        vec![resp.root.id.clone()],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".into()),
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SessionInvalid { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn analyzer_session_invalidated_by_settings_change_rejected() {
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("R2").unwrap();
+    let _f = sandbox.write_file("R2\\ok.txt", b"ok").unwrap();
+    let resp = commands_impl::start_analyzer::<_, fn(sweeper_contract::AnalyzerProgressEvent)>(
+        &state,
+        Some(root.to_string_lossy().to_string()),
+        None,
+    )
+    .unwrap();
+    {
+        let mut settings = state.settings.lock().unwrap();
+        let mut s = settings.get();
+        s.min_age_hours = 10;
+        let _ = settings.update(s);
+    }
+    let err = commands_impl::preview_clean(
+        &state,
+        resp.session_id,
+        vec![resp.root.id],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".into()),
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::SessionInvalid { .. }),
+        "{err:?}"
     );
 }

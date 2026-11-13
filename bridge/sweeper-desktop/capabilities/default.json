@@ -12,8 +12,11 @@
       "get_scan_results",
       "preview_clean",
       "execute_clean",
+      "start_analyzer",
       "explain_item",
       "get_settings",
+      "update_settings",
+      "validate_custom_path",
       "list_logs",
       "read_log"
     ],

@@ -1,12 +1,13 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
 //! Sweeper desktop binary (Tauri 2 shell).
 
 use sweeper_contract::{
-    CleanProgressEvent, ContractError, ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto,
-    LogReadResponse, PreviewCleanResponse, PreviewConfirmationsDto, ScanResultsDto, SettingsDto,
-    StartScanResponse, TierDto,
+    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ExecuteCleanResponse,
+    ExplainItemResponse, LogMetadataDto, LogReadResponse, PreviewCleanResponse,
+    PreviewConfirmationsDto, ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse,
+    TierDto, ValidateCustomPathResponse,
 };
 use sweeper_desktop::{commands_impl, AppState, SystemClock};
 use tauri::Emitter;
@@ -49,6 +50,22 @@ fn execute_clean(
 }
 
 #[tauri::command]
+fn start_analyzer(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState<SystemClock>>,
+    root: Option<String>,
+) -> Result<StartAnalyzerResponse, ContractError> {
+    let app_for_progress = app.clone();
+    commands_impl::start_analyzer(
+        &state,
+        root,
+        Some(move |evt: AnalyzerProgressEvent| {
+            let _ = app_for_progress.emit("AnalyzerProgressEvent", evt);
+        }),
+    )
+}
+
+#[tauri::command]
 fn explain_item(
     state: tauri::State<'_, AppState<SystemClock>>,
     item_id: String,
@@ -61,6 +78,22 @@ fn get_settings(
     state: tauri::State<'_, AppState<SystemClock>>,
 ) -> Result<SettingsDto, ContractError> {
     commands_impl::get_settings(&state)
+}
+
+#[tauri::command]
+fn update_settings(
+    state: tauri::State<'_, AppState<SystemClock>>,
+    settings: SettingsDto,
+) -> Result<SettingsDto, ContractError> {
+    commands_impl::update_settings(&state, settings)
+}
+
+#[tauri::command]
+fn validate_custom_path(
+    state: tauri::State<'_, AppState<SystemClock>>,
+    path: String,
+) -> Result<ValidateCustomPathResponse, ContractError> {
+    commands_impl::validate_custom_path(&state, path)
 }
 
 #[tauri::command]
@@ -92,8 +125,11 @@ fn main() {
             get_scan_results,
             preview_clean,
             execute_clean,
+            start_analyzer,
             explain_item,
             get_settings,
+            update_settings,
+            validate_custom_path,
             list_logs,
             read_log
         ])

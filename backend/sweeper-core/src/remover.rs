@@ -170,6 +170,36 @@ impl ValidatedItem {
             risk: None,
         })
     }
+
+    /// Construct a validated custom-path root item (contents-only clean of the root directory).
+    ///
+    /// The path is validated with `policy::validate_custom_path` and stored as both `target_root`
+    /// and `path` so the remover applies contents-only semantics (root directory kept).
+    pub fn from_custom_path_root(
+        id: impl Into<String>,
+        path: impl Into<String>,
+        size_bytes: u64,
+    ) -> Result<Self, String> {
+        let id = id.into();
+        let path = path.into();
+        let verdict = policy::validate_custom_path(&path);
+        if !verdict.allowed {
+            return Err(format!("custom path not allowed: {}", verdict.reason));
+        }
+        let canon = CanonicalPath::parse_lexical(&path)
+            .map_err(|e| format!("invalid custom path: {e}"))?
+            .to_string();
+        Ok(Self {
+            id,
+            target_id: "custom-path".to_string(),
+            target_root: canon.clone(),
+            path: canon,
+            size_bytes,
+            mtime_unix_secs: None,
+            source: ValidatedSource::CustomPath,
+            risk: None,
+        })
+    }
 }
 
 /// Clean execution options.

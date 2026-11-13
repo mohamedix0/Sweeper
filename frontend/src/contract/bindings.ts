@@ -36,6 +36,14 @@ async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; 
     else return { status: "error", error: e  as any };
 }
 },
+async startAnalyzer(root: string | null) : Promise<Result<{ sessionId: string; rootPath: string; totalBytes: string; totalItems: string; scannedDirs: string; scannedFiles: string; cancelled: boolean; warnings: string[]; root: AnalyzerNodeDto }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_analyzer", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: string; description: string; risk: RiskDto }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("explain_item", { itemId }) };
@@ -47,6 +55,22 @@ async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: stri
 async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; minAgeHours: number; allowDeleteUnknown: boolean }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_settings") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async updateSettings(settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; minAgeHours: number; allowDeleteUnknown: boolean }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; minAgeHours: number; allowDeleteUnknown: boolean }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_settings", { settings }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async validateCustomPath(path: string) : Promise<Result<{ path: string; allowed: boolean; reason: string }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("validate_custom_path", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -74,10 +98,12 @@ async readLog(logId: string) : Promise<Result<{ id: string; content: string }, {
 
 export const events = __makeEvents__<{
 scanProgressEvent: { kind: "started"; session_id: string } | { kind: "completed"; session_id: string } | { kind: "failed"; session_id: string; error: ContractError },
-cleanProgressEvent: { previewToken: string; targetId: string; completedItems: string; totalItems: string; bytesFreedSoFar: string; status: string }
+cleanProgressEvent: { previewToken: string; targetId: string; completedItems: string; totalItems: string; bytesFreedSoFar: string; status: string },
+analyzerProgressEvent: { sessionId: string; scannedDirs: string; scannedFiles: string; scannedBytes: string; currentPath: string | null }
 }>({
 scanProgressEvent: "ScanProgressEvent",
-cleanProgressEvent: "CleanProgressEvent"
+cleanProgressEvent: "CleanProgressEvent",
+analyzerProgressEvent: "AnalyzerProgressEvent"
 })
 
 /** user-defined constants **/
@@ -85,6 +111,75 @@ cleanProgressEvent: "CleanProgressEvent"
 
 
 /** user-defined types **/
+
+/**
+ * Analyzer tree node DTO (recursive).
+ */
+export type AnalyzerNodeDto = { 
+/**
+ * Stable node identifier (deterministic for canonical path).
+ */
+id: string; 
+/**
+ * Display name.
+ */
+name: string; 
+/**
+ * Canonical/display path.
+ */
+path: string; 
+/**
+ * Whether this node represents a directory/container in the tree.
+ */
+isDir: boolean; 
+/**
+ * Recursive total logical size in bytes (decimal string).
+ */
+sizeBytes: string; 
+/**
+ * Recursive item count under/including this node as applicable (decimal string).
+ */
+itemCount: string; 
+/**
+ * Risk classification.
+ */
+risk: RiskDto; 
+/**
+ * Knowledge-base/annotation description.
+ */
+description: string; 
+/**
+ * Selection/annotation reason (diagnostic, if any).
+ */
+reason: string | null; 
+/**
+ * Owning tier when known.
+ */
+tier: TierDto | null; 
+/**
+ * Matched allowlist target id when known.
+ */
+targetId: string | null; 
+/**
+ * True if the node itself is a `Link Point`.
+ */
+isLinkPoint: boolean; 
+/**
+ * True if the node itself is a cloud placeholder.
+ */
+isCloudPlaceholder: boolean; 
+/**
+ * True if display-only (never cleanable in v1 flows).
+ */
+displayOnly: boolean; 
+/**
+ * Whether selectable for routing into standard Preview -> Clean.
+ */
+selectable: boolean; 
+/**
+ * Child nodes.
+ */
+children: AnalyzerNodeDto[] }
 
 /**
  * Structured contract error variants (no internal paths or stack traces).

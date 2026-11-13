@@ -121,6 +121,96 @@ pub struct SkippedReasonDto {
     pub count: U64String,
 }
 
+/// Progress event for analyzer operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzerProgressEvent {
+    /// Analyzer session identifier.
+    pub session_id: String,
+    /// Number of directories scanned/enumerated (decimal string).
+    pub scanned_dirs: U64String,
+    /// Number of files observed (decimal string).
+    pub scanned_files: U64String,
+    /// Sum of logical file sizes observed in bytes (decimal string).
+    pub scanned_bytes: U64String,
+    /// Current/last path being processed (best-effort).
+    pub current_path: Option<String>,
+}
+
+/// Analyzer tree node DTO (recursive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzerNodeDto {
+    /// Stable node identifier (deterministic for canonical path).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Canonical/display path.
+    pub path: String,
+    /// Whether this node represents a directory/container in the tree.
+    pub is_dir: bool,
+    /// Recursive total logical size in bytes (decimal string).
+    pub size_bytes: U64String,
+    /// Recursive item count under/including this node as applicable (decimal string).
+    pub item_count: U64String,
+    /// Risk classification.
+    pub risk: RiskDto,
+    /// Knowledge-base/annotation description.
+    pub description: String,
+    /// Selection/annotation reason (diagnostic, if any).
+    pub reason: Option<String>,
+    /// Owning tier when known.
+    pub tier: Option<TierDto>,
+    /// Matched allowlist target id when known.
+    pub target_id: Option<String>,
+    /// True if the node itself is a `Link Point`.
+    pub is_link_point: bool,
+    /// True if the node itself is a cloud placeholder.
+    pub is_cloud_placeholder: bool,
+    /// True if display-only (never cleanable in v1 flows).
+    pub display_only: bool,
+    /// Whether selectable for routing into standard Preview -> Clean.
+    pub selectable: bool,
+    /// Child nodes.
+    pub children: Vec<AnalyzerNodeDto>,
+}
+
+/// Response from starting an analyzer session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StartAnalyzerResponse {
+    /// Analyzer session identifier.
+    pub session_id: String,
+    /// Canonical/root path analyzed.
+    pub root_path: String,
+    /// Total recursive bytes for the root (decimal string).
+    pub total_bytes: U64String,
+    /// Total recursive items for the root (decimal string).
+    pub total_items: U64String,
+    /// Directories scanned (decimal string).
+    pub scanned_dirs: U64String,
+    /// Files scanned (decimal string).
+    pub scanned_files: U64String,
+    /// Whether the analysis was cancelled before completion.
+    pub cancelled: bool,
+    /// Non-fatal warnings.
+    pub warnings: Vec<String>,
+    /// Root tree node.
+    pub root: AnalyzerNodeDto,
+}
+
+/// Verdict from custom path validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidateCustomPathResponse {
+    /// Normalized/canonical path when available, otherwise the input.
+    pub path: String,
+    /// Whether the path is allowed as a custom path root.
+    pub allowed: bool,
+    /// Human-safe reason/verdict text.
+    pub reason: String,
+}
+
 /// Display metadata for a scanned item (path is display-only; never submitted for deletion).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -439,6 +529,10 @@ fn render_bindings() -> Result<String, Box<dyn std::error::Error>> {
     let _ = <ScanProgressEvent as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <ExecuteCleanResponse as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <CleanProgressEvent as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <AnalyzerProgressEvent as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <AnalyzerNodeDto as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <StartAnalyzerResponse as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <ValidateCustomPathResponse as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <TierDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <RiskDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <SkipReasonDto as NamedType>::definition_named_data_type(&mut type_map);
@@ -497,8 +591,11 @@ fn render_commands(
         cmd_get_scan_results(cfg, type_map)?,
         cmd_preview_clean(cfg, type_map)?,
         cmd_execute_clean(cfg, type_map)?,
+        cmd_start_analyzer(cfg, type_map)?,
         cmd_explain_item(cfg, type_map)?,
         cmd_get_settings(cfg, type_map)?,
+        cmd_update_settings(cfg, type_map)?,
+        cmd_validate_custom_path(cfg, type_map)?,
         cmd_list_logs(cfg, type_map)?,
         cmd_read_log(cfg, type_map)?,
     ];
@@ -637,6 +734,34 @@ fn cmd_execute_clean(
     ))
 }
 
+fn cmd_start_analyzer(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let root_ty = datatype_str(
+        cfg,
+        <Option<String> as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let ok_ty = datatype_str(
+        cfg,
+        <StartAnalyzerResponse as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let err_ty = datatype_str(
+        cfg,
+        <ContractError as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    Ok(cmd_fn(
+        "startAnalyzer",
+        &[("root", root_ty)],
+        &format!("Result<{ok_ty}, {err_ty}>"),
+        "start_analyzer",
+        Some("{ root }"),
+    ))
+}
+
 fn cmd_explain_item(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
@@ -680,6 +805,57 @@ fn cmd_get_settings(
         &format!("Result<{ok_ty}, {err_ty}>"),
         "get_settings",
         None,
+    ))
+}
+
+fn cmd_update_settings(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let settings_ty = datatype_str(
+        cfg,
+        <SettingsDto as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let ok_ty = datatype_str(
+        cfg,
+        <SettingsDto as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let err_ty = datatype_str(
+        cfg,
+        <ContractError as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    Ok(cmd_fn(
+        "updateSettings",
+        &[("settings", settings_ty)],
+        &format!("Result<{ok_ty}, {err_ty}>"),
+        "update_settings",
+        Some("{ settings }"),
+    ))
+}
+
+fn cmd_validate_custom_path(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let ok_ty = datatype_str(
+        cfg,
+        <ValidateCustomPathResponse as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let err_ty = datatype_str(
+        cfg,
+        <ContractError as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    Ok(cmd_fn(
+        "validateCustomPath",
+        &[("path", "string".to_string())],
+        &format!("Result<{ok_ty}, {err_ty}>"),
+        "validate_custom_path",
+        Some("{ path }"),
     ))
 }
 
@@ -743,9 +919,16 @@ fn render_events(
         <CleanProgressEvent as Type>::inline(type_map, Generics::NONE),
         type_map,
     )?;
-    let events_types = format!("scanProgressEvent: {scan_ty},\ncleanProgressEvent: {clean_ty}");
+    let analyzer_ty = datatype_str(
+        cfg,
+        <AnalyzerProgressEvent as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let events_types = format!(
+        "scanProgressEvent: {scan_ty},\ncleanProgressEvent: {clean_ty},\nanalyzerProgressEvent: {analyzer_ty}"
+    );
     let events_map =
-        "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\""
+        "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\",\nanalyzerProgressEvent: \"AnalyzerProgressEvent\""
             .to_string();
     Ok(format!(
         "export const events = __makeEvents__<{{\n{events_types}\n}}>({{\n{events_map}\n}})"
@@ -765,6 +948,10 @@ pub fn fuzz_contract_payload_bytes(data: &[u8]) {
         let _ = serde_json::from_str::<TargetScanResultDto>(s);
         let _ = serde_json::from_str::<ScanResultsDto>(s);
         let _ = serde_json::from_str::<StartScanResponse>(s);
+        let _ = serde_json::from_str::<AnalyzerNodeDto>(s);
+        let _ = serde_json::from_str::<AnalyzerProgressEvent>(s);
+        let _ = serde_json::from_str::<StartAnalyzerResponse>(s);
+        let _ = serde_json::from_str::<ValidateCustomPathResponse>(s);
         let _ = serde_json::from_str::<PreviewConfirmationsDto>(s);
         let _ = serde_json::from_str::<PreviewTargetBreakdownDto>(s);
         let _ = serde_json::from_str::<PreviewCleanResponse>(s);
@@ -781,6 +968,8 @@ pub fn fuzz_contract_payload_bytes(data: &[u8]) {
     }
     let _ = serde_json::from_slice::<U64String>(data);
     let _ = serde_json::from_slice::<ScanResultsDto>(data);
+    let _ = serde_json::from_slice::<AnalyzerNodeDto>(data);
+    let _ = serde_json::from_slice::<StartAnalyzerResponse>(data);
     let _ = serde_json::from_slice::<PreviewCleanResponse>(data);
     let _ = serde_json::from_slice::<ExecuteCleanResponse>(data);
     let _ = serde_json::from_slice::<CleanProgressEvent>(data);
@@ -849,6 +1038,60 @@ mod tests {
         assert_eq!(vr["deletedCount"], serde_json::json!("2"));
         assert_eq!(vr["skippedCount"], serde_json::json!("1"));
         assert_eq!(vr["skippedReasons"][0]["count"], serde_json::json!("1"));
+    }
+
+    #[test]
+    fn analyzer_dtos_serialize_u64_fields_as_strings() {
+        let event = AnalyzerProgressEvent {
+            session_id: "a1".to_string(),
+            scanned_dirs: U64String(2),
+            scanned_files: U64String(3),
+            scanned_bytes: U64String(4),
+            current_path: Some(r"C:\Temp".to_string()),
+        };
+        let ev = serde_json::to_value(&event).unwrap();
+        assert_eq!(ev["sessionId"], serde_json::json!("a1"));
+        assert_eq!(ev["scannedDirs"], serde_json::json!("2"));
+        assert_eq!(ev["scannedFiles"], serde_json::json!("3"));
+        assert_eq!(ev["scannedBytes"], serde_json::json!("4"));
+
+        let node = AnalyzerNodeDto {
+            id: "n1".to_string(),
+            name: "Temp".to_string(),
+            path: r"C:\Temp".to_string(),
+            is_dir: true,
+            size_bytes: U64String(10),
+            item_count: U64String(2),
+            risk: RiskDto::Safe,
+            description: "desc".to_string(),
+            reason: None,
+            tier: Some(TierDto::Tier1),
+            target_id: Some("user-temp".to_string()),
+            is_link_point: false,
+            is_cloud_placeholder: false,
+            display_only: false,
+            selectable: true,
+            children: vec![],
+        };
+        let resp = StartAnalyzerResponse {
+            session_id: "a1".to_string(),
+            root_path: r"C:\Temp".to_string(),
+            total_bytes: U64String(10),
+            total_items: U64String(2),
+            scanned_dirs: U64String(1),
+            scanned_files: U64String(1),
+            cancelled: false,
+            warnings: vec![],
+            root: node.clone(),
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["totalBytes"], serde_json::json!("10"));
+        assert_eq!(v["totalItems"], serde_json::json!("2"));
+        assert_eq!(v["scannedDirs"], serde_json::json!("1"));
+        assert_eq!(v["scannedFiles"], serde_json::json!("1"));
+        assert_eq!(v["root"]["sizeBytes"], serde_json::json!("10"));
+        assert_eq!(v["root"]["itemCount"], serde_json::json!("2"));
+        let _roundtrip: StartAnalyzerResponse = serde_json::from_value(v).unwrap();
     }
 
     #[test]

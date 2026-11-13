@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+﻿import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { App } from './App';
@@ -139,5 +139,69 @@ describe('Sweeper frontend', () => {
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument();
     expect(screen.getByLabelText('Tier 1 (system temp and caches)')).toBeInTheDocument();
     expect(screen.getByLabelText('Tier 2 (developer caches)')).toBeInTheDocument();
+  });
+
+  it('runs Analyzer -> virtualized tree -> explain/select eligible -> Preview Selected -> Clean summary', async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Analyzer' }));
+    expect(await screen.findByRole('heading', { name: 'Analyzer' })).toBeInTheDocument();
+    const rootInput = screen.getByLabelText('Analyzer root path') as HTMLInputElement;
+    expect(rootInput.value).toBe('C:\\');
+    await user.click(screen.getByRole('button', { name: 'Analyze' }));
+
+    await screen.findByRole('heading', { name: 'Analyzer Tree' });
+    const tree = screen.getByRole('tree', { name: 'Analyzer results tree' });
+    expect(tree).toBeInTheDocument();
+
+    // Virtualization: mock tree has many bulk nodes but viewport should not render all rows at once.
+    const renderedRows = tree.querySelectorAll('[role="treeitem"]');
+    expect(renderedRows.length).toBeGreaterThan(0);
+    expect(renderedRows.length).toBeLessThan(60);
+
+    // Expand Temp to expose a selectable eligible file.
+    await user.click(screen.getByRole('button', { name: 'Expand Temp' }));
+    const selectableNode = await waitFor(() => {
+      const n = screen.getAllByRole('checkbox').find((el) => (el.getAttribute('aria-label') ?? '').includes('\\Temp\\a.tmp')) as HTMLInputElement | undefined;
+      expect(n).toBeTruthy();
+      return n!;
+    });
+    expect(selectableNode).toBeEnabled();
+    await user.click(selectableNode);
+
+    await user.click(screen.getAllByRole('button', { name: 'Explain' })[0]);
+    expect(await screen.findByRole('dialog', { name: /Explain:/ })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Close explanation' }));
+    await user.click(screen.getByRole('button', { name: 'Preview Selected' }));
+    await screen.findByText('Preview Breakdown');
+    expect(screen.getByText(/Permanent deletion \(bypasses Recycle Bin\)/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Clean Permanently' }));
+    await screen.findByRole('heading', { name: 'Clean Summary' });
+    expect(screen.getByText('Bytes freed')).toBeInTheDocument();
+  });
+
+  it('marks non-selectable analyzer nodes (.vhdx / Protected / Link Point) correctly', async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Analyzer' }));
+    await user.click(screen.getByRole('button', { name: 'Analyze' }));
+    await screen.findByRole('heading', { name: 'Analyzer Tree' });
+
+    const all = screen.getAllByRole('checkbox') as HTMLInputElement[];
+    const findBySuffix = (suffix: string) => all.find((n) => (n.getAttribute('aria-label') ?? '').includes(suffix));
+    const vhdx = findBySuffix('dev-machine.vhdx');
+    expect(vhdx).toBeTruthy();
+    expect(vhdx!).toBeDisabled();
+    expect(vhdx!.closest('[role="treeitem"]')).toHaveTextContent(/Not selectable/i);
+    expect(vhdx!.closest('[role="treeitem"]')).toHaveTextContent(/\.vhdx/i);
+
+    const gitNode = findBySuffix('\\Dev\\repo\\.git');
+    expect(gitNode).toBeTruthy();
+    expect(gitNode!).toBeDisabled();
+    expect(gitNode!.closest('[role="treeitem"]')).toHaveTextContent(/Protected/i);
+
+    const linkNode = findBySuffix('\\Users\\Alice\\OneDriveLink');
+    expect(linkNode).toBeTruthy();
+    expect(linkNode!).toBeDisabled();
+    expect(linkNode!.closest('[role="treeitem"]')).toHaveTextContent(/Link Point/i);
   });
 });
