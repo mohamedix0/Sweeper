@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for Sweeper Phase 2 read-only commands",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ],
+  "commands": {
+    "allow": [
+      "start_scan",
+      "get_scan_results",
+      "preview_clean",
+      "explain_item",
+      "get_settings",
+      "list_logs",
+      "read_log"
+    ],
+    "deny": []
+  }
+}
