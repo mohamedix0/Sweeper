@@ -39,7 +39,7 @@ pub enum Tier {
 
 /// Closed enum of supported Windows Known Folders used by embedded targets.
 /// Mapping to `FOLDERID_*` constants/resolution lives in `sweeper-winfs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum KnownFolder {
     /// `FOLDERID_LocalAppData`
     LocalAppData,

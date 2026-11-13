@@ -123,7 +123,7 @@ pub enum ReparseTagClass {
 }
 
 /// File identity from `GetFileInformationByHandle` (volume serial + file index).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileIdentity {
     /// Volume serial number (`dwVolumeSerialNumber`).
     pub volume_serial: u32,
@@ -352,10 +352,73 @@ pub fn inspect_reparse_point(handle: &SafeHandle) -> Result<ReparseTagClass> {
     Ok(classify_reparse_tag(tag))
 }
 
+/// Known Folder identifiers required for Sweeper allowlist resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KnownFolderId {
+    /// `FOLDERID_LocalAppData`
+    LocalAppData,
+    /// `FOLDERID_RoamingAppData`
+    RoamingAppData,
+    /// `FOLDERID_Profile` (user profile root)
+    UserProfile,
+    /// `FOLDERID_Windows`
+    Windows,
+    /// `FOLDERID_ProgramData`
+    ProgramData,
+}
+
+impl KnownFolderId {
+    fn guid(self) -> GUID {
+        match self {
+            // FOLDERID_LocalAppData {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
+            Self::LocalAppData => GUID {
+                data1: 0xF1B3_2785,
+                data2: 0x6FBA,
+                data3: 0x4FCF,
+                data4: [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91],
+            },
+            // FOLDERID_RoamingAppData {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}
+            Self::RoamingAppData => GUID {
+                data1: 0x3EB6_85DB,
+                data2: 0x65F9,
+                data3: 0x4CF6,
+                data4: [0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D],
+            },
+            // FOLDERID_Profile {5E6C858F-0E22-4760-9AFE-EA3317B67173}
+            Self::UserProfile => GUID {
+                data1: 0x5E6C_858F,
+                data2: 0x0E22,
+                data3: 0x4760,
+                data4: [0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73],
+            },
+            // FOLDERID_Windows {F38BF404-1D43-42F2-9305-67DE0B28FC23}
+            Self::Windows => GUID {
+                data1: 0xF38B_F404,
+                data2: 0x1D43,
+                data3: 0x42F2,
+                data4: [0x93, 0x05, 0x67, 0xDE, 0x0B, 0x28, 0xFC, 0x23],
+            },
+            // FOLDERID_ProgramData {62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}
+            Self::ProgramData => GUID {
+                data1: 0x62AB_5D82,
+                data2: 0xFDC1,
+                data3: 0x4DC3,
+                data4: [0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97],
+            },
+        }
+    }
+}
+
+/// Resolve a known folder to its filesystem path using `SHGetKnownFolderPath` (`FOLDERID_*`).
+pub fn resolve_known_folder(id: KnownFolderId) -> Result<PathBuf> {
+    let guid = id.guid();
+    known_folder_path(&guid)
+}
+
 /// Read-only Known Folder path resolution helper using `SHGetKnownFolderPath`.
 ///
-/// The caller provides a known folder `GUID` (e.g. `FOLDERID_*` constants). This is a read-only
-/// helper for Phase 1B; higher-level enum mapping lives in `sweeper-knowledge`.
+/// The caller provides a known folder `GUID` (e.g. `FOLDERID_*` constants). Prefer
+/// [`resolve_known_folder`] for supported Sweeper known folders.
 pub fn known_folder_path(folder_id: &GUID) -> Result<PathBuf> {
     let mut path_ptr: *mut u16 = std::ptr::null_mut();
     // SAFETY: `folder_id` points to a valid `GUID` for the duration of the call. `path_ptr` is a

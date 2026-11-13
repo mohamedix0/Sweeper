@@ -16,6 +16,7 @@ disallowed_methods = "deny"
 [dependencies]
 windows-sys = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 sweeper-testkit = { workspace = true }

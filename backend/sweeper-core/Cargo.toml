@@ -14,6 +14,11 @@ sweeper-winfs = { workspace = true }
 sweeper-knowledge = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+windows-sys = { workspace = true }
+
+[[bin]]
+name = "sweeper_scan_report"
+path = "src/bin/sweeper_scan_report.rs"
 
 [dev-dependencies]
 proptest = "1"

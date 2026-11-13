@@ -2,6 +2,7 @@
 
 pub mod paths;
 pub mod policy;
+pub mod scanner;
 
 /// Deterministic fuzz entrypoint for path/policy validation.
 /// Accepts arbitrary bytes (lossy UTF-8) and must never panic.

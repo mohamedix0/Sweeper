@@ -457,6 +457,7 @@ dependencies = [
  "sweeper-winfs",
  "tempfile",
  "thiserror",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -493,6 +494,7 @@ dependencies = [
 name = "sweeper-winfs"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "sweeper-testkit",
  "thiserror",
  "windows-sys 0.59.0",
