@@ -137,15 +137,12 @@ if (@($desktopInternalDeps).Count -ne $allowedDesktopInternal.Count -or (@(Compa
 # 5) Privacy / scrub checks on tracked files (permanent Gate A guard).
 $tracked = git -C $repoRoot ls-files
 $personalEmailPattern = '(?i)(@' + 'gmail\.com\b|@' + 'outlook\.com\b|@' + 'hotmail\.com\b|@' + 'yahoo\.com\b|@' + 'icloud\.com\b|@' + 'proton\.me\b|@' + 'protonmail\.com\b)'
-# Allow only noreply GitHub and RFC example.com emails in tracked files.
-$allowedEmailPattern = '(?i)^[A-Za-z0-9._%+\-]+@(?:users\.noreply\.github\.com|(?:[A-Za-z0-9\-]+\.)*example\.com)$'
 $userNameFrag = 'pub' + '22'
 $projectFrag = 'Hermes' + ' Projects'
 $localUserPathPattern = '(?i)C:\\Users\\(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
 $threadIdFrag = 'decf13a1' + '-4de9-4616-b251-262b42c6ac64'
 $tokenPatterns = @('gh' + 'p_[A-Za-z0-9]{20,}', 'github' + '_pat_[A-Za-z0-9_]{20,}', 'BEGIN [A-Z ]*PRIVATE KEY')
 
-$emailMatches = @()
 $privacyHits = @()
 
 foreach ($rel in $tracked) {
@@ -153,7 +150,6 @@ foreach ($rel in $tracked) {
   $full = Join-Path $repoRoot $rel
   if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
   $ext = [System.IO.Path]::GetExtension($rel).ToLowerInvariant()
-  $name = [System.IO.Path]::GetFileName($rel).ToLowerInvariant()
   # Skip obvious binary assets; scan text/config/docs/scripts/source/lockfiles.
   $skipExt = @('.png','.jpg','.jpeg','.gif','.ico','.icns','.webp','.bmp','.exe','.dll','.pdb','.zip','.7z','.gz','.woff','.woff2','.ttf','.otf','.eot')
   if ($skipExt -contains $ext) { continue }
@@ -161,7 +157,6 @@ foreach ($rel in $tracked) {
   $text = $null
   try { $text = Get-Content -LiteralPath $full -Raw -ErrorAction Stop } catch { continue }
   if ($null -eq $text) { continue }
-  $isPrivacyScript = ($rel -replace '\\','/') -eq 'scripts/gate-a-check.ps1'
 
   # Personal email domains (forbid), except allowed noreply/example domains.
   foreach ($m in [regex]::Matches($text, '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')) {
@@ -170,8 +165,6 @@ foreach ($rel in $tracked) {
       $privacyHits += "${rel}: personal email domain detected: $addr"
       continue
     }
-    # allow noreply/example.com; flag any other real-looking non-example domain only if it appears in obviously personal form?
-    # Strict rule from task states only listed personal domains must fail; keep it precise.
   }
 
   if ($text -match $userNameFrag) { $privacyHits += "${rel}: forbidden local username fragment detected" }
