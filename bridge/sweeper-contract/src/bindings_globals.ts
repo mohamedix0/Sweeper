@@ -1,4 +1,4 @@
-﻿import {
+import {
 	invoke as TAURI_INVOKE,
 	Channel as TAURI_CHANNEL,
 } from "@tauri-apps/api/core";

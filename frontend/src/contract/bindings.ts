@@ -276,7 +276,7 @@ export type TierDto =
 
 /** tauri-specta globals **/
 
-﻿import {
+import {
 	invoke as TAURI_INVOKE,
 	Channel as TAURI_CHANNEL,
 } from "@tauri-apps/api/core";

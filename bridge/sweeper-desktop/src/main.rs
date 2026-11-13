@@ -67,6 +67,11 @@ fn read_log(
 
 fn main() {
     let app_state = AppState::new_default();
+    #[cfg(has_frontend_dist)]
+    let context = tauri::generate_context!();
+    #[cfg(not(has_frontend_dist))]
+    let context = include!(concat!(env!("OUT_DIR"), "/tauri_context.rs"));
+
     tauri::Builder::default()
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
@@ -78,6 +83,6 @@ fn main() {
             list_logs,
             read_log
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
