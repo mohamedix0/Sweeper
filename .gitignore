@@ -14,7 +14,16 @@
 node_modules/
 /frontend/dist/
 /frontend/.vite/
+/frontend/coverage/
+/frontend/test-results/
+/frontend/playwright-report/
 *.tsbuildinfo
+
+# Mutation / Profiling
+/mutants.out/
+/mutants.out.old/
+*.profraw
+*.profdata
 
 # Tauri
 /bridge/sweeper-desktop/gen/
