@@ -1,318 +1,324 @@
 # Sweeper — Implementation Plan
 
-> الحالة: مسودة للمراجعة الأخيرة. لم يبدأ أي كود بعد.
-> المصطلحات المستخدمة هنا معرّفة في [GLOSSARY.md](../GLOSSARY.md) (Target, Allowlist, Protected Path, Custom Path, Risk, Tier, Scan, Preview, Clean, Analyzer, Minimum Age, Skipped, Link Point).
-> القرارات المعمارية: [ADR 0001](./adr/0001-deny-by-default-allowlist.md)، [ADR 0002](./adr/0002-three-part-separation.md)، [ADR 0003](./adr/0003-handle-based-removal.md).
+> Status: Draft for final review. No implementation code has been written yet.
+> Domain terms are defined in [GLOSSARY.md](../GLOSSARY.md) (`Target`, `Allowlist`, `Protected Path`, `Custom Path`, `Knowledge Base`, `Risk`, `Safe`, `Caution`, `Unknown`, `Tier`, `Scan`, `Preview`, `Clean`, `Analyzer`, `Minimum Age`, `Skipped`, `Link Point`).
+> Architectural decisions: [ADR 0001](./adr/0001-deny-by-default-allowlist.md), [ADR 0002](./adr/0002-three-part-separation.md), [ADR 0003](./adr/0003-handle-based-removal.md).
 
 ---
 
-## 1. الهدف والحدود
+## 1. Goal and Scope
 
-**الهدف:** تطبيق ويندوز بزرار واحد، يلاقي المساحة اللي ممكن تتحرر على درايف C، ويعرضها بالتفصيل (إيه هي، وحجمها، وخطورتها)، ويمسح بس اللي المستخدم أكّده. **الأمان والسلامة أهم من أي ميزة وأهم من السرعة.**
+**Goal:** A single-button Windows desktop application that discovers reclaimable space on drive `C:`, explains every item (what it is, its size, and its `Risk`), and removes only what the user confirms. **Safety and integrity take strict priority over features and speed.**
 
-**داخل v1:**
-- Scan + Preview + Clean لـ Targets الطبقات 1 و2 و3 (الطبقة 3 مطفية افتراضيًا).
-- Analyzer للقراءة فقط مع شرح كل عنصر وتصنيف الـ Risk، ومنه تقدر تحدد عناصر للمسح.
-- Advanced Settings: Custom Paths، تشغيل/إطفاء الـ Tiers، السماح بمسح الـ Unknown، تعديل Minimum Age.
-- مسح نهائي (بدون Recycle Bin)، و log لكل عملية.
-- واجهة إنجليزي. الـ exe مستقل بدون تثبيت أدمن (UAC) افتراضيًا.
+**In v1:**
+- `Scan` → `Preview` → `Clean` for `Tier` 1, 2, and 3 `Target`s (`Tier` 3 disabled by default).
+- Read-only `Analyzer` explaining each folder's purpose and `Risk`, allowing selection of removable items into `Preview`.
+- Advanced settings: `Custom Path`s, `Tier` toggles, "Allow deleting unknown folders", and `Minimum Age` override.
+- Permanent deletion (bypasses Recycle Bin), with a per-operation log.
+- English UI. Standalone `.exe`, running without elevation (no UAC prompt) by default.
 
-**خارج v1 (صراحةً):**
-- ضغط/تقليص ملفات `vhdx` الخاصة بـ WSL وDocker. بنعرضها بس في الـ Analyzer ومفيش حذف لها.
-- قراءة الـ MFT مباشرة لتسريع الـ Analyzer (محتاجة أدمن). فكرة لمرحلة لاحقة.
-- أي كود بيشتغل في الخلفية أو بجدول زمني. كل عملية بتبدأ بضغطة زرار من المستخدم.
-- الواجهة العربية.
+**Explicitly out of v1:**
+- Compacting or shrinking WSL/Docker `.vhdx` files (displayed in `Analyzer` only; never deleted).
+- Direct NTFS MFT reading to accelerate `Analyzer` (requires elevation; deferred to a later stage).
+- Background daemons or scheduled tasks. Every operation starts from an explicit user action.
+- Arabic UI.
 
 ---
 
-## 2. المعمارية: ٣ أجزاء منفصلة
+## 2. Architecture: Three Separated Parts
 
-الأجزاء التلاتة بتتعدّل وتتختبر لوحدها. الاتصال بينهم كله بـ **Contract** مكتوب بأنواع (types) مولّدة تلقائيًا، فمفيش مكان تتغير فيه حاجة في جزء وتنكسر في التاني من غير ما الـ build يقول.
+The three parts are developed and tested independently and communicate exclusively through a typed **Contract** with auto-generated TypeScript bindings so cross-layer drift fails at build time.
 
 ```mermaid
 flowchart LR
-    UI["frontend/ (React + TypeScript)<br/>عرض وتفاعل فقط"]
-    BR["bridge/ (Tauri shell + Contract)<br/>أوامر + جلسات + صلاحيات"]
-    BE["backend/ (Rust)<br/>كل المنطق الحساس"]
-    UI -- "invoke(commands)<br/>IDs فقط، مش مسارات" --> BR
-    BR -- "استدعاء مباشر" --> BE
-    BE -- "نتايج / events" --> BR
-    BR -- "DTOs مولّدة" --> UI
+    UI["frontend/ (React + TypeScript)<br/>Presentation & interaction only"]
+    BR["bridge/ (Tauri shell + Contract)<br/>Commands, sessions, capabilities"]
+    BE["backend/ (Rust)<br/>All safety-critical logic"]
+    UI -- "invoke(commands)<br/>IDs only, no deletion paths" --> BR
+    BR -- "Direct Rust calls" --> BE
+    BE -- "Results / events" --> BR
+    BR -- "Generated DTOs" --> UI
 ```
 
 ```text
 Sweeper/
-├─ Cargo.toml                  workspace واحد يجمع backend + bridge
-├─ rust-toolchain.toml         نسخة Rust مثبتة (1.99.1)
-├─ clippy.toml  deny.toml      قواعد الـ lint (منع الحذف خارج remover) والـ dependencies
-├─ backend/                    ← الجزء 1: Rust بدون أي UI
-│  ├─ sweeper-winfs/           عمليات ويندوز الخام (unsafe هنا بس)
-│  ├─ sweeper-knowledge/       Allowlist + Protected Paths + Knowledge Base (بيانات + أنواع)
-│  ├─ sweeper-core/            المنطق: التحقق، Scan، Analyzer، Remover، Log، Settings
-│  └─ sweeper-testkit/         أدوات الاختبار: sandbox، canaries، junction helpers
-├─ bridge/                     ← الجزء 2: الوصلة
-│  ├─ sweeper-contract/        الـ DTOs والأخطاء والأوامر (مصدر الحقيقة، بيولّد TypeScript)
-│  └─ sweeper-desktop/         غلاف Tauri: الأوامر، الجلسات، capabilities، CSP
-├─ frontend/                   ← الجزء 3: Vite + React + TypeScript
-│  └─ src/contract/            ملفات مولّدة، للقراءة فقط (ممنوع تعديلها يدويًا)
-└─ docs/                       الخطة وADRs
+├─ Cargo.toml                  Workspace combining backend + bridge
+├─ rust-toolchain.toml         Pinned Rust toolchain (1.99.1)
+├─ clippy.toml  deny.toml      Lint rules (ban deletion outside remover) & dependency audit
+├─ backend/                    Part 1: Pure Rust backend (no UI)
+│  ├─ sweeper-winfs/           Raw Windows NTFS operations (all unsafe lives here)
+│  ├─ sweeper-knowledge/       Allowlist + Protected Paths + Knowledge Base (data + types)
+│  ├─ sweeper-core/            Logic: validation, Scan, Analyzer, Remover, Journal, Settings
+│  └─ sweeper-testkit/         Test harness: isolated sandbox, canaries, junction helpers
+├─ bridge/                     Part 2: Typed bridge
+│  ├─ sweeper-contract/        DTOs, error types, command signatures (single source of truth -> TS)
+│  └─ sweeper-desktop/         Tauri shell: IPC handlers, in-memory sessions, capabilities, CSP
+├─ frontend/                   Part 3: Vite + React + TypeScript
+│  └─ src/contract/            Auto-generated bindings (read-only; never edit manually)
+└─ docs/                       Implementation plan and ADRs
 ```
 
-**اتجاه الاعتماد (لا يُكسر):**
-`sweeper-winfs` ← `sweeper-core` → `sweeper-knowledge`
-`sweeper-contract` مستقل (بيعرّف DTOs خاصة بيه، والتحويل بيحصل في `sweeper-desktop`).
-`sweeper-desktop` → `sweeper-core` + `sweeper-contract`
-`frontend` → الـ contract المولّد فقط.
+**Dependency direction (strictly enforced):**
+- `sweeper-winfs` ← `sweeper-core` → `sweeper-knowledge`
+- `sweeper-contract` is standalone (defines its own DTOs; mapping happens in `sweeper-desktop`).
+- `sweeper-desktop` → `sweeper-core` + `sweeper-contract`
+- `frontend` → generated contract only.
 
-### مسؤولية كل جزء
+### Module Responsibilities & Hard Constraints
 
-| الوحدة | مسؤوليتها | قيد صارم |
+| Crate / Module | Responsibility | Hard Constraint |
 |---|---|---|
-| `sweeper-winfs` | فتح/تعداد/حذف بالـ handle على NTFS، قراءة نوع الـ reparse، `GetFinalPathNameByHandle` | الوحيدة اللي فيها `unsafe` و`windows-sys`. لا تعرف أي حاجة عن الـ Allowlist أو الـ Risk. |
-| `sweeper-knowledge` | تعريف الـ Targets والـ Protected Paths كبيانات، و`allowlist.toml` المدموج، ومحلّله | مفيهاش I/O. |
-| `sweeper-core` | `paths` (أنواع المسار)، `policy` (التحقق)، `scanner`، `analyzer`، `remover`، `journal` (الـ log)، `settings` | `#![forbid(unsafe_code)]`. **`remover` هو الوحيد المسموح له بالحذف.** |
-| `sweeper-contract` | شكل الأوامر والنتايج والأخطاء | أرقام كبيرة (أحجام) تتبعت كـ string/`bigint` موثّق. |
-| `sweeper-desktop` | تسجيل الأوامر، تخزين الـ Scan Sessions في الذاكرة، فرض الـ preview token | مفيهوش أي منطق حذف. |
-| `frontend` | العرض والتفاعل | ممنوع أي `fs`/`shell` plugin. ما بيعرفش مسار حذف. |
+| `sweeper-winfs` | Handle-based open/enumerate/delete on NTFS, reparse tag inspection, `GetFinalPathNameByHandle` | Sole crate permitted to contain `unsafe` and `windows-sys`. Zero knowledge of `Allowlist` or `Risk`. |
+| `sweeper-knowledge` | `Target` and `Protected Path` definitions, embedded `allowlist.toml`, parser & linter | Zero filesystem I/O. |
+| `sweeper-core` | `paths` (validated path types), `policy`, `scanner`, `analyzer`, `remover`, `journal`, `settings` | `#![forbid(unsafe_code)]`. **`remover` is the sole module permitted to delete.** |
+| `sweeper-contract` | Command inputs, outputs, events, and error shapes | Large byte counts serialized as documented `string`/`bigint`. |
+| `sweeper-desktop` | Command registration, in-memory `ScanSession` store, `preview_token` enforcement | Zero deletion logic. |
+| `frontend` | UI rendering and user interaction | Zero `fs` or `shell` Tauri plugins. Never holds or submits deletion paths. |
 
 ---
 
-## 3. نموذج الأمان (الأهم في الخطة)
+## 3. Safety Model (Highest Priority)
 
-> **ملحوظة صادقة:** مفيش برنامج بيحذف ملفات ينفع نوعده بـ "100% مضمون". اللي بنقدر نضمنه هو **طبقات دفاع مستقلة بحيث لازم تفشل كلها مع بعض** عشان يحصل خطأ، وبوابات (gates) بتمنع أي كود ما بيعدّيش عليها من إنه يوصل للـ exe. الخطة دي مصممة على هذا الأساس.
+> **Engineering honesty:** No file-deletion program can truthfully claim "100% impossible to err". What we guarantee is **independent defense-in-depth layers that must all fail simultaneously** for an unauthorized deletion to occur, backed by CI gates that block non-compliant code from ever reaching the executable.
 
-### 3.1 طبقات الدفاع (بالترتيب)
+### 3.1 Defense-in-Depth Layers (Ordered)
 
-1. **Deny-by-default:** كل حذف لازم يطابق Target في الـ Allowlist أو Custom Path (ADR 0001).
-2. **Protected Paths صلبة:** بتغلب على أي حاجة، ومش قابلة للتعطيل من الواجهة.
-3. **الأنواع تمنع الغلط (Parse, don't validate):** الـ `remover` ما بيقبلش إلا `ValidatedItem`، ونوع ده مالوش constructor عام. مفيش طريقة تلتف حوله بسلسلة نصية.
-4. **الواجهة مش بتبعت مسارات:** بتبعت IDs لعناصر نتيجة Scan الـ Rust حافظها في جلسة. الاستثناء الوحيد هو إضافة Custom Path (والتحقق منه بيتم في Rust).
-5. **Preview Token:** أمر Clean بيطلب token أصدره Preview، وهو لمرة واحدة، مربوط بـ hash لقايمة الـ IDs المحددة، وصلاحيته 10 دقايق. من غير Preview مفيش Clean.
-6. **إعادة التحقق لحظة الحذف** (Q8): كل عنصر بيتعاد فحصه على الـ handle نفسه: allowlist + Protected + الـ final path جوّا جذر الـ Target + نوع الـ reparse + Minimum Age.
-7. **حذف بالـ handle مش بالمسار** (ADR 0003): بيقفل ثغرة TOCTOU اللي اتصلّحت في Rust نفسه (CVE-2022-21658).
-8. **حواجز وقت التشغيل:** Clean بيتوقف لو المساحة الفعلية اتمسحت > 120% من المقدّرة في الـ Preview، أو لو ظهر مسار برّه الجذر. وأي `panic` جوّا الـ remover بيوقف العملية كلها (`panic=abort` على الـ crate ده).
-9. **Write-ahead journal:** النية بتتكتب وتتعمل flush في الـ log قبل كل batch حذف، فعمرنا ما نفقد أثر اللي حصل حتى لو الـ process اتقتل.
+1. **Deny-by-default:** Every deletion must match a built-in `Allowlist` `Target` or an explicitly validated `Custom Path` (ADR 0001).
+2. **Hard `Protected Path`s:** Override everything (`Allowlist`, `Custom Path`s, `Analyzer`). Non-disableable from the UI.
+3. **Parse, don't validate:** `remover` accepts only `ValidatedItem`, a type with no public constructor. Raw strings cannot reach deletion APIs.
+4. **ID-only UI IPC:** Frontend submits `Scan` item IDs stored in a backend session, never deletion paths. The sole path-bearing command is adding a `Custom Path` (validated in Rust before acceptance).
+5. **Single-use `preview_token`:** `execute_clean` requires a token issued by `preview_clean`, bound to a hash of the selected item IDs, valid for 10 minutes. No `Clean` without `Preview`.
+6. **Moment-of-deletion re-validation:** Every item is re-checked on the opened handle itself: `Allowlist` match, `Protected Path` exclusion, final path containment within `Target` root, reparse tag check, and `Minimum Age`.
+7. **Handle-based deletion, never path-based** (ADR 0003): Eliminates the TOCTOU symlink/junction swap class of bugs (cf. CVE-2022-21658).
+8. **Runtime circuit breakers:** `Clean` aborts immediately if actual deleted bytes exceed **120%** of the `Preview` estimate, or if any resolved handle escapes its `Target` root. Any `panic` inside `remover` aborts the process (`panic = "abort"`).
+9. **Write-ahead journal:** Intent is written and flushed to the log before each deletion batch so an audit trail survives even if the process is terminated mid-run.
 
-### 3.2 قواعد الـ Targets (مفروضة في الـ build)
+### 3.2 `Target` Rules (Enforced at Build Time)
 
-- كل مسار = **Known Folder** (من `SHGetKnownFolderPath`، مش متغير بيئة نصي) + مسار نسبي ثابت.
-- ممنوع `**`. المسموح `*` واحدة في segment وسطي بس (مثلاً `Profile *`)، وماتكونش آخر segment.
-- ممنوع Target جذره بروفايل متصفح: لازم المسار يوصل لـ `Cache` و`Code Cache` و`GPUCache` بالاسم.
-- كل Target ليه: `id`، `tier`، `risk`، `description`، `scope` (محتوى فقط)، و`min_age_hours`.
-- **متغير TEMP:** بما إن `%TEMP%` ممكن يتحوّل لأي مكان (حصل فعلًا في بيئة تطوير هنا: بيشاور على فولدر غير الافتراضي)، الـ Target بتاع الـ temp بيتعطل لو اتحقق إنه بيشاور على Protected Path أو مسار أقل من ٣ مستويات.
+- Every `Target` root = a Windows Known Folder (resolved via `SHGetKnownFolderPath`, never raw text env expansion) + a fixed relative subpath.
+- `**` globs are forbidden. At most one `*` wildcard in an intermediate segment (e.g., `Profile *`), never in the final segment.
+- No `Target` may point at a browser profile root; paths must explicitly name cache subfolders (`Cache`, `Code Cache`, `GPUCache`).
+- Every `Target` defines: `id`, `tier`, `risk`, `description`, `scope` (contents only), and `min_age_hours`.
+- **`%TEMP%` guard:** Because `TEMP` can be redirected anywhere (observed on this machine during read-only inspection), the user-temp `Target` automatically disables itself if it resolves to a `Protected Path` or has path depth < 3 segments.
 
-### 3.3 تصنيف الـ Link Points والـ reparse points
+### 3.3 `Link Point` and Reparse Point Policy
 
-| النوع | السلوك |
+| Reparse / Link Type | Behavior |
 |---|---|
-| Symlink / Junction (Link Point) | مبيتتبعش أبدًا. بنمسح الـ link نفسه بس. |
-| Cloud placeholders (OneDrive وغيره) | **Skipped دايمًا.** مسحها بيتزامن للسحابة (فقدان بيانات). مفيش hydration. |
-| أي reparse tag تاني (AppExecLink, WOF…) | Skipped. |
-| Hard link | بيتشال الاسم بس (طبيعة NTFS)، الملف التاني سليم. |
+| Symlink / Junction (`Link Point`) | Never traversed. Only the link entry itself inside a `Target` may be removed; target contents are untouched. |
+| Cloud placeholders (OneDrive / `cldflt` tags) | **Always `Skipped`.** Deleting synced placeholders propagates deletions to the cloud. Never trigger hydration. |
+| Other reparse tags (`AppExecLink`, `WOF`, etc.) | **Always `Skipped`.** |
+| Hard link | Unlinks the directory entry only (standard NTFS behavior); other hard-linked paths remain intact. |
 
-### 3.4 الـ Protected Paths (قائمة مبدئية، تتوسّع بالاختبارات)
+### 3.4 `Protected Path`s (Initial Set — Expanded via Tests)
 
-جذر أي درايف، `C:\Windows` (و`System32`، و`WinSxS`، و`SysWOW64`)، `Program Files` و`Program Files (x86)`، `ProgramData` (الجذر)، `C:\Users` (الجذر) وجذر بروفايل أي مستخدم، `Desktop` `Documents` `Downloads` `Pictures` `Videos` `Music`، جذور OneDrive، `.ssh` `.gnupg` `.aws` `.kube` `.docker` (الإعدادات)، أي فولدر اسمه `.git`، `System Volume Information`، `pagefile.sys` `hiberfil.sys` `swapfile.sys`، `NTUSER.DAT*`، `Recovery`، وبروفايلات المتصفحات (`User Data` نفسه). المطابقة بالـ **هوية الحقيقية** (final path بعد فتح handle، مقارنة بدون حساسية لحالة الأحرف)، مش بمقارنة نصية. وده بيقفل الـ 8.3 `PROGRA~1` وأخواتها.
+- Any drive root (`C:\`, `D:\`, etc.)
+- `C:\Windows` (plus `System32`, `WinSxS`, `SysWOW64`), `Program Files`, `Program Files (x86)`, `ProgramData` root
+- `C:\Users` root and any user profile root
+- `Desktop`, `Documents`, `Downloads`, `Pictures`, `Videos`, `Music`, OneDrive sync roots
+- `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker` (config), any directory named `.git`
+- `System Volume Information`, `pagefile.sys`, `hiberfil.sys`, `swapfile.sys`, `NTUSER.DAT*`, `Recovery`
+- Browser profile roots (e.g., Chrome/Edge `User Data` and profile roots themselves)
 
----
-
-## 4. تدفق العمل (Flows)
-
-### Scan
-1. تحليل الـ `allowlist.toml` المدموج، وحل الـ Known Folders.
-2. لكل Target مفعّل: تعداد بالـ handle (من غير ما نتبع أي Link Point)، وجمع الحجم والعدد والملفات المؤهلة (حسب Minimum Age).
-3. إنتاج **ScanSession** (في الذاكرة فقط): قايمة عناصر كل واحد ليه `id`، و`target_id`، والمسار، وهوية الملف (volume serial + file id)، والحجم، وآخر تعديل.
-4. ترجع الواجهة بس: `id`، `target`، الوصف، الـ Risk، الحجم، العدد. المسار للعرض فقط.
-
-### Preview → Clean
-1. المستخدم بيحدد/يلغي تحديد. `preview_clean(session, ids)` بيرجع ملخص + `preview_token`.
-2. لو فيه عناصر Custom/Unknown: لازم تأكيد مكتوب، والـ Rust هو اللي بيتحقق من النص.
-3. `execute_clean(token)`: لكل عنصر → فتح بالـ handle → فحوصات 3.1(6) → كتابة نية في الـ journal → حذف بـ `FileDispositionInfoEx` (POSIX semantics) → تسجيل النتيجة (deleted / skipped + السبب).
-4. ملخص: المساحة المتحررة، وعدد الـ Skipped وأسبابهم.
-
-### Analyzer (قراءة فقط)
-- يمشي على الدرايف بتعداد سريع (`FindFirstFileEx` مع `FIND_FIRST_EX_LARGE_FETCH`) بشكل متوازي، من غير ما يتبع Link Points، ويرجع أحجام مجمّعة بالفولدر في شجرة قابلة للتوسيع (virtualized في الواجهة).
-- كل فولدر معروف في الـ Knowledge Base بياخد وصف وتصنيف (Safe / Caution / Unknown / Protected).
-- التحديد للحذف مسموح بس للـ Safe، وللـ Caution لو الطبقة مفعّلة، وللـ Unknown لو الخيار مفعّل مع تأكيد.
-- مفيش زرار حذف مباشر: التحديد بيضيف العناصر لـ Preview زي أي Clean تاني.
-
-### الإعدادات (`%APPDATA%\Sweeper\settings.json`)
-- Tiers المفعّلة، Minimum Age (افتراضي 24 ساعة، وممكن 10 أو أي قيمة)، "Allow deleting unknown folders"، وقائمة Custom Paths.
-- بتتحمّل وبتتفحص كل مرة. قيمة غلط أو متلاعب فيها بتتجاهل وترجع للافتراضي. والـ Protected Paths مش في الإعدادات أصلًا.
-- Custom Path بيتحقق منه (Q3) عند الإضافة وعند كل Clean.
-
-### الـ Log (`%LOCALAPPDATA%\Sweeper\logs\`)
-- سطر JSON لكل حدث (النية، النتيجة، المسار، الحجم، الوقت). بيتحذف القديم بعد 30 ملف.
+**Matching rule:** Resolve the opened handle via `GetFinalPathNameByHandle` and match case-insensitively on canonical identity, never on raw input strings. This closes 8.3 short-name aliases (`PROGRA~1`), trailing dots/spaces, and `\\?\` prefix tricks.
 
 ---
 
-## 5. الـ Contract (الأوامر)
+## 4. Workflows
 
-| الأمر | المدخل | المخرج |
+### `Scan`
+1. Parse the embedded `allowlist.toml` and resolve Known Folders.
+2. For each enabled `Target`: enumerate via handles (never following `Link Point`s), summing total bytes, file counts, and items exceeding `Minimum Age`.
+3. Store an in-memory `ScanSession` holding items (`id`, `target_id`, path, file identity = volume serial + file ID, size, mtime).
+4. Return to UI: `id`, `target_id`, description, `Risk`, size, count. Path is for display only.
+
+### `Preview` → `Clean`
+1. User toggles selection; `preview_clean(session_id, item_ids)` returns a per-`Target` breakdown + `preview_token`.
+2. If selection includes `Custom Path` or `Unknown` items, typed confirmation text is required and verified in Rust.
+3. `execute_clean(preview_token)`: for each item → open handle (`FILE_FLAG_OPEN_REPARSE_POINT`) → run Section 3.1(6) checks → flush intent to journal → delete via `FileDispositionInfoEx` (POSIX semantics) → log outcome (`deleted` / `Skipped` + reason).
+4. Return summary: bytes freed, `Skipped` count, and reasons.
+
+### `Analyzer` (Read-Only)
+- Walks the drive using parallel `FindFirstFileEx` (`FIND_FIRST_EX_LARGE_FETCH`), never following `Link Point`s, returning aggregated folder sizes as an expandable tree (virtualized in UI).
+- Known folders are annotated from the `Knowledge Base` with description and `Risk` (`Safe`, `Caution`, `Unknown`, `Protected`).
+- Selection for deletion is permitted for `Safe`, for `Caution` when its `Tier` is enabled, and for `Unknown` only when "Allow deleting unknown folders" is enabled and confirmed (subject to `Custom Path` rules).
+- No direct delete button: selected items feed into the standard `Preview` → `Clean` pipeline.
+
+### Settings (`%APPDATA%\Sweeper\settings.json`)
+- Stores: enabled `Tier`s, `Minimum Age` (default 24h; user-configurable e.g. 10h or 0h with warning), "Allow deleting unknown folders", and `Custom Path`s.
+- Parsed and validated on every load; invalid or tampered values fall back to safe defaults. `Protected Path`s are never stored in or overridable via settings.
+- `Custom Path`s must pass: exists on disk, absolute path without `..`, not a `Protected Path` and contains no `Protected Path`, depth ≥ 3 segments, deletes contents only (keeps root folder), explicit typed confirmation, and **no fallback to parent if missing**. Checked both on add and at `Clean` time.
+
+### Log (`%LOCALAPPDATA%\Sweeper\logs\`)
+- JSON-lines per operation (intent, outcome, path, size, timestamp). Rotated to keep the last 30 log files.
+
+---
+
+## 5. Typed Contract (IPC Surface)
+
+| Command | Input | Output |
 |---|---|---|
-| `start_scan` | `tiers?` | `session_id` + events للتقدم |
-| `get_scan_results` | `session_id` | قايمة العناصر (بدون مسارات قابلة للإرسال) |
-| `preview_clean` | `session_id`, `item_ids[]`, `confirmations?` | ملخص + `preview_token` |
-| `execute_clean` | `preview_token` | events + ملخص نهائي |
-| `start_analyzer` | `root?` | events + شجرة |
-| `explain_item` | `item_id` | وصف + Risk |
-| `get_settings` / `update_settings` | | |
-| `validate_custom_path` | `path` | حكم + السبب، ومفيش تنفيذ |
-| `list_logs` / `read_log` | | |
+| `start_scan` | `tiers?` | `session_id` + progress events |
+| `get_scan_results` | `session_id` | Item list (display metadata; no submitted paths) |
+| `preview_clean` | `session_id`, `item_ids[]`, `confirmations?` | Breakdown + `preview_token` |
+| `execute_clean` | `preview_token` | Progress events + final summary |
+| `start_analyzer` | `root?` | Progress events + tree nodes |
+| `explain_item` | `item_id` | Description + `Risk` |
+| `get_settings` / `update_settings` | Settings DTO | Validated settings DTO |
+| `validate_custom_path` | `path` | Verdict + reason (no side effects) |
+| `list_logs` / `read_log` | Log ID | Log metadata / entries |
 
-- كل الأنواع بتتعرّف مرة واحدة في Rust ويتولّد منها TypeScript تلقائيًا (`tauri-specta`، بنسخة مثبتة بالظبط لأنها لسه RC). الملف المولّد بيتعمل له commit، والـ CI بيفشل لو مختلف عن اللي هيتولّد.
-- كل أمر بيتسجل في manifest الـ Tauri، وبياخد permission صريح. مفيش `fs` ولا `shell` plugin.
-- CSP صارم (`default-src 'self'`، بدون `unsafe-eval` ولا `unsafe-inline`)، و`freezePrototype`، و**Isolation pattern** لتصفية رسائل الـ IPC.
-- الأخطاء: نوع serializable بسيط، مفيهوش مسارات داخلية.
-
----
-
-## 6. استراتيجية الاختبار وبوابات الأمان (Gates)
-
-### 6.1 قواعد ثابتة
-- **أي اختبار بيحذف بيشتغل جوّا Sandbox بينشئه الاختبار نفسه**، وفيه ملف حارس (sentinel) في الجذر. الـ harness بيرفض يشتغل لو الجذر مش تحت الـ sentinel. **مفيش اختبار بيلمس مسار حقيقي.**
-- **Canary harness:** كل اختبار حذف بيبني شجرة "لازم تفضل سليمة" خارج الـ Target، وبعد العملية (حتى لو فشلت أو عملت panic) بيتأكد إن كل ملف فيها لسه موجود بنفس الـ hash.
-- الاختبارات بتشتغل مرتين: كمستخدم عادي، وكأدمن (لأن بعض سلوك الـ symlinks والصلاحيات بيختلف).
-
-### 6.2 الطبقات
-
-**A. بوابات ثابتة (على كل commit، من غير تشغيل):**
-- `clippy::disallowed_methods`: منع `std::fs::remove_*` وكل دوال الحذف في `sweeper-winfs`، إلا جوّا `remover` (بـ `#[allow]` مسموح في مكان واحد فقط، ومراقب).
-- بوابة grep في الـ CI: أي ظهور لكلمات الحذف خارج `remover`/`winfs` = فشل.
-- `#![forbid(unsafe_code)]` في كل الـ crates ما عدا `sweeper-winfs`. وكل `unsafe` عليه تعليق `// SAFETY:`، و`cargo geiger` بيتابع العدد.
-- `cargo deny` (تراخيص + advisories) و`cargo audit` و`pnpm audit`، وكل البناء بـ `--locked`.
-- لينتر الـ allowlist: لا `**`، لا wildcard في آخر segment، لا Target يتقاطع مع Protected Path، لا تكرار، ولا Target جذره بروفايل متصفح.
-- فحص الـ Tauri: ملف الـ capabilities مقارَن بقايمة مسموحة، والـ CSP لا يتساهل.
-- الواجهة: TypeScript `strict`، وقاعدة ESLint تمنع `eval` و`dangerouslySetInnerHTML`.
-
-**B. اختبارات الوحدة + Property tests (`proptest`):**
-- الثابت (invariant) الأساسي: *لأي نص مدخل، لو وقع تحت Protected Path بعد التطبيع، يرفضه الـ validator.* بيتجرب بملايين الحالات العشوائية.
-- الـ parser والـ validator والـ journal بيتعمل لهم `cargo-fuzz`.
-- `cargo-mutants` على `policy` و`paths`: بيعدّل الكود عمدًا ويتأكد إن الاختبارات بتكتشف التعديل. **الـ mutation score ≥ 95% شرط للـ merge** في الـ modules دي.
-
-**C. مجموعة مسارات عدائية (table-driven):**
-`..` و`.`، وخلط `/` و`\`، و`\\?\` و`\\.\` و`\??\` و`\\?\GLOBALROOT`، ومسارات UNC، ومسار نسبي للدرايف (`C:foo`)، ومسافة أو نقطة في آخر الاسم، وأسماء 8.3 (`PROGRA~1`)، و`:` (Alternate Data Streams)، وأسماء محجوزة (`CON` `NUL` `COM1`…)، وأحرف Unicode (full-width وتطبيع)، وحالات أحرف مختلطة (`c:\WINDOWS`)، ومسارات أطول من 260 حرف، ومسار فاضي أو جذر أو فيه null byte، والتباس البادئات (`C:\Windows` مقابل `C:\Windows.old` و`C:\WindowsApps`).
-
-**D. اختبارات تكامل على NTFS حقيقي (داخل الـ Sandbox):**
-- Junction أو symlink جوّا الـ Target بيشاور بره → الهدف سليم، والـ link اتشال.
-- **سباق TOCTOU:** ثريد بيبدّل فولدر بـ junction أثناء الـ Clean، 1000+ تكرار → الـ canaries سليمة دايمًا.
-- جذر الـ Target نفسه أو أبوه اتحوّل لـ junction → رفض.
-- Hard link لملف بره → المحتوى سليم.
-- ملفات مقفولة (بدون `FILE_SHARE_DELETE`) → Skipped والباقي اتمسح.
-- Read-only/hidden/system، وملفات أحدث من Minimum Age، وملف عند حدّ العمر بالظبط، وملف بتاريخ تعديل في **المستقبل** (يتعامل كحديث).
-- مسارات أطول من 260، وتداخل 1000 مستوى (الكود تكراري مش recursive، فمفيش stack overflow)، وأسماء محجوزة بـ `\\?\`، وأسماء بنقطة في الآخر، وـ ADS، وأسماء عربي وإيموجي، وملفات بأسماء مختلفة في الحالة فقط (case-sensitive directory).
-- Mount point لدرايف تاني → بيتعامل كـ Link Point.
-- تصنيف الـ reparse tags: كل الـ tags غير symlink/mount-point (cloud وغيره) → Skipped (اختبار بـ tags وهمية).
-- **Custom Path غير موجود:** مفيش أي حذف، وفولدر الأب سليم (الحالة اللي ذكرتها).
-- `%TEMP%` بيشاور على جذر C أو البروفايل أو Documents → الـ Target بيتعطل.
-- قتل الـ process في نص الـ Clean ثم إعادة التشغيل → مفيش تلف، والعملية idempotent.
-
-**E. اختبارات الـ Allowlist الحقيقية (قراءة فقط):**
-- على أي جهاز: كل Target بيتحل لمسار، ومفيش واحد منهم Protected أو Link Point أو متداخل مع التاني.
-- اختبار "لا يوجد Target جذره بروفايل متصفح".
-
-**F. اختبارات الـ Bridge:**
-- أوامر بـ IDs مجهولة أو session منتهية، أو Clean مرتين، أو Clean من غير Preview، أو token اتعدّل، أو token متأخر أكتر من 10 دقايق → رفض.
-- Fuzz على مدخلات الأوامر (serde).
-- اختبار إن قايمة الأوامر المتاحة هي بالظبط المتوقعة، لا أكتر.
-
-**G. اختبارات الواجهة:**
-- Vitest للمكونات، و**Playwright E2E ضد backend وهمي** (sandbox mode): ماتلمسش C: الحقيقي أبدًا.
-- مسارات التأكيد المكتوب (Custom/Unknown)، وإمكانية الوصول (a11y)، وحالات أخطاء.
-
-**H. بوابات الإصدار (Release Gates)، لازم كلها خضرا:**
-1. كل البوابات A–G ناجحة.
-2. تقرير `cargo-mutants` يحقق الحد الأدنى.
-3. تشغيل **Scan فقط** على جهازك الحقيقي، ومراجعتك لتقرير الأحجام والتصنيفات قبل أي Clean حقيقي.
-4. أول Clean حقيقي يكون على Target `user-temp` وحده، ومراجعة الـ log.
-5. توقيع الـ exe وملف checksums.
-
-> **حدود البحث:** البحث على الإنترنت المتاح لي رجّع ملخصات من معرفة سابقة مش من صفحات حية. المراجع دي لازم تتراجع من مصدرها قبل الاعتماد عليها: Project Zero *"The Definitive Guide on Win32 to NT Path Conversion"*، وMicrosoft Learn *"Naming Files, Paths, and Namespaces"*، وRUSTSEC-2023-0018، وCVE-2022-21658، ووثائق Tauri v2 Security.
+- All types are defined once in `sweeper-contract` and exported to `frontend/src/contract/` via `tauri-specta` (exact pinned RC version). Generated TS files are committed, and CI fails on any diff.
+- Every command is declared in the Tauri app manifest with explicit scoped permissions; no `fs` or `shell` plugins.
+- Strict CSP (`default-src 'self'`, no `'unsafe-eval'`, no `'unsafe-inline'`), `freezePrototype: true`, and Tauri **Isolation pattern** for IPC validation.
+- Errors serialize to structured variants without leaking internal paths or stack traces.
 
 ---
 
-## 7. مراحل البناء
+## 6. Testing Strategy and Security Gates
 
-كل مرحلة بتتسلم شغالة ومختبرة وعدّت بواباتها. **مفيش حذف حقيقي قبل المرحلة 3.**
+### 6.1 Invariants
+- **Isolated Sandbox with Sentinel:** Every deletion test runs inside a per-test temp sandbox containing a sentinel file at its root. The harness panics if any target root lacks the sentinel ancestor. **No test ever touches real user or system paths.**
+- **Canary Harness:** Every deletion test seeds a "must-survive" canary tree outside the target; post-run (even after failure or panic), all canary files must exist with identical hashes.
+- **Dual-privilege runs:** Integration tests execute both as standard user and as Administrator (since symlink creation and privilege/ACL behavior differ).
 
-### المرحلة 0: الأساس (قبل أي ميزة)
-- هيكل الـ workspace، و`rust-toolchain.toml`، و`clippy.toml`، و`deny.toml`، والـ CI بالبوابات الثابتة (A).
-- `sweeper-testkit`: الـ Sandbox + الـ canaries + helpers للـ junctions.
-- **الخروج:** CI شغال، وقاعدة منع الحذف بتفشل لما نجرّبها عمدًا.
+### 6.2 Layers & Gates
 
-### المرحلة 1: Core قراءة فقط
-- `winfs`: فتح/تعداد/final path/reparse (بدون حذف أصلًا في المرحلة دي).
-- `knowledge`: `allowlist.toml` للطبقتين 1 و2 + الـ Protected Paths + اللينتر.
-- `core`: `paths` + `policy` + `scanner`، وتشغيل Scan تجريبي بـ binary تجريبي مؤقت (للتطوير فقط، مش جزء من المنتج) على جهازك.
-- **الخروج:** اختبارات B وC وE خضرا، وتقرير Scan حقيقي بتراجعه.
-- **الخطر:** منطق التطبيع. بيتحط عليه أكبر مجهود اختبار.
+**A. Static Gates (every commit, zero execution):**
+- `clippy::disallowed_methods`: bans `std::fs::remove_*` and `sweeper-winfs` delete primitives everywhere except a single audited `#[allow]` inside `core::remover`.
+- CI grep gate: fails if any deletion symbol appears outside `remover` / `winfs`.
+- `#![forbid(unsafe_code)]` on all crates except `sweeper-winfs`; every `unsafe` block requires a `// SAFETY:` comment; `cargo geiger` tracks unsafe count.
+- `cargo deny` (licenses + advisories), `cargo audit`, `pnpm audit`; all builds run with `--locked`.
+- Allowlist linter: rejects `**`, wildcard in final segment, overlap with any `Protected Path`, duplicates, or browser profile roots.
+- Tauri capability & CSP audit against an expected snapshot.
+- Frontend: TypeScript `strict: true`; ESLint forbids `eval` and `dangerouslySetInnerHTML`.
 
-### المرحلة 2: الواجهة (Scan + Preview)
-- `contract` + `desktop` (أوامر القراءة فقط) + `frontend` (شاشة Scan والنتايج والـ Preview).
-- توليد الـ TypeScript، والـ capabilities والـ CSP.
-- **الخروج:** اختبارات F وG للأوامر دي، وشاشة تعرض نتايج حقيقية. لا يوجد `execute_clean` بعد.
+**B. Unit + Property + Mutation Tests:**
+- Core property (`proptest`): *For any generated path string, if canonical normalization places it under a `Protected Path`, the validator rejects it.* Tested across millions of inputs.
+- `cargo-fuzz` targets on allowlist parser, path validator, and journal reader.
+- `cargo-mutants` on `core::policy` and `core::paths`: **mutation score ≥ 95% required to merge**.
 
-### المرحلة 3: الـ Remover + Clean
-- `winfs`: الحذف بالـ handle. `core::remover` + `journal` + Minimum Age + حواجز وقت التشغيل.
-- `preview_token` و`execute_clean`.
-- **الخروج:** كل اختبارات D خضرا (خاصةً سباق TOCTOU والـ canaries)، وmutation score محقق، وتجربة أول Clean حقيقي على `user-temp` وحده.
-- **الخطر:** أعلى مرحلة خطورة. متتجمعش مع حاجة تانية.
+**C. Adversarial Path Corpus (table-driven):**
+`..` and `.`, mixed `/` and `\`, `\\?\`, `\\.\`, `\??\`, `\\?\GLOBALROOT\...`, UNC paths, drive-relative paths (`C:foo`), trailing spaces and dots, 8.3 short names (`PROGRA~1`), `:` (Alternate Data Streams), reserved device names (`CON`, `NUL`, `COM1`, superscripts), Unicode normalization/full-width tricks, mixed casing (`c:\WINDOWS`), paths > 260 chars, empty/root/null-byte inputs, prefix confusion (`C:\Windows` vs `C:\Windows.old` vs `C:\WindowsApps`).
 
-### المرحلة 4: الـ Analyzer
-- تعداد متوازي سريع، وشجرة virtualized، والـ Knowledge Base والشرح والتصنيف.
-- ربط التحديد بـ Preview.
-- **الخروج:** الـ Analyzer على C: بيكتشف مكان الـ ~270 GB اللي ما اتحسبوش في الفحص الأولي، ومفيش اختبار حذف جديد بيفشل.
+**D. Real NTFS Integration Tests (inside Sandbox):**
+- Junction or symlink inside `Target` pointing outside → canary intact, link entry removed.
+- **TOCTOU race:** background thread swaps a directory for a junction during `Clean` (1000+ iterations) → all canaries survive.
+- `Target` root or ancestor swapped to a junction → rejected.
+- Hard link to an outside file → outside file intact.
+- Locked files (opened without `FILE_SHARE_DELETE`) → `Skipped`, remaining eligible items cleaned.
+- Read-only / hidden / system files; files newer than `Minimum Age`; exact boundary timestamp; future mtime (treated as recent / `Skipped`).
+- Paths > 260 chars; 1000-level deep tree (iterative walker, zero stack overflow); reserved names via `\\?\`; trailing dots; ADS streams; Arabic & emoji filenames; per-directory case-sensitive filenames (`fsutil file setCaseSensitiveInfo`).
+- Volume mount point to another drive → treated as `Link Point`, never traversed.
+- Reparse tag matrix: every non-symlink/mount-point tag (including mocked cloud placeholder tags) → `Skipped`.
+- **Missing `Custom Path`:** zero deletions, parent directory untouched.
+- `%TEMP%` redirected to drive root / profile root / `Documents` → user-temp `Target` disabled.
+- Mid-`Clean` process termination + restart → no corruption, idempotent recovery.
 
-### المرحلة 5: الإعدادات المتقدمة + الطبقة 3
-- Custom Paths والتأكيد المكتوب، وتشغيل/إطفاء الـ Tiers، والـ Unknown، وتعديل Minimum Age.
-- Targets الطبقة 3: `target/` لمشاريع Rust الخاملة (شرط وجود `Cargo.toml` جنبه وعدم تعديله من N يوم)، و`node_modules` الخاملة (شرط وجود lockfile)، وـ Docker/WSL (**عرض فقط**).
-- **الخروج:** اختبارات Q3 كلها، واختبار إن الإعدادات المتلاعب فيها مبتضعفش الأمان.
+**E. Real-Machine `Allowlist` Verification (Read-Only):**
+- Every `Target` resolves cleanly; zero overlap with `Protected Path`s, zero `Link Point`s, zero unintended overlap between `Target`s, zero browser profile roots.
 
-### المرحلة 6: التشطيب
-- تغليف exe/installer، توقيع، `Run as administrator` الاختياري (لـ `C:\Windows\Temp`، وـ Windows Update cache، وـ Prefetch).
-- في وضع الأدمن، **الـ Targets اللي بتحتاج أدمن بس هي المتاحة**، وعليها بوابات إضافية.
-- **الخروج:** بوابات الإصدار (H) كلها.
+**F. Bridge & IPC Tests:**
+- Unknown IDs, expired session, double `execute_clean`, `Clean` without `Preview`, tampered `preview_token`, expired token (> 10 min) → all rejected.
+- Serde fuzzing on command payloads; exact command surface assertion against manifest.
+
+**G. Frontend Tests:**
+- Vitest component tests + **Playwright E2E against a mock/sandbox backend** (never touches real `C:`).
+- Typed confirmation flows (`Custom Path` / `Unknown`), accessibility (a11y), and error states.
+
+**H. Release Gates (all must be green):**
+1. Gates A–G pass.
+2. `cargo-mutants` score ≥ 95% on `policy` and `paths`.
+3. **Scan-only** run on the real target machine, with user review of sizes and classifications before any real `Clean`.
+4. First real `Clean` limited to `user-temp` only, followed by log inspection.
+5. Signed `.exe` + SHA-256 checksums.
+
+> **Source verification note:** Prior web lookups returned cached summaries rather than live pages. Verify primary documentation before implementation: Project Zero *"The Definitive Guide on Win32 to NT Path Conversion"*, Microsoft Learn *"Naming Files, Paths, and Namespaces"*, RUSTSEC-2023-0018, CVE-2022-21658, and Tauri v2 Security docs.
 
 ---
 
-## 8. جدول الـ Targets المبدئي (من الفحص القراءة فقط على جهازك)
+## 7. Build Phases
 
-| الطبقة | Target | تصنيف | ملاحظة |
+Each phase delivers working, tested code passing its gates. **No real deletion code or capability exists before Phase 3.**
+
+### Phase 0: Foundation (before any feature)
+- Workspace layout, `rust-toolchain.toml`, `clippy.toml`, `deny.toml`, CI running Static Gates (A).
+- `sweeper-testkit`: sandbox with sentinel, canary harness, junction/symlink helpers.
+- **Exit criterion:** CI passes and deliberately adding `std::fs::remove_file` outside `remover` fails CI.
+
+### Phase 1: Read-Only Core
+- `sweeper-winfs`: handle open, enumerate, `GetFinalPathNameByHandle`, reparse inspection (no delete primitives yet).
+- `sweeper-knowledge`: `allowlist.toml` (Tiers 1 & 2) + `Protected Path`s + build-time linter.
+- `sweeper-core`: `paths` + `policy` + `scanner`, plus a temporary dev-only scan reporter binary to inspect the real machine safely (read-only) and an optional Winapp2.ini candidate-extraction script outputting a `.md` review report (reference only, never auto-executed).
+- **Exit criterion:** Gates B, C, E pass; user reviews real machine `Scan` report.
+- **Primary risk:** Path canonicalization edge cases — concentrate tests here.
+
+### Phase 2: UI (`Scan` + `Preview`)
+- `sweeper-contract` + `sweeper-desktop` (read-only commands) + `frontend` (`Scan` results + `Preview` breakdown).
+- `tauri-specta` TS generation, capabilities, strict CSP, Isolation pattern.
+- **Exit criterion:** Gates F, G pass for read-only commands; UI displays real `Scan` results. `execute_clean` does not exist yet.
+
+### Phase 3: `Remover` + `Clean`
+- `sweeper-winfs`: handle-based delete (`FileDispositionInfoEx`). `core::remover` + `journal` + `Minimum Age` + 120% circuit breaker.
+- `preview_token` + `execute_clean`.
+- **Exit criterion:** All Gate D tests pass (especially TOCTOU race and canaries), mutation score ≥ 95%, first real `Clean` verified on `user-temp` only.
+- **Primary risk:** Highest-risk phase; keep isolated from unrelated features.
+
+### Phase 4: `Analyzer`
+- Parallel fast directory walk, virtualized UI tree, `Knowledge Base` explanations and `Risk` badges.
+- Selection routed into standard `Preview` flow.
+- **Exit criterion:** `Analyzer` accounts for the ~270 GB uncategorized space on `C:`, and all existing safety/deletion tests remain green.
+
+### Phase 5: Advanced Settings + `Tier` 3
+- `Custom Path`s + typed confirmation, `Tier` toggles, "Allow deleting unknown folders", `Minimum Age` override.
+- `Tier` 3 `Target`s: stale Rust `target/` (requires sibling `Cargo.toml` unmodified for N days), stale `node_modules` (requires sibling lockfile), WSL/Docker `.vhdx` (**display only**).
+- **Exit criterion:** All `Custom Path` / missing-path / tampered-settings tests pass without weakening invariants.
+
+### Phase 6: Packaging & Optional Elevation
+- `.exe` / installer packaging, code signing, optional "Run as administrator" flow (for `C:\Windows\Temp`, Windows Update cache, `Prefetch`).
+- When elevated, **only elevation-requiring `Target`s are unlocked**, with dedicated safety gates.
+- **Exit criterion:** All Release Gates (H) green.
+
+---
+
+## 8. Initial `Target`s Table (From Read-Only Machine Scan)
+
+| Tier | Target | Risk | Notes (Observed on Machine) |
 |---|---|---|---|
-| 1 | `%LOCALAPPDATA%\Temp` (محتوى) | Safe | 0.26 GB وقت الفحص |
-| 1 | `CrashDumps` و`Microsoft\Windows\WER` | Safe | 0.27 GB |
-| 1 | `INetCache` وـ Thumbnail cache | Safe | |
-| 1 | Recycle Bin | Safe | 0.02 GB |
-| 2 | `npm-cache` | Safe | 1.37 GB |
-| 2 | `~\.gradle\caches` (فرعي فقط) | Caution | جزء من 11.4 GB، وبيتحمّل تاني |
-| 2 | `.cargo\registry\cache` | Safe | |
-| 2 | كاش Chrome/Edge (`Default\Cache`، `Code Cache`، `GPUCache`) | Safe | جزء من 12.8 GB، البروفايل **نفسه Protected** |
-| 2 | كاش VS Code (`Cache`، `CachedData`) | Safe | `User` و`workspaceStorage` **Unknown** |
-| 2 | `~\.nuget`، `NuGet`، `pip`، `JetBrains` caches | Caution | |
-| 3 | `ProgramData\Package Cache` | Caution | يؤثر على الـ repair، يحتاج أدمن |
-| 3 | `target/` و`node_modules` الخاملة | Caution | بشروط المرحلة 5 |
-| — | `Local\Programs`، `.rustup`، `Packages` | Protected / Unknown | عرض فقط |
+| 1 | `%LOCALAPPDATA%\Temp` (contents) | `Safe` | 0.26 GB at scan time |
+| 1 | `CrashDumps` & `Microsoft\Windows\WER` | `Safe` | 0.27 GB |
+| 1 | `INetCache` & Thumbnail cache | `Safe` | |
+| 1 | Recycle Bin | `Safe` | 0.02 GB |
+| 2 | `npm-cache` | `Safe` | 1.37 GB |
+| 2 | `~\.gradle\caches` (subfolder only) | `Caution` | Part of 11.4 GB; redownloaded on build |
+| 2 | `.cargo\registry\cache` | `Safe` | |
+| 2 | Chrome/Edge caches (`Default\Cache`, `Code Cache`, `GPUCache`) | `Safe` | Part of 12.8 GB; profile root is `Protected` |
+| 2 | VS Code caches (`Cache`, `CachedData`) | `Safe` | `User` & `workspaceStorage` are `Unknown` |
+| 2 | `~\.nuget`, `NuGet`, `pip`, `JetBrains` caches | `Caution` | |
+| 3 | `ProgramData\Package Cache` | `Caution` | Affects installer repair; requires admin |
+| 3 | Stale `target/` & `node_modules` | `Caution` | Gated by Phase 5 project-staleness rules |
+| — | `Local\Programs`, `.rustup`, `Packages` | `Protected` / `Unknown` | Display only |
 
-القايمة دي بتتراجع قبل ما تدخل `allowlist.toml`. الاكتشافات الجديدة بتتكتب في تقرير `.md` الأول (قرارك في Q7).
-
----
-
-## 9. قرارات أضفتها بنفسي (راجعها)
-
-1. صلاحية الـ Preview Token **10 دقايق**، ولو الـ Scan أقدم من كده لازم Scan جديد.
-2. **حاجز الـ 120%:** Clean بيتوقف لو اتمسح أكتر من 120% من المقدّر.
-3. أي cloud placeholder = **Skipped دايمًا**، حتى لو الـ Minimum Age اتعدّى.
-4. `vhdx` بتاعة WSL وDocker: **عرض فقط**، ولا حذف.
-5. الأدمن بيفتح التطبيق كله بصلاحيات مرتفعة، ويتحدد على الـ Targets اللي بتحتاجه فقط. وده خطر أعلى فبنأجله للمرحلة الأخيرة.
-6. Log محفوظ آخر 30 ملف.
-7. ملف الإعدادات متفحص دايمًا ومش مصدر ثقة.
-8. الـ Sandbox الاختباري بيرفض يشتغل بدون ملف حارس (sentinel).
-9. اسم المنتج **Sweeper**. وأسماء الـ crates بتبدأ بـ `sweeper-`، ولا نية لنشرها على crates.io.
+Entries above require review before entering `allowlist.toml`. Any newly discovered candidates are written to a `.md` review report first.
 
 ---
 
-## 10. ما لم يُحسم بعد
+## 9. Author-Added Defaults (For Review)
 
-- مستوى الاعتماد على `windows-sys` مقابل `windows`: التوصية `windows-sys` لأنه أخف وكفاية.
-- هل يتم تثبيت أسماء الـ Known Folders في الـ knowledge crate كـ enum ثابت؟ التوصية: نعم.
-- وقت الـ Analyzer على C: الكاملة: هيتقاس في المرحلة 4، ولو بطيء (> دقيقتين) نفكر في الـ MFT كخيار اختياري بأدمن.
+1. `preview_token` TTL: **10 minutes**; older scans require a fresh `Scan`.
+2. **120% circuit breaker:** `Clean` aborts if actual deleted bytes exceed 120% of the `Preview` estimate.
+3. Cloud placeholders are **always `Skipped`**, regardless of `Minimum Age`.
+4. WSL/Docker `.vhdx` files: **display only**, never deleted.
+5. Admin mode relaunches the app elevated and enables only admin-required `Target`s (deferred to Phase 6 due to elevated risk).
+6. Log retention: last **30** log files.
+7. `settings.json` is treated as untrusted input and re-validated on every load.
+8. Test sandbox refuses to run without its root sentinel file.
+9. Product name is **Sweeper**; crate prefix is `sweeper-`; no crates.io publication planned.
+
+---
+
+## 10. Open Decisions
+
+- `windows-sys` vs `windows` crate: recommend `windows-sys` (lighter, sufficient for handle APIs).
+- Represent Known Folders as a closed enum in `sweeper-knowledge`: recommend yes.
+- Full-drive `Analyzer` speed on `C:`: benchmark in Phase 4; consider optional elevated MFT scan only if walk exceeds ~2 minutes.
