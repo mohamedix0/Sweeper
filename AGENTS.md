@@ -13,3 +13,17 @@ Safety-first Windows desktop disk cleaner (Tauri 2 + Rust + React/TypeScript) th
 - **Orchestration, thread authority, and sub-agent model:** Read [docs/DELEGATION.md](docs/DELEGATION.md) before reading, writing, testing, or reviewing any code, or spawning any sub-agent.
 - **Architecture, safety invariants, phases (0–6), IPC contract, and gates (A–H):** Read [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) before designing, planning, or implementing any module or feature.
 - **Domain terminology and architectural rationale:** Consult [GLOSSARY.md](GLOSSARY.md) for canonical terms (`Target`, `Allowlist`, `Protected Path`, `Scan`, `Preview`, `Clean`, `Analyzer`, `Risk`, `Skipped`, `Link Point`) and [docs/adr/](docs/adr/) (`0001`–`0003`) before introducing types, UI copy, or structural changes.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `mohamedix0/Sweeper` via `gh` CLI. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+Default five-label vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See [docs/agents/triage-labels.md](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context (`GLOSSARY.md` at repo root and `docs/adr/`). See [docs/agents/domain.md](docs/agents/domain.md).
