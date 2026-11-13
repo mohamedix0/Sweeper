@@ -927,3 +927,43 @@ pub(super) fn is_vhdx_path(path: &str) -> bool {
         .map(|ext| ext.eq_ignore_ascii_case("vhdx"))
         .unwrap_or(false)
 }
+
+/// Find a node by id in an analyzer tree.
+pub fn find_node<'a>(root: &'a AnalyzerNode, id: &str) -> Option<&'a AnalyzerNode> {
+    if root.id == id {
+        return Some(root);
+    }
+    for child in &root.children {
+        if let Some(found) = find_node(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Look up a target description by target id.
+pub fn target_description(target_id: &str) -> Option<String> {
+    embedded_targets()
+        .into_iter()
+        .find(|t| t.id == target_id)
+        .map(|t| t.description)
+}
+
+/// Explain a known target or knowledge-base entry by id.
+/// Returns `(title, description, risk)` when known.
+pub fn knowledge_explanation(item_id: &str) -> Option<(String, String, Risk)> {
+    if let Some(k) = sweeper_knowledge::builtin_knowledge_entries()
+        .into_iter()
+        .find(|k| k.id == item_id)
+    {
+        return Some((
+            k.title,
+            format!("{} {}", k.description, k.notes).trim().to_string(),
+            k.risk,
+        ));
+    }
+    if let Some(t) = embedded_targets().into_iter().find(|t| t.id == item_id) {
+        return Some((t.name, t.description, t.risk));
+    }
+    None
+}

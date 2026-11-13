@@ -19,7 +19,7 @@ use sweeper_core::analyzer::{
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::remover::{self, CleanOptions, CleanProgress, ValidatedItem};
 use sweeper_core::scanner::{self, ScanReport};
-use sweeper_knowledge::{Risk, Tier};
+use sweeper_core::{Risk, Tier};
 
 use crate::clock::Clock;
 
@@ -185,6 +185,12 @@ impl SessionStore {
         );
     }
 
+    /// Direct access helper for integration tests: insert a synthetic analyzer session.
+    #[doc(hidden)]
+    pub fn insert_test_analyzer_session(&mut self, session: AnalyzerSession) {
+        self.analyzer_sessions.insert(session.id.clone(), session);
+    }
+
     /// Create and store a scan session by running a read-only scan.
     pub fn start_scan<C: Clock>(
         &mut self,
@@ -196,7 +202,7 @@ impl SessionStore {
         self.cleanup(clock);
         let now = clock.now_unix_secs();
         let enabled_tiers = resolve_enabled_tiers(tiers.as_deref(), settings);
-        let targets = sweeper_knowledge::embedded_targets()
+        let targets = sweeper_core::knowledge::embedded_targets()
             .into_iter()
             .filter(|t| tier_enabled(t.tier, &enabled_tiers))
             .collect::<Vec<_>>();
@@ -446,19 +452,16 @@ impl SessionStore {
             .get_valid_analyzer_session(clock, session_id, current_settings_generation)?
             .clone();
 
-        // Validate all selected IDs exist in analyzer result and detect custom-path confirmations.
-        let index = index_analyzer_nodes(&session.result.root);
+        if item_ids.is_empty() {
+            return Err(ContractError::InvalidInput {
+                reason: "no items selected".to_string(),
+            });
+        }
+
         let mut unknown = 0u64;
-        let mut needs_confirmation = false;
         for id in &item_ids {
-            match index.get(id) {
-                Some(node) => {
-                    if node.target_id.is_none() {
-                        // Custom-path-root candidate in analyzer conversion seam requires typed confirmation in Phase 4.
-                        needs_confirmation = true;
-                    }
-                }
-                None => unknown += 1,
+            if analyzer::find_analyzer_node(&session.result.root, id).is_none() {
+                unknown += 1;
             }
         }
         if unknown > 0 {
@@ -466,6 +469,21 @@ impl SessionStore {
                 count: U64String(unknown),
             });
         }
+
+        let preview_items = analyzer::build_analyzer_preview_items(&session.result, &item_ids)
+            .map_err(|msg| {
+                if msg.contains("selected analyzer node not found") {
+                    ContractError::UnknownItem {
+                        count: U64String(1),
+                    }
+                } else {
+                    ContractError::InvalidInput {
+                        reason: sanitize_reason(&msg),
+                    }
+                }
+            })?;
+
+        let needs_confirmation = preview_items.iter().any(|i| i.requires_typed_confirmation);
         if needs_confirmation {
             let ok = confirmations
                 .as_ref()
@@ -479,73 +497,20 @@ impl SessionStore {
             }
         }
 
-        let scan_items = analyzer::build_scan_items_from_analyzer(&session.result, &item_ids)
-            .map_err(|msg| ContractError::InvalidInput {
-                reason: sanitize_reason(&msg),
-            })?;
-
         let mut by_target: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
         let mut total_count = 0u64;
         let mut total_bytes = 0u64;
-        let mut validated_items: Vec<ValidatedItem> = Vec::with_capacity(scan_items.len());
+        let mut validated_items: Vec<ValidatedItem> = Vec::with_capacity(preview_items.len());
 
-        for (idx, si) in scan_items.into_iter().enumerate() {
-            let original_id = item_ids.get(idx).cloned().unwrap_or_else(|| si.id.clone());
-            let node = index.get(&original_id);
-            let is_custom = si.target_id == "custom-path";
-            let group_id = if is_custom {
-                "custom-path".to_string()
-            } else {
-                si.target_id.clone()
-            };
-            let group_name = if is_custom {
-                "Custom Path".to_string()
-            } else {
-                lookup_target_description(&si.target_id)
-                    .or_else(|| node.map(|n| n.name.clone()))
-                    .unwrap_or_else(|| si.target_id.clone())
-            };
+        for item in preview_items {
             let entry = by_target
-                .entry(group_id.clone())
-                .or_insert_with(|| (group_name, 0u64, 0u64));
+                .entry(item.group_id.clone())
+                .or_insert_with(|| (item.group_name.clone(), 0u64, 0u64));
             entry.1 = entry.1.saturating_add(1);
-            entry.2 = entry.2.saturating_add(si.size);
+            entry.2 = entry.2.saturating_add(item.size_bytes);
             total_count += 1;
-            total_bytes = total_bytes.saturating_add(si.size);
-
-            if is_custom {
-                let validated = ValidatedItem::from_custom_path_root(
-                    original_id.clone(),
-                    si.path.clone(),
-                    si.size,
-                )
-                .map_err(|_| ContractError::InvalidInput {
-                    reason: "selected custom path item failed validation".to_string(),
-                })?;
-                validated_items.push(validated);
-                continue;
-            }
-
-            // Find matching resolved allowlist target root for containment.
-            let target_roots = analyzer_target_roots_for_node(node, &si.target_id);
-            let target_root = find_containing_root(&target_roots, &si.path).ok_or_else(|| {
-                ContractError::InvalidInput {
-                    reason: "selected item is not within a resolved target root".to_string(),
-                }
-            })?;
-            let mtime = si.mtime_unix_secs;
-            let validated = ValidatedItem::from_allowlisted_scan(
-                original_id.clone(),
-                si.target_id.clone(),
-                target_root,
-                si.path.clone(),
-                si.size,
-                Some(mtime),
-            )
-            .map_err(|_| ContractError::InvalidInput {
-                reason: "selected item failed validation".to_string(),
-            })?;
-            validated_items.push(validated);
+            total_bytes = total_bytes.saturating_add(item.size_bytes);
+            validated_items.push(item.validated_item);
         }
 
         let breakdown = by_target
@@ -771,7 +736,7 @@ impl SessionStore {
                 return Ok(sweeper_contract::ExplainItemResponse {
                     item_id: item_id.to_string(),
                     title: item.target_name.clone(),
-                    description: lookup_target_description(&item.target_id)
+                    description: analyzer::target_description(&item.target_id)
                         .unwrap_or_else(|| "Scanned item.".to_string()),
                     risk: risk_to_dto(item.risk),
                 });
@@ -780,7 +745,7 @@ impl SessionStore {
                 return Ok(sweeper_contract::ExplainItemResponse {
                     item_id: item_id.to_string(),
                     title: t.target_name.clone(),
-                    description: lookup_target_description(item_id)
+                    description: analyzer::target_description(item_id)
                         .unwrap_or_else(|| "Target.".to_string()),
                     risk: t.risk,
                 });
@@ -790,7 +755,7 @@ impl SessionStore {
             if !analyzer_session_valid_at(s, now, current_settings_generation) {
                 continue;
             }
-            if let Some(node) = find_analyzer_node(&s.result.root, item_id) {
+            if let Some(node) = analyzer::find_analyzer_node(&s.result.root, item_id) {
                 let title = if node.name.is_empty() {
                     node.path.clone()
                 } else {
@@ -804,26 +769,12 @@ impl SessionStore {
                 });
             }
         }
-        if let Some(k) = sweeper_knowledge::builtin_knowledge_entries()
-            .into_iter()
-            .find(|k| k.id == item_id)
-        {
+        if let Some((title, description, risk)) = analyzer::knowledge_explanation(item_id) {
             return Ok(sweeper_contract::ExplainItemResponse {
                 item_id: item_id.to_string(),
-                title: k.title,
-                description: format!("{} {}", k.description, k.notes).trim().to_string(),
-                risk: risk_to_dto(k.risk),
-            });
-        }
-        if let Some(t) = sweeper_knowledge::embedded_targets()
-            .into_iter()
-            .find(|t| t.id == item_id)
-        {
-            return Ok(sweeper_contract::ExplainItemResponse {
-                item_id: item_id.to_string(),
-                title: t.name,
-                description: t.description,
-                risk: risk_to_dto(t.risk),
+                title,
+                description,
+                risk: risk_to_dto(risk),
             });
         }
         Err(ContractError::NotFound {
@@ -1021,147 +972,6 @@ fn map_analyzer_node_to_dto(node: &AnalyzerNode) -> AnalyzerNodeDto {
     }
 }
 
-fn index_analyzer_nodes(root: &AnalyzerNode) -> HashMap<String, AnalyzerNode> {
-    fn rec(node: &AnalyzerNode, map: &mut HashMap<String, AnalyzerNode>) {
-        map.insert(node.id.clone(), node.clone());
-        for c in &node.children {
-            rec(c, map);
-        }
-    }
-    let mut map = HashMap::new();
-    rec(root, &mut map);
-    map
-}
-
-fn find_analyzer_node<'a>(root: &'a AnalyzerNode, id: &str) -> Option<&'a AnalyzerNode> {
-    if root.id == id {
-        return Some(root);
-    }
-    for c in &root.children {
-        if let Some(n) = find_analyzer_node(c, id) {
-            return Some(n);
-        }
-    }
-    None
-}
-
-fn analyzer_target_roots_for_node(node: Option<&AnalyzerNode>, target_id: &str) -> Vec<String> {
-    // Prefer resolved roots from embedded target definitions. Core conversion already validated
-    // allowlist-backed selections; this resolves containment for ValidatedItem construction.
-    let Some(target) = sweeper_knowledge::embedded_targets()
-        .into_iter()
-        .find(|t| t.id == target_id)
-    else {
-        return node.map(|n| vec![n.path.clone()]).unwrap_or_default();
-    };
-    resolve_target_roots_for_definition(&target)
-}
-
-fn resolve_target_roots_for_definition(
-    target: &sweeper_knowledge::TargetDefinition,
-) -> Vec<String> {
-    use std::path::PathBuf;
-    let base = match resolve_known_folder_path(target.known_folder) {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    if target.relative_subpath.contains('*') {
-        resolve_wildcard_target_roots(&base, &target.relative_subpath)
-    } else {
-        let mut p = PathBuf::from(base);
-        for seg in target.relative_subpath.split('\\') {
-            p.push(seg);
-        }
-        if !p.exists() {
-            return Vec::new();
-        }
-        match CanonicalPath::parse_lexical(&p.to_string_lossy()) {
-            Ok(c) => vec![c.to_string()],
-            Err(_) => vec![p.to_string_lossy().to_string()],
-        }
-    }
-}
-
-fn resolve_known_folder_path(kf: sweeper_knowledge::KnownFolder) -> Option<String> {
-    let id = match kf {
-        sweeper_knowledge::KnownFolder::LocalAppData => sweeper_winfs::KnownFolderId::LocalAppData,
-        sweeper_knowledge::KnownFolder::RoamingAppData => {
-            sweeper_winfs::KnownFolderId::RoamingAppData
-        }
-        sweeper_knowledge::KnownFolder::UserProfile => sweeper_winfs::KnownFolderId::UserProfile,
-        sweeper_knowledge::KnownFolder::Windows => sweeper_winfs::KnownFolderId::Windows,
-        sweeper_knowledge::KnownFolder::ProgramData => sweeper_winfs::KnownFolderId::ProgramData,
-    };
-    sweeper_winfs::resolve_known_folder(id)
-        .ok()
-        .map(|p| p.to_string_lossy().to_string())
-}
-
-fn resolve_wildcard_target_roots(base: &str, relative_subpath: &str) -> Vec<String> {
-    use std::path::PathBuf;
-    let segments: Vec<&str> = relative_subpath.split('\\').collect();
-    let mut candidates = vec![PathBuf::from(base)];
-    for seg in segments {
-        if seg.contains('*') {
-            let mut next = Vec::new();
-            for cand in candidates {
-                let entries = match sweeper_winfs::read_dir_entries(&cand) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                for ent in entries {
-                    if !ent.is_dir {
-                        continue;
-                    }
-                    if !matches!(ent.reparse, sweeper_winfs::ReparseTagClass::NotReparse) {
-                        continue;
-                    }
-                    let name = ent.name.to_string_lossy();
-                    if !segment_pattern_matches(&name, seg) {
-                        continue;
-                    }
-                    next.push(ent.path);
-                }
-            }
-            candidates = next;
-        } else {
-            for c in &mut candidates {
-                c.push(seg);
-            }
-        }
-    }
-    let mut roots = Vec::new();
-    for c in candidates {
-        if !c.exists() {
-            continue;
-        }
-        if let Ok(canon) = CanonicalPath::parse_lexical(&c.to_string_lossy()) {
-            roots.push(canon.to_string());
-        } else {
-            roots.push(c.to_string_lossy().to_string());
-        }
-    }
-    roots.sort();
-    roots.dedup();
-    roots
-}
-
-fn segment_pattern_matches(name: &str, pattern: &str) -> bool {
-    if !pattern.contains('*') {
-        return name.eq_ignore_ascii_case(pattern);
-    }
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    let (prefix, suffix) = (parts[0], parts[1]);
-    if name.len() < prefix.len() + suffix.len() {
-        return false;
-    }
-    name[..prefix.len()].eq_ignore_ascii_case(prefix)
-        && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-}
-
 fn risk_to_dto(r: Risk) -> RiskDto {
     match r {
         Risk::Safe => RiskDto::Safe,
@@ -1269,13 +1079,6 @@ fn find_containing_root(roots: &[String], item_path: &str) -> Option<String> {
         }
     }
     best.map(|(_, r)| r)
-}
-
-fn lookup_target_description(target_id: &str) -> Option<String> {
-    sweeper_knowledge::embedded_targets()
-        .into_iter()
-        .find(|t| t.id == target_id)
-        .map(|t| t.description)
 }
 
 fn sanitize_reason(s: &str) -> String {

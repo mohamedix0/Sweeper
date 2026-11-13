@@ -139,9 +139,22 @@ pub fn update_settings<C: Clock>(
     state: &AppState<C>,
     settings: SettingsDto,
 ) -> Result<SettingsDto, ContractError> {
+    if settings.min_age_hours > sweeper_core::settings::MAX_MIN_AGE_HOURS {
+        return Err(ContractError::InvalidInput {
+            reason: "minimum_age_hours is out of bounds".into(),
+        });
+    }
+    // Validate all custom paths in settings payload (if present in JSON shape) via policy/core settings checks.
+    sweeper_core::settings::validate_settings_json(&settings).map_err(|reason| {
+        ContractError::InvalidInput {
+            reason: reason.replace('\n', " "),
+        }
+    })?;
+
     let mut store = state.settings.lock().map_err(|_| ContractError::Internal {
         reason: "state unavailable".into(),
     })?;
+    // Persist safely via sweeper_core::settings through the settings store.
     Ok(store.update(settings))
 }
 
@@ -150,15 +163,16 @@ pub fn validate_custom_path<C: Clock>(
     _state: &AppState<C>,
     path: String,
 ) -> Result<ValidateCustomPathResponse, ContractError> {
-    if path.trim().is_empty() {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
         return Err(ContractError::InvalidInput {
             reason: "path is required".into(),
         });
     }
-    let verdict = sweeper_core::policy::validate_custom_path(&path);
-    let normalized = sweeper_core::paths::CanonicalPath::parse_lexical(&path)
+    let verdict = sweeper_core::policy::validate_custom_path(trimmed);
+    let normalized = sweeper_core::paths::CanonicalPath::parse_lexical(trimmed)
         .map(|p| p.to_string())
-        .unwrap_or_else(|_| path.clone());
+        .unwrap_or_else(|_| trimmed.to_string());
     Ok(ValidateCustomPathResponse {
         path: normalized,
         allowed: verdict.allowed,

@@ -244,7 +244,10 @@ mod annotate;
 mod convert;
 mod walker;
 
-pub use convert::build_scan_items_from_analyzer;
+pub use annotate::{find_node as find_analyzer_node, knowledge_explanation, target_description};
+pub use convert::{
+    build_analyzer_preview_items, build_scan_items_from_analyzer, AnalyzerPreviewItem,
+};
 
 #[cfg(test)]
 mod tests {

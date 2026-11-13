@@ -12,8 +12,6 @@ workspace = true
 [dependencies]
 sweeper-contract = { workspace = true }
 sweeper-core = { workspace = true }
-sweeper-knowledge = { workspace = true }
-sweeper-winfs = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

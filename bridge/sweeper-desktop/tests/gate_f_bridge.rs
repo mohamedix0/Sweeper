@@ -57,8 +57,8 @@ fn seed_session(state: &AppState<FixedClock>, root: &Path, file_path: &Path, mti
             dto: item,
             target_id: "user-temp".to_string(),
             target_name: "User Temp".to_string(),
-            tier: sweeper_knowledge::Tier::Tier1,
-            risk: sweeper_knowledge::Risk::Safe,
+            tier: sweeper_core::Tier::Tier1,
+            risk: sweeper_core::Risk::Safe,
             age_eligible: true,
             requires_typed_confirmation: false,
         },
@@ -661,5 +661,220 @@ fn analyzer_session_invalidated_by_settings_change_rejected() {
     assert!(
         matches!(err, ContractError::SessionInvalid { .. }),
         "{err:?}"
+    );
+}
+
+#[test]
+fn analyzer_unknown_node_not_selectable_and_rejected_when_unknown_deletions_disabled() {
+    let state = make_state();
+    let settings_gen = {
+        let settings = state.settings.lock().unwrap();
+        assert!(
+            !settings.get().allow_delete_unknown,
+            "allow_delete_unknown must be false by default for this test"
+        );
+        settings.generation()
+    };
+
+    // Explicit Unknown-risk directory node (not selectable) in a synthetic analyzer session.
+    let unknown_dir = sweeper_core::analyzer::AnalyzerNode {
+        id: "node-unknown-dir".to_string(),
+        path: r"C:\Users\Public\SweeperUnknownDir".to_string(),
+        name: "SweeperUnknownDir".to_string(),
+        is_dir: true,
+        size_bytes: 123,
+        item_count: 1,
+        risk: sweeper_core::Risk::Unknown,
+        description: "Unknown directory".to_string(),
+        tier: None,
+        target_id: None,
+        is_link_point: false,
+        is_cloud_placeholder: false,
+        display_only: false,
+        selectable: false,
+        selection_reason: Some(
+            "Unknown items are not selectable by default in Phase 4".to_string(),
+        ),
+        children: Vec::new(),
+    };
+    let root = sweeper_core::analyzer::AnalyzerNode {
+        id: "node-root".to_string(),
+        path: r"C:\Users\Public".to_string(),
+        name: "Public".to_string(),
+        is_dir: true,
+        size_bytes: 123,
+        item_count: 2,
+        risk: sweeper_core::Risk::Protected,
+        description: "Protected container/root context".to_string(),
+        tier: None,
+        target_id: None,
+        is_link_point: false,
+        is_cloud_placeholder: false,
+        display_only: false,
+        selectable: false,
+        selection_reason: Some("Protected path is not selectable".to_string()),
+        children: vec![unknown_dir.clone()],
+    };
+    state.sessions.lock().unwrap().insert_test_analyzer_session(
+        sweeper_desktop::session::AnalyzerSession {
+            id: "analyzer-unknown-test".to_string(),
+            created_at: 1_800_000_000,
+            settings_generation: settings_gen,
+            result: sweeper_core::analyzer::AnalyzerResult {
+                root,
+                progress: sweeper_core::analyzer::AnalyzerProgress::default(),
+                cancelled: false,
+            },
+            min_age_hours: 24,
+        },
+    );
+
+    let err = commands_impl::preview_clean(
+        &state,
+        "analyzer-unknown-test".to_string(),
+        vec![unknown_dir.id.clone()],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::InvalidInput { .. }),
+        "non-selectable Unknown-risk directory node must be rejected by preview_clean: {err:?}"
+    );
+}
+
+#[test]
+fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute() {
+    let state = make_state();
+    let settings_gen = state.settings.lock().unwrap().generation();
+
+    let canary = CanaryTree::seed_external("gate-f-analyzer-custom-root").unwrap();
+
+    // Custom path validation rejects descendants of protected container roots (e.g. C:\Users),
+    // so create a deep, non-protected test directory under the configured Cargo target dir on D:.
+    let base = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let unique = format!(
+        "sweeper-custom-root-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let root_path = base.join("tmp-tests").join(unique).join("CustomCleanRoot");
+    fs::create_dir_all(&root_path).unwrap();
+    let inside = root_path.join("old.tmp");
+    fs::write(&inside, b"bye").unwrap();
+    let nested_dir = root_path.join("nested");
+    fs::create_dir_all(&nested_dir).unwrap();
+    let nested = nested_dir.join("x.tmp");
+    fs::write(&nested, b"x").unwrap();
+    assert!(root_path.exists() && inside.exists() && nested_dir.exists() && nested.exists());
+
+    let verdict = sweeper_core::policy::validate_custom_path(&root_path.to_string_lossy());
+    assert!(
+        verdict.allowed,
+        "test root must be a valid custom path for this environment: {} ({})",
+        root_path.display(),
+        verdict.reason
+    );
+    canary.verify().unwrap();
+
+    let root_str = root_path.to_string_lossy().to_string();
+    // Synthetic selectable custom-path-root directory node (target_id None => custom-path conversion seam).
+    let custom_root_node = sweeper_core::analyzer::AnalyzerNode {
+        id: "node-custom-root".to_string(),
+        path: root_str.clone(),
+        name: "CustomCleanRoot".to_string(),
+        is_dir: true,
+        size_bytes: 4,
+        item_count: 2,
+        risk: sweeper_core::Risk::Safe,
+        description: "Custom path root candidate".to_string(),
+        tier: None,
+        target_id: None,
+        is_link_point: false,
+        is_cloud_placeholder: false,
+        display_only: false,
+        selectable: true,
+        selection_reason: None,
+        children: Vec::new(),
+    };
+    let tree_root = sweeper_core::analyzer::AnalyzerNode {
+        id: "node-tree-root".to_string(),
+        path: root_str.clone(),
+        name: "CustomCleanRoot".to_string(),
+        is_dir: true,
+        size_bytes: 4,
+        item_count: 3,
+        risk: sweeper_core::Risk::Safe,
+        description: "Analyzer root".to_string(),
+        tier: None,
+        target_id: None,
+        is_link_point: false,
+        is_cloud_placeholder: false,
+        display_only: false,
+        selectable: true,
+        selection_reason: None,
+        children: vec![custom_root_node.clone()],
+    };
+    state.sessions.lock().unwrap().insert_test_analyzer_session(
+        sweeper_desktop::session::AnalyzerSession {
+            id: "analyzer-custom-root-test".to_string(),
+            created_at: 1_800_000_000,
+            settings_generation: settings_gen,
+            result: sweeper_core::analyzer::AnalyzerResult {
+                root: tree_root,
+                progress: sweeper_core::analyzer::AnalyzerProgress::default(),
+                cancelled: false,
+            },
+            min_age_hours: 24,
+        },
+    );
+
+    // Custom-path-root analyzer nodes require typed confirmation.
+    let err = commands_impl::preview_clean(
+        &state,
+        "analyzer-custom-root-test".to_string(),
+        vec![custom_root_node.id.clone()],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::InvalidInput { .. }),
+        "custom-path-root selection must require typed confirmation: {err:?}"
+    );
+
+    let preview = commands_impl::preview_clean(
+        &state,
+        "analyzer-custom-root-test".to_string(),
+        vec![custom_root_node.id.clone()],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".to_string()),
+        }),
+    )
+    .unwrap();
+
+    let logs_base = tempfile::tempdir().unwrap();
+    let exec = commands_impl::execute_clean(
+        &state,
+        preview.preview_token,
+        Some(logs_base.path().to_path_buf()),
+        |_| {},
+    )
+    .unwrap();
+    assert!(!exec.aborted, "abort_reason={:?}", exec.abort_reason);
+
+    // Custom-path root directory itself must survive; eligible contents cleaned.
+    assert!(
+        root_path.exists(),
+        "custom-path root directory must be preserved"
+    );
+    assert!(!inside.exists(), "root-level contents should be cleaned");
+    assert!(!nested.exists(), "nested contents should be cleaned");
+    assert!(
+        canary.verify().is_ok(),
+        "external canary must remain intact"
     );
 }

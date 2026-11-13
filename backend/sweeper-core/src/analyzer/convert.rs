@@ -6,22 +6,34 @@ use crate::scanner;
 use std::collections::{HashMap, HashSet};
 use sweeper_knowledge::{embedded_targets, Risk};
 
-/// Convert selected eligible Analyzer node IDs into validated scan items for Preview/Clean routing.
+/// A single analyzer node selection converted for Preview/Clean routing.
+#[derive(Debug, Clone)]
+pub struct AnalyzerPreviewItem {
+    /// Original analyzer node id selected by the client.
+    pub selected_node_id: String,
+    /// Validated item for `remover::execute_clean`.
+    pub validated_item: ValidatedItem,
+    /// Group id for preview breakdown (target id or `custom-path`).
+    pub group_id: String,
+    /// Human-readable group name for preview breakdown.
+    pub group_name: String,
+    /// Estimated/selected size in bytes.
+    pub size_bytes: u64,
+    /// Whether typed confirmation is required for this selection.
+    pub requires_typed_confirmation: bool,
+}
+
+/// Convert selected eligible Analyzer node IDs into validated items for Preview/Clean routing.
 ///
-/// This seam performs explicit safety re-validation:
-/// - selected nodes must exist in the provided tree
-/// - nodes must be selectable and not display-only/protected/link points/cloud placeholders/`.vhdx`
-/// - allowlist-backed nodes are mapped to allowlisted validated items
-/// - only safe, non-protected, non-container, depth>=3, non-link-point directories outside protected
-///   subtrees/containers are eligible as custom-path-root conversions (contents-only semantics)
-pub fn build_scan_items_from_analyzer(
+/// Performs explicit safety re-validation and resolves allowlist target roots internally so bridge
+/// layers do not depend on `sweeper-winfs` target resolution.
+pub fn build_analyzer_preview_items(
     result: &AnalyzerResult,
     selected_node_ids: &[String],
-) -> Result<Vec<scanner::ScanItem>, String> {
+) -> Result<Vec<AnalyzerPreviewItem>, String> {
     let index = index_nodes(&result.root);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut seq: u64 = 0;
 
     for id in selected_node_ids {
         if !seen.insert(id.clone()) {
@@ -52,8 +64,8 @@ pub fn build_scan_items_from_analyzer(
                         node.path
                     )
                 })?;
-            let _validated = ValidatedItem::from_allowlisted_scan(
-                format!("analyzer::{tid}::{}", node.id),
+            let validated_item = ValidatedItem::from_allowlisted_scan(
+                node.id.clone(),
                 tid.clone(),
                 target_root,
                 node.path.clone(),
@@ -62,21 +74,22 @@ pub fn build_scan_items_from_analyzer(
             )
             .map_err(|e| format!("selected node rejected by allowlist conversion: {e}"))?;
 
-            seq += 1;
-            out.push(scanner::ScanItem {
-                id: format!("analyzer::{tid}::{seq}"),
-                target_id: tid.clone(),
-                path: node.path.clone(),
-                file_identity: None,
-                size: node.size_bytes,
-                mtime_unix_secs: 0,
-                age_eligible: false,
+            out.push(AnalyzerPreviewItem {
+                selected_node_id: node.id.clone(),
+                validated_item,
+                group_id: tid.clone(),
+                group_name: if target.description.is_empty() {
+                    target.name.clone()
+                } else {
+                    target.description.clone()
+                },
+                size_bytes: node.size_bytes,
+                requires_typed_confirmation: false,
             });
             continue;
         }
 
-        // Custom-path-root seam (Phase 5 will supply explicit typed confirmation flows at higher layers).
-        // Restrict to directories and re-run on-disk custom path validation/policy checks.
+        // Custom-path-root seam (contents-only semantics, typed confirmation required).
         if !node.is_dir {
             return Err(format!(
                 "selected non-target node must be a directory custom-path root candidate: {}",
@@ -90,19 +103,57 @@ pub fn build_scan_items_from_analyzer(
                 node.path, verdict.reason
             ));
         }
+        let validated_item = ValidatedItem::from_custom_path_root(
+            node.id.clone(),
+            node.path.clone(),
+            node.size_bytes,
+        )
+        .map_err(|e| format!("selected custom-path candidate rejected: {e}"))?;
 
-        seq += 1;
-        out.push(scanner::ScanItem {
-            id: format!("analyzer::custom::{seq}"),
-            target_id: "custom-path".to_string(),
-            path: node.path.clone(),
-            file_identity: None,
-            size: node.size_bytes,
-            mtime_unix_secs: 0,
-            age_eligible: true,
+        out.push(AnalyzerPreviewItem {
+            selected_node_id: node.id.clone(),
+            validated_item,
+            group_id: "custom-path".to_string(),
+            group_name: "Custom Path".to_string(),
+            size_bytes: node.size_bytes,
+            requires_typed_confirmation: true,
         });
     }
 
+    Ok(out)
+}
+
+/// Convert selected eligible Analyzer node IDs into validated scan items for Preview/Clean routing.
+///
+/// Compatibility helper retained for callers that only need `scanner::ScanItem`s.
+pub fn build_scan_items_from_analyzer(
+    result: &AnalyzerResult,
+    selected_node_ids: &[String],
+) -> Result<Vec<scanner::ScanItem>, String> {
+    let preview_items = build_analyzer_preview_items(result, selected_node_ids)?;
+    let mut out = Vec::with_capacity(preview_items.len());
+    let mut seq: u64 = 0;
+    for item in preview_items {
+        seq += 1;
+        let is_custom = item.group_id == "custom-path";
+        let target_id = if is_custom {
+            "custom-path".to_string()
+        } else {
+            item.group_id.clone()
+        };
+        out.push(scanner::ScanItem {
+            id: format!(
+                "analyzer::{}::{seq}",
+                if is_custom { "custom" } else { &target_id }
+            ),
+            target_id,
+            path: item.validated_item.path().to_string(),
+            file_identity: None,
+            size: item.size_bytes,
+            mtime_unix_secs: 0,
+            age_eligible: is_custom,
+        });
+    }
     Ok(out)
 }
 

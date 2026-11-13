@@ -1,9 +1,9 @@
 ﻿//! Settings store with safe defaults fallback.
 
-use std::fs;
 use std::path::PathBuf;
 
 use sweeper_contract::SettingsDto;
+use sweeper_core::settings;
 
 /// Settings store (loads/saves JSON; invalid/missing => safe defaults).
 #[derive(Debug, Clone)]
@@ -40,9 +40,8 @@ impl SettingsStore {
         self.settings = self
             .path
             .as_ref()
-            .and_then(|p| fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str::<SettingsDto>(&s).ok())
-            .map(validate_settings)
+            .and_then(|p| settings::load_settings_json::<SettingsDto>(p))
+            .map(sanitize_loaded_settings)
             .unwrap_or_default();
     }
 
@@ -51,21 +50,15 @@ impl SettingsStore {
         self.settings.clone()
     }
 
-    /// Update settings (validated) and persist if path configured. Returns new settings.
-    /// Increments generation if scan-affecting fields changed.
-    pub fn update(&mut self, new_settings: SettingsDto) -> SettingsDto {
-        let validated = validate_settings(new_settings);
+    /// Update settings (already validated by caller) and persist if path configured.
+    /// Returns new settings. Increments generation if scan-affecting fields changed.
+    pub fn update(&mut self, validated: SettingsDto) -> SettingsDto {
         if scan_affecting_changed(&self.settings, &validated) {
             self.generation = self.generation.saturating_add(1);
         }
         self.settings = validated.clone();
         if let Some(path) = &self.path {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Ok(json) = serde_json::to_string_pretty(&validated) {
-                let _ = fs::write(path, json);
-            }
+            let _ = settings::persist_settings_json(path, &validated);
         }
         validated
     }
@@ -76,10 +69,8 @@ impl SettingsStore {
     }
 }
 
-fn validate_settings(mut s: SettingsDto) -> SettingsDto {
-    // Validate/sanitize: min_age_hours kept as-is but could be bounded; booleans are fine.
-    // Tier3 disabled by default is fine as provided; we don't force except on deserialization failure fallback.
-    if s.min_age_hours > 24 * 365 * 10 {
+fn sanitize_loaded_settings(mut s: SettingsDto) -> SettingsDto {
+    if s.min_age_hours > settings::MAX_MIN_AGE_HOURS {
         s.min_age_hours = 24;
     }
     s

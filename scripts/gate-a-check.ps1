@@ -110,5 +110,28 @@ if (-not $removeDirCalls -or $removeDirCalls.Count -ne 2) {
   Fail "Expected exactly 2 RemoveDirectoryW call sites in sweeper-winfs/src/lib.rs (both inside gated test-support helper cleanup)."
 }
 
+# 4) sweeper-desktop must not depend on sweeper-winfs (and must only use sweeper-core + sweeper-contract as internal workspace deps).
+$desktopCargo = Join-Path $repoRoot 'bridge/sweeper-desktop/Cargo.toml'
+$desktopCargoText = Get-Content -Raw -Path $desktopCargo
+if ($desktopCargoText -match '(?m)^\s*sweeper-winfs\s*=') {
+  Fail "bridge/sweeper-desktop/Cargo.toml must not depend on sweeper-winfs."
+}
+$depsSection = $desktopCargoText
+$buildDepsIdx = $desktopCargoText.IndexOf('[build-dependencies]')
+$devDepsIdx = $desktopCargoText.IndexOf('[dev-dependencies]')
+$cutIdx = -1
+if ($buildDepsIdx -ge 0) { $cutIdx = $buildDepsIdx }
+if ($devDepsIdx -ge 0 -and ($cutIdx -lt 0 -or $devDepsIdx -lt $cutIdx)) { $cutIdx = $devDepsIdx }
+if ($cutIdx -ge 0) { $depsSection = $desktopCargoText.Substring(0, $cutIdx) }
+$desktopInternalDeps = @()
+foreach ($m in [regex]::Matches($depsSection, '(?m)^\s*(sweeper-[A-Za-z0-9_-]+)\s*=\s*\{[^}]*workspace\s*=\s*true')) {
+  $desktopInternalDeps += $m.Groups[1].Value
+}
+$desktopInternalDeps = @($desktopInternalDeps | Sort-Object -Unique)
+$allowedDesktopInternal = @('sweeper-contract', 'sweeper-core')
+if (@($desktopInternalDeps).Count -ne $allowedDesktopInternal.Count -or (@(Compare-Object -ReferenceObject $allowedDesktopInternal -DifferenceObject $desktopInternalDeps)).Count -ne 0) {
+  Fail "bridge/sweeper-desktop/Cargo.toml internal workspace deps must be exactly: $($allowedDesktopInternal -join ', '). Found: $($desktopInternalDeps -join ', ')"
+}
+
 if ($failed) { exit 1 }
 Write-Host "GATE-A grep checks passed." -ForegroundColor Green

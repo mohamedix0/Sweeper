@@ -6,6 +6,13 @@ pub mod paths;
 pub mod policy;
 pub mod remover;
 pub mod scanner;
+pub mod settings;
+
+/// Re-exported knowledge API/types for bridge/session layers (avoids direct sweeper-knowledge dependency).
+pub mod knowledge {
+    pub use sweeper_knowledge::*;
+}
+pub use sweeper_knowledge::{Risk, Tier};
 
 /// Deterministic fuzz entrypoint for path/policy validation.
 /// Accepts arbitrary bytes (lossy UTF-8) and must never panic.
