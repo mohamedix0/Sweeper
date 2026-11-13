@@ -10,6 +10,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Pinned for Phase 2 contract/TS binding generation compatibility (locked in Cargo.lock).
+specta = { version = "=2.0.0-rc.22", features = ["derive", "serde"] }
+specta-typescript = "=0.0.9"
+tauri = { version = "2", default-features = false }
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+heck = "0.5"
+
+[dev-dependencies]
+tempfile = { workspace = true }
