@@ -1,5 +1,6 @@
 import tsParser from '@typescript-eslint/parser';
 import tsPlugin from '@typescript-eslint/eslint-plugin';
+import reactHooks from 'eslint-plugin-react-hooks';
 
 export default [
   {
@@ -14,6 +15,7 @@ export default [
     },
     plugins: {
       '@typescript-eslint': tsPlugin,
+      'react-hooks': reactHooks,
     },
     rules: {
       'no-eval': 'error',
@@ -38,7 +40,6 @@ export default [
           message: 'Use JSX; dynamic element creation is restricted in this codebase.',
         },
       ],
-      // Forbid dangerouslySetInnerHTML in JSX usage.
       'no-restricted-syntax': [
         'error',
         {
@@ -46,10 +47,12 @@ export default [
           message: 'dangerouslySetInnerHTML is forbidden by Static Gate A frontend policy.',
         },
       ],
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
       '@typescript-eslint/no-explicit-any': 'off',
     },
   },
   {
-    ignores: ['dist/**', 'node_modules/**'],
+    ignores: ['dist/**', 'node_modules/**', 'playwright-report/**', 'test-results/**'],
   },
 ];
