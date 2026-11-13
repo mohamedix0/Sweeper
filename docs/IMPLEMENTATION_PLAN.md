@@ -41,24 +41,30 @@ flowchart LR
     BR -- "Generated DTOs" --> UI
 ```
 
-**Planned workspace layout** (not yet created; currently only `GLOSSARY.md`, `.gitignore`, `docs/`, and local git-ignored `reference/` exist):
+**Workspace layout** (application code and Rust workspace config live under `app/`; repo-level governance/docs/tooling remain at the repository root):
 
 ```text
 Sweeper/
-â”œâ”€ Cargo.toml                  Workspace combining backend + bridge
-â”œâ”€ rust-toolchain.toml         Pinned Rust toolchain (1.99.1)
-â”œâ”€ clippy.toml  deny.toml      Lint rules (ban deletion outside remover) & dependency audit
-â”œâ”€ backend/                    Part 1: Pure Rust backend (no UI)
-â”‚  â”œâ”€ sweeper-winfs/           Raw Windows NTFS operations (all unsafe lives here)
-â”‚  â”œâ”€ sweeper-knowledge/       Allowlist + Protected Paths + Knowledge Base (data + types)
-â”‚  â”œâ”€ sweeper-core/            Logic: validation, Scan, Analyzer, Remover, Journal, Settings
-â”‚  â””â”€ sweeper-testkit/         Test harness: isolated sandbox, canaries, junction helpers
-â”œâ”€ bridge/                     Part 2: Typed bridge
-â”‚  â”œâ”€ sweeper-contract/        DTOs, error types, command signatures (single source of truth -> TS)
-â”‚  â””â”€ sweeper-desktop/         Tauri shell: IPC handlers, in-memory sessions, capabilities, CSP
-â”œâ”€ frontend/                   Part 3: Vite + React + TypeScript
-â”‚  â””â”€ src/contract/            Auto-generated bindings (read-only; never edit manually)
-â””â”€ docs/                       Implementation plan, delegation policy, and ADRs
++- app/                        Application workspace root
+¦  +- Cargo.toml               Workspace combining backend + bridge
+¦  +- Cargo.lock               Locked dependency graph for the app workspace
+¦  +- rust-toolchain.toml      Pinned Rust toolchain (1.99.1)
+¦  +- clippy.toml  deny.toml   Lint rules (ban deletion outside remover) & dependency audit
+¦  +- backend/                 Part 1: Pure Rust backend (no UI)
+¦  ¦  +- sweeper-winfs/        Raw Windows NTFS operations (all unsafe lives here)
+¦  ¦  +- sweeper-knowledge/    Allowlist + Protected Paths + Knowledge Base (data + types)
+¦  ¦  +- sweeper-core/         Logic: validation, Scan, Analyzer, Remover, Journal, Settings
+¦  ¦  +- sweeper-testkit/      Test harness: isolated sandbox, canaries, junction helpers
+¦  +- bridge/                  Part 2: Typed bridge
+¦  ¦  +- sweeper-contract/     DTOs, error types, command signatures (single source of truth -> TS)
+¦  ¦  +- sweeper-desktop/      Tauri shell: IPC handlers, in-memory sessions, capabilities, CSP
+¦  +- frontend/                Part 3: Vite + React + TypeScript
+¦  ¦  +- src/contract/         Auto-generated bindings (read-only; never edit manually)
+¦  +- fuzz/                    Cargo-fuzz targets for parsers/validators/readers
++- docs/                       Implementation plan, delegation policy, and ADRs
++- scripts/                    Repo-level gates, cleanup, and tooling scripts
++- AGENTS.md  GLOSSARY.md      Repo-level agent guidance and domain vocabulary
++- .github/                    CI and repository automation
 ```
 
 **Dependency direction (strictly enforced):**
@@ -197,7 +203,7 @@ All matching resolves the opened handle via `GetFinalPathNameByHandle` and compa
 ### 6.2 Layers & Gates
 
 **A. Static Gates (every commit, zero execution):**
-- `clippy::disallowed_methods`: bans `std::fs::remove_*` everywhere in `backend/` and `bridge/` (including inside `core::remover`), and bans `sweeper-winfs` deletion primitives everywhere except a single audited `#[allow]` inside `core::remover`.
+- `clippy::disallowed_methods`: bans `std::fs::remove_*` everywhere in `app/backend/` and `app/bridge/` (including inside `core::remover`), and bans `sweeper-winfs` deletion primitives everywhere except a single audited `#[allow]` inside `core::remover`.
 - CI grep gate: fails if `std::fs::remove_*` appears anywhere in production code, or if any `sweeper-winfs` deletion symbol appears outside `core::remover` / `sweeper-winfs`.
 - `#![forbid(unsafe_code)]` on all crates except `sweeper-winfs`; every `unsafe` block requires a `// SAFETY:` comment; `cargo geiger` tracks unsafe count.
 - `cargo deny` (licenses + advisories), `cargo audit`, `pnpm audit`; all builds run with `--locked`.
@@ -256,7 +262,7 @@ Each phase delivers working, tested code passing its gates. **No real deletion c
 ### Phase 0: Foundation (before any feature)
 - Workspace layout, `rust-toolchain.toml`, `clippy.toml`, `deny.toml`, CI running Static Gates (A).
 - `sweeper-testkit`: sandbox with sentinel, canary harness, junction/symlink helpers.
-- **Exit criterion:** CI passes and deliberately adding `std::fs::remove_file` anywhere in `backend/` or `bridge/` fails CI.
+- **Exit criterion:** CI passes and deliberately adding `std::fs::remove_file` anywhere in `app/backend/` or `app/bridge/` fails CI.
 
 ### Phase 1: Read-Only Core
 - `sweeper-winfs`: handle open, enumerate, `GetFinalPathNameByHandle`, reparse inspection (no delete primitives yet).

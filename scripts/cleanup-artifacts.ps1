@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-    Cleans temporary Sweeper build, test, and mutation artifacts strictly inside the project directory.
+    Cleans temporary Sweeper build, test, and mutation artifacts strictly inside the repository root.
 
 .DESCRIPTION
-    Operates strictly inside `$RepoRoot` (`<repo-root>`) and never touches
-    any directory outside the project folder (never touches `C:`, `.t3`, or user/system folders).
+    Operates strictly inside the repository root resolved from this script's location and never touches
+    any directory outside the project folder (never touches `C:` drive paths, `.t3`, or user/system folders).
     Removes unneeded transient artifacts automatically (skipping active build caches while
     `cargo`/`rustc` is running):
-      - `fuzz/target` (redundant when `CARGO_TARGET_DIR` points to `$RepoRoot\target`)
-      - `mutants.out`, `mutants.out.old` (`cargo-mutants` output)
-      - `frontend/test-results`, `frontend/playwright-report`, `frontend/.vite`, `frontend/coverage`
+      - `app/fuzz/target` (redundant when `CARGO_TARGET_DIR` points to the repo-root `target/`)
+      - `app/mutants.out*`, `app/target` (stray crate-local outputs)
+      - `app/frontend/test-results`, `app/frontend/playwright-report`, `app/frontend/.vite`, `app/frontend/coverage`
       - `target/tmp` and root `*.profraw` / `*.profdata`
-      - `$RepoRoot\target` cache when exceeding `-MaxTargetSizeGb` (or when `-PruneTargetCache` is passed)
+      - repo-root `target/` cache when exceeding `-MaxTargetSizeGb` (or when `-PruneTargetCache` is passed)
 #>
 param(
     [switch]$PruneTargetCache,
@@ -19,7 +19,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $NormRepoRoot = ([System.IO.Path]::GetFullPath($RepoRoot)).TrimEnd('\', '/')
 Push-Location $RepoRoot
 
@@ -38,27 +38,33 @@ function Remove-ProjectSubtreeSafe {
 try {
     $activeRustBuild = @(Get-Process -Name cargo, rustc -ErrorAction SilentlyContinue).Count -gt 0
 
-    # 1. Clean transient frontend & mutation output directories inside the project folder
+    # 1. Clean transient frontend & mutation output directories inside app/
     $alwaysTransientDirs = @(
-        (Join-Path $NormRepoRoot "frontend\test-results"),
-        (Join-Path $NormRepoRoot "frontend\playwright-report"),
-        (Join-Path $NormRepoRoot "frontend\.vite"),
-        (Join-Path $NormRepoRoot "frontend\coverage"),
-        (Join-Path $NormRepoRoot "mutants.out.old")
+        (Join-Path $NormRepoRoot "app\frontend\test-results"),
+        (Join-Path $NormRepoRoot "app\frontend\playwright-report"),
+        (Join-Path $NormRepoRoot "app\frontend\.vite"),
+        (Join-Path $NormRepoRoot "app\frontend\coverage"),
+        (Join-Path $NormRepoRoot "app\mutants.out.old")
     )
     foreach ($dir in $alwaysTransientDirs) {
         Remove-ProjectSubtreeSafe -PathToRemove $dir -Label "transient dir"
     }
 
-    # 2. Clean transient Rust build/fuzz/mutation directories inside the project folder when no compiler is running
+    # 2. Clean transient Rust build/fuzz/mutation directories inside app/ when no compiler is running
     if (-not $activeRustBuild) {
         $rustTransientDirs = @(
-            (Join-Path $NormRepoRoot "fuzz\target"),
+            (Join-Path $NormRepoRoot "app\fuzz\target"),
+            (Join-Path $NormRepoRoot "app\target"),
             (Join-Path $NormRepoRoot "target\tmp"),
-            (Join-Path $NormRepoRoot "mutants.out")
+            (Join-Path $NormRepoRoot "app\mutants.out")
         )
         foreach ($dir in $rustTransientDirs) {
             Remove-ProjectSubtreeSafe -PathToRemove $dir -Label "transient Rust dir"
+        }
+
+        # Additional mutants.out* variants under app/
+        Get-ChildItem -LiteralPath (Join-Path $NormRepoRoot "app") -Directory -Filter "mutants.out*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Remove-ProjectSubtreeSafe -PathToRemove $_.FullName -Label "mutants output"
         }
     }
 
@@ -73,15 +79,16 @@ try {
         }
     }
 
-    # 4. Keep $RepoRoot\target bounded
+    # 4. Keep repo-root target/ bounded
     $repoTarget = Join-Path $NormRepoRoot "target"
     if (Test-Path -LiteralPath $repoTarget) {
         $targetBytes = (Get-ChildItem -LiteralPath $repoTarget -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if (-not $targetBytes) { $targetBytes = 0 }
         $targetGb = [math]::Round(($targetBytes / 1GB), 2)
         Write-Host "Project target/ size: $targetGb GB ($repoTarget)"
         if ((-not $activeRustBuild) -and ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)) {
             Write-Host "Pruning project target/ cache (threshold: $MaxTargetSizeGb GB)..."
-            cargo clean 2>&1 | Out-Null
+            cargo clean --manifest-path (Join-Path $NormRepoRoot "app\Cargo.toml") 2>&1 | Out-Null
         } elseif ($activeRustBuild -and ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)) {
             Write-Host "Skipping project target/ prune because cargo/rustc is actively running."
         }

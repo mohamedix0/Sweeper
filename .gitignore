@@ -13,21 +13,29 @@
 
 # Node / Frontend
 node_modules/
-/frontend/dist/
-/frontend/.vite/
-/frontend/coverage/
-/frontend/test-results/
-/frontend/playwright-report/
+/app/frontend/dist/
+/app/frontend/.vite/
+/app/frontend/coverage/
+/app/frontend/test-results/
+/app/frontend/playwright-report/
+/app/frontend/node_modules/
 *.tsbuildinfo
 
 # Mutation / Profiling
 /mutants.out/
 /mutants.out.old/
+/app/mutants.out/
+/app/mutants.out.old/
+/app/mutants.out*/
+/app/target/
 *.profraw
 *.profdata
 
+# Fuzz
+/app/fuzz/target/
+
 # Tauri
-/bridge/sweeper-desktop/gen/
+/app/bridge/sweeper-desktop/gen/
 
 # Logs, local state, secrets
 *.log

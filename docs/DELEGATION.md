@@ -9,8 +9,8 @@
 
 ## 1. Orchestrator Identity & Authority
 
-- **Orchestrator Thread ID (T3 Code):** `<orchestrator-thread-id>`
 - **Role:** Project Manager, Orchestrator, Coordinator, and Decision-Maker.
+- **Zero Personal / Machine Data:** Never commit personal emails (must use GitHub `users.noreply.github.com`), real local Windows usernames or absolute machine paths (`D:\...`, `C:\Users\<real-user>`), internal session/thread UUIDs, API keys, or scan outputs containing real user paths. Keep docs, scripts, tests, and config machine-neutral and scrubbed.
 
 ## 2. Strict Delegation Operating Model
 
@@ -37,5 +37,5 @@ All sub-agents (implementation, research, testing, design, and review) must use 
 1. Every delegated task must state which crate/layer (`backend/`, `bridge/`, `frontend/`) it owns, which invariants apply, and which gates (A–H in [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)) must pass.
 2. Separate parallel implementation tasks writing to overlapping scopes should use `isolation: "worktree"` or strict directory boundaries (`sweeper-winfs`, `sweeper-core`, `sweeper-knowledge`, `sweeper-contract`, `sweeper-desktop`, `frontend`).
 3. Code review (`clean-code-guard`), test review (`test-guard`), and doc review (`docs-guard`) are dispatched as separate `review` sub-agent runs using the same standard sub-agent model configuration.
-4. Every sub-agent prompt must specify `$env:CARGO_TARGET_DIR = "<repo-root>\target"` (inside the project folder on `D:`) so temporary worktrees on `C:` never accumulate duplicate `target/` caches, and Playwright tests must use `channel: "msedge"`.
-5. After every ticket lands/merges (and on each periodic Watchdog tick), run `powershell -ExecutionPolicy Bypass -File scripts/cleanup-artifacts.ps1` to clean unneeded transient build/test/mutation outputs strictly inside the project directory (`<repo-root>`).
+4. Every sub-agent prompt must specify a repo-root Cargo target directory (for example `$env:CARGO_TARGET_DIR = (Join-Path (git rev-parse --show-toplevel) "target")`) so temporary worktrees on `C:` never accumulate duplicate `target/` caches, and Playwright tests must use `channel: "msedge"`.
+5. After every ticket lands/merges (and on each periodic Watchdog tick), run `powershell -ExecutionPolicy Bypass -File scripts/cleanup-artifacts.ps1` to clean unneeded transient build/test/mutation outputs strictly inside the repository root.

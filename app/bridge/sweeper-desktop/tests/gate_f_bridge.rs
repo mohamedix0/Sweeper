@@ -752,7 +752,9 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     // container roots (e.g. user profile/%TEMP%), but CARGO_TARGET_DIR is outside them.
     let sandbox_base = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target")
+        })
         .join("sweeper-test-sandboxes");
     let sandbox = Sandbox::new_in(&sandbox_base).unwrap();
     sandbox.assert_sentinel_present();

@@ -20,19 +20,22 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            app -> target
 
       - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+        run: cargo fmt --manifest-path app/Cargo.toml --all -- --check
 
-      - name: Gate A grep checks
+      - name: Gate A checks
         shell: pwsh
         run: ./scripts/gate-a-check.ps1
 
       - name: cargo clippy (workspace, all targets)
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --manifest-path app/Cargo.toml --workspace --all-targets --locked -- -D warnings
 
       - name: cargo test (workspace)
-        run: cargo test --workspace --locked
+        run: cargo test --manifest-path app/Cargo.toml --workspace --locked
 
       - name: Install cargo audit/deny tools
         uses: taiki-e/install-action@v2
@@ -40,9 +43,11 @@ jobs:
           tool: cargo-audit,cargo-deny
 
       - name: cargo deny
+        working-directory: app
         run: cargo deny check
 
       - name: cargo audit
+        working-directory: app
         run: cargo audit
 
       - name: Setup Node.js
@@ -56,21 +61,21 @@ jobs:
           version: 9
 
       - name: Frontend install
-        working-directory: frontend
+        working-directory: app/frontend
         run: pnpm install --frozen-lockfile
 
       - name: pnpm audit
-        working-directory: frontend
+        working-directory: app/frontend
         run: pnpm audit --audit-level=high
 
       - name: Frontend typecheck
-        working-directory: frontend
+        working-directory: app/frontend
         run: pnpm run typecheck
 
       - name: Frontend lint
-        working-directory: frontend
+        working-directory: app/frontend
         run: pnpm run lint
 
       - name: Frontend build
-        working-directory: frontend
+        working-directory: app/frontend
         run: pnpm run build
