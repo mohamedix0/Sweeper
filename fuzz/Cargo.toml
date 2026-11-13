@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 sweeper-core = { path = "../backend/sweeper-core" }
+sweeper-contract = { path = "../bridge/sweeper-contract" }
 
 [workspace]
 members = ["."]
@@ -17,6 +18,13 @@ members = ["."]
 [[bin]]
 name = "path_policy"
 path = "fuzz_targets/path_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contract_serde"
+path = "fuzz_targets/contract_serde.rs"
 test = false
 doc = false
 bench = false

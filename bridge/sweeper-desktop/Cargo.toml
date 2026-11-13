@@ -12,5 +12,16 @@ workspace = true
 [dependencies]
 sweeper-contract = { workspace = true }
 sweeper-core = { workspace = true }
-serde = { workspace = true }
+sweeper-knowledge = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tauri = { version = "2", default-features = false, features = ["wry", "isolation"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = ["isolation"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
