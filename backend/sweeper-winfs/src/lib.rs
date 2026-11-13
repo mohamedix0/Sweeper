@@ -15,20 +15,21 @@ use thiserror::Error;
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ENVVAR_NOT_FOUND, ERROR_FILE_NOT_FOUND,
-    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, HANDLE,
-    INVALID_HANDLE_VALUE,
+    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
+    FILETIME, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
-    FindNextFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
-    SetFileInformationByHandle, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
+    FindNextFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW, RemoveDirectoryW,
+    SetFileInformationByHandle, SetFileTime, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING, WIN32_FIND_DATAW,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING,
+    WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Environment::GetEnvironmentVariableW;
-use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
@@ -922,6 +923,153 @@ pub fn retire_log_file(path: &Path) -> Result<()> {
             context: "DeleteFileW(retire_log_file)",
             code: err,
         });
+    }
+    Ok(())
+}
+
+/// Create an NTFS directory junction (mount point reparse point) at `link` targeting `target`.
+///
+/// Test/support and NTFS primitive helper. The created link entry is a reparse point; callers must
+/// never traverse it as a directory during deletion/scanning of target contents.
+///
+/// # Safety and semantics
+/// - `link` must not already exist as a file/directory/junction (this function creates the link directory).
+/// - `target` is canonicalized and converted to an absolute NT path form for the substitute name.
+pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
+    let target_abs = std::fs::canonicalize(target).map_err(|e| WinfsError::Win32 {
+        context: "canonicalize(create_directory_junction target)",
+        code: e.raw_os_error().unwrap_or(0) as u32,
+    })?;
+    let target_text = target_abs
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .trim_start_matches(r"\\?\UNC\")
+        .to_string();
+    let target_dos = if target_abs.to_string_lossy().starts_with(r"\\?\UNC\") {
+        format!(r"\\{}", target_text)
+    } else {
+        target_text
+    };
+    let substitute_name = format!(r"\??\{}", target_dos);
+    let print_name = target_dos;
+
+    let mut sub_w: Vec<u16> = OsStr::new(&substitute_name).encode_wide().collect();
+    sub_w.push(0);
+    let mut print_w: Vec<u16> = OsStr::new(&print_name).encode_wide().collect();
+    print_w.push(0);
+
+    let sub_bytes_len = (sub_w.len() - 1) * 2;
+    let print_bytes_len = (print_w.len() - 1) * 2;
+    let sub_offset = 0usize;
+    let print_offset = sub_bytes_len + 2; // after substitute NUL terminator
+    let path_buffer_bytes = print_offset + print_bytes_len + 2;
+    let reparse_data_length = 8 + path_buffer_bytes; // mount point fields + path buffer
+    let total_size = 8 + reparse_data_length; // tag + data_len + reserved + data
+
+    let mut buf = vec![0u8; total_size];
+    // ReparseTag
+    buf[0..4].copy_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    // ReparseDataLength
+    buf[4..6].copy_from_slice(&(reparse_data_length as u16).to_le_bytes());
+    // Reserved = 0
+    // SubstituteNameOffset / Length
+    buf[8..10].copy_from_slice(&(sub_offset as u16).to_le_bytes());
+    buf[10..12].copy_from_slice(&(sub_bytes_len as u16).to_le_bytes());
+    // PrintNameOffset / Length
+    buf[12..14].copy_from_slice(&(print_offset as u16).to_le_bytes());
+    buf[14..16].copy_from_slice(&(print_bytes_len as u16).to_le_bytes());
+    // PathBuffer: substitute + NUL + print + NUL
+    let path_buf_start = 16usize;
+    for (i, ch) in sub_w.iter().enumerate() {
+        let off = path_buf_start + sub_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&ch.to_le_bytes());
+    }
+    for (i, ch) in print_w.iter().enumerate() {
+        let off = path_buf_start + print_offset + i * 2;
+        buf[off..off + 2].copy_from_slice(&ch.to_le_bytes());
+    }
+
+    std::fs::create_dir(link).map_err(|e| WinfsError::Win32 {
+        context: "CreateDirectory(create_directory_junction link)",
+        code: e.raw_os_error().unwrap_or(0) as u32,
+    })?;
+
+    let wide_link = to_wide(link);
+    // SAFETY: wide_link is NUL-terminated UTF-16 and valid for the call. The handle is opened on
+    // the newly created directory with reparse-point access and no following of link targets. On
+    // success we issue FSCTL_SET_REPARSE_POINT with a correctly sized mount-point buffer, then close
+    // the handle via SafeHandle/CloseHandle.
+    let handle = unsafe {
+        CreateFileW(
+            wide_link.as_ptr(),
+            FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES_ACCESS | SYNCHRONIZE_ACCESS,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        // SAFETY: best-effort cleanup of the just-created empty directory; `wide_link` is valid NUL-terminated UTF-16.
+        let _ = unsafe { RemoveDirectoryW(wide_link.as_ptr()) };
+        return Err(last_error("CreateFileW(create_directory_junction)"));
+    }
+    let sh = SafeHandle(handle);
+    let mut bytes_returned: u32 = 0;
+    // SAFETY: sh is a valid open handle to the directory reparse point. uf contains a valid
+    // IO_REPARSE_TAG_MOUNT_POINT reparse data buffer with lengths/offsets consistent with PathBuffer.
+    let ok = unsafe {
+        DeviceIoControl(
+            sh.raw(),
+            FSCTL_SET_REPARSE_POINT,
+            buf.as_ptr() as *const _,
+            buf.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let err = last_error("DeviceIoControl(FSCTL_SET_REPARSE_POINT)");
+        // SAFETY: best-effort cleanup of the directory we created for the failed junction setup.
+        let _ = unsafe { RemoveDirectoryW(wide_link.as_ptr()) };
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Set the last write time for a file or directory path (fast Win32 helper; no process spawn).
+///
+/// iletime is in Windows FILETIME units (100-nanosecond intervals since 1601-01-01 UTC).
+pub fn set_last_write_time(path: &Path, filetime: u64) -> Result<()> {
+    let wide = to_wide(path);
+    // SAFETY: NUL-terminated UTF-16 path buffer is valid for the call. Handle is opened for
+    // attribute write without following reparse points and closed via SafeHandle.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(last_error("CreateFileW(set_last_write_time)"));
+    }
+    let sh = SafeHandle(handle);
+    let ft = FILETIME {
+        dwLowDateTime: (filetime & 0xFFFF_FFFF) as u32,
+        dwHighDateTime: (filetime >> 32) as u32,
+    };
+    // SAFETY: sh is valid and t points to a valid FILETIME struct for the duration of call.
+    let ok = unsafe { SetFileTime(sh.raw(), std::ptr::null(), std::ptr::null(), &ft) };
+    if ok == 0 {
+        return Err(last_error("SetFileTime"));
     }
     Ok(())
 }

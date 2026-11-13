@@ -223,26 +223,12 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// Create a directory junction at `link` pointing to `target` (Windows).
+///
+/// Uses a direct Win32 reparse-point implementation (no `cmd.exe` spawn) for speed/reliability.
 #[cfg(windows)]
 pub fn create_junction(link: &Path, target: &Path) -> Result<()> {
-    let target_abs = fs::canonicalize(target)?;
-    let link_arg = link.to_string_lossy();
-    let target_arg = target_abs.to_string_lossy();
-    std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J", &*link_arg, &*target_arg])
-        .status()
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(format!(
-                    "mklink /J failed with status {status} for link '{}' -> target '{}'",
-                    link.display(),
-                    target_abs.display()
-                )))
-            }
-        })?;
-    Ok(())
+    sweeper_winfs::create_directory_junction(link, target)
+        .map_err(|e| TestkitError::Io(std::io::Error::other(e.to_string())))
 }
 
 /// Create a directory junction at `link` pointing to `target` (non-Windows stub).
@@ -308,11 +294,15 @@ pub fn set_file_attributes(path: &Path, attrs: u32) -> Result<()> {
     const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
     const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut cmd = std::process::Command::new("attrib");
+    cmd.creation_flags(CREATE_NO_WINDOW);
     // Clear all first, then set requested.
     cmd.arg("-R").arg("-H").arg("-S").arg(path);
     let _ = cmd.status();
     let mut cmd2 = std::process::Command::new("attrib");
+    cmd2.creation_flags(CREATE_NO_WINDOW);
     if (attrs & FILE_ATTRIBUTE_READONLY) != 0 {
         cmd2.arg("+R");
     }
@@ -338,35 +328,8 @@ pub fn set_file_attributes(path: &Path, attrs: u32) -> Result<()> {
 /// Set last write time for a path (FILETIME as 100ns intervals since 1601) for test setup.
 #[cfg(windows)]
 pub fn set_last_write_time(path: &Path, filetime: u64) -> Result<()> {
-    let ft = filetime as i64;
-    let p = to_extended_length_path(path);
-    let ps_path = p.to_string_lossy().replace('\'', "''");
-    let script = format!(
-        "$p = '{ps_path}'; if (Test-Path -LiteralPath $p -PathType Container) {{ [System.IO.Directory]::SetLastWriteTimeUtc($p, [DateTime]::FromFileTimeUtc({ft})) }} else {{ [System.IO.File]::SetLastWriteTimeUtc($p, [DateTime]::FromFileTimeUtc({ft})) }}"
-    );
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        // Best-effort fallback without extended prefix
-        let ps_path2 = path.to_string_lossy().replace('\'', "''");
-        let script2 = format!(
-            "$p = '{ps_path2}'; if (Test-Path -LiteralPath $p -PathType Container) {{ [System.IO.Directory]::SetLastWriteTimeUtc($p, [DateTime]::FromFileTimeUtc({ft})) }} else {{ [System.IO.File]::SetLastWriteTimeUtc($p, [DateTime]::FromFileTimeUtc({ft})) }}"
-        );
-        let status2 = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script2])
-            .status()?;
-        if status2.success() {
-            Ok(())
-        } else {
-            Err(TestkitError::Io(std::io::Error::other(format!(
-                "failed to set last write time for {}",
-                path.display()
-            ))))
-        }
-    }
+    sweeper_winfs::set_last_write_time(path, filetime)
+        .map_err(|e| TestkitError::Io(std::io::Error::other(e.to_string())))
 }
 
 /// Create a deep directory tree (iterative) of `depth` levels under `root`, returning the deepest path.

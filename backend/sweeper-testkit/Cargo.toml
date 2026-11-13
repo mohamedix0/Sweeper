@@ -15,6 +15,7 @@ hex = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
+sweeper-winfs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

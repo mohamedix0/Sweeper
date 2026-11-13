@@ -1,9 +1,10 @@
 #![cfg(windows)]
+#![allow(clippy::disallowed_methods)] // Test-only setup/cleanup; production removal is enforced in core::remover.
 
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::Command; // kept for other tests; TOCTOU hot loop uses fast Win32/testkit APIs
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -150,37 +151,39 @@ fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() 
     let target_root = sb.create_dir("target").unwrap();
     let canary = CanaryTree::seed_external("gate_d_toctou_shared").unwrap();
     let journal_dir = sb.create_dir("journal").unwrap();
+    let old_ft = sweeper_testkit::filetime_from_unix_secs(old_mtime_secs());
 
     for iter in 0..1005 {
         let sub = target_root.join(format!("sub_{iter}"));
-        // Best-effort cleanup from previous iteration artifacts.
-        let _ = Command::new("cmd")
-            .args(["/C", "rmdir", "/S", "/Q", &sub.to_string_lossy()])
-            .status();
-        let _ = Command::new("cmd")
-            .args(["/C", "rmdir", "/S", "/Q", &sub.to_string_lossy()])
-            .status();
+
+        // Best-effort cleanup from previous iteration artifacts without spawning cmd.exe.
+        // If `sub` is a junction, remove_dir removes the reparse point only.
+        let _ = fs::remove_file(sub.join("victim.txt"));
+        let _ = fs::remove_dir(&sub);
+        let _ = fs::remove_dir_all(&sub);
         fs::create_dir_all(&sub).unwrap();
-        let f = sub.join("victim.txt");
-        write_file(&f, format!("iter-{iter}").as_bytes());
-        set_filetime(&f, old_mtime_secs());
-        set_filetime(&sub, old_mtime_secs());
+
+        let victim = sub.join("victim.txt");
+        write_file(&victim, format!("iter-{iter}").as_bytes());
+        sweeper_testkit::set_last_write_time(&victim, old_ft).unwrap();
+        sweeper_testkit::set_last_write_time(&sub, old_ft).unwrap();
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_bg = stop.clone();
         let sub_bg = sub.clone();
         let canary_root = canary.root().to_path_buf();
+        let victim_bg = sub_bg.join("victim.txt");
         let handle = thread::spawn(move || {
             while !stop_bg.load(Ordering::Relaxed) {
-                let _ = Command::new("cmd")
-                    .args(["/C", "rmdir", "/S", "/Q", &sub_bg.to_string_lossy()])
-                    .status();
-                let _ = sweeper_testkit::create_junction(&sub_bg, &canary_root);
-                let _ = Command::new("cmd")
-                    .args(["/C", "rmdir", &sub_bg.to_string_lossy()])
-                    .status();
+                // Real-dir state: ensure directory+file exist.
+                let _ = fs::remove_dir(&sub_bg); // no-op unless it's a junction
                 let _ = fs::create_dir_all(&sub_bg);
-                let _ = fs::write(sub_bg.join("victim.txt"), b"x");
+                let _ = fs::write(&victim_bg, b"x");
+
+                // Swap to junction state pointing at external canary.
+                let _ = fs::remove_file(&victim_bg);
+                let _ = fs::remove_dir(&sub_bg);
+                let _ = sweeper_testkit::create_junction(&sub_bg, &canary_root);
             }
         });
 
@@ -204,6 +207,7 @@ fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() 
 
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
+
         assert!(
             canary.verify().is_ok(),
             "external canary modified on iteration {iter}"
