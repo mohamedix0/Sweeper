@@ -211,8 +211,8 @@ fn lexical_parse(input: &str) -> Result<CanonicalPath, PathError> {
     if input.as_bytes().contains(&0) {
         return Err(PathError::NulByte);
     }
-    if input.len() > 4096 {
-        // Guard against pathological inputs before deeper processing.
+    if input.len() > 32_767 {
+        // Guard against pathological inputs; allow legitimate extended-length NTFS paths.
         return Err(PathError::TooLong);
     }
     check_disallowed_unicode(input)?;
@@ -269,6 +269,10 @@ fn lexical_parse(input: &str) -> Result<CanonicalPath, PathError> {
         if raw_seg.is_empty() {
             // reject empty segments (e.g. C:\a\\b) and trailing separator creating empty tail handled below
             return Err(PathError::EmptySegment);
+        }
+        if raw_seg.len() > 255 {
+            // Guard against pathological component lengths while allowing deep trees.
+            return Err(PathError::TooLong);
         }
         if raw_seg == "." || raw_seg == ".." {
             return Err(PathError::Traversal);

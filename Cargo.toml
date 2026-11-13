@@ -21,6 +21,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 disallowed_methods = "deny"
 
+[profile.release]
+panic = "abort"
+
 [workspace.dependencies]
 sweeper-testkit = { path = "backend/sweeper-testkit" }
 sweeper-winfs = { path = "backend/sweeper-winfs" }

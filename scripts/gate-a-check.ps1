@@ -34,8 +34,7 @@ if ($removeHitsProd) {
 }
 
 # 2) Ban sweeper-winfs deletion symbols outside core::remover / sweeper-winfs.
-# No deletion primitives exist in Phase 0; reserve symbol names for future phases.
-$deletionSymbols = '(delete_by_handle|remove_by_handle|FileDispositionInfoEx|SetFileInformationByHandle\s*\(.*FileDisposition|sweeper_winfs::delete)'
+$deletionSymbols = '(delete_by_handle|remove_by_handle|set_file_disposition_delete|open_for_delete|clear_readonly_attribute|FileDispositionInfoEx|SetFileInformationByHandle\s*\(.*FileDisposition|sweeper_winfs::delete_file|sweeper_winfs::delete_dir)'
 $deletionHits = Get-ChildItem -Path $prodPaths -Recurse -Include *.rs -File |
   Where-Object {
     $_.FullName -notmatch '\\target\\' -and

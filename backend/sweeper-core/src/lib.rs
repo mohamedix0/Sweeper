@@ -1,7 +1,9 @@
 ﻿#![forbid(unsafe_code)]
 
+pub mod journal;
 pub mod paths;
 pub mod policy;
+pub mod remover;
 pub mod scanner;
 
 /// Deterministic fuzz entrypoint for path/policy validation.

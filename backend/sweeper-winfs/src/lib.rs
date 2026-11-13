@@ -1,25 +1,30 @@
-//! Raw Windows NTFS operations (read-only handle inspection).
-//! Sole crate permitted to contain `unsafe`. No deletion primitives.
+//! Raw Windows NTFS operations (read-only handle inspection and handle-based deletion primitives).
+//! Sole crate permitted to contain `unsafe`. All deletion primitives are invoked only by
+//! `sweeper-core::remover` (enforced by clippy/gate-a checks).
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use thiserror::Error;
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ENVVAR_NOT_FOUND, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES,
-    ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ENVVAR_NOT_FOUND, ERROR_FILE_NOT_FOUND,
+    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
-    FindNextFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING,
-    WIN32_FIND_DATAW,
+    FindNextFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
+    SetFileInformationByHandle, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Environment::GetEnvironmentVariableW;
@@ -64,7 +69,18 @@ pub const IO_REPARSE_TAG_CLOUD_E: u32 = 0x9000_E01A;
 /// Cloud placeholder tag variant.
 pub const IO_REPARSE_TAG_CLOUD_F: u32 = 0x9000_F01A;
 
-/// Errors returned by `sweeper-winfs` read-only operations.
+// File disposition constants (not all exposed by windows-sys 0.59 in every feature set).
+const FILE_DISPOSITION_INFO_CLASS: i32 = 4; // FileDispositionInfo
+const FILE_DISPOSITION_INFO_EX_CLASS: i32 = 21; // FileDispositionInfoEx
+const FILE_BASIC_INFO_CLASS: i32 = 0; // FileBasicInfo
+const FILE_DISPOSITION_FLAG_DELETE: u32 = 0x0000_0001;
+const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS: u32 = 0x0000_0002;
+const FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE: u32 = 0x0000_0010;
+const DELETE_ACCESS: u32 = 0x0001_0000;
+const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x0000_0080;
+const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+/// Errors returned by `sweeper-winfs` operations.
 #[derive(Debug, Error)]
 pub enum WinfsError {
     /// Win32 API failure with context and last OS error code.
@@ -156,6 +172,25 @@ pub struct DirEntry {
     pub reparse_tag: u32,
 }
 
+/// Snapshot of handle-observed metadata for moment-of-deletion re-validation.
+#[derive(Debug, Clone)]
+pub struct HandleInspection {
+    /// Canonical final path resolved from the opened handle.
+    pub final_path: String,
+    /// File identity (volume serial + file index).
+    pub identity: FileIdentity,
+    /// Raw file attributes.
+    pub attributes: u32,
+    /// Logical file size in bytes (0 for directories).
+    pub size: u64,
+    /// Reparse classification determined from handle attributes/tag.
+    pub reparse: ReparseTagClass,
+    /// Raw reparse tag if applicable (0 if none).
+    pub reparse_tag: u32,
+    /// Last write time FILETIME `(high, low)` as observed on the handle.
+    pub last_write_time: (u32, u32),
+}
+
 /// Open a file or directory handle for read-only inspection without following reparse points.
 ///
 /// Uses `FILE_FLAG_OPEN_REPARSE_POINT` and `FILE_FLAG_BACKUP_SEMANTICS` (for directories)
@@ -164,12 +199,13 @@ pub fn open_for_inspection(path: &Path) -> Result<SafeHandle> {
     let wide = to_wide(path);
     let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
     // SAFETY: `wide` is a NUL-terminated UTF-16 buffer that lives for the duration of the call.
-    // We request read attribute/access via share flags and no write/delete disposition; opening is
-    // strictly read-only. `FILE_FLAG_OPEN_REPARSE_POINT` ensures link points are not followed.
+    // We request no data access rights (metadata APIs used here do not require them) and open with
+    // broad share flags for read-only inspection. `FILE_FLAG_OPEN_REPARSE_POINT` ensures link
+    // points are not followed. `OPEN_EXISTING` opens only existing filesystem objects.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            0, // read-only inspection: no data access required for metadata APIs used here
+            0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null_mut(),
             OPEN_EXISTING,
@@ -183,22 +219,54 @@ pub fn open_for_inspection(path: &Path) -> Result<SafeHandle> {
     Ok(SafeHandle(handle))
 }
 
+/// Open a file or directory handle for handle-based deletion without following reparse points.
+///
+/// Uses `FILE_FLAG_OPEN_REPARSE_POINT` and `FILE_FLAG_BACKUP_SEMANTICS`, requests
+/// `DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE`, and share flags appropriate for safe deletion.
+pub fn open_for_delete(path: &Path) -> Result<SafeHandle> {
+    let wide = to_wide(path);
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+    // Include FILE_WRITE_ATTRIBUTES to allow clearing read-only via handle-based basic info update.
+    const FILE_WRITE_ATTRIBUTES_ACCESS: u32 = 0x0000_0100;
+    let access = DELETE_ACCESS
+        | FILE_READ_ATTRIBUTES_ACCESS
+        | FILE_WRITE_ATTRIBUTES_ACCESS
+        | SYNCHRONIZE_ACCESS;
+    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer valid for the call. The handle is opened
+    // with `OPEN_EXISTING` and `FILE_FLAG_OPEN_REPARSE_POINT` so reparse points (including link
+    // points) are not traversed. `DELETE` access is required for disposition-based deletion; share
+    // flags allow concurrent readers/writers where possible while still failing if another opener
+    // denies delete sharing (surfaced as a lock/skipped condition by callers).
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            flags,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(last_error("CreateFileW(open_for_delete)"));
+    }
+    Ok(SafeHandle(handle))
+}
+
 /// Resolve canonical path for an opened handle via `GetFinalPathNameByHandleW`.
 pub fn get_final_path(handle: &SafeHandle) -> Result<String> {
-    // VOLUME_NAME_DOS = 0x0
+    // VOLUME_NAME_DOS = 0x0, FILE_NAME_NORMALIZED = 0x0
     const VOLUME_NAME_DOS: u32 = 0;
-    // FILE_NAME_NORMALIZED = 0x0
     const FILE_NAME_NORMALIZED: u32 = 0;
     let flags = VOLUME_NAME_DOS | FILE_NAME_NORMALIZED;
-    // SAFETY: passing a valid handle and null buffer with size 0 is defined to query required
-    // length (including NUL). `handle` remains valid for the call.
+    // SAFETY: querying required length with null buffer and size 0 is valid for a live handle.
     let needed = unsafe { GetFinalPathNameByHandleW(handle.raw(), std::ptr::null_mut(), 0, flags) };
     if needed == 0 {
         return Err(last_error("GetFinalPathNameByHandleW(len)"));
     }
     let mut buf = vec![0u16; needed as usize];
-    // SAFETY: `buf` is writable for `needed` u16 elements and `handle` is valid. The API writes a
-    // NUL-terminated path string on success.
+    // SAFETY: `buf` is writable for `needed` UTF-16 code units and `handle` is valid/open.
     let written =
         unsafe { GetFinalPathNameByHandleW(handle.raw(), buf.as_mut_ptr(), needed, flags) };
     if written == 0 {
@@ -211,11 +279,10 @@ pub fn get_final_path(handle: &SafeHandle) -> Result<String> {
 
 /// Get file identity (volume serial + file index) via `GetFileInformationByHandle`.
 pub fn get_file_identity(handle: &SafeHandle) -> Result<FileIdentity> {
-    // SAFETY: zeroed `BY_HANDLE_FILE_INFORMATION` is valid to write into; `handle` must be valid
-    // and open, which `SafeHandle` guarantees while alive.
+    // SAFETY: `info` is zero-initialized writable storage of the exact structure expected by the API.
     let mut info: windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
         unsafe { std::mem::zeroed() };
-    // SAFETY: `info` points to writable memory of correct size for the duration of the call.
+    // SAFETY: `handle` is valid and `info` points to writable memory of the correct type/size.
     let ok = unsafe { GetFileInformationByHandle(handle.raw(), &mut info) };
     if ok == 0 {
         return Err(last_error("GetFileInformationByHandle"));
@@ -227,6 +294,233 @@ pub fn get_file_identity(handle: &SafeHandle) -> Result<FileIdentity> {
     })
 }
 
+/// Collect handle-observed inspection data for moment-of-deletion re-validation.
+pub fn inspect_handle(handle: &SafeHandle) -> Result<HandleInspection> {
+    let final_path = get_final_path(handle)?;
+    // SAFETY: zero-initialized BY_HANDLE_FILE_INFORMATION is valid writable storage for the call.
+    let mut info: windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
+        unsafe { std::mem::zeroed() };
+    // SAFETY: handle is valid and `info` is a correctly sized writable output buffer.
+    let ok = unsafe { GetFileInformationByHandle(handle.raw(), &mut info) };
+    if ok == 0 {
+        return Err(last_error("GetFileInformationByHandle(inspect)"));
+    }
+    let identity = FileIdentity {
+        volume_serial: info.dwVolumeSerialNumber,
+        file_index: ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64),
+    };
+    let attributes = info.dwFileAttributes;
+    let size = ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64);
+
+    // Deterministic test override (path-keyed) takes precedence when present.
+    if let Some(ov) = test_reparse_override_for_path(&final_path) {
+        let reparse_tag = match ov {
+            ReparseTagClass::OtherReparse(t) => t,
+            ReparseTagClass::CloudPlaceholder => IO_REPARSE_TAG_CLOUD,
+            ReparseTagClass::LinkPoint => IO_REPARSE_TAG_SYMLINK,
+            ReparseTagClass::NotReparse => 0,
+        };
+        return Ok(HandleInspection {
+            final_path,
+            identity,
+            attributes,
+            size,
+            reparse: ov,
+            reparse_tag,
+            last_write_time: (
+                info.ftLastWriteTime.dwHighDateTime,
+                info.ftLastWriteTime.dwLowDateTime,
+            ),
+        });
+    }
+
+    let mut reparse = if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        inspect_reparse_point(handle)?
+    } else {
+        ReparseTagClass::NotReparse
+    };
+    let mut reparse_tag = match reparse {
+        ReparseTagClass::NotReparse => 0,
+        ReparseTagClass::LinkPoint => 0,
+        ReparseTagClass::CloudPlaceholder => 0,
+        ReparseTagClass::OtherReparse(tag) => tag,
+    };
+    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && reparse_tag == 0 {
+        if let Some(tag) = query_reparse_tag(handle)? {
+            reparse_tag = tag;
+            reparse = classify_reparse_tag(tag);
+        } else {
+            reparse = ReparseTagClass::OtherReparse(0);
+            reparse_tag = 0;
+        }
+    }
+    Ok(HandleInspection {
+        final_path,
+        identity,
+        attributes,
+        size,
+        reparse,
+        reparse_tag,
+        last_write_time: (
+            info.ftLastWriteTime.dwHighDateTime,
+            info.ftLastWriteTime.dwLowDateTime,
+        ),
+    })
+}
+
+fn query_reparse_tag(handle: &SafeHandle) -> Result<Option<u32>> {
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut bytes_returned: u32 = 0;
+    // SAFETY: handle is valid; input buffer is null/0 for FSCTL_GET_REPARSE_POINT and output buffer
+    // is writable for `buf.len()` bytes with a valid bytes-returned pointer.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle.raw(),
+            FSCTL_GET_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr() as *mut _,
+            buf.len() as u32,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        const ERROR_NOT_A_REPARSE_POINT: u32 = 4390;
+        if err == ERROR_NOT_A_REPARSE_POINT {
+            return Ok(None);
+        }
+        return Err(WinfsError::Win32 {
+            context: "DeviceIoControl(FSCTL_GET_REPARSE_POINT)",
+            code: err,
+        });
+    }
+    if (bytes_returned as usize) < std::mem::size_of::<u32>() {
+        return Ok(Some(0));
+    }
+    // SAFETY: at least 4 bytes returned; first DWORD of reparse data buffer is the reparse tag.
+    let tag = unsafe { *(buf.as_ptr() as *const u32) };
+    Ok(Some(tag))
+}
+
+/// Clear the read-only attribute on an opened handle (best-effort support for deletion in valid targets).
+pub fn clear_readonly_attribute(handle: &SafeHandle) -> Result<()> {
+    let attrs = handle_file_attributes(handle)?;
+    if (attrs & FILE_ATTRIBUTE_READONLY) == 0 {
+        return Ok(());
+    }
+    let mut new_attrs = attrs & !FILE_ATTRIBUTE_READONLY;
+    if new_attrs == 0 {
+        // FILE_BASIC_INFO.FileAttributes == 0 means "no change"; use FILE_ATTRIBUTE_NORMAL for files.
+        new_attrs = 0x80; // FILE_ATTRIBUTE_NORMAL
+    }
+    // Ensure directory attribute is preserved if set.
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        new_attrs |= FILE_ATTRIBUTE_DIRECTORY;
+        new_attrs &= !0x80;
+        if new_attrs == 0 {
+            new_attrs = FILE_ATTRIBUTE_DIRECTORY;
+        }
+    }
+    // SAFETY: zero-initialized FILE_BASIC_INFO is valid; zero time fields mean "do not change".
+    let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    basic.FileAttributes = new_attrs;
+    // SAFETY: handle is valid and `basic` points to initialized FILE_BASIC_INFO of correct size.
+    let set_ok = unsafe {
+        SetFileInformationByHandle(
+            handle.raw(),
+            FILE_BASIC_INFO_CLASS,
+            &basic as *const _ as *const _,
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if set_ok == 0 {
+        return Err(last_error(
+            "SetFileInformationByHandle(FileBasicInfo clear readonly)",
+        ));
+    }
+    Ok(())
+}
+
+/// Mark an opened handle for deletion using `FileDispositionInfoEx` with POSIX semantics.
+///
+/// On `ERROR_INVALID_FUNCTION` / `ERROR_NOT_SUPPORTED`, falls back to `FileDispositionInfo`.
+/// Never falls back to path-based deletion.
+pub fn set_file_disposition_delete(handle: &SafeHandle) -> Result<()> {
+    #[repr(C)]
+    struct FileDispositionInfoEx {
+        flags: u32,
+    }
+    #[repr(C)]
+    struct FileDispositionInfo {
+        delete_file: u8,
+    }
+
+    let info_ex = FileDispositionInfoEx {
+        flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    };
+    // SAFETY: handle is valid and points to initialized FileDispositionInfoEx for correct class/size.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            handle.raw(),
+            FILE_DISPOSITION_INFO_EX_CLASS,
+            &info_ex as *const _ as *const _,
+            std::mem::size_of::<FileDispositionInfoEx>() as u32,
+        )
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    let err = unsafe { GetLastError() };
+    if err == ERROR_INVALID_FUNCTION || err == ERROR_NOT_SUPPORTED {
+        let info = FileDispositionInfo { delete_file: 1 };
+        // SAFETY: handle is valid; fallback uses documented FileDispositionInfo class/size only.
+        let ok2 = unsafe {
+            SetFileInformationByHandle(
+                handle.raw(),
+                FILE_DISPOSITION_INFO_CLASS,
+                &info as *const _ as *const _,
+                std::mem::size_of::<FileDispositionInfo>() as u32,
+            )
+        };
+        if ok2 != 0 {
+            return Ok(());
+        }
+        return Err(WinfsError::Win32 {
+            context: "SetFileInformationByHandle(FileDispositionInfo fallback)",
+            code: unsafe { GetLastError() },
+        });
+    }
+    Err(WinfsError::Win32 {
+        context: "SetFileInformationByHandle(FileDispositionInfoEx)",
+        code: err,
+    })
+}
+
+// File/directory deletion is performed by `sweeper-core::remover` via `open_for_delete` + disposition.
+
+/// Returns true if a Win32 error code indicates a sharing/lock condition for delete attempts.
+pub fn is_sharing_violation(code: u32) -> bool {
+    // ERROR_SHARING_VIOLATION = 32
+    code == 32 || code == ERROR_ACCESS_DENIED
+}
+
+/// Get raw attributes for an opened handle.
+pub fn handle_file_attributes(handle: &SafeHandle) -> Result<u32> {
+    // SAFETY: zeroed output struct is valid for GetFileInformationByHandle.
+    let mut info: windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
+        unsafe { std::mem::zeroed() };
+    // SAFETY: handle is valid and output buffer is correctly typed/sized.
+    let ok = unsafe { GetFileInformationByHandle(handle.raw(), &mut info) };
+    if ok == 0 {
+        return Err(last_error("GetFileInformationByHandle(attributes)"));
+    }
+    Ok(info.dwFileAttributes)
+}
+
 /// Read-only handle-aware directory enumeration.
 ///
 /// Uses `FindFirstFileExW` with `FIND_FIRST_EX_LARGE_FETCH`. Never follows `Link Point`s:
@@ -234,11 +528,10 @@ pub fn get_file_identity(handle: &SafeHandle) -> Result<FileIdentity> {
 pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntry>> {
     let pattern = dir.join("*");
     let wide = to_wide(&pattern);
-    // SAFETY: zeroed `WIN32_FIND_DATAW` is a valid output buffer for FindFirstFileExW/Next.
+    // SAFETY: zeroed WIN32_FIND_DATAW is valid writable output for find APIs.
     let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
-    // SAFETY: `wide` is NUL-terminated and lives for the call; `data` is writable. We request basic
-    // info with large fetch for efficiency. Enumeration is read-only and does not follow reparse
-    // targets (it only lists entries in `dir`).
+    // SAFETY: `wide` is NUL-terminated and valid for the call; `data` is writable. Enumeration is
+    // read-only and lists entries in `dir` without traversing reparse targets.
     let handle = unsafe {
         FindFirstFileExW(
             wide.as_ptr(),
@@ -265,12 +558,11 @@ pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntry>> {
         if name != OsStr::new(".") && name != OsStr::new("..") {
             entries.push(dir_entry_from_find_data(dir, &data, name));
         }
-        // SAFETY: `handle` is a valid find handle from FindFirstFileExW and `data` is writable.
-        // Advancing enumeration is read-only.
+        // SAFETY: find handle and data buffer are valid for advancing enumeration.
         let ok = unsafe { FindNextFileW(handle, &mut data) };
         if ok == 0 {
             let err = unsafe { GetLastError() };
-            // SAFETY: closing the valid find handle once after enumeration completes/fails.
+            // SAFETY: close the valid find handle exactly once before returning/breaking.
             unsafe { FindClose(handle) };
             if err == ERROR_NO_MORE_FILES {
                 break;
@@ -305,7 +597,7 @@ pub fn classify_reparse_tag(tag: u32) -> ReparseTagClass {
         | IO_REPARSE_TAG_CLOUD_D
         | IO_REPARSE_TAG_CLOUD_E
         | IO_REPARSE_TAG_CLOUD_F => ReparseTagClass::CloudPlaceholder,
-        // Conservative heuristic for cldflt/cloud placeholder families (0x9000_001A-style).
+        // Conservative heuristic for cldflt/cloud placeholder families (0x9000_x01A-style).
         other if (other & 0xF000_FFFF) == 0x9000_001A => ReparseTagClass::CloudPlaceholder,
         other => ReparseTagClass::OtherReparse(other),
     }
@@ -315,11 +607,12 @@ pub fn classify_reparse_tag(tag: u32) -> ReparseTagClass {
 ///
 /// Returns `ReparseTagClass::NotReparse` if the handle/path is not a reparse point.
 pub fn inspect_reparse_point(handle: &SafeHandle) -> Result<ReparseTagClass> {
-    // Buffer large enough for common reparse data; MAXIMUM_REPARSE_DATA_BUFFER_SIZE is 16384.
+    if let Some(ov) = test_reparse_override_for_handle(handle) {
+        return Ok(ov);
+    }
     let mut buf = vec![0u8; 16 * 1024];
     let mut bytes_returned: u32 = 0;
-    // SAFETY: `handle` is valid. `buf` is writable for its full length and `bytes_returned` points
-    // to writable u32. DeviceIoControl with FSCTL_GET_REPARSE_POINT reads reparse metadata only.
+    // SAFETY: handle is valid; output buffer and bytes_returned are writable for the call.
     let ok = unsafe {
         DeviceIoControl(
             handle.raw(),
@@ -334,7 +627,6 @@ pub fn inspect_reparse_point(handle: &SafeHandle) -> Result<ReparseTagClass> {
     };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        // ERROR_NOT_A_REPARSE_POINT = 4390
         const ERROR_NOT_A_REPARSE_POINT: u32 = 4390;
         if err == ERROR_NOT_A_REPARSE_POINT {
             return Ok(ReparseTagClass::NotReparse);
@@ -347,7 +639,7 @@ pub fn inspect_reparse_point(handle: &SafeHandle) -> Result<ReparseTagClass> {
     if (bytes_returned as usize) < std::mem::size_of::<u32>() {
         return Ok(ReparseTagClass::OtherReparse(0));
     }
-    // SAFETY: buffer contains at least 4 bytes on success; first field of reparse data is tag.
+    // SAFETY: buffer contains at least 4 bytes; first field of reparse data buffer is the tag.
     let tag = unsafe { *(buf.as_ptr() as *const u32) };
     Ok(classify_reparse_tag(tag))
 }
@@ -370,35 +662,30 @@ pub enum KnownFolderId {
 impl KnownFolderId {
     fn guid(self) -> GUID {
         match self {
-            // FOLDERID_LocalAppData {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
             Self::LocalAppData => GUID {
                 data1: 0xF1B3_2785,
                 data2: 0x6FBA,
                 data3: 0x4FCF,
                 data4: [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91],
             },
-            // FOLDERID_RoamingAppData {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}
             Self::RoamingAppData => GUID {
                 data1: 0x3EB6_85DB,
                 data2: 0x65F9,
                 data3: 0x4CF6,
                 data4: [0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D],
             },
-            // FOLDERID_Profile {5E6C858F-0E22-4760-9AFE-EA3317B67173}
             Self::UserProfile => GUID {
                 data1: 0x5E6C_858F,
                 data2: 0x0E22,
                 data3: 0x4760,
                 data4: [0x9A, 0xFE, 0xEA, 0x33, 0x17, 0xB6, 0x71, 0x73],
             },
-            // FOLDERID_Windows {F38BF404-1D43-42F2-9305-67DE0B28FC23}
             Self::Windows => GUID {
                 data1: 0xF38B_F404,
                 data2: 0x1D43,
                 data3: 0x42F2,
                 data4: [0x93, 0x05, 0x67, 0xDE, 0x0B, 0x28, 0xFC, 0x23],
             },
-            // FOLDERID_ProgramData {62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}
             Self::ProgramData => GUID {
                 data1: 0x62AB_5D82,
                 data2: 0xFDC1,
@@ -409,21 +696,17 @@ impl KnownFolderId {
     }
 }
 
-/// Resolve a known folder to its filesystem path using `SHGetKnownFolderPath` (`FOLDERID_*`).
+/// Resolve a known folder to its filesystem path using `SHGetKnownFolderPath`.
 pub fn resolve_known_folder(id: KnownFolderId) -> Result<PathBuf> {
     let guid = id.guid();
     known_folder_path(&guid)
 }
 
-/// Read-only Known Folder path resolution helper using `SHGetKnownFolderPath`.
-///
-/// The caller provides a known folder `GUID` (e.g. `FOLDERID_*` constants). Prefer
-/// [`resolve_known_folder`] for supported Sweeper known folders.
+/// Resolve a Known Folder path from a GUID using `SHGetKnownFolderPath`.
 pub fn known_folder_path(folder_id: &GUID) -> Result<PathBuf> {
     let mut path_ptr: *mut u16 = std::ptr::null_mut();
-    // SAFETY: `folder_id` points to a valid `GUID` for the duration of the call. `path_ptr` is a
-    // writable out parameter; on success SHGetKnownFolderPath allocates a NUL-terminated UTF-16
-    // string with CoTaskMemAlloc that we must free via CoTaskMemFree.
+    // SAFETY: `folder_id` is a valid GUID pointer for the call. On success `path_ptr` receives a
+    // CoTaskMem-allocated NUL-terminated UTF-16 string that must be freed with CoTaskMemFree.
     let hr = unsafe {
         SHGetKnownFolderPath(
             folder_id,
@@ -444,8 +727,7 @@ pub fn known_folder_path(folder_id: &GUID) -> Result<PathBuf> {
             code: 0,
         });
     }
-    // SAFETY: on success `path_ptr` is a valid NUL-terminated UTF-16 string allocated by COM task
-    // memory allocator and remains valid until freed.
+    // SAFETY: on success `path_ptr` is a valid NUL-terminated UTF-16 string allocated by COM.
     let path = unsafe {
         let mut len = 0usize;
         while *path_ptr.add(len) != 0 {
@@ -455,8 +737,7 @@ pub fn known_folder_path(folder_id: &GUID) -> Result<PathBuf> {
         let os = OsString::from_wide(slice);
         PathBuf::from(os)
     };
-    // SAFETY: `path_ptr` was allocated by SHGetKnownFolderPath/CoTaskMemAlloc on success and must
-    // be released exactly once with CoTaskMemFree.
+    // SAFETY: free the CoTaskMem-allocated buffer exactly once.
     unsafe { CoTaskMemFree(path_ptr as *const _) };
     Ok(path)
 }
@@ -464,7 +745,7 @@ pub fn known_folder_path(folder_id: &GUID) -> Result<PathBuf> {
 /// Read-only environment variable helper using `GetEnvironmentVariableW`.
 pub fn env_var(name: &str) -> Option<String> {
     let wide_name = to_wide_os(OsStr::new(name));
-    // SAFETY: query required size with null buffer/0; `wide_name` is NUL-terminated.
+    // SAFETY: querying required size with null buffer/0 is valid; `wide_name` is NUL-terminated.
     let needed = unsafe { GetEnvironmentVariableW(wide_name.as_ptr(), std::ptr::null_mut(), 0) };
     if needed == 0 {
         let err = unsafe { GetLastError() };
@@ -474,7 +755,7 @@ pub fn env_var(name: &str) -> Option<String> {
         return None;
     }
     let mut buf = vec![0u16; needed as usize];
-    // SAFETY: `buf` is writable for `needed` elements; API writes value including NUL on success.
+    // SAFETY: buffer is writable for `needed` elements for the duration of the call.
     let written = unsafe { GetEnvironmentVariableW(wide_name.as_ptr(), buf.as_mut_ptr(), needed) };
     if written == 0 {
         return None;
@@ -482,6 +763,8 @@ pub fn env_var(name: &str) -> Option<String> {
     let slice = &buf[..written as usize];
     String::from_utf16(slice).ok()
 }
+
+// (intentionally no extra FFI; keep unsafe surface minimal and use available windows-sys APIs)
 
 fn dir_entry_from_find_data(dir: &Path, data: &WIN32_FIND_DATAW, name: OsString) -> DirEntry {
     let attrs = data.dwFileAttributes;
@@ -525,7 +808,6 @@ fn to_wide(path: &Path) -> Vec<u16> {
     {
         let s = path.as_os_str();
         let text = s.to_string_lossy();
-        // For absolute drive paths, use extended-length prefix to support >260 chars reliably.
         if text.len() >= 260
             && !text.starts_with(r"\\?\")
             && !text.starts_with(r"\\.\")
@@ -550,7 +832,96 @@ fn os_string_from_wide_buf(buf: &[u16]) -> OsString {
 }
 
 fn last_error(context: &'static str) -> WinfsError {
-    // SAFETY: `GetLastError` reads thread-local last-error state and has no preconditions.
+    // SAFETY: reads thread-local last-error state with no preconditions.
     let code = unsafe { GetLastError() };
     WinfsError::Win32 { context, code }
+}
+
+/* test hook state helpers defined below */
+
+fn test_reparse_override_map() -> &'static Mutex<HashMap<String, ReparseTagClass>> {
+    static MAP: OnceLock<Mutex<HashMap<String, ReparseTagClass>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalize_test_path_key(path: &str) -> String {
+    path.trim_start_matches(r"\\?\")
+        .replace('/', "\\")
+        .to_ascii_uppercase()
+}
+
+fn test_reparse_override_for_path(path: &str) -> Option<ReparseTagClass> {
+    let key = normalize_test_path_key(path);
+    let map = test_reparse_override_map().lock().ok()?;
+    if let Some(v) = map.get(&key).copied() {
+        return Some(v);
+    }
+    // Also try lexical-normalized form if path is parseable.
+    if let Ok(p) =
+        std::path::PathBuf::from(path.strip_prefix(r"\\?\").unwrap_or(path)).canonicalize()
+    {
+        let k2 = normalize_test_path_key(&p.to_string_lossy());
+        return map.get(&k2).copied();
+    }
+    None
+}
+
+fn test_reparse_override_for_handle(handle: &SafeHandle) -> Option<ReparseTagClass> {
+    let path = get_final_path(handle).ok()?;
+    test_reparse_override_for_path(&path)
+}
+
+/// Deterministic test hook for reparse classification (used by Gate D tag-matrix tests).
+pub fn set_test_reparse_override(path: &Path, class: Option<ReparseTagClass>) {
+    if let Ok(mut map) = test_reparse_override_map().lock() {
+        let s = path.to_string_lossy().to_string();
+        let keys = [
+            normalize_test_path_key(&s),
+            normalize_test_path_key(&s.replace('/', "\\")),
+        ];
+        match class {
+            Some(c) => {
+                for k in keys {
+                    map.insert(k, c);
+                }
+            }
+            None => {
+                for k in keys {
+                    map.remove(&k);
+                }
+            }
+        }
+    }
+}
+
+/// Return `true` if a Win32 error likely indicates the path/object is missing.
+pub fn is_not_found(code: u32) -> bool {
+    matches!(code, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+}
+
+/// Return `true` if an open-for-delete error likely indicates a lock/sharing conflict.
+pub fn is_lock_like_error(code: u32) -> bool {
+    is_sharing_violation(code)
+}
+
+/// Retire (delete) a Sweeper journal/log file by path.
+///
+/// This is a narrow maintenance helper for log rotation (not a `Clean` target deletion primitive).
+pub fn retire_log_file(path: &Path) -> Result<()> {
+    let wide = to_wide(path);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path buffer valid for the call. Deleting a
+    // specific log file path during journal rotation is maintenance of Sweeper-owned logs and does
+    // not traverse reparse points as deletion targets in `Clean`.
+    let ok = unsafe { windows_sys::Win32::Storage::FileSystem::DeleteFileW(wide.as_ptr()) };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        if is_not_found(err) {
+            return Ok(());
+        }
+        return Err(WinfsError::Win32 {
+            context: "DeleteFileW(retire_log_file)",
+            code: err,
+        });
+    }
+    Ok(())
 }

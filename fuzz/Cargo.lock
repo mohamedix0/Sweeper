@@ -3119,6 +3119,7 @@ name = "sweeper-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "sweeper-knowledge",
  "sweeper-winfs",
  "thiserror 2.0.21",
