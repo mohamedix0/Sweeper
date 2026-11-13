@@ -65,7 +65,10 @@ fn validate_custom_paths_value(value: &serde_json::Value) -> Result<(), String> 
     Ok(())
 }
 
-/// Persist settings JSON to disk safely (creates parent directories; temp write with best-effort replace).
+/// Persist settings JSON to disk safely (creates parent directories).
+///
+/// Writes directly to the target path to avoid orphaned temp files and to remain
+/// compatible with gate-a rules (no remove/unlink in production backend code).
 pub fn persist_settings_json<T>(path: &Path, settings: &T) -> Result<(), String>
 where
     T: Serialize,
@@ -75,13 +78,7 @@ where
     }
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("failed to serialize settings: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json.as_bytes()).map_err(|e| format!("failed to write settings: {e}"))?;
-    if fs::rename(&tmp, path).is_ok() {
-        return Ok(());
-    }
-    // Fallback: direct write (avoids banned remove_file in production code paths).
-    fs::write(path, json.as_bytes()).map_err(|e| format!("failed to persist settings: {e}"))
+    fs::write(path, json.as_bytes()).map_err(|e| format!("failed to write settings: {e}"))
 }
 
 /// Load settings JSON from disk, returning `None` on missing/invalid/unreadable input.

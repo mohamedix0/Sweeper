@@ -65,9 +65,18 @@ pub struct Sandbox {
 impl Sandbox {
     /// Create a new isolated sandbox with a sentinel file at its root.
     pub fn new() -> Result<Self> {
+        Self::new_in(std::env::temp_dir())
+    }
+
+    /// Create a new isolated sandbox under `base_dir` with a sentinel file at its root.
+    ///
+    /// Useful for tests that must satisfy path-policy constraints that reject locations
+    /// under protected container roots (e.g. `%TEMP%` inside a user profile on Windows).
+    pub fn new_in(base_dir: impl AsRef<Path>) -> Result<Self> {
+        fs::create_dir_all(base_dir.as_ref())?;
         let dir = tempfile::Builder::new()
             .prefix("sweeper-sandbox-")
-            .tempdir()?;
+            .tempdir_in(base_dir)?;
         let root = dir.path().to_path_buf();
         let sentinel = root.join(SENTINEL_FILE_NAME);
         let mut f = fs::File::create(&sentinel)?;

@@ -747,35 +747,31 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     let state = make_state();
     let settings_gen = state.settings.lock().unwrap().generation();
 
+    // Sentinel-guarded per-test sandbox (auto-cleaned on Drop) and external canary.
+    // Use CARGO_TARGET_DIR as base: custom-path validation rejects descendants of protected
+    // container roots (e.g. user profile/%TEMP%), but CARGO_TARGET_DIR is outside them.
+    let sandbox_base = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("sweeper-test-sandboxes");
+    let sandbox = Sandbox::new_in(&sandbox_base).unwrap();
+    sandbox.assert_sentinel_present();
     let canary = CanaryTree::seed_external("gate-f-analyzer-custom-root").unwrap();
 
-    // Custom path validation rejects descendants of protected container roots (e.g. C:\Users),
-    // so create a deep, non-protected test directory under the configured Cargo target dir on D:.
-    let base = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
-    let unique = format!(
-        "sweeper-custom-root-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let root_path = base.join("tmp-tests").join(unique).join("CustomCleanRoot");
-    fs::create_dir_all(&root_path).unwrap();
-    let inside = root_path.join("old.tmp");
-    fs::write(&inside, b"bye").unwrap();
-    let nested_dir = root_path.join("nested");
-    fs::create_dir_all(&nested_dir).unwrap();
-    let nested = nested_dir.join("x.tmp");
-    fs::write(&nested, b"x").unwrap();
-    assert!(root_path.exists() && inside.exists() && nested_dir.exists() && nested.exists());
+    let root_path = sandbox.create_dir("CustomCleanRoot").unwrap();
+    let inside = sandbox
+        .write_file("CustomCleanRoot\\old.tmp", b"bye")
+        .unwrap();
+    let _nested_dir = sandbox.create_dir("CustomCleanRoot\\nested").unwrap();
+    let nested = sandbox
+        .write_file("CustomCleanRoot\\nested\\x.tmp", b"x")
+        .unwrap();
+    assert!(root_path.exists() && inside.exists() && nested.exists());
 
     let verdict = sweeper_core::policy::validate_custom_path(&root_path.to_string_lossy());
     assert!(
         verdict.allowed,
-        "test root must be a valid custom path for this environment: {} ({})",
+        "sandbox custom path root must be valid for this environment: {} ({})",
         root_path.display(),
         verdict.reason
     );
@@ -867,6 +863,7 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     assert!(!exec.aborted, "abort_reason={:?}", exec.abort_reason);
 
     // Custom-path root directory itself must survive; eligible contents cleaned.
+    sandbox.assert_sentinel_present();
     assert!(
         root_path.exists(),
         "custom-path root directory must be preserved"
