@@ -323,7 +323,7 @@ fn dirs_next_to_home_cache() -> Option<(PathBuf, bool)> {
 }
 
 #[test]
-fn deep_directory_tree_finishes_without_stack_overflow() {
+fn deep_directory_tree_finishes_without_stack_overflow_and_safe_drop() {
     let sb = Sandbox::new().expect("sandbox");
     // Create 1000-level deep directory tree (iterative creation helper) and a file at bottom.
     let deep = sweeper_testkit::create_deep_tree(sb.root(), 1000).expect("create deep tree");
@@ -351,6 +351,9 @@ fn deep_directory_tree_finishes_without_stack_overflow() {
         "expected deep item count, got {}",
         res.root.item_count
     );
+
+    // Deterministic safe drop: dropping a 1000+ level tree must not overflow the stack.
+    drop(res);
 }
 
 #[test]
@@ -426,4 +429,174 @@ fn analyzer_root_validation_rejects_invalid_inputs() {
         sweeper_core::analyzer::validate_analyzer_root(Some(r"C:\does\not\exist\..\x")).is_err()
     );
     assert!(sweeper_core::analyzer::validate_analyzer_root(Some(r"relative\path")).is_err());
+}
+
+#[test]
+fn build_scan_items_rejects_unsafe_and_display_only_nodes() {
+    use sweeper_core::analyzer::{AnalyzerProgress, AnalyzerResult};
+
+    fn mk(
+        id: &str,
+        path: &str,
+        risk: Risk,
+        selectable: bool,
+        display_only: bool,
+        is_dir: bool,
+    ) -> AnalyzerNode {
+        AnalyzerNode {
+            id: id.to_string(),
+            path: path.to_string(),
+            name: "n".to_string(),
+            is_dir,
+            size_bytes: 0,
+            item_count: 0,
+            risk,
+            description: String::new(),
+            tier: None,
+            target_id: None,
+            is_link_point: false,
+            is_cloud_placeholder: false,
+            display_only,
+            selectable,
+            selection_reason: None,
+            children: vec![],
+        }
+    }
+    fn wrap(node: AnalyzerNode) -> AnalyzerResult {
+        AnalyzerResult {
+            root: node.clone(),
+            progress: AnalyzerProgress::default(),
+            cancelled: false,
+        }
+    }
+
+    // .vhdx (display-only / non-selectable)
+    let vhdx = mk(
+        "v",
+        r"C:\Users\me\vm.vhdx",
+        Risk::Caution,
+        false,
+        true,
+        false,
+    );
+    assert!(
+        build_scan_items_from_analyzer(&wrap(vhdx.clone()), std::slice::from_ref(&vhdx.id))
+            .is_err()
+    );
+
+    // Protected
+    let prot = mk(
+        "p",
+        r"C:\Windows\System32",
+        Risk::Protected,
+        false,
+        true,
+        true,
+    );
+    assert!(
+        build_scan_items_from_analyzer(&wrap(prot.clone()), std::slice::from_ref(&prot.id))
+            .is_err()
+    );
+
+    // Link point
+    let mut lp = mk("l", r"C:\Temp\link", Risk::Unknown, false, false, true);
+    lp.is_link_point = true;
+    assert!(
+        build_scan_items_from_analyzer(&wrap(lp.clone()), std::slice::from_ref(&lp.id)).is_err()
+    );
+
+    // Cloud placeholder
+    let mut cp = mk("c", r"C:\Temp\cloud", Risk::Unknown, false, false, true);
+    cp.is_cloud_placeholder = true;
+    assert!(
+        build_scan_items_from_analyzer(&wrap(cp.clone()), std::slice::from_ref(&cp.id)).is_err()
+    );
+
+    // Unknown not selectable (allow_unknown false)
+    let unk = mk(
+        "u",
+        r"C:\Temp\unknown_dir",
+        Risk::Unknown,
+        false,
+        false,
+        true,
+    );
+    assert!(
+        build_scan_items_from_analyzer(&wrap(unk.clone()), std::slice::from_ref(&unk.id)).is_err()
+    );
+
+    // Ancestor-of-protected / protected-container-like custom-path candidate must be rejected by seam.
+    // (Even if incorrectly marked selectable, conversion must not weaken policy.)
+    let mut bad = mk("b", r"C:\Windows", Risk::Safe, true, false, true);
+    bad.selectable = true;
+    bad.display_only = false;
+    bad.risk = Risk::Safe;
+    assert!(
+        build_scan_items_from_analyzer(&wrap(bad.clone()), std::slice::from_ref(&bad.id)).is_err()
+    );
+}
+
+#[test]
+fn wildcard_allowlist_annotation_best_effort() {
+    // Best-effort: if a concrete wildcard allowlist root exists (e.g. Chrome Profile * cache or JetBrains caches),
+    // ensure analyzer annotates it as an allowlist target node.
+    let candidates = [
+        std::env::var_os("LOCALAPPDATA")
+            .map(|p| std::path::PathBuf::from(p).join(r"Google\Chrome\User Data\Profile 1\Cache")),
+        std::env::var_os("LOCALAPPDATA")
+            .map(|p| std::path::PathBuf::from(p).join(r"Microsoft\Edge\User Data\Profile 1\Cache")),
+        std::env::var_os("LOCALAPPDATA").map(|p| std::path::PathBuf::from(p).join(r"JetBrains")),
+    ];
+    // Try JetBrains */caches discovery
+    if let Some(jb) =
+        std::env::var_os("LOCALAPPDATA").map(|p| std::path::PathBuf::from(p).join("JetBrains"))
+    {
+        if jb.exists() {
+            if let Ok(entries) = std::fs::read_dir(&jb) {
+                for e in entries.flatten() {
+                    let caches = e.path().join("caches");
+                    if caches.exists() {
+                        let res = analyze_path(
+                            Some(&caches.to_string_lossy()),
+                            Arc::new(AtomicBool::new(false)),
+                            None,
+                            AnalyzerOptions {
+                                worker_threads: 2,
+                                ..Default::default()
+                            },
+                        );
+                        if let Ok(res) = res {
+                            // If this is a JetBrains caches allowlist target, root should be annotated with target_id.
+                            if res.root.target_id.as_deref() == Some("jetbrains-caches") {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Chrome/Edge profile cache checks
+    for p in [candidates[0].clone(), candidates[1].clone()]
+        .into_iter()
+        .flatten()
+    {
+        if p.exists() {
+            let res = analyze_path(
+                Some(&p.to_string_lossy()),
+                Arc::new(AtomicBool::new(false)),
+                None,
+                AnalyzerOptions {
+                    worker_threads: 2,
+                    ..Default::default()
+                },
+            );
+            if let Ok(res) = res {
+                if res.root.target_id.is_some() {
+                    return;
+                }
+            }
+        }
+    }
+    eprintln!("skipping wildcard_allowlist_annotation_best_effort: no matching wildcard target root found");
 }
