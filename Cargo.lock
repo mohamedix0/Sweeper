@@ -277,6 +277,7 @@ dependencies = [
 name = "sweeper-winfs"
 version = "0.1.0"
 dependencies = [
+ "sweeper-testkit",
  "thiserror",
  "windows-sys 0.59.0",
 ]
