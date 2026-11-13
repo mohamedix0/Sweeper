@@ -1,0 +1,290 @@
+﻿# Embedded Tier 1 & Tier 2 allowlist (Phase 1B). Build-time linted by build.rs.
+# Tier 3 targets are deferred to Phase 5 (not present/enabled here).
+
+[[targets]]
+id = "user-temp"
+name = "User Temp"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Temp"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Temporary files in the per-user LocalAppData Temp folder. Windows and applications recreate needed temp files automatically; cleaning old contents is generally safe."
+
+[[targets]]
+id = "crash-dumps"
+name = "Crash Dumps"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "CrashDumps"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Local user-mode application crash dump files. Removing old dumps frees space and does not affect application functionality."
+
+[[targets]]
+id = "wer-reports"
+name = "Windows Error Reporting"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Windows\\WER"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Windows Error Reporting queues and report data for the current user. These are diagnostic artifacts and can be safely removed after the minimum age."
+
+[[targets]]
+id = "inet-cache"
+name = "Internet Cache (INetCache)"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Windows\\INetCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Legacy Windows/WinINet internet cache for the current user. Cached web content is regenerated automatically when needed."
+
+[[targets]]
+id = "npm-cache"
+name = "npm Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "npm-cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "npm package download cache. Removing it frees disk space; packages are re-downloaded on demand."
+
+[[targets]]
+id = "gradle-caches"
+name = "Gradle Caches"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "UserProfile"
+relative_subpath = ".gradle\\caches"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Gradle dependency and build caches in the user profile. Deleting caches can slow the next builds while dependencies are re-downloaded/rebuilt."
+
+[[targets]]
+id = "cargo-registry-cache"
+name = "Cargo Registry Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "UserProfile"
+relative_subpath = ".cargo\\registry\\cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Downloaded Rust crate archive cache (.crate files). Cargo can re-download them when needed; source checkouts/index are not targeted."
+
+[[targets]]
+id = "chrome-cache-default"
+name = "Google Chrome Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Google\\Chrome\\User Data\\Default\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Google Chrome HTTP cache for the Default profile. Browser cache is regenerated automatically; profile data is not targeted."
+
+[[targets]]
+id = "chrome-code-cache-default"
+name = "Google Chrome Code Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Google\\Chrome\\User Data\\Default\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Google Chrome compiled/script code cache for the Default profile. Regenerated automatically."
+
+[[targets]]
+id = "chrome-gpu-cache-default"
+name = "Google Chrome GPU Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Google\\Chrome\\User Data\\Default\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Google Chrome GPU cache for the Default profile. Regenerated automatically."
+
+[[targets]]
+id = "chrome-cache-profiles"
+name = "Google Chrome Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Google\\Chrome\\User Data\\Profile *\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Google Chrome HTTP cache for additional profiles (Profile *). Only explicit cache leaf folders are targeted."
+
+[[targets]]
+id = "chrome-code-cache-profiles"
+name = "Google Chrome Code Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Google\\Chrome\\User Data\\Profile *\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Google Chrome compiled/script code cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "chrome-gpu-cache-profiles"
+name = "Google Chrome GPU Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Google\\Chrome\\User Data\\Profile *\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Google Chrome GPU cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "edge-cache-default"
+name = "Microsoft Edge Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Edge\\User Data\\Default\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Microsoft Edge HTTP cache for the Default profile. Cache is regenerated automatically."
+
+[[targets]]
+id = "edge-code-cache-default"
+name = "Microsoft Edge Code Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Edge\\User Data\\Default\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Microsoft Edge compiled/script code cache for the Default profile."
+
+[[targets]]
+id = "edge-gpu-cache-default"
+name = "Microsoft Edge GPU Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Edge\\User Data\\Default\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Microsoft Edge GPU cache for the Default profile."
+
+[[targets]]
+id = "edge-cache-profiles"
+name = "Microsoft Edge Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Edge\\User Data\\Profile *\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Microsoft Edge HTTP cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "edge-code-cache-profiles"
+name = "Microsoft Edge Code Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Edge\\User Data\\Profile *\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Microsoft Edge compiled/script code cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "edge-gpu-cache-profiles"
+name = "Microsoft Edge GPU Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Edge\\User Data\\Profile *\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Microsoft Edge GPU cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "vscode-cache"
+name = "VS Code Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Code\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Visual Studio Code Cache folder. Safe to clear; VS Code regenerates cache data. User settings and workspaceStorage are not targeted."
+
+[[targets]]
+id = "vscode-cached-data"
+name = "VS Code CachedData"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Code\\CachedData"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Visual Studio Code CachedData folder containing cached runtime/browser assets. Regenerated by VS Code as needed."
+
+[[targets]]
+id = "pip-cache"
+name = "pip Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "LocalAppData"
+relative_subpath = "pip\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "pip HTTP/wheel cache. Removing it frees space but may slow future installs while packages are re-downloaded."
+
+[[targets]]
+id = "nuget-v3-cache"
+name = "NuGet v3 Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "LocalAppData"
+relative_subpath = "NuGet\\v3-cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "NuGet v3 HTTP cache for the current user. Clearing can increase restore times while packages/metadata are fetched again."
+
+[[targets]]
+id = "jetbrains-caches"
+name = "JetBrains IDE Caches"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "LocalAppData"
+relative_subpath = "JetBrains\\*\\caches"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Per-version JetBrains IDE cache folders (LocalAppData\\JetBrains\\*\\caches). Clearing caches may slow IDE startup/indexing; only explicit caches leaf folders are targeted."
