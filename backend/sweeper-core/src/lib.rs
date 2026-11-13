@@ -1,5 +1,6 @@
 ﻿#![forbid(unsafe_code)]
 
+pub mod analyzer;
 pub mod journal;
 pub mod paths;
 pub mod policy;

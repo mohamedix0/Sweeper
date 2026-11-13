@@ -146,6 +146,32 @@ pub enum ReparseTagClass {
     OtherReparse(u32),
 }
 
+impl ReparseTagClass {
+    /// Returns true if this classification represents a link point (symlink, junction, mount point).
+    pub fn is_link_point(self) -> bool {
+        matches!(self, Self::LinkPoint)
+    }
+
+    /// Returns true if this classification represents a cloud placeholder.
+    pub fn is_cloud_placeholder(self) -> bool {
+        matches!(self, Self::CloudPlaceholder)
+    }
+}
+
+/// Common cloud/offline NTFS attributes used to avoid placeholder hydration during read-only scans.
+pub const FILE_ATTRIBUTE_OFFLINE_FLAG: u32 = 0x0000_1000;
+/// Recall-on-open attribute (cloud placeholder content not locally resident).
+pub const FILE_ATTRIBUTE_RECALL_ON_OPEN_FLAG: u32 = 0x0004_0000;
+/// Recall-on-data-access attribute (cloud placeholder content not locally resident).
+pub const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS_FLAG: u32 = 0x0040_0000;
+
+/// Returns true if file attributes indicate an offline/cloud placeholder entry that must not be hydrated.
+pub fn is_cloud_placeholder_attributes(attributes: u32) -> bool {
+    (attributes & FILE_ATTRIBUTE_OFFLINE_FLAG) != 0
+        || (attributes & FILE_ATTRIBUTE_RECALL_ON_OPEN_FLAG) != 0
+        || (attributes & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS_FLAG) != 0
+}
+
 /// File identity from `GetFileInformationByHandle` (volume serial + file index).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileIdentity {
@@ -529,59 +555,121 @@ pub fn handle_file_attributes(handle: &SafeHandle) -> Result<u32> {
     Ok(info.dwFileAttributes)
 }
 
-/// Read-only handle-aware directory enumeration.
+/// Read-only handle-aware directory enumeration for the Analyzer and scanner.
 ///
-/// Uses `FindFirstFileExW` with `FIND_FIRST_EX_LARGE_FETCH`. Never follows `Link Point`s:
-/// entries are returned as-is with reparse classification so callers can avoid traversal.
+/// Uses Win32 `FindFirstFileExW` / `FindNextFileW` / `FindClose` with `FindExInfoBasic` and
+/// `FIND_FIRST_EX_LARGE_FETCH`, with safe fallback on `ERROR_INVALID_PARAMETER` when a volume or
+/// provider rejects `FindExInfoBasic` and/or `LARGE_FETCH`. Never follows `Link Point`s: entries
+/// are returned as-is with attributes and reparse classification so callers can avoid traversal and
+/// avoid opening file contents or hydrating cloud placeholders.
 pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntry>> {
+    read_dir_entries_with_options(dir, true)
+}
+
+/// Read-only directory enumeration with optional `FIND_FIRST_EX_LARGE_FETCH` preference.
+///
+/// Always attempts `FindExInfoBasic` first for speed and falls back to `FindExInfoStandard` on
+/// `ERROR_INVALID_PARAMETER` (and retries without `LARGE_FETCH` if the provider rejects it).
+pub fn read_dir_entries_with_options(
+    dir: &Path,
+    prefer_large_fetch: bool,
+) -> Result<Vec<DirEntry>> {
     let pattern = dir.join("*");
     let wide = to_wide(&pattern);
-    // SAFETY: zeroed WIN32_FIND_DATAW is valid writable output for find APIs.
-    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
-    // SAFETY: `wide` is NUL-terminated and valid for the call; `data` is writable. Enumeration is
-    // read-only and lists entries in `dir` without traversing reparse targets.
-    let handle = unsafe {
-        FindFirstFileExW(
-            wide.as_ptr(),
-            FindExInfoBasic,
-            &mut data as *mut _ as *mut _,
-            FindExSearchNameMatch,
-            std::ptr::null(),
-            FIND_FIRST_EX_LARGE_FETCH,
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-        let err = unsafe { GetLastError() };
-        if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
-            return Ok(Vec::new());
-        }
-        return Err(WinfsError::Win32 {
-            context: "FindFirstFileExW",
-            code: err,
-        });
-    }
-    let mut entries = Vec::new();
-    loop {
-        let name = os_string_from_wide_buf(&data.cFileName);
-        if name != OsStr::new(".") && name != OsStr::new("..") {
-            entries.push(dir_entry_from_find_data(dir, &data, name));
-        }
-        // SAFETY: find handle and data buffer are valid for advancing enumeration.
-        let ok = unsafe { FindNextFileW(handle, &mut data) };
-        if ok == 0 {
+    let strategies = enumeration_strategies(prefer_large_fetch);
+    let mut last_err: Option<u32> = None;
+
+    for (info_level, flags, _label) in strategies {
+        // SAFETY: zeroed WIN32_FIND_DATAW is valid writable output for find APIs.
+        let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+        // SAFETY: `wide` is NUL-terminated and valid for the call; `data` is writable. Enumeration
+        // is read-only and lists entries in `dir` without traversing reparse targets or opening
+        // file contents. `FindFirstFileExW` returns a search handle that must be closed with
+        // `FindClose`, which is guaranteed below on all paths after a successful open.
+        let handle = unsafe {
+            FindFirstFileExW(
+                wide.as_ptr(),
+                info_level,
+                &mut data as *mut _ as *mut _,
+                FindExSearchNameMatch,
+                std::ptr::null(),
+                flags,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
             let err = unsafe { GetLastError() };
-            // SAFETY: close the valid find handle exactly once before returning/breaking.
-            unsafe { FindClose(handle) };
-            if err == ERROR_NO_MORE_FILES {
-                break;
+            if err == ERROR_FILE_NOT_FOUND
+                || err == ERROR_PATH_NOT_FOUND
+                || err == ERROR_NO_MORE_FILES
+            {
+                return Ok(Vec::new());
+            }
+            if err == ERROR_INVALID_PARAMETER {
+                last_err = Some(err);
+                continue;
             }
             return Err(WinfsError::Win32 {
-                context: "FindNextFileW",
+                context: "FindFirstFileExW",
                 code: err,
             });
         }
+
+        let mut entries = Vec::new();
+        loop {
+            let name = os_string_from_wide_buf(&data.cFileName);
+            if name != OsStr::new(".") && name != OsStr::new("..") {
+                entries.push(dir_entry_from_find_data(dir, &data, name));
+            }
+            // SAFETY: `handle` is a valid search handle returned by `FindFirstFileExW` and `data`
+            // is writable storage for the next entry. Advancing enumeration is read-only.
+            let ok = unsafe { FindNextFileW(handle, &mut data) };
+            if ok == 0 {
+                let err = unsafe { GetLastError() };
+                // SAFETY: close the valid find handle exactly once before returning or breaking.
+                unsafe {
+                    FindClose(handle);
+                }
+                if err == ERROR_NO_MORE_FILES {
+                    return Ok(entries);
+                }
+                return Err(WinfsError::Win32 {
+                    context: "FindNextFileW",
+                    code: err,
+                });
+            }
+        }
     }
-    Ok(entries)
+
+    Err(WinfsError::Win32 {
+        context: "FindFirstFileExW",
+        code: last_err.unwrap_or(ERROR_INVALID_PARAMETER),
+    })
+}
+
+fn enumeration_strategies(prefer_large_fetch: bool) -> [(i32, u32, &'static str); 4] {
+    if prefer_large_fetch {
+        [
+            (FindExInfoBasic, FIND_FIRST_EX_LARGE_FETCH, "basic+large"),
+            (FindExInfoBasic, 0, "basic"),
+            (
+                1, /* FindExInfoStandard */
+                FIND_FIRST_EX_LARGE_FETCH,
+                "standard+large",
+            ),
+            (1 /* FindExInfoStandard */, 0, "standard"),
+        ]
+    } else {
+        [
+            (FindExInfoBasic, 0, "basic"),
+            (1 /* FindExInfoStandard */, 0, "standard"),
+            (FindExInfoBasic, FIND_FIRST_EX_LARGE_FETCH, "basic+large"),
+            (
+                1, /* FindExInfoStandard */
+                FIND_FIRST_EX_LARGE_FETCH,
+                "standard+large",
+            ),
+        ]
+    }
 }
 
 /// Classify a reparse tag value.
@@ -778,11 +866,20 @@ fn dir_entry_from_find_data(dir: &Path, data: &WIN32_FIND_DATAW, name: OsString)
     let attrs = data.dwFileAttributes;
     let is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
     let reparse_tag = data.dwReserved0;
-    let reparse = if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+    let mut reparse = if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
         classify_reparse_tag(reparse_tag)
     } else {
         ReparseTagClass::NotReparse
     };
+    // Defense-in-depth: treat offline/recall-on-* placeholder attributes as cloud placeholders even
+    // when the provider does not expose a recognized cloud reparse tag in find data.
+    if matches!(
+        reparse,
+        ReparseTagClass::NotReparse | ReparseTagClass::OtherReparse(_)
+    ) && is_cloud_placeholder_attributes(attrs)
+    {
+        reparse = ReparseTagClass::CloudPlaceholder;
+    }
     let size = ((data.nFileSizeHigh as u64) << 32) | (data.nFileSizeLow as u64);
     DirEntry {
         path: dir.join(&name),
