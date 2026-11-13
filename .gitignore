@@ -1,0 +1,32 @@
+# Local reference repos (read-only inspiration, never tracked)
+/reference/
+
+# Local agent skills / tooling
+/.agents/
+
+# Rust / Cargo
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Node / Frontend
+node_modules/
+/frontend/dist/
+/frontend/.vite/
+*.tsbuildinfo
+
+# Tauri
+/bridge/sweeper-desktop/gen/
+
+# Logs, local state, secrets
+*.log
+.env
+.env.*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
