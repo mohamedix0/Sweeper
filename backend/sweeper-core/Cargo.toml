@@ -14,3 +14,8 @@ sweeper-winfs = { workspace = true }
 sweeper-knowledge = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = { workspace = true }
+sweeper-testkit = { workspace = true }
