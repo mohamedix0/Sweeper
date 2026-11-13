@@ -3385,6 +3385,7 @@ dependencies = [
  "sweeper-contract",
  "sweeper-core",
  "sweeper-knowledge",
+ "sweeper-testkit",
  "tauri",
  "tauri-build",
  "tempfile",

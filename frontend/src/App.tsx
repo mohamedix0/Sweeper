@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import './App.css';
-import { createClient, formatContractError, type ScanResults, type SweeperClient } from './api/client';
+import { createClient, formatContractError, type CleanProgressEvent, type ExecuteCleanResponse, type ScanResults, type SweeperClient } from './api/client';
 import type { ContractError, RiskDto, TargetScanResultDto } from './contract/bindings';
 import { formatBytes, formatUnixSeconds, sumDecimalStrings } from './utils/format';
 
@@ -25,7 +25,6 @@ function riskClass(risk: RiskDto): string {
 function isSelectableItem(item: { ageEligible: boolean }, targetRisk: RiskDto): boolean {
   if (targetRisk === 'Protected') return false;
   if (!item.ageEligible) return false;
-  // Unknown items can be displayed; selection is allowed in UI flow but requires typed confirmation at preview
   return true;
 }
 
@@ -36,7 +35,6 @@ function needsTypedConfirmation(targets: TargetScanResultDto[], selectedIds: Set
     }
     for (const item of t.items) {
       if (!selectedIds.has(item.id)) continue;
-      // Custom Path targets would be indicated by targetId prefix in real data; mock uses custom-
       if (t.targetId.startsWith('custom-')) return true;
     }
   }
@@ -59,7 +57,7 @@ function TtlIndicator({ label, issuedAtMs, ttlMs }: { label: string; issuedAtMs:
   );
 }
 
-function ScanAndPreviewView({ client }: { client: SweeperClient }) {
+function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOpenLog: (logId: string) => void }) {
   const [tier1, setTier1] = useState(true);
   const [tier2, setTier2] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -72,6 +70,9 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [confirmText, setConfirmText] = useState('');
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanProgress, setCleanProgress] = useState<CleanProgressEvent | null>(null);
+  const [cleanSummary, setCleanSummary] = useState<ExecuteCleanResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
@@ -95,6 +96,17 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
 
   const requiresConfirmation = useMemo(() => needsTypedConfirmation(targets, selectedIds), [targets, selectedIds]);
 
+  function resetForInvalidSession(message?: string) {
+    setSessionId(null);
+    setScanStartedAt(null);
+    setResults(null);
+    setSelectedIds(new Set());
+    setPreview(null);
+    setConfirmText('');
+    setCleanProgress(null);
+    if (message) setInfo(message);
+  }
+
   async function runScan() {
     setError(null);
     setInfo(null);
@@ -102,6 +114,8 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
     setExplain(null);
     setSelectedIds(new Set());
     setResults(null);
+    setCleanSummary(null);
+    setCleanProgress(null);
     setScanning(true);
     setScanStatus('Starting Scan…');
     const tiers = [tier1 ? 'Tier1' : null, tier2 ? 'Tier2' : null].filter(Boolean) as ('Tier1' | 'Tier2')[];
@@ -116,13 +130,11 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
       setScanStartedAt(started);
       const data = await client.getScanResults(sid);
       setResults(data);
-      setInfo('Scan complete. Select eligible items and run Preview. No files are removed in Phase 2.');
+      setInfo('Scan complete. Select eligible items, run Preview, then Clean Permanently if you confirm.');
     } catch (e) {
       setError(formatContractError(e));
-      if ((e as ContractError | undefined)?.code === 'sessionInvalid') {
-        setSessionId(null);
-        setResults(null);
-      }
+      const ce = e as ContractError | undefined;
+      if (ce?.code === 'sessionInvalid') resetForInvalidSession();
     } finally {
       setScanning(false);
     }
@@ -131,6 +143,8 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
   function toggleItem(itemId: string, targetRisk: RiskDto, ageEligible: boolean) {
     if (!isSelectableItem({ ageEligible }, targetRisk)) return;
     setPreview(null);
+    setCleanSummary(null);
+    setCleanProgress(null);
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(itemId)) next.delete(itemId);
@@ -154,40 +168,75 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
     setError(null);
     setInfo(null);
     setPreviewLoading(true);
+    setCleanSummary(null);
+    setCleanProgress(null);
     try {
       const confirmations = requiresConfirmation ? { typedConfirmation: confirmText || null } : null;
       const res = await client.previewClean(sessionId, Array.from(selectedIds), confirmations);
       setPreview({ ...res, issuedAtMs: Date.now() });
-      setInfo('Preview ready. Review the breakdown below. Clean is locked in Phase 2 (no permanent deletion).');
+      setInfo('Preview ready. Review the breakdown and the permanent deletion warning before cleaning.');
     } catch (e) {
-      setError(formatContractError(e));
       const ce = e as ContractError | undefined;
-      if (ce?.code === 'sessionInvalid' || ce?.code === 'previewTokenInvalid') {
+      setError(formatContractError(e));
+      if (ce?.code === 'sessionInvalid') {
+        resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
+      } else if (ce?.code === 'previewTokenInvalid') {
         setPreview(null);
-        if (ce.code === 'sessionInvalid') {
-          setSessionId(null);
-          setResults(null);
-          setSelectedIds(new Set());
-        }
       }
     } finally {
       setPreviewLoading(false);
     }
   }
 
-  const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading &&
+  async function runClean() {
+    if (!preview) return;
+    setError(null);
+    setInfo(null);
+    setCleaning(true);
+    setCleanProgress(null);
+    setCleanSummary(null);
+    try {
+      const res = await client.executeClean(preview.previewToken, (ev) => setCleanProgress(ev));
+      setCleanSummary(res);
+      setPreview(null);
+      setSelectedIds(new Set());
+      setInfo('Clean completed. Review the summary and operation log below.');
+      if (sessionId) {
+        try {
+          const refreshed = await client.getScanResults(sessionId);
+          setResults(refreshed);
+        } catch {
+          // ignore
+        }
+      }
+    } catch (e) {
+      const ce = e as ContractError | undefined;
+      setError(formatContractError(e));
+      if (ce?.code === 'sessionInvalid') {
+        resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
+      } else if (ce?.code === 'previewTokenInvalid') {
+        setPreview(null);
+        setInfo('Preview token is invalid, expired, or already used. Run Preview again.');
+      }
+    } finally {
+      setCleaning(false);
+    }
+  }
+
+  const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning &&
     (!requiresConfirmation || confirmText.trim().length > 0);
+  const canClean = !!preview && !scanning && !previewLoading && !cleaning;
 
   return (
     <div>
       <section className="panel" aria-labelledby="scan-heading">
         <h2 id="scan-heading">Scan &amp; Preview</h2>
-        <p className="muted">Read-only Phase 2: discover reclaimable Targets, explain items, and generate a Preview. No files are removed.</p>
+        <p className="muted">Discover reclaimable Targets, explain items, preview selections, and run permanent Clean only after confirmation.</p>
         <div className="row">
           <label className="checkbox"><input type="checkbox" checked={tier1} onChange={(e) => setTier1(e.target.checked)} /> Tier 1 (system temp and caches)</label>
           <label className="checkbox"><input type="checkbox" checked={tier2} onChange={(e) => setTier2(e.target.checked)} /> Tier 2 (developer caches)</label>
           <div className="spacer" />
-          <button className="btn primary" onClick={runScan} disabled={scanning}>Start Scan</button>
+          <button className="btn primary" onClick={runScan} disabled={scanning || cleaning}>Start Scan</button>
         </div>
         {scanning && (
           <div role="status" aria-live="polite" className="notice info">
@@ -249,7 +298,7 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
                           type="checkbox"
                           aria-label={`Select ${item.path}`}
                           checked={checked}
-                          disabled={!selectable}
+                          disabled={!selectable || cleaning}
                           onChange={() => toggleItem(item.id, t.risk, item.ageEligible)}
                         />
                       </label>
@@ -277,18 +326,14 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
                 <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path items). Enter <code>DELETE</code> to request Preview.</div>
                 <div className="field">
                   <label htmlFor="confirm-delete">Typed confirmation</label>
-                  <input id="confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="Type DELETE" autoComplete="off" />
+                  <input id="confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="Type DELETE" autoComplete="off" disabled={cleaning} />
                 </div>
               </div>
             )}
             <div className="row">
               <button className="btn primary" onClick={runPreview} disabled={!canPreview}>
-                {previewLoading ? 'Generating Preview…' : 'Preview Clean (read-only)'}
+                {previewLoading ? 'Generating Preview…' : 'Preview Clean'}
               </button>
-              <button className="btn" disabled title="Clean is available in Phase 3 only">Clean (Phase 3 — locked)</button>
-            </div>
-            <div className="notice info" role="status">
-              <strong>Phase 2 notice:</strong> Permanent Clean is not available yet. This build never calls <code>execute_clean</code> and performs no deletions. Deletion arrives in Phase 3 after Preview + confirmation.
             </div>
 
             {preview && (
@@ -314,6 +359,60 @@ function ScanAndPreviewView({ client }: { client: SweeperClient }) {
                     ))}
                   </tbody>
                 </table>
+
+                <div className="notice warn" role="alert" aria-live="polite">
+                  <strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.
+                </div>
+                <div className="row">
+                  <button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">
+                    {cleaning ? 'Cleaning…' : 'Clean Permanently'}
+                  </button>
+                </div>
+                {cleaning && (
+                  <div className="notice info" role="status" aria-live="polite">
+                    <div>Cleaning in progress…</div>
+                    {cleanProgress && (
+                      <div>
+                        Progress: {cleanProgress.completedItems} / {cleanProgress.totalItems} items — {formatBytes(cleanProgress.bytesFreedSoFar)} freed so far ({cleanProgress.status})
+                      </div>
+                    )}
+                    <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {cleanSummary && (
+              <div className="panel" aria-labelledby="clean-summary-heading" role="status">
+                <h4 id="clean-summary-heading" className="section-title">Clean Summary</h4>
+                {cleanSummary.aborted && (
+                  <div className="notice error" role="alert">
+                    <strong>Clean aborted.</strong> {cleanSummary.abortReason || 'The operation was aborted.'}
+                  </div>
+                )}
+                <dl className="kv">
+                  <dt>Bytes freed</dt><dd>{formatBytes(cleanSummary.bytesFreed)}</dd>
+                  <dt>Deleted count</dt><dd>{cleanSummary.deletedCount}</dd>
+                  <dt>Skipped count</dt><dd>{cleanSummary.skippedCount}</dd>
+                </dl>
+                <div>
+                  <strong>Skipped reasons</strong>
+                  {cleanSummary.skippedReasons.length === 0 ? (
+                    <p className="muted" aria-label="Skipped reasons">None.</p>
+                  ) : (
+                    <ul aria-label="Skipped reasons">
+                      {cleanSummary.skippedReasons.map((r, idx) => (
+                        <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                {cleanSummary.logId && (
+                  <div className="row" style={{ marginTop: '0.5rem' }}>
+                    <button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button>
+                    <span className="muted">Log: {cleanSummary.logId}</span>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -357,8 +456,8 @@ function SettingsView({ client }: { client: SweeperClient }) {
   }, [client]);
   return (
     <section className="panel" aria-labelledby="settings-heading">
-      <h2 id="settings-heading">Settings (Read-Only in Phase 2)</h2>
-      <p className="muted">Settings are displayed for review. Editing and <code>update_settings</code> are not enabled in this phase.</p>
+      <h2 id="settings-heading">Settings</h2>
+      <p className="muted">Settings are displayed for review. Editing controls remain limited in this build.</p>
       {error && <div className="notice error" role="alert">{error}</div>}
       {!settings && !error && <p>Loading settings…</p>}
       {settings && (
@@ -368,20 +467,51 @@ function SettingsView({ client }: { client: SweeperClient }) {
           <dt>Tier 3 enabled</dt><dd>{String(settings.enableTier3)}</dd>
           <dt>Minimum Age (hours)</dt><dd>{settings.minAgeHours}</dd>
           <dt>Allow deleting unknown folders</dt><dd>{String(settings.allowDeleteUnknown)}</dd>
-          <dt>Custom Paths</dt><dd className="muted">Not editable in Phase 2 (read-only view; no Custom Paths configured).</dd>
+          <dt>Custom Paths</dt><dd className="muted">Not editable in this build (read-only view; no Custom Paths configured).</dd>
         </dl>
       )}
     </section>
   );
 }
 
-function LogsView({ client }: { client: SweeperClient }) {
+function LogsView({ client, focusLogId, onFocusConsumed }: { client: SweeperClient; focusLogId?: string | null; onFocusConsumed?: () => void }) {
   const [logs, setLogs] = useState<{ id: string; name: string; modifiedUnixSecs: string | null; sizeBytes: string | null }[]>([]);
   const [selected, setSelected] = useState<{ id: string; content: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    client.listLogs().then(setLogs).catch((e) => setError(formatContractError(e)));
+
+  const refresh = useCallback(async () => {
+    try {
+      const next = await client.listLogs();
+      setLogs(next);
+    } catch (e) {
+      setError(formatContractError(e));
+    }
   }, [client]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!focusLogId) return;
+    let cancelled = false;
+    (async () => {
+      setError(null);
+      try {
+        await refresh();
+        const log = await client.readLog(focusLogId);
+        if (!cancelled) setSelected(log);
+      } catch (e) {
+        if (!cancelled) setError(formatContractError(e));
+      } finally {
+        if (!cancelled) onFocusConsumed?.();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [focusLogId, client, refresh, onFocusConsumed]);
+
   async function openLog(id: string) {
     setError(null);
     try {
@@ -390,14 +520,19 @@ function LogsView({ client }: { client: SweeperClient }) {
       setError(formatContractError(e));
     }
   }
+
   return (
     <section className="panel" aria-labelledby="logs-heading">
       <h2 id="logs-heading">Logs</h2>
-      <p className="muted">Read-only log inspector (<code>list_logs</code> / <code>read_log</code>).</p>
+      <p className="muted">Operation log inspector (<code>list_logs</code> / <code>read_log</code>).</p>
       {error && <div className="notice error" role="alert">{error}</div>}
       <div className="grid-2">
         <div>
-          <h3 className="section-title">Available Logs</h3>
+          <div className="row">
+            <h3 className="section-title">Available Logs</h3>
+            <div className="spacer" />
+            <button className="btn" onClick={() => refresh()}>Refresh</button>
+          </div>
           {logs.length === 0 ? <p className="muted">No logs found.</p> : (
             <table className="table" aria-label="Log list">
               <thead><tr><th>Name</th><th>Modified</th><th>Size</th><th></th></tr></thead>
@@ -431,6 +566,12 @@ function LogsView({ client }: { client: SweeperClient }) {
 export function App() {
   const client = useMemo(() => createClient(), []);
   const [view, setView] = useState<View>('scan');
+  const [focusLogId, setFocusLogId] = useState<string | null>(null);
+
+  function openLog(logId: string) {
+    setFocusLogId(logId);
+    setView('logs');
+  }
 
   return (
     <div className="app-shell">
@@ -438,14 +579,14 @@ export function App() {
         <div className="brand">Sweeper</div>
         <nav className="nav" aria-label="Primary">
           <button aria-current={view === 'scan' ? 'page' : undefined} onClick={() => setView('scan')}>Scan &amp; Preview</button>
-          <button aria-current={view === 'settings' ? 'page' : undefined} onClick={() => setView('settings')}>Settings (Read-Only)</button>
+          <button aria-current={view === 'settings' ? 'page' : undefined} onClick={() => setView('settings')}>Settings</button>
           <button aria-current={view === 'logs' ? 'page' : undefined} onClick={() => setView('logs')}>Logs</button>
         </nav>
       </header>
       <main className="main">
-        {view === 'scan' && <ScanAndPreviewView client={client} />}
+        {view === 'scan' && <ScanAndPreviewView client={client} onOpenLog={openLog} />}
         {view === 'settings' && <SettingsView client={client} />}
-        {view === 'logs' && <LogsView client={client} />}
+        {view === 'logs' && <LogsView client={client} focusLogId={focusLogId} onFocusConsumed={() => setFocusLogId(null)} />}
       </main>
     </div>
   );

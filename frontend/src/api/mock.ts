@@ -1,11 +1,38 @@
 import type {
-  ContractError,
   PreviewTargetBreakdownDto,
   RiskDto,
   ScanItemDto,
+  SkippedReasonDto,
   TargetScanResultDto,
   TierDto,
 } from '../contract/bindings';
+
+export type CleanProgressEvent = {
+  previewToken: string;
+  targetId: string;
+  completedItems: string;
+  totalItems: string;
+  bytesFreedSoFar: string;
+  status: string;
+};
+
+export type ExecuteCleanResponse = {
+  bytesFreed: string;
+  deletedCount: string;
+  skippedCount: string;
+  skippedReasons: SkippedReasonDto[];
+  aborted: boolean;
+  abortReason: string | null;
+  logId: string | null;
+};
+
+export type ContractError =
+  | { code: 'sessionInvalid'; details: { reason: string } }
+  | { code: 'unknownItem'; details: { count: string } }
+  | { code: 'previewTokenInvalid'; details: { reason: string } }
+  | { code: 'invalidInput'; details: { reason: string } }
+  | { code: 'notFound'; details: { reason: string } }
+  | { code: 'internal'; details: { reason: string } };
 
 type ScanProgress =
   | { kind: 'started'; session_id: string }
@@ -55,7 +82,10 @@ type PreviewState = {
   used: boolean;
   itemIds: string[];
   settingsGeneration: number;
+  previewEstimatedBytes: string;
 };
+
+type LogEntry = { id: string; name: string; modifiedUnixSecs: string; sizeBytes: string; content: string };
 
 export type MockController = {
   startScan: (tiers: TierDto[] | null, onProgress?: (e: ScanProgress) => void) => Promise<{ sessionId: string }>;
@@ -65,11 +95,11 @@ export type MockController = {
     itemIds: string[],
     confirmations: { typedConfirmation: string | null } | null,
   ) => Promise<PreviewCleanResult>;
+  executeClean: (previewToken: string, onProgress?: (e: CleanProgressEvent) => void) => Promise<ExecuteCleanResponse>;
   explainItem: (itemId: string) => Promise<ExplainResult>;
   getSettings: () => Promise<SettingsDto>;
   listLogs: () => Promise<LogMeta[]>;
   readLog: (logId: string) => Promise<LogContent>;
-  // test helpers
   advanceTimeMs: (ms: number) => void;
   invalidateSettings: () => void;
   reset: () => void;
@@ -145,6 +175,11 @@ export function createMockController(): MockController {
   const previews = new Map<string, PreviewState>();
   let scanSeq = 0;
   let previewSeq = 0;
+  let logSeq = 0;
+  const logs: LogEntry[] = [
+    { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"event":"scan","status":"completed","targets":3}\n{"event":"preview","items":2}' },
+    { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"event":"clean","status":"completed","deleted":1}' },
+  ];
 
   function getSession(sessionId: string): SessionState {
     const s = sessions.get(sessionId);
@@ -160,24 +195,11 @@ export function createMockController(): MockController {
     const targets: TargetScanResultDto[] = [];
 
     const defs: Array<{ tier: TierDto; build: () => ReturnType<typeof buildTarget> }> = [
-      {
-        tier: 'Tier1',
-        build: () =>
-          buildTarget('t-user-temp', 'User Temp', 'Tier1', 'Safe', 'Temporary files regenerated automatically.', SAMPLE_ITEMS_T1.slice(0, 2)),
-      },
-      {
-        tier: 'Tier1',
-        build: () =>
-          buildTarget('t-crash', 'Crash Dumps & WER', 'Tier1', 'Safe', 'Local crash reports and error dumps.', SAMPLE_ITEMS_T1.slice(2)),
-      },
-      {
-        tier: 'Tier2',
-        build: () =>
-          buildTarget('t-npm', 'npm-cache', 'Tier2', 'Safe', 'Package manager download cache, redownloaded as needed.', SAMPLE_ITEMS_T2),
-      },
+      { tier: 'Tier1', build: () => buildTarget('t-user-temp', 'User Temp', 'Tier1', 'Safe', 'Temporary files regenerated automatically.', SAMPLE_ITEMS_T1.slice(0, 2)) },
+      { tier: 'Tier1', build: () => buildTarget('t-crash', 'Crash Dumps & WER', 'Tier1', 'Safe', 'Local crash reports and error dumps.', SAMPLE_ITEMS_T1.slice(2)) },
+      { tier: 'Tier2', build: () => buildTarget('t-npm', 'npm-cache', 'Tier2', 'Safe', 'Package manager download cache, redownloaded as needed.', SAMPLE_ITEMS_T2) },
     ];
 
-    // include a protected display-only target and an unknown example for UI behavior
     const protectedTarget: TargetScanResultDto = {
       targetId: 't-protected-system32',
       targetName: 'System32 (Protected)',
@@ -263,7 +285,6 @@ export function createMockController(): MockController {
       };
       sessions.set(sessionId, state);
       onProgress?.({ kind: 'started', session_id: sessionId });
-      // deterministic: complete immediately (UI can animate if desired)
       onProgress?.({ kind: 'completed', session_id: sessionId });
       return { sessionId };
     },
@@ -294,7 +315,7 @@ export function createMockController(): MockController {
         selected.push({ item, targetId: item.targetId });
       }
       if (unknown > 0) err('unknownItem', String(unknown));
-      const needsConfirm = selected.some((s) => s.item.risk === 'Unknown' || s.item.targetId.startsWith('custom-'));
+      const needsConfirm = selected.some((x) => x.item.risk === 'Unknown' || x.item.targetId.startsWith('custom-'));
       if (needsConfirm) {
         const typed = confirmations?.typedConfirmation?.trim();
         if (typed !== 'DELETE') err('invalidInput', 'Typed confirmation required: enter DELETE to continue.');
@@ -323,12 +344,77 @@ export function createMockController(): MockController {
         used: false,
         itemIds: [...itemIds],
         settingsGeneration,
+        previewEstimatedBytes: totalBytes.toString(),
       });
       return {
         previewToken: token,
         breakdown,
         totalSelectedCount: BigInt(selected.length).toString(),
         totalSelectedBytes: totalBytes.toString(),
+      };
+    },
+
+    async executeClean(previewToken, onProgress) {
+      const p = previews.get(previewToken);
+      if (!p) err('previewTokenInvalid', 'Preview token not found.');
+      if (p.used) err('previewTokenInvalid', 'Preview token already used.');
+      if (nowMs - p.createdAtMs > 10 * 60 * 1000) err('previewTokenInvalid', 'Preview token expired.');
+      const s = getSession(p.sessionId);
+      if (p.settingsGeneration !== settingsGeneration) err('sessionInvalid', 'Session invalidated by settings change.');
+      p.used = true;
+
+      let deletedBytes = 0n;
+      let deletedCount = 0n;
+      let skippedCount = 0n;
+      const reasons: Record<string, bigint> = {};
+      const total = BigInt(p.itemIds.length);
+      let completed = 0n;
+      for (const id of p.itemIds) {
+        const item = s.itemsById.get(id);
+        if (!item) {
+          skippedCount += 1n;
+          reasons['Skipped: item not found'] = (reasons['Skipped: item not found'] ?? 0n) + 1n;
+        } else if (!item.ageEligible || item.risk === 'Protected') {
+          skippedCount += 1n;
+          reasons['Skipped: not eligible'] = (reasons['Skipped: not eligible'] ?? 0n) + 1n;
+        } else {
+          deletedBytes += BigInt(item.size);
+          deletedCount += 1n;
+          s.itemsById.delete(id);
+          for (const t of s.targets) {
+            t.items = t.items.filter((i) => i.id !== id);
+          }
+        }
+        completed += 1n;
+        onProgress?.({
+          previewToken,
+          targetId: item?.targetId ?? 'unknown',
+          completedItems: completed.toString(),
+          totalItems: total.toString(),
+          bytesFreedSoFar: deletedBytes.toString(),
+          status: item && item.ageEligible && item.risk !== 'Protected' ? 'deleted' : 'Skipped',
+        });
+      }
+      const skippedReasons: SkippedReasonDto[] = Object.entries(reasons).map(([reason, count]) => ({ reason, count: count.toString() }));
+
+      logSeq += 1;
+      const ts = Math.floor(nowMs / 1000).toString();
+      const logId = `mock-clean-${logSeq}`;
+      const logName = `clean-${logId}.jsonl`;
+      const content = [
+        ...p.itemIds.map((id) => JSON.stringify({ record: 'intent', target_id: id, timestamp: ts })),
+        JSON.stringify({ record: 'outcome', status: 'completed', deletedCount: deletedCount.toString(), bytesFreed: deletedBytes.toString(), timestamp: ts }),
+      ].join('\n') + '\n';
+      logs.unshift({ id: logId, name: logName, modifiedUnixSecs: ts, sizeBytes: String(content.length), content });
+
+      return {
+        bytesFreed: deletedBytes.toString(),
+        deletedCount: deletedCount.toString(),
+        skippedCount: skippedCount.toString(),
+        skippedReasons,
+        aborted: false,
+        abortReason: null,
+        logId,
       };
     },
 
@@ -353,20 +439,13 @@ export function createMockController(): MockController {
     },
 
     async listLogs() {
-      return [
-        { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048' },
-        { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512' },
-      ];
+      return logs.map((l) => ({ id: l.id, name: l.name, modifiedUnixSecs: l.modifiedUnixSecs, sizeBytes: l.sizeBytes }));
     },
 
     async readLog(logId: string) {
-      if (logId === 'log-1') {
-        return { id: logId, content: '{"event":"scan","status":"completed","targets":3}\n{"event":"preview","items":2}' };
-      }
-      if (logId === 'log-2') {
-        return { id: logId, content: '{"event":"clean","status":"completed","deleted":1}' };
-      }
-      err('notFound', 'Log not found.');
+      const log = logs.find((l) => l.id === logId);
+      if (!log) err('notFound', 'Log not found.');
+      return { id: log.id, content: log.content };
     },
 
     advanceTimeMs(ms) {
@@ -381,7 +460,13 @@ export function createMockController(): MockController {
       settingsGeneration = 1;
       scanSeq = 0;
       previewSeq = 0;
+      logSeq = 0;
       nowMs = Date.now();
+      logs.length = 0;
+      logs.push(
+        { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"event":"scan","status":"completed","targets":3}\n{"event":"preview","items":2}' },
+        { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"event":"clean","status":"completed","deleted":1}' },
+      );
     },
   };
 }

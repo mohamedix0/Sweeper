@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 use sweeper_contract::{
     ContractError, RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
@@ -8,19 +9,24 @@ use sweeper_desktop::clock::FixedClock;
 use sweeper_desktop::commands_impl;
 use sweeper_desktop::session::StoredItem;
 use sweeper_desktop::AppState;
+use sweeper_testkit::{CanaryTree, Sandbox};
 
 fn make_state() -> AppState<FixedClock> {
-    AppState::with_clock(FixedClock::new(1_700_000_000))
+    // old mtime for scanned items (>=24h before now)
+    AppState::with_clock(FixedClock::new(1_800_000_000))
 }
 
-fn seed_session(state: &AppState<FixedClock>) {
+fn seed_session(state: &AppState<FixedClock>, root: &Path, file_path: &Path, mtime_secs: u64) {
     let settings_gen = state.settings.lock().unwrap().generation();
+    let root_s = root.to_string_lossy().to_string();
+    let path_s = file_path.to_string_lossy().to_string();
+    let size = fs::metadata(file_path).map(|m| m.len()).unwrap_or(100);
     let item = ScanItemDto {
         id: "t1::1".to_string(),
         target_id: "user-temp".to_string(),
-        path: r"C:\Users\Test\AppData\Local\Temp\a.tmp".to_string(),
-        size: U64String(100),
-        mtime_unix_secs: U64String(1_699_000_000),
+        path: path_s.clone(),
+        size: U64String(size),
+        mtime_unix_secs: U64String(mtime_secs),
         age_eligible: true,
     };
     let target = TargetScanResultDto {
@@ -28,11 +34,11 @@ fn seed_session(state: &AppState<FixedClock>) {
         target_name: "User Temp".to_string(),
         tier: TierDto::Tier1,
         risk: RiskDto::Safe,
-        resolved_paths: vec![r"C:\Users\Test\AppData\Local\Temp".to_string()],
+        resolved_paths: vec![root_s],
         scanned: true,
         status_reason: None,
-        total_bytes: U64String(100),
-        eligible_bytes: U64String(100),
+        total_bytes: U64String(size),
+        eligible_bytes: U64String(size),
         file_count: U64String(1),
         eligible_count: U64String(1),
         skipped_count: U64String(0),
@@ -40,7 +46,7 @@ fn seed_session(state: &AppState<FixedClock>) {
     };
     let results = ScanResultsDto {
         session_id: "scan-test".to_string(),
-        started_unix_secs: U64String(1_700_000_000),
+        started_unix_secs: U64String(1_800_000_000),
         min_age_hours: 24,
         targets: vec![target],
     };
@@ -61,13 +67,16 @@ fn seed_session(state: &AppState<FixedClock>) {
         .sessions
         .lock()
         .unwrap()
-        .create_test_session_with_items(1_700_000_000, settings_gen, "scan-test", results, items);
+        .create_test_session_with_items(1_800_000_000, settings_gen, "scan-test", results, items);
 }
 
 #[test]
 fn unknown_item_ids_rejected() {
     let state = make_state();
-    seed_session(&state);
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
     let err = commands_impl::preview_clean(
         &state,
         "scan-test".to_string(),
@@ -81,7 +90,11 @@ fn unknown_item_ids_rejected() {
 #[test]
 fn expired_session_after_15_minutes_rejected() {
     let state = make_state();
-    seed_session(&state);
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
+
     state.clock.advance_secs(15 * 60 + 1);
     let err = commands_impl::get_scan_results(&state, "scan-test".to_string()).unwrap_err();
     assert!(
@@ -104,11 +117,14 @@ fn expired_session_after_15_minutes_rejected() {
 #[test]
 fn invalidated_session_on_settings_generation_change_rejected() {
     let state = make_state();
-    seed_session(&state);
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
     {
         let mut settings = state.settings.lock().unwrap();
         let mut s = settings.get();
-        s.min_age_hours = 10; // scan-affecting
+        s.min_age_hours = 10;
         let _ = settings.update(s);
     }
     let err = commands_impl::get_scan_results(&state, "scan-test".to_string()).unwrap_err();
@@ -119,9 +135,24 @@ fn invalidated_session_on_settings_generation_change_rejected() {
 }
 
 #[test]
-fn preview_token_expires_after_10_minutes_and_rejects_tamper_double_use() {
+fn execute_clean_without_preview_rejected() {
     let state = make_state();
-    seed_session(&state);
+    let err = commands_impl::execute_clean(&state, "no-such-token".to_string(), None, |_| {})
+        .unwrap_err();
+    assert!(
+        matches!(err, ContractError::PreviewTokenInvalid { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn preview_token_expired_tampered_double_use_and_session_invalidated_rejected() {
+    // Expired token (>10m)
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
     let preview = commands_impl::preview_clean(
         &state,
         "scan-test".to_string(),
@@ -129,43 +160,172 @@ fn preview_token_expires_after_10_minutes_and_rejects_tamper_double_use() {
         None,
     )
     .unwrap();
-    let settings_gen = state.settings.lock().unwrap().generation();
+    state.clock.advance_secs(10 * 60 + 1);
+    let err = commands_impl::execute_clean(&state, preview.preview_token.clone(), None, |_| {})
+        .unwrap_err();
+    assert!(
+        matches!(err, ContractError::PreviewTokenInvalid { .. }),
+        "{err:?}"
+    );
 
-    // Tamper: consume with wrong token string via direct store manipulation not possible; simulate by
-    // validating correct token then trying double-use.
-    {
-        let mut sessions = state.sessions.lock().unwrap();
-        let res =
-            sessions.consume_preview_token(&state.clock, &preview.preview_token, settings_gen);
-        assert!(res.is_ok());
-        let err = sessions
-            .consume_preview_token(&state.clock, &preview.preview_token, settings_gen)
-            .unwrap_err();
-        assert!(
-            matches!(err, ContractError::PreviewTokenInvalid { .. }),
-            "{err:?}"
-        );
-    }
-
-    // Expiry: create another token and advance >10 min
-    let state2 = make_state();
-    seed_session(&state2);
-    let preview2 = commands_impl::preview_clean(
-        &state2,
+    // Tampered token
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
+    let _preview = commands_impl::preview_clean(
+        &state,
         "scan-test".to_string(),
         vec!["t1::1".to_string()],
         None,
     )
     .unwrap();
-    let settings_gen2 = state2.settings.lock().unwrap().generation();
-    state2.clock.advance_secs(10 * 60 + 1);
-    let mut sessions2 = state2.sessions.lock().unwrap();
-    let err = sessions2
-        .consume_preview_token(&state2.clock, &preview2.preview_token, settings_gen2)
-        .unwrap_err();
+    let err =
+        commands_impl::execute_clean(&state, "preview-tampered-token".to_string(), None, |_| {})
+            .unwrap_err();
     assert!(
         matches!(err, ContractError::PreviewTokenInvalid { .. }),
         "{err:?}"
+    );
+
+    // Double execute_clean rejected (single-use)
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
+    let preview = commands_impl::preview_clean(
+        &state,
+        "scan-test".to_string(),
+        vec!["t1::1".to_string()],
+        None,
+    )
+    .unwrap();
+    let logs_dir = tempfile::tempdir().unwrap();
+    let res = commands_impl::execute_clean(
+        &state,
+        preview.preview_token.clone(),
+        Some(logs_dir.path().to_path_buf()),
+        |_| {},
+    );
+    assert!(res.is_ok(), "{res:?}");
+    let err = commands_impl::execute_clean(
+        &state,
+        preview.preview_token,
+        Some(logs_dir.path().to_path_buf()),
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::PreviewTokenInvalid { .. }),
+        "{err:?}"
+    );
+
+    // Settings-invalidated session rejected by execute_clean
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
+    let preview = commands_impl::preview_clean(
+        &state,
+        "scan-test".to_string(),
+        vec!["t1::1".to_string()],
+        None,
+    )
+    .unwrap();
+    {
+        let mut settings = state.settings.lock().unwrap();
+        let mut s = settings.get();
+        s.min_age_hours = 10;
+        let _ = settings.update(s);
+    }
+    let err =
+        commands_impl::execute_clean(&state, preview.preview_token, None, |_| {}).unwrap_err();
+    assert!(
+        matches!(err, ContractError::SessionInvalid { .. }),
+        "{err:?}"
+    );
+
+    // Expired ScanSession (>15m) rejected by execute_clean
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
+    let preview = commands_impl::preview_clean(
+        &state,
+        "scan-test".to_string(),
+        vec!["t1::1".to_string()],
+        None,
+    )
+    .unwrap();
+    state.clock.advance_secs(15 * 60 + 1);
+    let err =
+        commands_impl::execute_clean(&state, preview.preview_token, None, |_| {}).unwrap_err();
+    assert!(
+        matches!(err, ContractError::SessionInvalid { .. })
+            || matches!(err, ContractError::PreviewTokenInvalid { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn valid_scan_preview_execute_clean_in_sentinel_sandbox_writes_log_and_preserves_canary() {
+    let state = make_state();
+    let sandbox = Sandbox::new().unwrap();
+    let canary = CanaryTree::seed_external("gate-f-exec").unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let file_path = sandbox
+        .write_file("Temp\\deleteme.tmp", b"hello-sweeper")
+        .unwrap();
+    assert!(file_path.exists());
+    canary.verify().unwrap();
+
+    seed_session(&state, &root, &file_path, 1_700_000_000);
+    let preview = commands_impl::preview_clean(
+        &state,
+        "scan-test".to_string(),
+        vec!["t1::1".to_string()],
+        None,
+    )
+    .unwrap();
+
+    let logs_base = tempfile::tempdir().unwrap();
+    let mut progress_events = 0usize;
+    let resp = commands_impl::execute_clean(
+        &state,
+        preview.preview_token,
+        Some(logs_base.path().to_path_buf()),
+        |_| {
+            progress_events += 1;
+        },
+    )
+    .unwrap();
+
+    assert_eq!(resp.deleted_count, U64String(1));
+    assert_eq!(resp.skipped_count, U64String(0));
+    assert!(!resp.aborted, "abort_reason={:?}", resp.abort_reason);
+    assert!(
+        !file_path.exists(),
+        "eligible file should be deleted in sandbox"
+    );
+    assert!(progress_events >= 1);
+    canary.verify().unwrap();
+
+    let log_id = resp.log_id.clone().expect("log_id must be present");
+    let logs =
+        commands_impl::list_logs_in_dir(Some(logs_base.path().join("logs").as_path())).unwrap();
+    assert!(logs.iter().any(|l| l.id == log_id), "logs={logs:?}");
+    let log =
+        commands_impl::read_log_in_dir(Some(logs_base.path().join("logs").as_path()), &log_id)
+            .unwrap();
+    assert!(log.content.contains("\"record\":\"intent\""));
+    assert!(log.content.contains("\"record\":\"outcome\""));
+    assert!(
+        log.content.contains("\"status\":\"deleted\"")
+            || log.content.contains("\"status\":\"deleted\"")
     );
 }
 
@@ -179,13 +339,11 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
     let cap: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&cap_path).unwrap()).unwrap();
 
-    // Strict CSP: default-src 'self' with NO 'unsafe-eval' and NO 'unsafe-inline'.
     let csp = conf["app"]["security"]["csp"].as_str().unwrap();
     assert!(csp.contains("default-src 'self'"), "csp: {csp}");
     assert!(!csp.contains("unsafe-eval"), "csp: {csp}");
     assert!(!csp.contains("unsafe-inline"), "csp: {csp}");
 
-    // freezePrototype and Isolation pattern
     assert_eq!(
         conf["app"]["security"]["freezePrototype"],
         serde_json::json!(true)
@@ -195,7 +353,6 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
         serde_json::json!("isolation")
     );
 
-    // Zero fs/shell plugins in config/capabilities
     let conf_s = conf.to_string().to_lowercase();
     let cap_s = cap.to_string().to_lowercase();
     assert!(
@@ -213,7 +370,6 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
         "capabilities must not reference fs/shell plugins"
     );
 
-    // Exact read-only command surface
     let mut cmds = cap["commands"]["allow"]
         .as_array()
         .unwrap()
@@ -224,6 +380,7 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
     assert_eq!(
         cmds,
         vec![
+            "execute_clean".to_string(),
             "explain_item".to_string(),
             "get_scan_results".to_string(),
             "get_settings".to_string(),
@@ -232,9 +389,5 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
             "read_log".to_string(),
             "start_scan".to_string(),
         ]
-    );
-    assert!(
-        !cap_s.contains("execute_clean"),
-        "execute_clean must not exist in Phase 2"
     );
 }

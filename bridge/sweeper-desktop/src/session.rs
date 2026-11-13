@@ -1,13 +1,17 @@
 //! In-memory scan sessions and preview tokens with TTL enforcement.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
+use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use sweeper_contract::{
-    ContractError, PreviewCleanResponse, PreviewConfirmationsDto, PreviewTargetBreakdownDto,
-    RiskDto, ScanItemDto, ScanResultsDto, SettingsDto, StartScanResponse, TargetScanResultDto,
-    TierDto, U64String,
+    ContractError, ExecuteCleanResponse, PreviewCleanResponse, PreviewConfirmationsDto,
+    PreviewTargetBreakdownDto, RiskDto, ScanItemDto, ScanResultsDto, SettingsDto, SkippedReasonDto,
+    StartScanResponse, TargetScanResultDto, TierDto, U64String,
 };
+use sweeper_core::paths::CanonicalPath;
+use sweeper_core::remover::{self, CleanOptions, CleanProgress, ValidatedItem};
 use sweeper_core::scanner::{self, ScanReport};
 use sweeper_knowledge::{Risk, Tier};
 
@@ -31,7 +35,7 @@ pub struct StoredItem {
     pub risk: Risk,
     /// Age eligible flag.
     pub age_eligible: bool,
-    /// Is this a custom-path/unknown-like selection requiring typed confirmation? (Phase 2: allowlist items only)
+    /// Is this a custom-path/unknown-like selection requiring typed confirmation?
     pub requires_typed_confirmation: bool,
 }
 
@@ -48,6 +52,10 @@ pub struct ScanSession {
     pub results: ScanResultsDto,
     /// Items by id.
     pub items: HashMap<String, StoredItem>,
+    /// Resolved target roots by target id (for building validated items).
+    pub target_roots: HashMap<String, Vec<String>>,
+    /// Minimum age hours applied for this scan.
+    pub min_age_hours: u32,
 }
 
 /// Preview token state.
@@ -63,7 +71,11 @@ pub struct PreviewTokenState {
     pub selection_hash: String,
     /// Selected item IDs.
     pub item_ids: Vec<String>,
-    /// Whether token has been used.
+    /// Validated items for clean execution.
+    pub validated_items: Vec<ValidatedItem>,
+    /// Preview estimated bytes (sum of selected item sizes).
+    pub preview_estimated_bytes: u64,
+    /// Whether token has been used/consumed.
     pub used: bool,
 }
 
@@ -96,7 +108,7 @@ impl SessionStore {
             let within_session = session
                 .map(|s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS)
                 .unwrap_or(false);
-            age_ok && within_session
+            age_ok && within_session && !t.used
         });
     }
 
@@ -119,6 +131,11 @@ impl SessionStore {
         results: ScanResultsDto,
         items: HashMap<String, StoredItem>,
     ) {
+        let target_roots = results
+            .targets
+            .iter()
+            .map(|t| (t.target_id.clone(), t.resolved_paths.clone()))
+            .collect();
         self.sessions.insert(
             session_id.to_string(),
             ScanSession {
@@ -127,6 +144,8 @@ impl SessionStore {
                 settings_generation,
                 results,
                 items,
+                target_roots,
+                min_age_hours: 24,
             },
         );
     }
@@ -154,13 +173,15 @@ impl SessionStore {
         })?;
 
         let session_id = self.next_id("scan", now);
-        let (results, items) = map_report_to_session(&session_id, report);
+        let (results, items, target_roots) = map_report_to_session(&session_id, report);
         let session = ScanSession {
             id: session_id.clone(),
             created_at: now,
             settings_generation,
             results,
             items,
+            target_roots,
+            min_age_hours: settings.min_age_hours,
         };
         self.sessions.insert(session_id.clone(), session);
         Ok(StartScanResponse { session_id })
@@ -178,7 +199,7 @@ impl SessionStore {
         Ok(session.results.clone())
     }
 
-    /// Create a preview token for selected item IDs (read-only; no clean).
+    /// Create a preview token for selected item IDs (no clean).
     pub fn preview_clean<C: Clock>(
         &mut self,
         clock: &C,
@@ -213,7 +234,6 @@ impl SessionStore {
             });
         }
 
-        // Typed confirmation required for custom path / unknown selections.
         let needs_confirmation = selected.iter().any(|i| i.requires_typed_confirmation);
         if needs_confirmation {
             let ok = confirmations
@@ -227,10 +247,11 @@ impl SessionStore {
             }
         }
 
-        // Build breakdown by target.
         let mut by_target: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
         let mut total_count = 0u64;
         let mut total_bytes = 0u64;
+        let mut validated_items: Vec<ValidatedItem> = Vec::with_capacity(selected.len());
+
         for item in &selected {
             let entry = by_target
                 .entry(item.target_id.clone())
@@ -239,7 +260,40 @@ impl SessionStore {
             entry.2 = entry.2.saturating_add(item.dto.size.get());
             total_count += 1;
             total_bytes = total_bytes.saturating_add(item.dto.size.get());
+
+            let roots = session
+                .target_roots
+                .get(&item.target_id)
+                .cloned()
+                .or_else(|| {
+                    session
+                        .results
+                        .targets
+                        .iter()
+                        .find(|t| t.target_id == item.target_id)
+                        .map(|t| t.resolved_paths.clone())
+                })
+                .unwrap_or_default();
+            let target_root = find_containing_root(&roots, &item.dto.path).ok_or_else(|| {
+                ContractError::InvalidInput {
+                    reason: "selected item is not within a resolved target root".to_string(),
+                }
+            })?;
+            let mtime = item.dto.mtime_unix_secs.get();
+            let validated = ValidatedItem::from_allowlisted_scan(
+                item.dto.id.clone(),
+                item.target_id.clone(),
+                target_root,
+                item.dto.path.clone(),
+                item.dto.size.get(),
+                Some(mtime),
+            )
+            .map_err(|_| ContractError::InvalidInput {
+                reason: "selected item failed validation".to_string(),
+            })?;
+            validated_items.push(validated);
         }
+
         let breakdown = by_target
             .into_iter()
             .map(
@@ -260,6 +314,8 @@ impl SessionStore {
             issued_at: now,
             selection_hash,
             item_ids: item_ids.clone(),
+            validated_items,
+            preview_estimated_bytes: total_bytes,
             used: false,
         };
         self.preview_tokens.insert(token.clone(), state);
@@ -272,17 +328,24 @@ impl SessionStore {
         })
     }
 
-    /// Validate (and consume) a preview token. `execute_clean` does not exist in Phase 2,
-    /// but this helper supports Gate F expectations/tests.
-    pub fn consume_preview_token<C: Clock>(
+    /// Validate and atomically consume a preview token for execution.
+    pub fn consume_preview_token_for_execute<C: Clock>(
         &mut self,
         clock: &C,
         preview_token: &str,
         current_settings_generation: u64,
-    ) -> Result<(String, Vec<String>), ContractError> {
+    ) -> Result<(ScanSession, Vec<ValidatedItem>, u64), ContractError> {
         self.cleanup(clock);
         let now = clock.now_unix_secs();
-        let (session_id, item_ids, selection_hash, issued_at, used) = {
+        let (
+            session_id,
+            item_ids,
+            selection_hash,
+            issued_at,
+            used,
+            validated_items,
+            preview_estimated_bytes,
+        ) = {
             let t = self.preview_tokens.get(preview_token).ok_or_else(|| {
                 ContractError::PreviewTokenInvalid {
                     reason: "token not found".to_string(),
@@ -294,6 +357,8 @@ impl SessionStore {
                 t.selection_hash.clone(),
                 t.issued_at,
                 t.used,
+                t.validated_items.clone(),
+                t.preview_estimated_bytes,
             )
         };
         if used {
@@ -301,11 +366,17 @@ impl SessionStore {
                 reason: "token already used".to_string(),
             });
         }
-        // Ensure session valid and bounds token.
-        let _session = self.get_valid_session(clock, &session_id, current_settings_generation)?;
+        let session = self
+            .get_valid_session(clock, &session_id, current_settings_generation)?
+            .clone();
         if now.saturating_sub(issued_at) > PREVIEW_TOKEN_TTL_SECS {
             return Err(ContractError::PreviewTokenInvalid {
                 reason: "token expired".to_string(),
+            });
+        }
+        if now.saturating_sub(session.created_at) > SCAN_SESSION_TTL_SECS {
+            return Err(ContractError::SessionInvalid {
+                reason: "session expired".to_string(),
             });
         }
         let expected = hash_selection(&session_id, &item_ids);
@@ -315,9 +386,100 @@ impl SessionStore {
             });
         }
         if let Some(t) = self.preview_tokens.get_mut(preview_token) {
+            if t.used {
+                return Err(ContractError::PreviewTokenInvalid {
+                    reason: "token already used".to_string(),
+                });
+            }
             t.used = true;
         }
-        Ok((session_id, item_ids))
+        Ok((session, validated_items, preview_estimated_bytes))
+    }
+
+    /// Execute clean for a preview token (consumes token atomically).
+    pub fn execute_clean<C, F>(
+        &mut self,
+        clock: &C,
+        preview_token: &str,
+        current_settings_generation: u64,
+        journal_base_dir: Option<PathBuf>,
+        mut on_progress: F,
+    ) -> Result<ExecuteCleanResponse, ContractError>
+    where
+        C: Clock,
+        F: FnMut(sweeper_contract::CleanProgressEvent),
+    {
+        let (session, validated_items, preview_estimated_bytes) = self
+            .consume_preview_token_for_execute(clock, preview_token, current_settings_generation)?;
+
+        let total_items = validated_items.len() as u64;
+        let now = UNIX_EPOCH + Duration::from_secs(clock.now_unix_secs());
+        let opts = CleanOptions {
+            preview_estimated_bytes,
+            min_age: Duration::from_secs(u64::from(session.min_age_hours) * 3600),
+            now,
+            journal_base_dir: journal_base_dir.clone(),
+        };
+
+        let log_dir = opts
+            .journal_base_dir
+            .clone()
+            .unwrap_or_else(sweeper_core::journal::default_logs_base_dir);
+        let resolved_log_dir = sweeper_core::journal::resolve_log_dir(&log_dir);
+        let existing_logs = list_log_ids(&resolved_log_dir);
+
+        let report =
+            remover::execute_clean_with_progress(validated_items, opts, |p: CleanProgress| {
+                on_progress(sweeper_contract::CleanProgressEvent {
+                    preview_token: preview_token.to_string(),
+                    target_id: p.target_id,
+                    completed_items: U64String(p.completed_items),
+                    total_items: U64String(p.total_items),
+                    bytes_freed_so_far: U64String(p.bytes_freed_so_far),
+                    status: p.status,
+                });
+            })
+            .map_err(|e| ContractError::Internal {
+                reason: sanitize_reason(&e.to_string()),
+            })?;
+
+        let log_id = detect_new_log_id(&resolved_log_dir, &existing_logs);
+
+        let deleted_count = report
+            .items
+            .iter()
+            .filter(|i| i.status == "deleted")
+            .count() as u64;
+        let mut reasons: BTreeMap<String, u64> = BTreeMap::new();
+        for item in &report.items {
+            if item.status == "Skipped" || item.status == "aborted" {
+                let key = if item.reason.trim().is_empty() {
+                    "Skipped".to_string()
+                } else {
+                    item.reason.clone()
+                };
+                *reasons.entry(key).or_insert(0) += 1;
+            }
+        }
+        let skipped_reasons = reasons
+            .into_iter()
+            .map(|(reason, count)| SkippedReasonDto {
+                reason,
+                count: U64String(count),
+            })
+            .collect::<Vec<_>>();
+
+        let _ = (session, total_items);
+
+        Ok(ExecuteCleanResponse {
+            bytes_freed: U64String(report.bytes_freed),
+            deleted_count: U64String(deleted_count),
+            skipped_count: U64String(report.skipped_count),
+            skipped_reasons,
+            aborted: report.aborted,
+            abort_reason: report.abort_reason,
+            log_id,
+        })
     }
 
     /// Explain an item by id (scan item id or target/knowledge id).
@@ -328,7 +490,6 @@ impl SessionStore {
         current_settings_generation: u64,
     ) -> Result<sweeper_contract::ExplainItemResponse, ContractError> {
         self.cleanup(clock);
-        // Try as scan item in any valid session.
         let now = clock.now_unix_secs();
         for s in self.sessions.values() {
             if !session_valid_at(s, now, current_settings_generation) {
@@ -343,7 +504,6 @@ impl SessionStore {
                     risk: risk_to_dto(item.risk),
                 });
             }
-            // Also allow target-level explanation by target id present in session.
             if s.results.targets.iter().any(|t| t.target_id == item_id) {
                 if let Some(t) = s.results.targets.iter().find(|t| t.target_id == item_id) {
                     return Ok(sweeper_contract::ExplainItemResponse {
@@ -356,7 +516,6 @@ impl SessionStore {
                 }
             }
         }
-        // Fall back to knowledge base entries (always available).
         if let Some(k) = sweeper_knowledge::builtin_knowledge_entries()
             .into_iter()
             .find(|k| k.id == item_id)
@@ -368,7 +527,6 @@ impl SessionStore {
                 risk: risk_to_dto(k.risk),
             });
         }
-        // Fall back to embedded targets.
         if let Some(t) = sweeper_knowledge::embedded_targets()
             .into_iter()
             .find(|t| t.id == item_id)
@@ -475,12 +633,18 @@ fn risk_to_dto(r: Risk) -> RiskDto {
 fn map_report_to_session(
     session_id: &str,
     report: ScanReport,
-) -> (ScanResultsDto, HashMap<String, StoredItem>) {
+) -> (
+    ScanResultsDto,
+    HashMap<String, StoredItem>,
+    HashMap<String, Vec<String>>,
+) {
     let mut items_map = HashMap::new();
+    let mut target_roots = HashMap::new();
     let targets = report
         .targets
         .into_iter()
         .map(|t| {
+            target_roots.insert(t.target_id.clone(), t.resolved_paths.clone());
             let dto_items = t
                 .items
                 .into_iter()
@@ -502,7 +666,7 @@ fn map_report_to_session(
                             tier: t.tier,
                             risk: t.risk,
                             age_eligible: i.age_eligible,
-                            requires_typed_confirmation: false, // allowlist scan items only in Phase 2
+                            requires_typed_confirmation: false,
                         },
                     );
                     dto
@@ -531,7 +695,7 @@ fn map_report_to_session(
         min_age_hours: report.min_age_hours,
         targets,
     };
-    (results, items_map)
+    (results, items_map, target_roots)
 }
 
 fn hash_selection(session_id: &str, item_ids: &[String]) -> String {
@@ -548,6 +712,24 @@ fn hash_selection(session_id: &str, item_ids: &[String]) -> String {
     hex::encode(out)
 }
 
+fn find_containing_root(roots: &[String], item_path: &str) -> Option<String> {
+    let item = CanonicalPath::parse_lexical(item_path).ok()?;
+    let mut best: Option<(usize, String)> = None;
+    for root_str in roots {
+        let Ok(root) = CanonicalPath::parse_lexical(root_str) else {
+            continue;
+        };
+        if root.is_self_or_ancestor_of(&item) && !root.is_same_path(&item) {
+            let depth = root.segment_count();
+            match &best {
+                Some((best_depth, _)) if *best_depth >= depth => {}
+                _ => best = Some((depth, root_str.clone())),
+            }
+        }
+    }
+    best.map(|(_, r)| r)
+}
+
 fn lookup_target_description(target_id: &str) -> Option<String> {
     sweeper_knowledge::embedded_targets()
         .into_iter()
@@ -556,17 +738,14 @@ fn lookup_target_description(target_id: &str) -> Option<String> {
 }
 
 fn sanitize_reason(s: &str) -> String {
-    // Avoid leaking internal paths or stack traces in contract errors.
-    // Keep it conservative and short.
     let lower = s.to_lowercase();
     if lower.contains("path")
-        || lower.contains("\\")
+        || lower.contains('\\')
         || lower.contains('/')
         || lower.contains("stack")
     {
         "operation failed".to_string()
     } else {
-        // truncate
         let mut out = s.trim().to_string();
         if out.len() > 120 {
             out.truncate(120);
@@ -576,5 +755,61 @@ fn sanitize_reason(s: &str) -> String {
         } else {
             out
         }
+    }
+}
+
+fn list_log_ids(log_dir: &std::path::Path) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if let Ok(rd) = std::fs::read_dir(log_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                out.insert(stem.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn detect_new_log_id(log_dir: &std::path::Path, existing: &HashSet<String>) -> Option<String> {
+    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(log_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if existing.contains(stem) {
+                continue;
+            }
+            let modified = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            candidates.push((modified, stem.to_string()));
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    candidates.into_iter().next().map(|(_, id)| id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_root_prefers_longest_match() {
+        let roots = vec![
+            r"C:\Users\A\AppData\Local".to_string(),
+            r"C:\Users\A\AppData\Local\Temp".to_string(),
+        ];
+        let found = find_containing_root(&roots, r"C:\Users\A\AppData\Local\Temp\f.txt");
+        assert_eq!(found.as_deref(), Some(r"C:\Users\A\AppData\Local\Temp"));
     }
 }

@@ -28,6 +28,14 @@ async previewClean(sessionId: string, itemIds: string[], confirmations: { typedC
     else return { status: "error", error: e  as any };
 }
 },
+async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; deletedCount: string; skippedCount: string; skippedReasons: SkippedReasonDto[]; aborted: boolean; abortReason: string | null; logId: string | null }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("execute_clean", { previewToken }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: string; description: string; risk: RiskDto }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("explain_item", { itemId }) };
@@ -65,9 +73,11 @@ async readLog(logId: string) : Promise<Result<{ id: string; content: string }, {
 /** user-defined events **/
 
 export const events = __makeEvents__<{
-scanProgressEvent: { kind: "started"; session_id: string } | { kind: "completed"; session_id: string } | { kind: "failed"; session_id: string; error: ContractError }
+scanProgressEvent: { kind: "started"; session_id: string } | { kind: "completed"; session_id: string } | { kind: "failed"; session_id: string; error: ContractError },
+cleanProgressEvent: { previewToken: string; targetId: string; completedItems: string; totalItems: string; bytesFreedSoFar: string; status: string }
 }>({
-scanProgressEvent: "ScanProgressEvent"
+scanProgressEvent: "ScanProgressEvent",
+cleanProgressEvent: "CleanProgressEvent"
 })
 
 /** user-defined constants **/
@@ -199,6 +209,19 @@ mtimeUnixSecs: string;
  * Whether eligible by minimum age.
  */
 ageEligible: boolean }
+
+/**
+ * Aggregated skipped-reason entry for clean summaries.
+ */
+export type SkippedReasonDto = { 
+/**
+ * Human-safe reason label/text.
+ */
+reason: string; 
+/**
+ * Number of items skipped for this reason (decimal string).
+ */
+count: string }
 
 /**
  * Per-target scan result for UI display.

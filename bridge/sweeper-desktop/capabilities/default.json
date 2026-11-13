@@ -11,6 +11,7 @@
       "start_scan",
       "get_scan_results",
       "preview_clean",
+      "execute_clean",
       "explain_item",
       "get_settings",
       "list_logs",

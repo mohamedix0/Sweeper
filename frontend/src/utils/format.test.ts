@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, sumDecimalStrings, toBigInt } from './format';
+import { formatBytes, formatUnixSeconds, sumDecimalStrings, toBigInt } from './format';
 
 describe('format utils (BigInt-safe)', () => {
   it('parses decimal strings as BigInt', () => {
@@ -23,5 +23,11 @@ describe('format utils (BigInt-safe)', () => {
   it('handles very large byte counts without Number precision loss', () => {
     const big = '9007199254740993';
     expect(formatBytes(big)).toContain('PB');
+  });
+
+  it('range-checks BigInt before Number conversion for unix seconds', () => {
+    expect(formatUnixSeconds(null)).toBe('—');
+    expect(formatUnixSeconds('0')).toBe(new Date(0).toLocaleString());
+    expect(formatUnixSeconds('9007199254740993')).toBe('9007199254740993');
   });
 });

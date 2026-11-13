@@ -94,6 +94,10 @@ impl ValidatedItem {
     pub fn id(&self) -> &str {
         &self.id
     }
+    /// Target id.
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
     /// Target root path.
     pub fn target_root(&self) -> &str {
         &self.target_root
@@ -105,6 +109,66 @@ impl ValidatedItem {
     /// Estimated size bytes.
     pub fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+    /// Last modified time (unix seconds), if known.
+    pub fn mtime_unix_secs(&self) -> Option<u64> {
+        self.mtime_unix_secs
+    }
+
+    /// Construct a validated allowlisted scan item for bridge-mediated clean execution.
+    ///
+    /// Performs basic lexical/path-policy checks (containment within target root, non-protected,
+    /// canonical lexical parsing). Moment-of-deletion handle-based revalidation remains mandatory
+    /// inside the remover.
+    pub fn from_allowlisted_scan(
+        id: impl Into<String>,
+        target_id: impl Into<String>,
+        target_root: impl Into<String>,
+        path: impl Into<String>,
+        size_bytes: u64,
+        mtime_unix_secs: Option<u64>,
+    ) -> Result<Self, String> {
+        let id = id.into();
+        let target_id = target_id.into();
+        let target_root = target_root.into();
+        let path = path.into();
+
+        let root = CanonicalPath::parse_lexical(&target_root)
+            .map_err(|e| format!("invalid target root: {e}"))?;
+        let item =
+            CanonicalPath::parse_lexical(&path).map_err(|e| format!("invalid item path: {e}"))?;
+
+        if root.segment_count() < 3 {
+            return Err("target root depth < 3".to_string());
+        }
+        if !root.is_self_or_ancestor_of(&item) || item.is_same_path(&root) {
+            return Err(
+                "item path must be inside target root (and not the root itself)".to_string(),
+            );
+        }
+        if policy::is_subtree_protected(&root)
+            || policy::is_ancestor_of_subtree_protected(&root)
+            || policy::is_protected_container_root(&root)
+        {
+            return Err("target root is protected".to_string());
+        }
+        if policy::is_subtree_protected(&item)
+            || policy::is_ancestor_of_subtree_protected(&item)
+            || policy::is_protected_container_root(&item)
+        {
+            return Err("item path is protected".to_string());
+        }
+
+        Ok(Self {
+            id,
+            target_id: target_id.clone(),
+            target_root,
+            path,
+            size_bytes,
+            mtime_unix_secs,
+            source: ValidatedSource::AllowlistedTarget { target_id },
+            risk: None,
+        })
     }
 }
 
@@ -162,6 +226,21 @@ pub struct CleanReport {
     pub abort_reason: Option<String>,
 }
 
+/// Progress update emitted during clean execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanProgress {
+    /// Target identifier for the current/processed item.
+    pub target_id: String,
+    /// Number of items completed so far.
+    pub completed_items: u64,
+    /// Total items in this clean run.
+    pub total_items: u64,
+    /// Bytes freed so far.
+    pub bytes_freed_so_far: u64,
+    /// Status label for the last processed item/update.
+    pub status: String,
+}
+
 /// Execute handle-based clean for validated items.
 ///
 /// Safety-critical: revalidates on opened handles, journals intent before deletion and outcomes after,
@@ -170,6 +249,21 @@ pub fn execute_clean(
     items: Vec<ValidatedItem>,
     opts: CleanOptions,
 ) -> Result<CleanReport, CleanError> {
+    execute_clean_with_progress(items, opts, |_| {})
+}
+
+/// Execute handle-based clean for validated items with progress callbacks.
+///
+/// Safety-critical: revalidates on opened handles, journals intent before deletion and outcomes after,
+/// aborts on 120% overrun or target-root escape, and uses an abort-on-panic guard.
+pub fn execute_clean_with_progress<F>(
+    items: Vec<ValidatedItem>,
+    opts: CleanOptions,
+    mut on_progress: F,
+) -> Result<CleanReport, CleanError>
+where
+    F: FnMut(CleanProgress),
+{
     let _panic_guard = AbortOnPanicGuard;
     let base_dir = opts
         .journal_base_dir
@@ -177,6 +271,7 @@ pub fn execute_clean(
         .unwrap_or_else(journal::default_logs_base_dir);
     let mut journal = JournalWriter::open_in(&base_dir)?;
 
+    let total_items = items.len() as u64;
     let mut report = CleanReport {
         items: Vec::with_capacity(items.len()),
         bytes_freed: 0,
@@ -185,39 +280,49 @@ pub fn execute_clean(
         abort_reason: None,
     };
     let mut deleted_total: u64 = 0;
+    let mut completed: u64 = 0;
 
     for item in items {
         if report.aborted {
-            // Once aborted, remaining items are skipped with reason.
             let reason = report
                 .abort_reason
                 .clone()
                 .unwrap_or_else(|| "aborted".to_string());
             record_skip(&mut journal, &mut report, &item, &reason)?;
+            completed = completed.saturating_add(1);
+            on_progress(CleanProgress {
+                target_id: item.target_id.clone(),
+                completed_items: completed,
+                total_items,
+                bytes_freed_so_far: report.bytes_freed,
+                status: "Skipped".to_string(),
+            });
             continue;
         }
 
         let outcome = process_item(&item, &opts, &mut journal, &mut deleted_total, &report)?;
-        match outcome {
+        let status = match &outcome {
             ProcessOutcome::Deleted(bytes) => {
                 report.items.push(ItemCleanResult {
                     id: item.id.clone(),
                     path: item.path.clone(),
                     status: "deleted".to_string(),
                     reason: String::new(),
-                    bytes_deleted: bytes,
+                    bytes_deleted: *bytes,
                 });
-                report.bytes_freed = report.bytes_freed.saturating_add(bytes);
+                report.bytes_freed = report.bytes_freed.saturating_add(*bytes);
+                "deleted".to_string()
             }
             ProcessOutcome::Skipped(reason) => {
                 report.items.push(ItemCleanResult {
                     id: item.id.clone(),
                     path: item.path.clone(),
                     status: "Skipped".to_string(),
-                    reason,
+                    reason: reason.clone(),
                     bytes_deleted: 0,
                 });
                 report.skipped_count += 1;
+                "Skipped".to_string()
             }
             ProcessOutcome::Aborted(reason) => {
                 report.aborted = true;
@@ -226,12 +331,21 @@ pub fn execute_clean(
                     id: item.id.clone(),
                     path: item.path.clone(),
                     status: "Skipped".to_string(),
-                    reason,
+                    reason: reason.clone(),
                     bytes_deleted: 0,
                 });
                 report.skipped_count += 1;
+                "aborted".to_string()
             }
-        }
+        };
+        completed = completed.saturating_add(1);
+        on_progress(CleanProgress {
+            target_id: item.target_id.clone(),
+            completed_items: completed,
+            total_items,
+            bytes_freed_so_far: report.bytes_freed,
+            status,
+        });
     }
 
     Ok(report)

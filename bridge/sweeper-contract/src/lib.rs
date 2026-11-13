@@ -111,6 +111,16 @@ pub enum SkipReasonDto {
     NotEligible,
 }
 
+/// Aggregated skipped-reason entry for clean summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedReasonDto {
+    /// Human-safe reason label/text.
+    pub reason: String,
+    /// Number of items skipped for this reason (decimal string).
+    pub count: U64String,
+}
+
 /// Display metadata for a scanned item (path is display-only; never submitted for deletion).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -217,6 +227,44 @@ pub struct PreviewCleanResponse {
     pub total_selected_count: U64String,
     /// Total selected bytes estimate (decimal string).
     pub total_selected_bytes: U64String,
+}
+
+/// Progress event for clean operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanProgressEvent {
+    /// Preview token for the active clean.
+    pub preview_token: String,
+    /// Target identifier for the current/last processed item.
+    pub target_id: String,
+    /// Completed item count (decimal string).
+    pub completed_items: U64String,
+    /// Total item count (decimal string).
+    pub total_items: U64String,
+    /// Bytes freed so far (decimal string).
+    pub bytes_freed_so_far: U64String,
+    /// Status label for the current progress update.
+    pub status: String,
+}
+
+/// Final response from executing a clean operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteCleanResponse {
+    /// Bytes freed (decimal string).
+    pub bytes_freed: U64String,
+    /// Deleted item count (decimal string).
+    pub deleted_count: U64String,
+    /// Skipped item count (decimal string).
+    pub skipped_count: U64String,
+    /// Aggregated skipped reasons.
+    pub skipped_reasons: Vec<SkippedReasonDto>,
+    /// Whether clean aborted early.
+    pub aborted: bool,
+    /// Abort reason if aborted.
+    pub abort_reason: Option<String>,
+    /// Associated log identifier for viewing operation log.
+    pub log_id: Option<String>,
 }
 
 /// Explanation for an item or target (read-only knowledge).
@@ -380,7 +428,6 @@ fn render_bindings() -> Result<String, Box<dyn std::error::Error>> {
     let ts_cfg = ts::Typescript::default();
     let mut type_map = TypeCollection::default();
 
-    // Register/resolve all types that appear in command signatures and events.
     let _ = <StartScanResponse as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <ScanResultsDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <PreviewCleanResponse as NamedType>::definition_named_data_type(&mut type_map);
@@ -390,7 +437,8 @@ fn render_bindings() -> Result<String, Box<dyn std::error::Error>> {
     let _ = <LogReadResponse as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <ContractError as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <ScanProgressEvent as NamedType>::definition_named_data_type(&mut type_map);
-    // Types referenced transitively (enums, nested DTOs) should be pulled in, but ensure key ones.
+    let _ = <ExecuteCleanResponse as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <CleanProgressEvent as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <TierDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <RiskDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <SkipReasonDto as NamedType>::definition_named_data_type(&mut type_map);
@@ -398,11 +446,9 @@ fn render_bindings() -> Result<String, Box<dyn std::error::Error>> {
     let _ = <TargetScanResultDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <PreviewConfirmationsDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <PreviewTargetBreakdownDto as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <SkippedReasonDto as NamedType>::definition_named_data_type(&mut type_map);
 
-    // Export named types (sorted by name for determinism as specta-typescript does internally? export() iterates map).
     let dependant_types = ts_cfg.export(&type_map)?;
-    // ts_cfg.export includes header/framework_header; we need just the type defs section in tauri-specta layout.
-    // But easier to strip headers and reconstruct full file in tauri-specta format.
     let types_only = strip_specta_typescript_headers(&dependant_types)
         .trim()
         .to_string();
@@ -421,9 +467,6 @@ fn render_bindings() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn strip_specta_typescript_headers(s: &str) -> String {
-    // specta-typescript default export prepends header + framework header + blank lines.
-    // We keep everything after the initial comment/header block that belongs to types.
-    // Simpler: remove known default framework header line if present.
     let mut out = s.to_string();
     if let Some(stripped) =
         out.strip_prefix("// This file has been generated by Specta. DO NOT EDIT.\n\n")
@@ -449,13 +492,11 @@ fn render_commands(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // Default ErrorHandlingMode in tauri-specta rc.21 is Result.
-    // All commands return Result<T, ContractError> in Rust -> Promise<Result<T, ContractError>> in TS
-    // with try/catch wrapper returning {status:"ok",data:...} or {status:"error",error:e as any}.
     let commands = [
         cmd_start_scan(cfg, type_map)?,
         cmd_get_scan_results(cfg, type_map)?,
         cmd_preview_clean(cfg, type_map)?,
+        cmd_execute_clean(cfg, type_map)?,
         cmd_explain_item(cfg, type_map)?,
         cmd_get_settings(cfg, type_map)?,
         cmd_list_logs(cfg, type_map)?,
@@ -489,7 +530,6 @@ fn cmd_start_scan(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // tiers: Option<Vec<TierDto>>
     let tiers_ty = datatype_str(
         cfg,
         <Option<Vec<TierDto>> as Type>::inline(type_map, Generics::NONE),
@@ -571,6 +611,29 @@ fn cmd_preview_clean(
         &format!("Result<{ok_ty}, {err_ty}>"),
         "preview_clean",
         Some("{ sessionId, itemIds, confirmations }"),
+    ))
+}
+
+fn cmd_execute_clean(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let ok_ty = datatype_str(
+        cfg,
+        <ExecuteCleanResponse as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let err_ty = datatype_str(
+        cfg,
+        <ContractError as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    Ok(cmd_fn(
+        "executeClean",
+        &[("preview_token", "string".to_string())],
+        &format!("Result<{ok_ty}, {err_ty}>"),
+        "execute_clean",
+        Some("{ previewToken }"),
     ))
 }
 
@@ -670,16 +733,20 @@ fn render_events(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // ScanProgressEvent registered as event "ScanProgressEvent" by tauri-specta::Event derive macro name by default.
-    let event_ty = datatype_str(
+    let scan_ty = datatype_str(
         cfg,
         <ScanProgressEvent as Type>::inline(type_map, Generics::NONE),
         type_map,
     )?;
-    let event_name = "ScanProgressEvent";
-    let event_camel = event_name.to_lower_camel_case();
-    let events_types = format!("{event_camel}: {event_ty}");
-    let events_map = format!("{event_camel}: \"{event_name}\"");
+    let clean_ty = datatype_str(
+        cfg,
+        <CleanProgressEvent as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let events_types = format!("scanProgressEvent: {scan_ty},\ncleanProgressEvent: {clean_ty}");
+    let events_map =
+        "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\""
+            .to_string();
     Ok(format!(
         "export const events = __makeEvents__<{{\n{events_types}\n}}>({{\n{events_map}\n}})"
     ))
@@ -688,12 +755,12 @@ fn render_events(
 /// Deterministic serde fuzz entrypoint for contract payload bytes.
 /// Accepts arbitrary bytes and must never panic.
 pub fn fuzz_contract_payload_bytes(data: &[u8]) {
-    // Try as UTF-8 JSON fragments for various DTOs/enums; errors are expected.
     if let Ok(s) = std::str::from_utf8(data) {
         let _ = serde_json::from_str::<U64String>(s);
         let _ = serde_json::from_str::<TierDto>(s);
         let _ = serde_json::from_str::<RiskDto>(s);
         let _ = serde_json::from_str::<SkipReasonDto>(s);
+        let _ = serde_json::from_str::<SkippedReasonDto>(s);
         let _ = serde_json::from_str::<ScanItemDto>(s);
         let _ = serde_json::from_str::<TargetScanResultDto>(s);
         let _ = serde_json::from_str::<ScanResultsDto>(s);
@@ -701,19 +768,22 @@ pub fn fuzz_contract_payload_bytes(data: &[u8]) {
         let _ = serde_json::from_str::<PreviewConfirmationsDto>(s);
         let _ = serde_json::from_str::<PreviewTargetBreakdownDto>(s);
         let _ = serde_json::from_str::<PreviewCleanResponse>(s);
+        let _ = serde_json::from_str::<ExecuteCleanResponse>(s);
         let _ = serde_json::from_str::<ExplainItemResponse>(s);
         let _ = serde_json::from_str::<SettingsDto>(s);
         let _ = serde_json::from_str::<LogMetadataDto>(s);
         let _ = serde_json::from_str::<LogReadResponse>(s);
         let _ = serde_json::from_str::<ScanProgressEvent>(s);
+        let _ = serde_json::from_str::<CleanProgressEvent>(s);
         let _ = serde_json::from_str::<ContractError>(s);
         let _ = serde_json::from_str::<Vec<String>>(s);
         let _ = serde_json::from_str::<Vec<TierDto>>(s);
     }
-    // Also exercise raw-byte parsing attempts via serde_json::from_slice where meaningful.
     let _ = serde_json::from_slice::<U64String>(data);
     let _ = serde_json::from_slice::<ScanResultsDto>(data);
     let _ = serde_json::from_slice::<PreviewCleanResponse>(data);
+    let _ = serde_json::from_slice::<ExecuteCleanResponse>(data);
+    let _ = serde_json::from_slice::<CleanProgressEvent>(data);
     let _ = serde_json::from_slice::<ContractError>(data);
 }
 
@@ -746,6 +816,39 @@ mod tests {
         assert_eq!(v["mtimeUnixSecs"], serde_json::json!("456"));
         let back: ScanItemDto = serde_json::from_value(v).unwrap();
         assert_eq!(back, item);
+    }
+
+    #[test]
+    fn clean_dtos_serialize_u64_fields_as_strings() {
+        let event = CleanProgressEvent {
+            preview_token: "pt".to_string(),
+            target_id: "t1".to_string(),
+            completed_items: U64String(1),
+            total_items: U64String(2),
+            bytes_freed_so_far: U64String(3),
+            status: "running".to_string(),
+        };
+        let v = serde_json::to_value(&event).unwrap();
+        assert_eq!(v["completedItems"], serde_json::json!("1"));
+        assert_eq!(v["totalItems"], serde_json::json!("2"));
+        assert_eq!(v["bytesFreedSoFar"], serde_json::json!("3"));
+        let resp = ExecuteCleanResponse {
+            bytes_freed: U64String(10),
+            deleted_count: U64String(2),
+            skipped_count: U64String(1),
+            skipped_reasons: vec![SkippedReasonDto {
+                reason: "Skipped: locked".to_string(),
+                count: U64String(1),
+            }],
+            aborted: false,
+            abort_reason: None,
+            log_id: Some("log-1".to_string()),
+        };
+        let vr = serde_json::to_value(&resp).unwrap();
+        assert_eq!(vr["bytesFreed"], serde_json::json!("10"));
+        assert_eq!(vr["deletedCount"], serde_json::json!("2"));
+        assert_eq!(vr["skippedCount"], serde_json::json!("1"));
+        assert_eq!(vr["skippedReasons"][0]["count"], serde_json::json!("1"));
     }
 
     #[test]

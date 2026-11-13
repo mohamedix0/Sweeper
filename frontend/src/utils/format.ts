@@ -42,9 +42,15 @@ export function formatBytes(bytes: string | bigint | number): string {
 export function formatUnixSeconds(secs: string | null | undefined): string {
   if (!secs) return '—';
   try {
-    const ms = Number(toBigInt(secs) * 1000n);
+    const msBig = toBigInt(secs) * 1000n;
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    const min = BigInt(Number.MIN_SAFE_INTEGER);
+    if (msBig > max || msBig < min) return secs;
+    const ms = Number(msBig);
     if (!Number.isFinite(ms)) return secs;
-    return new Date(ms).toLocaleString();
+    const d = new Date(ms);
+    if (Number.isNaN(d.getTime())) return secs;
+    return d.toLocaleString();
   } catch {
     return String(secs);
   }

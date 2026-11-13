@@ -25,3 +25,5 @@ tauri-build = { version = "2", features = ["isolation"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+sweeper-testkit = { workspace = true }
+sweeper-core = { workspace = true }

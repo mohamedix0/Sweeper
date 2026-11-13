@@ -1,11 +1,12 @@
-//! Read-only command implementations (headless-testable).
+//! Command implementations (headless-testable).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
-    ContractError, ExplainItemResponse, LogMetadataDto, LogReadResponse, PreviewCleanResponse,
-    PreviewConfirmationsDto, ScanResultsDto, SettingsDto, StartScanResponse, TierDto, U64String,
+    CleanProgressEvent, ContractError, ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto,
+    LogReadResponse, PreviewCleanResponse, PreviewConfirmationsDto, ScanResultsDto, SettingsDto,
+    StartScanResponse, TierDto, U64String,
 };
 
 use crate::clock::Clock;
@@ -213,4 +214,41 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
     Err(ContractError::NotFound {
         reason: "log not found".into(),
     })
+}
+
+/// `execute_clean` implementation (test-injected logs dir supported).
+pub fn execute_clean<C: Clock, F>(
+    state: &AppState<C>,
+    preview_token: String,
+    journal_base_dir: Option<PathBuf>,
+    on_progress: F,
+) -> Result<ExecuteCleanResponse, ContractError>
+where
+    F: FnMut(CleanProgressEvent),
+{
+    let settings_gen = state
+        .settings
+        .lock()
+        .map_err(|_| ContractError::Internal {
+            reason: "state unavailable".into(),
+        })?
+        .generation();
+    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
+        reason: "state unavailable".into(),
+    })?;
+    sessions.execute_clean(
+        &state.clock,
+        &preview_token,
+        settings_gen,
+        journal_base_dir,
+        on_progress,
+    )
+}
+
+/// `execute_clean` using default journal log location.
+pub fn execute_clean_default<C: Clock>(
+    state: &AppState<C>,
+    preview_token: String,
+) -> Result<ExecuteCleanResponse, ContractError> {
+    execute_clean(state, preview_token, None, |_| {})
 }

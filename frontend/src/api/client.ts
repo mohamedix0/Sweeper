@@ -1,8 +1,27 @@
 import { commands, events } from '../contract/bindings';
-import type { ContractError, RiskDto, ScanItemDto, TargetScanResultDto, TierDto } from '../contract/bindings';
-import { createMockController, mockController } from './mock';
+import type { ContractError, RiskDto, ScanItemDto, SkippedReasonDto, TargetScanResultDto, TierDto } from '../contract/bindings';
+import { mockController } from './mock';
 
-export type { ContractError, RiskDto, ScanItemDto, TargetScanResultDto, TierDto };
+export type { ContractError, RiskDto, ScanItemDto, SkippedReasonDto, TargetScanResultDto, TierDto };
+
+export type CleanProgressEvent = {
+  previewToken: string;
+  targetId: string;
+  completedItems: string;
+  totalItems: string;
+  bytesFreedSoFar: string;
+  status: string;
+};
+
+export type ExecuteCleanResponse = {
+  bytesFreed: string;
+  deletedCount: string;
+  skippedCount: string;
+  skippedReasons: SkippedReasonDto[];
+  aborted: boolean;
+  abortReason: string | null;
+  logId: string | null;
+};
 
 export type ScanProgress =
   | { kind: 'started'; session_id: string }
@@ -31,6 +50,7 @@ export interface SweeperClient {
     itemIds: string[],
     confirmations: { typedConfirmation: string | null } | null,
   ): Promise<PreviewCleanResult>;
+  executeClean(previewToken: string, onProgress?: (e: CleanProgressEvent) => void): Promise<ExecuteCleanResponse>;
   explainItem(itemId: string): Promise<{ itemId: string; title: string; description: string; risk: RiskDto }>;
   getSettings(): Promise<{
     enableTier1: boolean;
@@ -50,7 +70,6 @@ function isTauriRuntime(): boolean {
 export function shouldUseMockBackend(): boolean {
   const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
   if (env.VITE_SWEEPER_MOCK === '1' || env.VITE_SWEEPER_MOCK === 'true') return true;
-  // for test/build environments without tauri, prefer mock unless explicitly forced otherwise
   if (env.MODE === 'test') return true;
   return !isTauriRuntime();
 }
@@ -80,6 +99,20 @@ export function createTauriClient(): SweeperClient {
     },
     async previewClean(sessionId, itemIds, confirmations) {
       return unwrap(await commands.previewClean(sessionId, itemIds, confirmations));
+    },
+    async executeClean(previewToken, onProgress) {
+      let unlisten: (() => void) | null = null;
+      try {
+        if (onProgress) {
+          unlisten = await events.cleanProgressEvent.listen((event) => {
+            const payload = event.payload as CleanProgressEvent;
+            if (payload.previewToken === previewToken) onProgress(payload);
+          });
+        }
+        return unwrap(await commands.executeClean(previewToken));
+      } finally {
+        if (unlisten) unlisten();
+      }
     },
     async explainItem(itemId) {
       return unwrap(await commands.explainItem(itemId));
@@ -119,6 +152,3 @@ export function formatContractError(e: unknown): string {
   if (e instanceof Error) return e.message;
   return 'An unexpected error occurred.';
 }
-
-// exposed for tests
-export const _test = { createMockController, mockController };

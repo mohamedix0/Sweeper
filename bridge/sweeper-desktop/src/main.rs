@@ -4,10 +4,12 @@
 //! Sweeper desktop binary (Tauri 2 shell).
 
 use sweeper_contract::{
-    ContractError, ExplainItemResponse, LogMetadataDto, LogReadResponse, PreviewCleanResponse,
-    PreviewConfirmationsDto, ScanResultsDto, SettingsDto, StartScanResponse, TierDto,
+    CleanProgressEvent, ContractError, ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto,
+    LogReadResponse, PreviewCleanResponse, PreviewConfirmationsDto, ScanResultsDto, SettingsDto,
+    StartScanResponse, TierDto,
 };
 use sweeper_desktop::{commands_impl, AppState, SystemClock};
+use tauri::Emitter;
 
 #[tauri::command]
 fn start_scan(
@@ -33,6 +35,17 @@ fn preview_clean(
     confirmations: Option<PreviewConfirmationsDto>,
 ) -> Result<PreviewCleanResponse, ContractError> {
     commands_impl::preview_clean(&state, session_id, item_ids, confirmations)
+}
+
+#[tauri::command]
+fn execute_clean(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState<SystemClock>>,
+    preview_token: String,
+) -> Result<ExecuteCleanResponse, ContractError> {
+    commands_impl::execute_clean(&state, preview_token, None, |evt: CleanProgressEvent| {
+        let _ = app.emit("CleanProgressEvent", evt);
+    })
 }
 
 #[tauri::command]
@@ -78,6 +91,7 @@ fn main() {
             start_scan,
             get_scan_results,
             preview_clean,
+            execute_clean,
             explain_item,
             get_settings,
             list_logs,
