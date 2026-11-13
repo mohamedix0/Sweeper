@@ -9,6 +9,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 sweeper-winfs = { workspace = true }
 sweeper-knowledge = { workspace = true }
@@ -25,3 +28,4 @@ path = "src/bin/sweeper_scan_report.rs"
 proptest = "1"
 tempfile = { workspace = true }
 sweeper-testkit = { workspace = true }
+sweeper-core = { path = ".", features = ["test-support"] }

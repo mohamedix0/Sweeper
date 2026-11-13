@@ -13,23 +13,30 @@ use std::sync::{Mutex, OnceLock};
 
 use thiserror::Error;
 use windows_sys::core::GUID;
+#[cfg(any(test, feature = "test-support"))]
+use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ENVVAR_NOT_FOUND, ERROR_FILE_NOT_FOUND,
-    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND,
-    FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES,
+    ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
-    FindNextFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW, RemoveDirectoryW,
-    SetFileInformationByHandle, SetFileTime, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
+    CreateFileW, DeleteFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
+    FindNextFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
+    SetFileInformationByHandle, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING,
-    WIN32_FIND_DATAW,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FIND_FIRST_EX_LARGE_FETCH, OPEN_EXISTING, WIN32_FIND_DATAW,
+};
+#[cfg(any(test, feature = "test-support"))]
+use windows_sys::Win32::Storage::FileSystem::{
+    RemoveDirectoryW, SetFileTime, FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Environment::GetEnvironmentVariableW;
-use windows_sys::Win32::System::Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT};
+use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+#[cfg(any(test, feature = "test-support"))]
+use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
@@ -905,36 +912,132 @@ pub fn is_lock_like_error(code: u32) -> bool {
     is_sharing_violation(code)
 }
 
-/// Retire (delete) a Sweeper journal/log file by path.
+/// Retire (delete) a single Sweeper journal/log file within `logs_dir`.
 ///
-/// This is a narrow maintenance helper for log rotation (not a `Clean` target deletion primitive).
-pub fn retire_log_file(path: &Path) -> Result<()> {
-    let wide = to_wide(path);
-    // SAFETY: `wide` is a NUL-terminated UTF-16 path buffer valid for the call. Deleting a
-    // specific log file path during journal rotation is maintenance of Sweeper-owned logs and does
-    // not traverse reparse points as deletion targets in `Clean`.
-    let ok = unsafe { windows_sys::Win32::Storage::FileSystem::DeleteFileW(wide.as_ptr()) };
+/// Strictly scoped maintenance helper for log rotation (not a `Clean` target deletion primitive).
+/// Only files whose names match Sweeper journal log naming (`clean-*.jsonl`) are eligible.
+pub fn retire_sweeper_log_file(logs_dir: &Path, file_name: &str) -> Result<()> {
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || file_name.contains("..")
+        || !is_sweeper_journal_log_name(file_name)
+    {
+        return Err(WinfsError::Win32 {
+            context: "retire_sweeper_log_file(validate file_name)",
+            code: ERROR_INVALID_PARAMETER,
+        });
+    }
+
+    let dir_handle = open_for_inspection(logs_dir)?;
+    let inspection = inspect_handle(&dir_handle)?;
+    if (inspection.attributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+        || matches!(inspection.reparse, ReparseTagClass::LinkPoint)
+    {
+        return Err(WinfsError::Win32 {
+            context: "retire_sweeper_log_file(validate logs_dir)",
+            code: ERROR_INVALID_PARAMETER,
+        });
+    }
+
+    let final_dir = PathBuf::from(strip_extended_prefix(&inspection.final_path));
+    let target_path = final_dir.join(file_name);
+    let file_handle = match open_for_inspection(&target_path) {
+        Ok(h) => h,
+        Err(WinfsError::Win32 { code, .. }) if is_not_found(code) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let file_inspection = inspect_handle(&file_handle)?;
+    if (file_inspection.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+        || !matches!(file_inspection.reparse, ReparseTagClass::NotReparse)
+    {
+        return Err(WinfsError::Win32 {
+            context: "retire_sweeper_log_file(validate target file)",
+            code: ERROR_INVALID_PARAMETER,
+        });
+    }
+    if !is_path_direct_child_of_dir(
+        &strip_extended_prefix(&file_inspection.final_path),
+        &final_dir,
+    ) {
+        return Err(WinfsError::Win32 {
+            context: "retire_sweeper_log_file(validate containment)",
+            code: ERROR_INVALID_PARAMETER,
+        });
+    }
+    drop(file_handle);
+
+    let wide = to_wide(&target_path);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path buffer for a validated Sweeper-owned log file
+    // directly inside the inspected logs directory. This is maintenance-only log rotation and does not
+    // implement general `Clean` target deletion semantics.
+    let ok = unsafe { DeleteFileW(wide.as_ptr()) };
     if ok == 0 {
         let err = unsafe { GetLastError() };
         if is_not_found(err) {
             return Ok(());
         }
         return Err(WinfsError::Win32 {
-            context: "DeleteFileW(retire_log_file)",
+            context: "DeleteFileW(retire_sweeper_log_file)",
             code: err,
         });
     }
     Ok(())
 }
 
+fn is_sweeper_journal_log_name(file_name: &str) -> bool {
+    let Some(rest) = file_name.strip_prefix("clean-") else {
+        return false;
+    };
+    let Some(stem) = rest.strip_suffix(".jsonl") else {
+        return false;
+    };
+    if stem.is_empty() || !stem.is_ascii() {
+        return false;
+    }
+    // Expected shape: <unix_secs>-<pid>-<nanos>
+    let parts: Vec<&str> = stem.split('-').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn strip_extended_prefix(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn is_path_direct_child_of_dir(path: &str, dir: &Path) -> bool {
+    let stripped = strip_extended_prefix(path);
+    let path = Path::new(&stripped);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    // Best-effort lexical containment against resolved directory path.
+    parent
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&dir.to_string_lossy())
+        && !name.to_string_lossy().is_empty()
+}
+
 /// Create an NTFS directory junction (mount point reparse point) at `link` targeting `target`.
 ///
-/// Test/support and NTFS primitive helper. The created link entry is a reparse point; callers must
-/// never traverse it as a directory during deletion/scanning of target contents.
+/// Test/support helper. The created link entry is a reparse point; callers must never traverse it
+/// as a directory during deletion/scanning of target contents.
 ///
 /// # Safety and semantics
 /// - `link` must not already exist as a file/directory/junction (this function creates the link directory).
 /// - `target` is canonicalized and converted to an absolute NT path form for the substitute name.
+#[cfg(any(test, feature = "test-support"))]
 pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
     let target_abs = std::fs::canonicalize(target).map_err(|e| WinfsError::Win32 {
         context: "canonicalize(create_directory_junction target)",
@@ -1043,6 +1146,7 @@ pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
 /// Set the last write time for a file or directory path (fast Win32 helper; no process spawn).
 ///
 /// iletime is in Windows FILETIME units (100-nanosecond intervals since 1601-01-01 UTC).
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_last_write_time(path: &Path, filetime: u64) -> Result<()> {
     let wide = to_wide(path);
     // SAFETY: NUL-terminated UTF-16 path buffer is valid for the call. Handle is opened for

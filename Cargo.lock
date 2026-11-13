@@ -3365,6 +3365,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sweeper-core",
  "sweeper-knowledge",
  "sweeper-testkit",
  "sweeper-winfs",

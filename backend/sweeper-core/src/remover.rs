@@ -65,7 +65,8 @@ pub struct ValidatedItem {
 }
 
 impl ValidatedItem {
-    /// Crate-internal constructor for validated construction pipelines (scanner/policy/remover tests within crate).
+    /// Crate-internal constructor for validated construction pipelines and test-support helpers.
+    #[cfg(feature = "test-support")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_internal(
         id: String,
@@ -870,6 +871,7 @@ fn clear_readonly(handle: &sweeper_winfs::SafeHandle) -> Result<(), WinfsError> 
 /// Controlled constructor for integration tests and trusted pipelines within this crate's test surface.
 ///
 /// Kept outside general app APIs; `ValidatedItem` fields remain private and removal APIs accept only `ValidatedItem`.
+#[cfg(feature = "test-support")]
 pub fn validated_item_for_tests(
     id: impl Into<String>,
     target_id: impl Into<String>,

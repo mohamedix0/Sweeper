@@ -243,7 +243,10 @@ fn enforce_max_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError
     }
     entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
     for (_, path) in entries.into_iter().skip(max_files) {
-        let _ = sweeper_winfs::retire_log_file(&path);
+        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            #[allow(clippy::disallowed_methods)]
+            let _ = sweeper_winfs::retire_sweeper_log_file(log_dir, name);
+        }
     }
     Ok(())
 }

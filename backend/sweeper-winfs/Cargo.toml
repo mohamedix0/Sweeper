@@ -13,6 +13,9 @@ unsafe_code = "allow"
 [lints.clippy]
 disallowed_methods = "deny"
 
+[features]
+test-support = []
+
 [dependencies]
 windows-sys = { workspace = true }
 thiserror = { workspace = true }
