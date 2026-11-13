@@ -6,6 +6,7 @@
 
 # Rust / Cargo
 /target/
+/t3-*/
 **/target/
 **/*.rs.bk
 *.pdb

@@ -63,7 +63,9 @@ try {
     }
 
     # 3. Clean profiling files strictly at repo root
-    Get-ChildItem -LiteralPath $NormRepoRoot -Include *.profraw,*.profdata -File -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem -LiteralPath $NormRepoRoot -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Extension -eq ".profraw" -or $_.Extension -eq ".profdata"
+    } | ForEach-Object {
         $full = [System.IO.Path]::GetFullPath($_.FullName)
         if ($full.StartsWith($NormRepoRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
             Write-Host "Removing profiling artifact: $full"
