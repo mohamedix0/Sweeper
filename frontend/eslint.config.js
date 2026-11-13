@@ -19,6 +19,17 @@ export default [
       'no-eval': 'error',
       'no-implied-eval': 'error',
       'no-new-func': 'error',
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            { name: '@tauri-apps/plugin-fs', message: 'Tauri fs plugin is forbidden in Sweeper frontend.' },
+            { name: '@tauri-apps/plugin-shell', message: 'Tauri shell plugin is forbidden in Sweeper frontend.' },
+            { name: '@tauri-apps/api/fs', message: 'Tauri fs API is forbidden in Sweeper frontend.' },
+            { name: '@tauri-apps/api/shell', message: 'Tauri shell API is forbidden in Sweeper frontend.' },
+          ],
+        },
+      ],
       'no-restricted-properties': [
         'error',
         {

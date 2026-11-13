@@ -17,18 +17,20 @@ $prodPaths = @(
   (Join-Path $repoRoot 'bridge')
 )
 
-# 1) Ban std::fs::remove_* in production code (backend/, bridge/)
+# 1) Ban std::fs::remove_* in production source under backend/ and bridge/.
+# Gate A: enforce zero matches in src/ (excluding sweeper-testkit and integration tests/ dirs).
 $removePattern = 'std::fs::remove_(file|dir_all|dir)\b'
-$removeHits = Get-ChildItem -Path $prodPaths -Recurse -Include *.rs -File |
-  Where-Object { $_.FullName -notmatch '\\target\\' -and $_.FullName -notmatch '\\tests?\\' } |
-  Select-String -Pattern $removePattern -AllMatches
-# Also scan test files? Gate states "anywhere in production code", so exclude tests/ dirs and files under tests paths.
 $removeHitsProd = Get-ChildItem -Path $prodPaths -Recurse -Include *.rs -File |
-  Where-Object { $_.FullName -notmatch '\\target\\' -and $_.FullName -notmatch '([/\\])tests([/\\])' -and $_.Name -notmatch '_test\.rs$' } |
+  Where-Object {
+    $_.FullName -match '([/\\])src([/\\])' -and
+    $_.FullName -notmatch '\\target\\' -and
+    $_.FullName -notmatch '\\backend\\sweeper-testkit\\' -and
+    $_.FullName -notmatch '([/\\])tests([/\\])'
+  } |
   Select-String -Pattern $removePattern -AllMatches
 if ($removeHitsProd) {
   foreach ($h in $removeHitsProd) { Write-Host "$($h.Path):$($h.LineNumber): $($h.Line.Trim())" }
-  Fail "std::fs::remove_* found in production code under backend/ or bridge/."
+  Fail "std::fs::remove_* found in production source (backend/ or bridge/ src/, excluding sweeper-testkit and tests/)."
 }
 
 # 2) Ban sweeper-winfs deletion symbols outside core::remover / sweeper-winfs.

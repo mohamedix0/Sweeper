@@ -3,7 +3,3 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-
-fn _gate_probe() {
-    let _ = std::fs::remove_file("C:\\should-not-exist");
-}

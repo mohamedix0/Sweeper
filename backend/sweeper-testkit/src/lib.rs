@@ -51,6 +51,11 @@ pub enum TestkitError {
 pub type Result<T> = std::result::Result<T, TestkitError>;
 
 /// Per-test isolated sandbox rooted in a temp directory with a required sentinel file.
+///
+/// Invariant: the sentinel file ([`SENTINEL_FILE_NAME`]) must exist at the sandbox root.
+/// Guarded helpers (e.g. [`Sandbox::guarded_path`], [`Sandbox::write_file`]) enforce this
+/// before performing filesystem operations. Any test harness operation that could be used to
+/// stage deletion targets must refuse if the sentinel is missing.
 #[derive(Debug)]
 pub struct Sandbox {
     _dir: TempDir,
@@ -72,6 +77,10 @@ impl Sandbox {
     }
 
     /// Returns the sandbox root path.
+    ///
+    /// Callers must treat this as a sentinel-guarded root: use [`Sandbox::guarded_path`] or
+    /// other guarded helpers before filesystem mutations, and never perform deletion-like test
+    /// operations if [`Sandbox::assert_sentinel_present`] would fail.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -84,11 +93,32 @@ impl Sandbox {
         }
     }
 
+    /// Resolve a path inside the sandbox after verifying the sentinel is present.
+    pub fn guarded_path(&self, relative: impl AsRef<Path>) -> PathBuf {
+        self.assert_sentinel_present();
+        self.root.join(relative)
+    }
+
     /// Create a child directory inside the sandbox after verifying sentinel.
     pub fn create_dir(&self, relative: impl AsRef<Path>) -> Result<PathBuf> {
-        self.assert_sentinel_present();
-        let path = self.root.join(relative);
+        let path = self.guarded_path(relative);
         fs::create_dir_all(&path)?;
+        Ok(path)
+    }
+
+    /// Write a file inside the sandbox after verifying sentinel.
+    pub fn write_file(
+        &self,
+        relative: impl AsRef<Path>,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<PathBuf> {
+        let path = self.guarded_path(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut f = fs::File::create(&path)?;
+        f.write_all(contents.as_ref())?;
+        f.sync_all()?;
         Ok(path)
     }
 }
@@ -153,8 +183,6 @@ impl CanaryTree {
     }
 }
 
-
-
 fn write_bytes(path: PathBuf, bytes: &[u8]) -> Result<()> {
     let mut f = fs::File::create(path)?;
     f.write_all(bytes)?;
@@ -197,23 +225,21 @@ fn sha256_file(path: &Path) -> Result<String> {
 /// Create a directory junction at `link` pointing to `target` (Windows).
 #[cfg(windows)]
 pub fn create_junction(link: &Path, target: &Path) -> Result<()> {
+    let target_abs = fs::canonicalize(target)?;
+    let link_arg = link.to_string_lossy();
+    let target_arg = target_abs.to_string_lossy();
     std::process::Command::new("cmd")
-        .args([
-            "/C",
-            "mklink",
-            "/J",
-            &link.to_string_lossy(),
-            &target.to_string_lossy(),
-        ])
+        .args(["/C", "mklink", "/J", &*link_arg, &*target_arg])
         .status()
         .and_then(|status| {
             if status.success() {
                 Ok(())
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("mklink /J failed with status {status}"),
-                ))
+                Err(std::io::Error::other(format!(
+                    "mklink /J failed with status {status} for link '{}' -> target '{}'",
+                    link.display(),
+                    target_abs.display()
+                )))
             }
         })?;
     Ok(())
@@ -229,8 +255,16 @@ pub fn create_junction(link: &Path, target: &Path) -> Result<()> {
 /// Create a file symlink at `link` pointing to `target` (Windows).
 #[cfg(windows)]
 pub fn create_file_symlink(link: &Path, target: &Path) -> Result<()> {
-    std::os::windows::fs::symlink_file(target, link)?;
-    Ok(())
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(1314) => Err(TestkitError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "symlink privilege not held (enable Developer Mode or run with required privilege): {e}"
+            ),
+        ))),
+        Err(e) => Err(TestkitError::Io(e)),
+    }
 }
 
 /// Create a file symlink at `link` pointing to `target` (non-Windows stub).
