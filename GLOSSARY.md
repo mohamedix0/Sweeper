@@ -41,6 +41,9 @@ A known Target that is recoverable but costly to regenerate, or could disturb to
 **Unknown**:
 A location the tool does not recognise. Its size is shown, but it is removable only after the user turns on "Allow deleting unknown folders" and confirms, and it must still pass Custom Path rules.
 
+**Protected**:
+An item or location belonging to a Protected Path (or a non-Allowlist descendant of a protected container root). Displayed for context only and never selectable for Clean.
+
 **Tier**:
 A group of Targets that can be switched on or off together in settings (1: system temp and caches, 2: developer caches, 3: heavy or risky items).
 _Avoid_: Level, category
