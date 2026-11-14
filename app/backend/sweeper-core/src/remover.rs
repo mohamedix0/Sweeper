@@ -2,6 +2,7 @@
 //!
 //! Sole module allowed to invoke `sweeper-winfs` deletion primitives (enforced by clippy/gate-a).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -497,7 +498,7 @@ fn process_item(
         ))?;
         if reason.contains("escape")
             || reason.contains("swapped to a junction")
-            || reason.contains("link point") && reason.contains("target root")
+            || (reason.contains("link point") && reason.contains("target root"))
         {
             // Target root compromised -> abort entire clean for safety.
             return Ok(ProcessOutcome::Aborted(reason));
@@ -524,7 +525,8 @@ fn process_item(
     let is_root_itself = paths_equal_str(&item.path, &item.target_root);
     if is_root_itself {
         if item_path.is_dir() {
-            let outcome = clean_directory_contents(item, opts, journal, deleted_total)?;
+            let contents = clean_directory_contents(item, opts, journal, deleted_total)?;
+            let outcome = contents.outcome;
             if let ProcessOutcome::Deleted(bytes) = outcome {
                 // For Tier 3 stale project directories, remove the now-cleaned directory root itself.
                 if matches!(item.source, ValidatedSource::Tier3ProjectDirectory { .. }) {
@@ -542,6 +544,7 @@ fn process_item(
                             journal,
                             deleted_total,
                             Some(bytes),
+                            contents.root_mutated,
                         );
                     }
                     return Ok(ProcessOutcome::Deleted(bytes));
@@ -566,21 +569,35 @@ fn process_item(
     delete_path_entry(item, &item.path, opts, journal, deleted_total)
 }
 
+struct CleanContentsResult {
+    outcome: ProcessOutcome,
+    root_mutated: bool,
+}
+
+fn norm_path_key(path: &Path) -> String {
+    path.to_string_lossy().to_ascii_lowercase()
+}
+
 fn clean_directory_contents(
     item: &ValidatedItem,
     opts: &CleanOptions,
     journal: &mut JournalWriter,
     deleted_total: &mut u64,
-) -> Result<ProcessOutcome, CleanError> {
+) -> Result<CleanContentsResult, CleanError> {
     // Iterative traversal of contents, deleting files and empty dirs/link entries without following link points.
     let mut stack: Vec<PathBuf> = vec![PathBuf::from(&item.path)];
     let mut postorder: Vec<PathBuf> = Vec::new();
     let mut any_deleted_bytes: u64 = 0;
+    let mut mutated_dirs: HashSet<String> = HashSet::new();
+    let root_key = norm_path_key(Path::new(&item.path));
 
     while let Some(dir) = stack.pop() {
         // Re-check root safety during traversal.
         if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-            return Ok(ProcessOutcome::Aborted(reason));
+            return Ok(CleanContentsResult {
+                outcome: ProcessOutcome::Aborted(reason),
+                root_mutated: mutated_dirs.contains(&root_key),
+            });
         }
         let entries = match sweeper_winfs::read_dir_entries(&dir) {
             Ok(e) => e,
@@ -600,7 +617,10 @@ fn clean_directory_contents(
                     &reason,
                     None,
                 ))?;
-                return Ok(ProcessOutcome::Skipped(reason));
+                return Ok(CleanContentsResult {
+                    outcome: ProcessOutcome::Skipped(reason),
+                    root_mutated: mutated_dirs.contains(&root_key),
+                });
             }
         };
         // Record directory for possible deletion later only if it is not the root itself.
@@ -620,16 +640,25 @@ fn clean_directory_contents(
                     )? {
                         ProcessOutcome::Deleted(b) => {
                             any_deleted_bytes = any_deleted_bytes.saturating_add(b);
+                            mutated_dirs.insert(norm_path_key(&dir));
                             if circuit_breaker_exceeded(
                                 opts.preview_estimated_bytes,
                                 *deleted_total,
                             ) {
-                                return Ok(ProcessOutcome::Aborted(
-                                    "aborted: 120% circuit breaker exceeded".to_string(),
-                                ));
+                                return Ok(CleanContentsResult {
+                                    outcome: ProcessOutcome::Aborted(
+                                        "aborted: 120% circuit breaker exceeded".to_string(),
+                                    ),
+                                    root_mutated: mutated_dirs.contains(&root_key),
+                                });
                             }
                         }
-                        ProcessOutcome::Aborted(r) => return Ok(ProcessOutcome::Aborted(r)),
+                        ProcessOutcome::Aborted(r) => {
+                            return Ok(CleanContentsResult {
+                                outcome: ProcessOutcome::Aborted(r),
+                                root_mutated: mutated_dirs.contains(&root_key),
+                            })
+                        }
                         ProcessOutcome::Skipped(_) => {}
                     }
                 }
@@ -664,16 +693,25 @@ fn clean_directory_contents(
                         )? {
                             ProcessOutcome::Deleted(b) => {
                                 any_deleted_bytes = any_deleted_bytes.saturating_add(b);
+                                mutated_dirs.insert(norm_path_key(&dir));
                                 if circuit_breaker_exceeded(
                                     opts.preview_estimated_bytes,
                                     *deleted_total,
                                 ) {
-                                    return Ok(ProcessOutcome::Aborted(
-                                        "aborted: 120% circuit breaker exceeded".to_string(),
-                                    ));
+                                    return Ok(CleanContentsResult {
+                                        outcome: ProcessOutcome::Aborted(
+                                            "aborted: 120% circuit breaker exceeded".to_string(),
+                                        ),
+                                        root_mutated: mutated_dirs.contains(&root_key),
+                                    });
                                 }
                             }
-                            ProcessOutcome::Aborted(r) => return Ok(ProcessOutcome::Aborted(r)),
+                            ProcessOutcome::Aborted(r) => {
+                                return Ok(CleanContentsResult {
+                                    outcome: ProcessOutcome::Aborted(r),
+                                    root_mutated: mutated_dirs.contains(&root_key),
+                                })
+                            }
                             ProcessOutcome::Skipped(_) => {}
                         }
                     }
@@ -685,7 +723,10 @@ fn clean_directory_contents(
     // Delete now-empty child directories bottom-up (skip if not empty or revalidated unsafe).
     for dir in postorder.into_iter().rev() {
         if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-            return Ok(ProcessOutcome::Aborted(reason));
+            return Ok(CleanContentsResult {
+                outcome: ProcessOutcome::Aborted(reason),
+                root_mutated: mutated_dirs.contains(&root_key),
+            });
         }
         // Skip if directory not empty.
         let is_empty = sweeper_winfs::read_dir_entries(&dir)
@@ -694,23 +735,48 @@ fn clean_directory_contents(
         if !is_empty {
             continue;
         }
+        let dir_key = norm_path_key(&dir);
+        let ignore_emptied_dir_age = mutated_dirs.contains(&dir_key);
         // Delete directory entry itself (must remain within target root and pass revalidation).
-        match delete_path_entry(item, &dir.to_string_lossy(), opts, journal, deleted_total)? {
+        match delete_path_entry_with_options(
+            item,
+            &dir.to_string_lossy(),
+            opts,
+            journal,
+            deleted_total,
+            false,
+            None,
+            ignore_emptied_dir_age,
+        )? {
             ProcessOutcome::Deleted(b) => {
                 any_deleted_bytes = any_deleted_bytes.saturating_add(b);
+                if let Some(parent) = dir.parent() {
+                    mutated_dirs.insert(norm_path_key(parent));
+                }
                 if circuit_breaker_exceeded(opts.preview_estimated_bytes, *deleted_total) {
-                    return Ok(ProcessOutcome::Aborted(
-                        "aborted: 120% circuit breaker exceeded".to_string(),
-                    ));
+                    return Ok(CleanContentsResult {
+                        outcome: ProcessOutcome::Aborted(
+                            "aborted: 120% circuit breaker exceeded".to_string(),
+                        ),
+                        root_mutated: mutated_dirs.contains(&root_key),
+                    });
                 }
             }
-            ProcessOutcome::Aborted(r) => return Ok(ProcessOutcome::Aborted(r)),
+            ProcessOutcome::Aborted(r) => {
+                return Ok(CleanContentsResult {
+                    outcome: ProcessOutcome::Aborted(r),
+                    root_mutated: mutated_dirs.contains(&root_key),
+                })
+            }
             ProcessOutcome::Skipped(_) => {}
         }
     }
 
     // Represent contents-clean as deleted summary for the root item context.
-    Ok(ProcessOutcome::Deleted(any_deleted_bytes))
+    Ok(CleanContentsResult {
+        outcome: ProcessOutcome::Deleted(any_deleted_bytes),
+        root_mutated: mutated_dirs.contains(&root_key),
+    })
 }
 
 fn delete_path_entry(
@@ -720,7 +786,16 @@ fn delete_path_entry(
     journal: &mut JournalWriter,
     deleted_total: &mut u64,
 ) -> Result<ProcessOutcome, CleanError> {
-    delete_path_entry_inner(item, path_str, opts, journal, deleted_total, false, None)
+    delete_path_entry_with_options(
+        item,
+        path_str,
+        opts,
+        journal,
+        deleted_total,
+        false,
+        None,
+        false,
+    )
 }
 
 fn delete_path_entry_allowing_root(
@@ -730,8 +805,9 @@ fn delete_path_entry_allowing_root(
     journal: &mut JournalWriter,
     deleted_total: &mut u64,
     base_bytes_deleted: Option<u64>,
+    ignore_emptied_dir_age: bool,
 ) -> Result<ProcessOutcome, CleanError> {
-    delete_path_entry_inner(
+    delete_path_entry_with_options(
         item,
         path_str,
         opts,
@@ -739,9 +815,34 @@ fn delete_path_entry_allowing_root(
         deleted_total,
         true,
         base_bytes_deleted,
+        ignore_emptied_dir_age,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn delete_path_entry_with_options(
+    item: &ValidatedItem,
+    path_str: &str,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    allow_delete_root: bool,
+    base_bytes_deleted: Option<u64>,
+    ignore_emptied_dir_age: bool,
+) -> Result<ProcessOutcome, CleanError> {
+    delete_path_entry_inner(
+        item,
+        path_str,
+        opts,
+        journal,
+        deleted_total,
+        allow_delete_root,
+        base_bytes_deleted,
+        ignore_emptied_dir_age,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn delete_path_entry_inner(
     item: &ValidatedItem,
     path_str: &str,
@@ -750,6 +851,7 @@ fn delete_path_entry_inner(
     deleted_total: &mut u64,
     allow_delete_root: bool,
     base_bytes_deleted: Option<u64>,
+    ignore_emptied_dir_age: bool,
 ) -> Result<ProcessOutcome, CleanError> {
     let path = Path::new(path_str);
     // Intent before each deletion batch/item.
@@ -804,12 +906,19 @@ fn delete_path_entry_inner(
     };
 
     // Moment-of-deletion re-validation on opened handle.
-    if let Err(reason) = revalidate_handle(item, path_str, &inspection, opts, allow_delete_root) {
+    if let Err(reason) = revalidate_handle(
+        item,
+        path_str,
+        &inspection,
+        opts,
+        allow_delete_root,
+        ignore_emptied_dir_age,
+    ) {
         journal.write_outcome(&journal::outcome_record(
             &item.id, path_str, 0, "Skipped", &reason, None,
         ))?;
         if reason.contains("escape")
-            || reason.contains("target root") && reason.contains("link point")
+            || (reason.contains("target root") && reason.contains("link point"))
         {
             return Ok(ProcessOutcome::Aborted(reason));
         }
@@ -889,6 +998,7 @@ fn revalidate_handle(
     inspection: &sweeper_winfs::HandleInspection,
     opts: &CleanOptions,
     allow_delete_root: bool,
+    ignore_emptied_dir_age: bool,
 ) -> Result<(), String> {
     let final_path = strip_extended_prefix(&inspection.final_path);
     let final_canon = CanonicalPath::parse_lexical(&final_path)
@@ -953,17 +1063,26 @@ fn revalidate_handle(
     }
 
     // 5) Minimum Age check (exact boundary and future mtime treated as recent / Skipped).
-    let mtime_secs = filetime_to_unix_secs(inspection.last_write_time);
-    let mtime = UNIX_EPOCH + Duration::from_secs(mtime_secs);
-    if mtime > opts.now {
-        return Err("Skipped: future mtime (treated as recent)".to_string());
-    }
-    if let Ok(age) = opts.now.duration_since(mtime) {
-        if age < opts.min_age {
-            return Err("Skipped: newer than minimum age".to_string());
+    // NTFS bumps directory LastWriteTime when we delete children inside it during contents clean;
+    // allow skipping age checks only for directories we actually emptied in this run. TOCTOU:
+    // if replaced by file/reparse, age checks must still run.
+    let skip_age_check = ignore_emptied_dir_age
+        && inspection_is_directory(inspection)
+        && inspection.reparse_tag == 0
+        && matches!(inspection.reparse, ReparseTagClass::NotReparse);
+    if !skip_age_check {
+        let mtime_secs = filetime_to_unix_secs(inspection.last_write_time);
+        let mtime = UNIX_EPOCH + Duration::from_secs(mtime_secs);
+        if mtime > opts.now {
+            return Err("Skipped: future mtime (treated as recent)".to_string());
         }
-    } else {
-        return Err("Skipped: future mtime (treated as recent)".to_string());
+        if let Ok(age) = opts.now.duration_since(mtime) {
+            if age < opts.min_age {
+                return Err("Skipped: newer than minimum age".to_string());
+            }
+        } else {
+            return Err("Skipped: future mtime (treated as recent)".to_string());
+        }
     }
 
     Ok(())

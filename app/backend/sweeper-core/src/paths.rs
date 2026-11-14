@@ -721,7 +721,15 @@ mod tests {
 
         // Unicode superscript variants map to reserved names (each arm matters).
         for name in [
-            "COM¹", "COM²", "COM³", "COM⁴", "COM⁵", "COM⁶", "COM⁷", "COM⁸", "COM⁹",
+            "COM\u{00B9}",
+            "COM\u{00B2}",
+            "COM\u{00B3}",
+            "COM\u{2074}",
+            "COM\u{2075}",
+            "COM\u{2076}",
+            "COM\u{2077}",
+            "COM\u{2078}",
+            "COM\u{2079}",
         ] {
             let p = format!(r"C:\{name}");
             assert!(
@@ -733,7 +741,15 @@ mod tests {
             );
         }
         for name in [
-            "LPT¹", "LPT²", "LPT³", "LPT⁴", "LPT⁵", "LPT⁶", "LPT⁷", "LPT⁸", "LPT⁹",
+            "LPT\u{00B9}",
+            "LPT\u{00B2}",
+            "LPT\u{00B3}",
+            "LPT\u{2074}",
+            "LPT\u{2075}",
+            "LPT\u{2076}",
+            "LPT\u{2077}",
+            "LPT\u{2078}",
+            "LPT\u{2079}",
         ] {
             let p = format!(r"C:\{name}");
             assert!(
@@ -744,11 +760,11 @@ mod tests {
                 "expected reserved for {name}"
             );
         }
-        // '⁰' maps to 0: "COM⁰" normalizes to "COM0" which is not reserved.
-        assert!(CanonicalPath::parse_lexical(r"C:\COM⁰").is_ok());
+        // '\u{2070}' maps to 0: "COM\u{2070}" normalizes to "COM0" which is not reserved.
+        assert!(CanonicalPath::parse_lexical("C:\\COM\u{2070}").is_ok());
         // Non-reserved unicode variant-like names return false/are allowed.
         assert!(CanonicalPath::parse_lexical(r"C:\CONX").is_ok());
-        assert!(CanonicalPath::parse_lexical(r"C:\FOO¹").is_ok());
+        assert!(CanonicalPath::parse_lexical("C:\\FOO\u{00B9}").is_ok());
     }
 
     #[test]

@@ -99,7 +99,8 @@ fn clean_diagnostics(clean: &remover::CleanReport, journal_dir: &Path) -> String
         clean.aborted, clean.abort_reason, clean.bytes_freed, clean.skipped_count, clean.items
     ));
     out.push_str("journal_files:\n");
-    match fs::read_dir(journal_dir) {
+    let log_dir = sweeper_core::journal::resolve_log_dir(journal_dir);
+    match fs::read_dir(&log_dir) {
         Ok(entries) => {
             let mut paths: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok().map(|e| e.path()))
@@ -132,7 +133,8 @@ fn clean_diagnostics(clean: &remover::CleanReport, journal_dir: &Path) -> String
 }
 
 fn journal_has_locked_skip(journal_dir: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(journal_dir) else {
+    let log_dir = sweeper_core::journal::resolve_log_dir(journal_dir);
+    let Ok(entries) = fs::read_dir(log_dir) else {
         return false;
     };
     for entry in entries.flatten() {
