@@ -20,6 +20,7 @@ import {
   type ExplainState,
   type PreviewResult,
 } from './cleanShared';
+import { ChevronDownIcon, ChevronRightIcon, DotIcon } from './Icons';
 
 type FlatAnalyzerRow = { node: AnalyzerNodeDto; depth: number };
 
@@ -77,8 +78,8 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
   }, [result]);
 
   const flatRows = useMemo(() => (result ? flattenVisible(result.root, expanded) : []), [result, expanded]);
-  const rowHeight = 34;
-  const viewportHeight = 420;
+  const rowHeight = 54;
+  const viewportHeight = 432;
   const overscan = 8;
   const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
   const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
@@ -170,10 +171,16 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
       <section className="panel" aria-labelledby="analyzer-heading">
         <h2 id="analyzer-heading">Analyzer</h2>
         <p className="muted">Analyze a folder to build an expandable tree of space usage. Select eligible nodes and route them through the standard Preview &rarr; Clean flow (no direct delete).</p>
-        <div className="row">
+        <div className="analyzer-toolbar">
           <label htmlFor="analyzer-root" className="muted">Root path</label>
           <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} className="analyzer-root-input" />
           <button className="btn primary" onClick={runAnalyzer} disabled={analyzing || cleaning || !rootPath.trim()}>Analyze</button>
+          {sessionId && startedAt && (
+            <div className="row muted" aria-label="Analyzer session status">
+              <span className="num">Session: {sessionId}</span>
+              <TtlIndicator label="Analyzer session TTL (15m)" issuedAtMs={startedAt} ttlMs={SESSION_TTL_MS} />
+            </div>
+          )}
         </div>
         {analyzing && (
           <div role="status" aria-live="polite" className="notice info">
@@ -181,12 +188,7 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
             <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
           </div>
         )}
-        {sessionId && startedAt && (
-          <div className="row muted" aria-label="Analyzer session status">
-            <span>Session: {sessionId}</span>
-            <TtlIndicator label="Analyzer session TTL (15m)" issuedAtMs={startedAt} ttlMs={SESSION_TTL_MS} />
-          </div>
-        )}
+        {null}
       </section>
 
       {error && <div className="notice error" role="alert">{error}</div>}
@@ -197,8 +199,8 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
           <div className="row">
             <h3 id="analyzer-tree-heading">Analyzer Tree</h3>
             <div className="spacer" />
-            <span className="muted">Total: {formatBytes(result.totalBytes)} ({result.totalItems} items)</span>
-            <span className="muted">Selected: {selectedIds.size} ({formatBytes(selectedBytes)})</span>
+            <span className="muted num">Total: {formatBytes(result.totalBytes)} ({result.totalItems} items)</span>
+            <span className="muted num">Selected: {selectedIds.size} ({formatBytes(selectedBytes)})</span>
           </div>
           <div
             ref={viewportRef}
@@ -223,48 +225,50 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
               if (node.path.toLowerCase().endsWith('.vhdx')) reasons.push('.vhdx display-only');
               if (node.reason) reasons.push(node.reason);
               return (
-                <div
-                  key={node.id}
-                  role="treeitem"
-                  aria-expanded={hasChildren ? isExpanded : undefined}
-                  aria-selected={checked}
-                  aria-level={depth + 1}
-                  className="analyzer-row"
-                  style={{ paddingLeft: 8 + depth * 18, height: rowHeight }}
-                >
-                  <button
-                    type="button"
-                    className="tree-toggle"
-                    onClick={() => toggleExpand(node)}
-                    aria-label={hasChildren ? (isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`) : `Leaf ${node.name}`}
-                    disabled={!hasChildren}
+                  <div
+                    key={node.id}
+                    role="treeitem"
+                    aria-expanded={hasChildren ? isExpanded : undefined}
+                    aria-selected={checked}
+                    aria-level={depth + 1}
+                    className="analyzer-row"
+                    style={{ paddingLeft: 8 + depth * 18 }}
                   >
-                    {hasChildren ? (isExpanded ? '▾' : '▸') : '•'}
-                  </button>
-                  <label className="checkbox" title={selectable ? 'Select for Preview/Clean' : 'Not selectable'}>
-                    <input
-                      type="checkbox"
-                      aria-label={`Select analyzer node ${node.path}`}
-                      checked={checked}
-                      disabled={!selectable || cleaning}
-                      onChange={() => toggleSelect(node)}
-                    />
-                  </label>
-                  <div className="analyzer-node-main">
-                    <div className="item-path">{node.name} <span className="muted">({node.path})</span></div>
-                    <div className="item-status">
-                      {selectable ? (node.risk === 'Unknown' || !node.targetId ? 'Selectable (typed confirmation required at Preview)' : 'Selectable') : `Not selectable${reasons.length ? `: ${reasons.join(', ')}` : ''}`}
+                    <button
+                      type="button"
+                      className="tree-toggle"
+                      onClick={() => toggleExpand(node)}
+                      aria-label={hasChildren ? (isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`) : `Leaf ${node.name}`}
+                      disabled={!hasChildren}
+                    >
+                      {hasChildren ? (isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />) : <DotIcon />}
+                    </button>
+                    <label className="checkbox" title={selectable ? "Select for Preview/Clean" : "Not selectable"}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select analyzer node ${node.path}`}
+                        checked={checked}
+                        disabled={!selectable || cleaning}
+                        onChange={() => toggleSelect(node)}
+                      />
+                    </label>
+                    <div className="analyzer-node-main">
+                      <div className="item-path">{node.name} <span className="muted">({node.path})</span></div>
+                      <div className="item-status">
+                        {selectable ? (node.risk === "Unknown" || !node.targetId ? "Selectable (typed confirmation required at Preview)" : "Selectable") : `Not selectable${reasons.length ? `: ${reasons.join(", ")}` : ""}`}
+                      </div>
+                    </div>
+                    <div className="item-size num">{formatBytes(node.sizeBytes)}</div>
+                    <div className="muted num">{node.itemCount}</div>
+                    <button className="btn" onClick={() => onExplain(node.id)}>Explain</button>
+                    <div className="analyzer-badges">
+                      <span className={riskClass(node.risk)} aria-label={`Risk ${node.risk}`}>{node.risk}</span>
+                      {node.tier && <span className="badge">{node.tier}</span>}
+                      {node.isLinkPoint && <span className="badge">Link Point</span>}
+                      {node.displayOnly && <span className="badge">Display-only</span>}
                     </div>
                   </div>
-                  <div className="item-size">{formatBytes(node.sizeBytes)}</div>
-                  <div className="muted">{node.itemCount}</div>
-                  <button className="btn" onClick={() => onExplain(node.id)}>Explain</button>
-                  <span className={riskClass(node.risk)} aria-label={`Risk ${node.risk}`}>{node.risk}</span>
-                  {node.tier && <span className="badge">{node.tier}</span>}
-                  {node.isLinkPoint && <span className="badge">Link Point</span>}
-                  {node.displayOnly && <span className="badge">Display-only</span>}
-                </div>
-              );
+                );
             })}
             <div style={{ height: bottomPad }} />
             {flatRows.length === 0 && <div className="muted analyzer-empty">No nodes.</div>}
@@ -272,7 +276,7 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
 
           <section aria-labelledby="analyzer-preview-heading" className="panel panel-spaced">
             <h3 id="analyzer-preview-heading">Preview Selected</h3>
-            <p className="muted">Selection total: <strong>{formatBytes(selectedBytes)}</strong> ({selectedIds.size} node(s)). Analyzer selections go through the standard Preview &rarr; Clean flow only.</p>
+            <p className="muted">Selection total: <strong className="num">{formatBytes(selectedBytes)}</strong> <span className="num">({selectedIds.size} node(s))</span>. Analyzer selections go through the standard Preview &rarr; Clean flow only.</p>
             {requiresConfirmation && (
               <div className="notice warn" role="note">
                 <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path nodes). Enter <code>{TYPED_CONFIRMATION_PHRASE}</code> to request Preview.</div>

@@ -212,8 +212,8 @@ export function ScanAndPreviewView({
         {relaunchError && <div className="notice error" role="alert">{relaunchError}</div>}
         {!elevationStatus.isElevated && (
           <div className="notice warn" role="note">
-            <div><strong>Administrator-only Tier 3 targets locked.</strong> Windows Temp, Windows Update cache, Prefetch, and Package Cache require administrator elevation and Tier 3 opt-in. Standard startup never triggers UAC.</div>
-            <div className="row row-top">
+            <div className="row">
+              <div className="spacer"><strong>Administrator-only Tier 3 targets locked.</strong> Windows Temp, Windows Update cache, Prefetch, and Package Cache require administrator elevation and Tier 3 opt-in. Standard startup never triggers UAC.</div>
               <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
               {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
             </div>
@@ -291,7 +291,7 @@ export function ScanAndPreviewView({
                         <div className="item-path">{item.path}</div>
                         <div className="item-status">{!selectable ? `Skipped/Not selectable: ${reason}` : (t.risk === 'Unknown' || isCustomPathTargetId(t.targetId) ? 'Eligible (typed confirmation required at Preview)' : 'Eligible for Preview selection')}</div>
                       </div>
-                      <div className="item-size">{formatBytes(item.size)}</div>
+                      <div className="item-size num">{formatBytes(item.size)}</div>
                       <button className="btn" onClick={() => onExplain(item.id)}>Explain</button>
                       <span className={riskClass(t.risk)} aria-label={`Risk ${t.risk}`}>{t.risk}</span>
                     </div>
@@ -303,7 +303,7 @@ export function ScanAndPreviewView({
 
           <section aria-labelledby="preview-heading" className="panel">
             <h3 id="preview-heading">Preview</h3>
-            <p className="muted">Selection total: <strong>{formatBytes(selectedBytes)}</strong> ({selectedIds.size} item(s)). Preview requires a valid ScanSession and issues a single-use preview token (10m, bounded by session).</p>
+            <p className="muted">Selection total: <strong className="num">{formatBytes(selectedBytes)}</strong> <span className="num">({selectedIds.size} item(s))</span>. Preview requires a valid ScanSession and issues a single-use preview token (10m, bounded by session).</p>
             {requiresConfirmation && (
               <div className="notice warn" role="note">
                 <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path items). Enter <code>{TYPED_CONFIRMATION_PHRASE}</code> to request Preview.</div>

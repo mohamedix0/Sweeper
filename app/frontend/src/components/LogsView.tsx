@@ -54,26 +54,28 @@ export function LogsView({ client, focusLogId, onFocusConsumed }: { client: Swee
             <button className="btn" onClick={() => refresh()}>Refresh</button>
           </div>
           {logs.length === 0 ? <p className="muted">No logs found.</p> : (
-            <table className="table" aria-label="Log list">
-              <thead><tr><th>Name</th><th>Modified</th><th>Size</th><th></th></tr></thead>
-              <tbody>
-                {logs.map((l) => (
-                  <tr key={l.id}>
-                    <td>{l.name}</td>
-                    <td>{formatUnixSeconds(l.modifiedUnixSecs)}</td>
-                    <td>{l.sizeBytes ? formatBytes(l.sizeBytes) : '—'}</td>
-                    <td><button className="btn" onClick={() => openLog(l.id)}>View</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="log-table-wrap">
+              <table className="table" aria-label="Log list">
+                <thead><tr><th>Name</th><th>Modified</th><th>Size</th><th></th></tr></thead>
+                <tbody>
+                  {logs.map((l) => (
+                    <tr key={l.id} className={selected?.id === l.id ? 'log-row-active' : undefined}>
+                      <td><code>{l.name}</code></td>
+                      <td className="num">{formatUnixSeconds(l.modifiedUnixSecs)}</td>
+                      <td className="num">{l.sizeBytes ? formatBytes(l.sizeBytes) : '—'}</td>
+                      <td><button className="btn" onClick={() => openLog(l.id)}>View</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
         <div>
           <h3 className="section-title">Log Content</h3>
           {selected ? (
             <div>
-              <p className="muted">Log: {selected.id}</p>
+              <p className="muted">Log: <code>{selected.id}</code></p>
               <pre className="log" aria-label="Log content">{selected.content}</pre>
             </div>
           ) : <p className="muted">Select a log to inspect its contents.</p>}

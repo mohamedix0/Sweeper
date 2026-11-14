@@ -28,7 +28,7 @@ export function TtlIndicator({ label, issuedAtMs, ttlMs }: { label: string; issu
   const mins = Math.floor(remaining / 60000);
   const secs = Math.floor((remaining % 60000) / 1000);
   return (
-    <span className="muted">
+    <span className="muted num">
       {label}: {mins}:{secs.toString().padStart(2, '0')} remaining
     </span>
   );
@@ -56,7 +56,7 @@ export function ExplainDrawer({ explain, onClose }: { explain: ExplainState; onC
         <p><span className={riskClass(explain.risk)}>Risk: {explain.risk}</span></p>
         <p>{explain.description}</p>
         <dl className="kv">
-          <dt>Item ID</dt><dd>{explain.itemId}</dd>
+          <dt>Item ID</dt><dd><code>{explain.itemId}</code></dd>
         </dl>
       </aside>
     </div>

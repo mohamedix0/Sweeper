@@ -150,7 +150,7 @@ export function SettingsView({
       {relaunchInfo && <div className="notice info" role="status">{relaunchInfo}</div>}
       {relaunchError && <div className="notice error" role="alert">{relaunchError}</div>}
 
-      <div className="panel" aria-labelledby="general-settings-heading">
+      <div className="settings-section" aria-labelledby="general-settings-heading">
         <h3 id="general-settings-heading" className="section-title">General</h3>
         <div className="row">
           <label className="checkbox"><input type="checkbox" checked={draft.enableTier1} onChange={(e) => setDraft({ ...draft, enableTier1: e.target.checked })} /> Enable Tier 1</label>
@@ -165,7 +165,7 @@ export function SettingsView({
         </div>
       </div>
 
-      <div className="panel" aria-labelledby="tier3-settings-heading">
+      <div className="settings-section" aria-labelledby="tier3-settings-heading">
         <h3 id="tier3-settings-heading" className="section-title">Tier 3 (Opt-in, disabled by default)</h3>
         <div className="notice warn" role="note">Tier 3 targets are higher risk and require explicit opt-in. No Target may override Protected Paths.</div>
         <label className="checkbox"><input type="checkbox" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} /> Enable Tier 3 targets</label>
@@ -173,7 +173,7 @@ export function SettingsView({
           <label htmlFor="stale-project-days">Stale project threshold (days)</label>
           <input id="stale-project-days" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={!draft.enableTier3} />
         </div>
-        <div className="panel" aria-labelledby="elevation-targets-heading">
+        <div className="settings-section" aria-labelledby="elevation-targets-heading">
           <h4 id="elevation-targets-heading" className="section-title">Administrator-only Tier 3 targets</h4>
           <p className="muted">Windows Temp, Windows Update cache, Prefetch, and Package Cache require administrator elevation and Tier 3 opt-in. Standard startup never triggers UAC.</p>
           <label className="checkbox">
@@ -186,12 +186,22 @@ export function SettingsView({
             />
             Allow Administrator-only Tier 3 targets (Windows Temp, Update cache, Prefetch, Package Cache)
           </label>
-          {!elevationStatus.isElevated && <div className="notice warn" role="note">Requires administrator. Enable Tier 3 and run as administrator to unlock these targets.</div>}
+          {!elevationStatus.isElevated && (
+            <div className="notice warn" role="note">
+              <div className="row">
+                <span className="spacer">Requires administrator. Enable Tier 3 and run as administrator to unlock these targets.</span>
+                <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
+                {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
+              </div>
+            </div>
+          )}
           {elevationStatus.isElevated && !draft.enableTier3 && <div className="notice" role="note">Enable Tier 3 to use Administrator-only targets.</div>}
-          <div className="row row-top">
-            <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
-            {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
-          </div>
+          {elevationStatus.isElevated && (
+            <div className="row row-top">
+              <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
+              {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
+            </div>
+          )}
         </div>
         <ul className="list" aria-label="Tier 3 target notes">
           <li><strong>Recycle Bin (opt-in permanent empty):</strong> empties Recycle Bin contents when Tier 3 is enabled (Caution).</li>
@@ -201,7 +211,7 @@ export function SettingsView({
         </ul>
       </div>
 
-      <div className="panel" aria-labelledby="unknown-settings-heading">
+      <div className="settings-section" aria-labelledby="unknown-settings-heading">
         <h3 id="unknown-settings-heading" className="section-title">Unknown Deletions</h3>
         <div className="notice warn" role="note">Allowing deletion of unknown folders is advanced and risky. Unknown selections remain gated by typed confirmation (<code>{TYPED_CONFIRMATION_PHRASE}</code>) and Protected Paths remain non-removable.</div>
         <label className="checkbox">
@@ -210,7 +220,7 @@ export function SettingsView({
         </label>
       </div>
 
-      <div className="panel" aria-labelledby="custom-paths-heading">
+      <div className="settings-section" aria-labelledby="custom-paths-heading">
         <h3 id="custom-paths-heading" className="section-title">Custom Paths</h3>
         <p className="muted">Custom Paths are validated (must exist, depth &ge; 3, not Protected, no parent fallback). Contents only; root folder is preserved. Selections require typed confirmation.</p>
         <div className="row row-end">
