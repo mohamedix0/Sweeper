@@ -103,8 +103,8 @@ pub fn is_ancestor_of_subtree_protected(path: &CanonicalPath) -> bool {
             if path.is_self_or_ancestor_of(&prot) && !path.is_same_path(&prot) {
                 return true;
             }
-            // equality handled by subtree-protected match itself
-            if path.is_self_or_ancestor_of(&prot) && path.is_same_path(&prot) {
+            // Explicit equality case: selecting the protected path itself is blocked.
+            if path.is_same_path(&prot) {
                 return true;
             }
         }
@@ -417,16 +417,8 @@ pub fn validate_tier3_target_root(input: &str) -> ValidationVerdict {
         Err(e) => return ValidationVerdict::deny(format!("path resolution failed: {e}")),
     };
     let resolved = validated.canonical();
-    if resolved.segment_count() < 3 {
-        return ValidationVerdict::deny("resolved path must have depth >= 3 segments");
-    }
-    if is_subtree_protected(resolved)
-        || is_ancestor_of_subtree_protected(resolved)
-        || is_protected_container_root(resolved)
-    {
-        return ValidationVerdict::deny(
-            "resolved path is protected or within/above a protected location",
-        );
+    if let Err(reason) = validate_resolved_tier3_root_policy(resolved) {
+        return ValidationVerdict::deny(reason);
     }
     match contains_subtree_protected_descendant(resolved) {
         Ok(true) => return ValidationVerdict::deny("path contains a subtree-protected descendant"),
@@ -434,6 +426,23 @@ pub fn validate_tier3_target_root(input: &str) -> ValidationVerdict {
         Err(e) => return ValidationVerdict::deny(format!("failed to inspect descendants: {e}")),
     }
     ValidationVerdict::allow()
+}
+
+/// Pure resolved-path policy check for Tier 3 target roots.
+///
+/// Kept separate so depth/protection operators are directly unit-testable without requiring
+/// filesystem resolution to specific synthetic paths.
+fn validate_resolved_tier3_root_policy(resolved: &CanonicalPath) -> Result<(), &'static str> {
+    if resolved.segment_count() < 3 {
+        return Err("resolved path must have depth >= 3 segments");
+    }
+    if is_subtree_protected(resolved)
+        || is_ancestor_of_subtree_protected(resolved)
+        || is_protected_container_root(resolved)
+    {
+        return Err("resolved path is protected and cannot be a Tier 3 Target");
+    }
+    Ok(())
 }
 
 /// Returns true if `root` contains any subtree-protected descendant.
@@ -462,22 +471,9 @@ fn contains_subtree_protected_descendant(root: &CanonicalPath) -> Result<bool, S
                     stack.push(ent.path);
                 }
             } else {
-                // If a child path cannot be lexically normalized safely, be conservative only when it
-                // obviously indicates protected names via raw component checks.
-                if let Some(name) = ent.path.file_name().and_then(|s| s.to_str()) {
-                    let u = name.to_ascii_uppercase();
-                    if u == ".GIT"
-                        || u == ".SSH"
-                        || u == ".GNUPG"
-                        || u == ".AWS"
-                        || u == ".KUBE"
-                        || u == ".DOCKER"
-                        || u == "NTUSER.DAT"
-                        || u.starts_with("NTUSER.DAT")
-                    {
-                        return Ok(true);
-                    }
-                }
+                // If a child path cannot be lexically normalized safely, treat it as protected
+                // to preserve safety (deny-by-default) rather than attempting heuristic parsing.
+                return Ok(true);
             }
         }
     }
@@ -566,6 +562,8 @@ mod tests {
             r"C:\Windows\System32\drivers",
             r"C:\Program Files\App",
             r"C:\Users\Alice\NTUSER.DAT",
+            r"C:\Users\Alice\NTUSER.DAT.LOG1",
+            r"C:\Users\Alice\ntuser.dat{12345678-1234-1234-1234-123456789abc}.TM.blf",
             r"C:\pagefile.sys",
         ] {
             assert!(is_subtree_protected(&canon(p)), "expected protected: {p}");
@@ -849,6 +847,103 @@ mod tests {
         let clean_cp =
             CanonicalPath::parse_lexical(&clean_root.to_string_lossy()).expect("canonical");
         assert!(!contains_subtree_protected_descendant(&clean_cp).expect("scan ok"));
+    }
+
+    #[test]
+    fn contains_subtree_protected_descendant_traverses_normal_dirs_and_finds_nested() {
+        // Kills mutant where traversal/recursion into normal directories is skipped.
+        let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+        let root_dir = sb.create_dir("a/b/c").expect("root dir");
+        let nested = root_dir.join("normal_subdir").join("deeper");
+        fs::create_dir_all(&nested).expect("create nested dirs");
+        fs::create_dir_all(nested.join(".git")).expect("create nested .git");
+        let cp = CanonicalPath::parse_lexical(&root_dir.to_string_lossy()).expect("canonical");
+        assert!(
+            contains_subtree_protected_descendant(&cp).expect("scan ok"),
+            "must detect protected descendant nested under normal directories"
+        );
+    }
+
+    #[test]
+    fn validate_resolved_tier3_root_policy_depth_boundaries_and_protection() {
+        // Depth boundaries (segment_count after drive root): 2 => Err, 3 => Ok when not protected.
+        let depth2 = canon(r"C:\Temp\Sub");
+        assert_eq!(depth2.segment_count(), 2);
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&depth2),
+            Err("resolved path must have depth >= 3 segments")
+        );
+
+        let depth3 = canon(r"C:\Temp\Sub\Leaf");
+        assert_eq!(depth3.segment_count(), 3);
+        assert!(validate_resolved_tier3_root_policy(&depth3).is_ok());
+
+        // Subtree-protected only: segment-named secret under user profile.
+        let subtree_only = canon(r"C:\Users\Alice\.ssh");
+        assert!(is_subtree_protected(&subtree_only));
+        assert!(!is_protected_container_root(&subtree_only));
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&subtree_only),
+            Err("resolved path is protected and cannot be a Tier 3 Target")
+        );
+
+        // Protected container root only (browser User Data shape): not subtree-protected.
+        let container_only = canon(r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data");
+        assert!(is_protected_container_root(&container_only));
+        assert!(!is_subtree_protected(&container_only));
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&container_only),
+            Err("resolved path is protected and cannot be a Tier 3 Target")
+        );
+
+        // Ancestor-of-fixed-subtree-protected also applies to some paths (e.g. C:\Windows is an
+        // ancestor of fixed subtree-protected prefixes), but depth/container protections may also
+        // apply depending on the path. Depth guard is evaluated first for safety.
+        let windows_root = canon(r"C:\Windows");
+        assert!(is_protected_container_root(&windows_root));
+        assert!(is_ancestor_of_subtree_protected(&windows_root));
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&windows_root),
+            Err("resolved path must have depth >= 3 segments")
+        );
+
+        let drive_root = root(r"C:\");
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&drive_root),
+            Err("resolved path must have depth >= 3 segments")
+        );
+    }
+
+    #[test]
+    fn validate_tier3_target_root_resolved_protection_on_existing_paths() {
+        // Keep end-to-end validation on real tempdir paths.
+        let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+
+        let clean = sb.create_dir("tier3/clean/leaf").expect("create clean dir");
+        let clean_v = validate_tier3_target_root(&clean.to_string_lossy());
+        assert!(clean_v.allowed, "clean path should be allowed: {}", clean_v.reason);
+
+        let ssh_root = sb.create_dir("tier3/prot/.ssh").expect("create .ssh root");
+        let ssh_v = validate_tier3_target_root(&ssh_root.to_string_lossy());
+        assert!(!ssh_v.allowed, "subtree-protected root must be denied");
+
+        let user_data_root = sb
+            .create_dir("tier3/prot/AppData/Local/Vendor/Browser/User Data")
+            .expect("create User Data root");
+        let ud_v = validate_tier3_target_root(&user_data_root.to_string_lossy());
+        assert!(!ud_v.allowed, "container root must be denied");
+
+        let profile_root = sb
+            .create_dir("tier3/prot/AppData/Local/Vendor/Browser/User Data/Default")
+            .expect("create profile root");
+        let p_v = validate_tier3_target_root(&profile_root.to_string_lossy());
+        assert!(!p_v.allowed, "profile container root must be denied");
+
+        let dirty_root = sb.create_dir("tier3/dirty/root").expect("create dirty root");
+        fs::create_dir_all(dirty_root.join("nested").join(".git")).expect("create nested .git");
+        let dirty_v = validate_tier3_target_root(&dirty_root.to_string_lossy());
+        assert!(!dirty_v.allowed, "path containing protected descendant must be denied");
+        assert!(dirty_v.reason.contains("protected descendant"));
     }
 
     #[test]

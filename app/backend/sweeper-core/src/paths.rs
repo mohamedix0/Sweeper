@@ -290,10 +290,8 @@ fn lexical_parse(input: &str) -> Result<CanonicalPath, PathError> {
     } else {
         format!("{}:\\{}", drive.to_ascii_uppercase(), segments.join("\\"))
     };
-    if normalized.len() > 32 * 1024 {
-        // > 32767 chars is problematic for many APIs; be conservative for lexical stage.
-        return Err(PathError::TooLong);
-    }
+    // Length is already bounded by the input-length and per-segment checks above.
+    debug_assert!(normalized.len() <= 32_767);
     let folded = normalized.to_ascii_uppercase();
     Ok(CanonicalPath {
         normalized,
@@ -383,7 +381,6 @@ fn is_reserved_dos_name_unicode_variant(base_upper: &str) -> bool {
             '¹' => '1',
             '²' => '2',
             '³' => '3',
-            '⁰' => '0',
             '⁴' => '4',
             '⁵' => '5',
             '⁶' => '6',
@@ -760,8 +757,9 @@ mod tests {
                 "expected reserved for {name}"
             );
         }
-        // '\u{2070}' maps to 0: "COM\u{2070}" normalizes to "COM0" which is not reserved.
+        // Superscript zero variant is not mapped to a reserved DOS device name; it must remain allowed.
         assert!(CanonicalPath::parse_lexical("C:\\COM\u{2070}").is_ok());
+        assert!(CanonicalPath::parse_lexical("C:\\LPT\u{2070}").is_ok());
         // Non-reserved unicode variant-like names return false/are allowed.
         assert!(CanonicalPath::parse_lexical(r"C:\CONX").is_ok());
         assert!(CanonicalPath::parse_lexical("C:\\FOO\u{00B9}").is_ok());
@@ -786,6 +784,23 @@ mod tests {
         assert!(!exceeds_legacy_max_path_len(&s260));
         assert!(exceeds_legacy_max_path_len(&s261));
         assert!(!exceeds_legacy_max_path_len("short"));
+    }
+
+    #[test]
+    fn rejects_non_del_control_characters() {
+        // C0 control chars (except NUL, which is caught as NulByte) must be rejected as disallowed Unicode.
+        // This distinguishes `is_control() || ch == DEL` from `is_control() && ch == DEL`.
+        for c in ['\u{0001}', '\u{001F}', '\u{007F}', '\u{0080}', '\u{009F}'] {
+            let p = format!("C:\\Temp\\foo{c}bar");
+            assert!(
+                matches!(
+                    CanonicalPath::parse_lexical(&p),
+                    Err(PathError::DisallowedUnicode)
+                ),
+                "expected disallowed unicode for control char U+{:04X}",
+                c as u32
+            );
+        }
     }
 
     #[test]
