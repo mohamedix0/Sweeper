@@ -90,6 +90,8 @@ pub fn build_analyzer_preview_items(
         }
 
         // Custom-path-root seam (contents-only semantics, typed confirmation required).
+        // Eligible Unknown selections (opt-in) and other non-target custom-path selections
+        // must route through `ValidatedItem::from_custom_path_root` and require typed confirmation.
         if !node.is_dir {
             return Err(format!(
                 "selected non-target node must be a directory custom-path root candidate: {}",
@@ -101,6 +103,16 @@ pub fn build_analyzer_preview_items(
             return Err(format!(
                 "selected custom-path candidate rejected: {} ({})",
                 node.path, verdict.reason
+            ));
+        }
+        if matches!(node.risk, Risk::Protected)
+            || annotate::is_vhdx_path(&node.path)
+            || node.is_link_point
+            || node.is_cloud_placeholder
+        {
+            return Err(format!(
+                "selected custom-path candidate rejected by safety policy: {}",
+                node.path
             ));
         }
         let validated_item = ValidatedItem::from_custom_path_root(

@@ -329,19 +329,85 @@ pub fn validate_custom_path_lexical(input: &str) -> ValidationVerdict {
 /// depth >= 3, neither Subtree-Protected nor Protected Container Root,
 /// and contains no Subtree-Protected descendant.
 pub fn validate_custom_path(input: &str) -> ValidationVerdict {
-    // Lexical + policy checks first
+    let lexical = match ensure_safe_custom_path_syntax(input) {
+        Ok(p) => p,
+        Err(v) => return v,
+    };
+    if let Err(v) = ensure_not_protected_or_root(&lexical, false) {
+        return v;
+    }
+
+    let resolved = match CanonicalPath::from_existing_path(input) {
+        Ok(v) => v.into_canonical(),
+        Err(PathError::NotFound) => {
+            return ValidationVerdict::deny("path does not exist (no parent fallback)")
+        }
+        Err(PathError::LinkPoint) => return ValidationVerdict::deny("path is a link point"),
+        Err(e) => return ValidationVerdict::deny(format!("path resolution failed: {e}")),
+    };
+    if let Err(v) = ensure_not_protected_or_root(&resolved, true) {
+        return v;
+    }
+
+    match contains_subtree_protected_descendant(&resolved) {
+        Ok(true) => ValidationVerdict::deny("path contains a subtree-protected descendant"),
+        Ok(false) => ValidationVerdict::allow(),
+        Err(e) => ValidationVerdict::deny(format!("failed to inspect descendants: {e}")),
+    }
+}
+
+fn ensure_safe_custom_path_syntax(input: &str) -> Result<CanonicalPath, ValidationVerdict> {
+    let lexical = CanonicalPath::parse_lexical(input)
+        .map_err(|e| ValidationVerdict::deny(format!("invalid path: {e}")))?;
+    if lexical.segment_count() < 3 {
+        return Err(ValidationVerdict::deny(
+            "custom path must have depth >= 3 segments",
+        ));
+    }
+    Ok(lexical)
+}
+
+fn ensure_not_protected_or_root(
+    path: &CanonicalPath,
+    resolved: bool,
+) -> Result<(), ValidationVerdict> {
+    if resolved && path.segment_count() < 3 {
+        return Err(ValidationVerdict::deny(
+            "resolved path must have depth >= 3 segments",
+        ));
+    }
+    if is_protected_for_selection(path) {
+        let msg = if resolved {
+            "resolved path is protected or within/above a protected location"
+        } else {
+            "path is protected or within/above a protected location"
+        };
+        return Err(ValidationVerdict::deny(msg));
+    }
+    Ok(())
+}
+
+/// Validation for Tier 3 conditional target roots (recycle-bin scope, stale project directories).
+///
+/// Stricter than "anything" but relaxed compared to Custom Path selection: allows non-protected
+/// descendants under protected container roots when the root itself is not a protected container
+/// root/subtree-protected path and contains no subtree-protected descendants and no link-point traversal.
+/// This enables opt-in stale project cleanup in user dev folders while preserving safety invariants.
+pub fn validate_tier3_target_root(input: &str) -> ValidationVerdict {
     let lexical = match CanonicalPath::parse_lexical(input) {
         Ok(p) => p,
         Err(e) => return ValidationVerdict::deny(format!("invalid path: {e}")),
     };
     if lexical.segment_count() < 3 {
-        return ValidationVerdict::deny("custom path must have depth >= 3 segments");
+        return ValidationVerdict::deny("tier 3 path must have depth >= 3 segments");
     }
-    if is_protected_for_selection(&lexical) {
+    if is_subtree_protected(&lexical)
+        || is_ancestor_of_subtree_protected(&lexical)
+        || is_protected_container_root(&lexical)
+    {
         return ValidationVerdict::deny("path is protected or within/above a protected location");
     }
 
-    // Must exist on disk and not be a link point; resolve canonical final path via handle APIs.
     let validated = match CanonicalPath::from_existing_path(input) {
         Ok(v) => v,
         Err(PathError::NotFound) => {
@@ -354,19 +420,19 @@ pub fn validate_custom_path(input: &str) -> ValidationVerdict {
     if resolved.segment_count() < 3 {
         return ValidationVerdict::deny("resolved path must have depth >= 3 segments");
     }
-    if is_protected_for_selection(resolved) {
+    if is_subtree_protected(resolved)
+        || is_ancestor_of_subtree_protected(resolved)
+        || is_protected_container_root(resolved)
+    {
         return ValidationVerdict::deny(
             "resolved path is protected or within/above a protected location",
         );
     }
-
-    // Must contain no Subtree-Protected descendant (on-disk scan, bounded/safe).
     match contains_subtree_protected_descendant(resolved) {
         Ok(true) => return ValidationVerdict::deny("path contains a subtree-protected descendant"),
         Ok(false) => {}
         Err(e) => return ValidationVerdict::deny(format!("failed to inspect descendants: {e}")),
     }
-
     ValidationVerdict::allow()
 }
 

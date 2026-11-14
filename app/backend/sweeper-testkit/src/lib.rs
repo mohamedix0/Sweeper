@@ -64,8 +64,14 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// Create a new isolated sandbox with a sentinel file at its root.
+    ///
+    /// Prefers a canonicalized process temp directory so that Windows short-name aliases in
+    /// environment paths (for example `RUNNER~1` on GitHub Actions) are expanded to long names
+    /// while preserving temp-area semantics required by allowlist-sensitive tests (e.g. Gate F).
+    /// Falls back to a cargo-target sandbox base only when canonicalized temp is unavailable or
+    /// still contains short-name segments.
     pub fn new() -> Result<Self> {
-        Self::new_in(std::env::temp_dir())
+        Self::new_in(default_sandbox_base())
     }
 
     /// Create a new isolated sandbox under `base_dir` with a sentinel file at its root.
@@ -231,6 +237,94 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn default_sandbox_base() -> PathBuf {
+    let temp = std::env::temp_dir();
+    let canonical_temp = canonicalize_sandbox_base(temp.clone());
+    if !has_short_name_component(&canonical_temp) {
+        return canonical_temp;
+    }
+
+    if let Some(base) = cargo_target_sandbox_base() {
+        let _ = fs::create_dir_all(&base);
+        let canonical_base = canonicalize_sandbox_base(base.clone());
+        if is_safe_sandbox_base(&canonical_base) {
+            return canonical_base;
+        }
+        if is_safe_sandbox_base(&base) {
+            return base;
+        }
+    }
+
+    panic!(
+        "no safe non-short-name sandbox base found (canonical temp '{}' still contains a short-name segment and no safe cargo-target fallback was available)",
+        canonical_temp.display()
+    );
+}
+
+fn cargo_target_sandbox_base() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+        return Some(normalize_sandbox_base_path(
+            PathBuf::from(v).join("sweeper-test-sandboxes"),
+        ));
+    }
+    if let Some(v) = std::env::var_os("CARGO_TARGET_DIR") {
+        return Some(normalize_sandbox_base_path(
+            PathBuf::from(v).join("sweeper-test-sandboxes"),
+        ));
+    }
+
+    // Best-effort workspace-local fallback for testkit users outside cargo-target tmp contexts.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fallback = manifest.join("..\\..\\..\\target\\sweeper-test-sandboxes");
+    Some(normalize_sandbox_base_path(fallback))
+}
+
+fn strip_extended_prefix(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{}", rest));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_string());
+    }
+    p
+}
+
+fn normalize_sandbox_base_path(base: PathBuf) -> PathBuf {
+    // Ensure directories exist so canonicalization can resolve .. and remove short-name aliases.
+    let _ = fs::create_dir_all(&base);
+    if let Ok(c) = fs::canonicalize(&base) {
+        return strip_extended_prefix(c);
+    }
+    // Fallback: lexical normalization (collapse ..) without touching FS beyond best effort.
+    let normalized: PathBuf = base.components().collect();
+    let _ = fs::create_dir_all(&normalized);
+    if let Ok(c) = fs::canonicalize(&normalized) {
+        return strip_extended_prefix(c);
+    }
+    strip_extended_prefix(normalized)
+}
+
+fn canonicalize_sandbox_base(base: PathBuf) -> PathBuf {
+    normalize_sandbox_base_path(base)
+}
+
+fn is_safe_sandbox_base(path: &Path) -> bool {
+    !has_short_name_component(path) && !has_parent_dir_component(path)
+}
+
+fn has_short_name_component(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(os) => os.to_string_lossy().contains('~'),
+        _ => false,
+    })
+}
+
+fn has_parent_dir_component(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 /// Create a directory junction at `link` pointing to `target` (Windows).
 ///
 /// Uses a direct Win32 reparse-point implementation (no `cmd.exe` spawn) for speed/reliability.
@@ -392,4 +486,50 @@ pub fn filetime_from_unix_secs(secs: u64) -> u64 {
     const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
     secs.saturating_mul(10_000_000)
         .saturating_add(EPOCH_DIFF_100NS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        has_parent_dir_component, has_short_name_component, is_safe_sandbox_base,
+        normalize_sandbox_base_path,
+    };
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn short_name_component_detection_flags_tilde_segments() {
+        assert!(has_short_name_component(Path::new(
+            r"C:\Temp\SHORT~1\AppData\Local\Temp"
+        )));
+        assert!(!has_short_name_component(Path::new(
+            r"C:\Temp\longname\AppData\Local\Temp"
+        )));
+    }
+
+    #[test]
+    fn safe_sandbox_base_requires_no_short_name_segments() {
+        assert!(!is_safe_sandbox_base(Path::new(
+            r"C:\Temp\SHORT~1\AppData\Local\Temp"
+        )));
+        assert!(is_safe_sandbox_base(Path::new(
+            r"D:\work\target\sweeper-test-sandboxes"
+        )));
+    }
+
+    #[test]
+    fn normalized_sandbox_base_has_no_parent_dir_components() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let p = manifest.join("..\\..\\..\\target\\sweeper-test-sandboxes");
+        let norm = normalize_sandbox_base_path(p);
+        assert!(
+            !has_parent_dir_component(&norm),
+            "normalized path must not contain '..' components: {}",
+            norm.display()
+        );
+        assert!(
+            !has_short_name_component(&norm),
+            "normalized path must not contain short-name '~' segments: {}",
+            norm.display()
+        );
+    }
 }
