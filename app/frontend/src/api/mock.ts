@@ -115,6 +115,8 @@ type LogEntry = { id: string; name: string; modifiedUnixSecs: string; sizeBytes:
 export type MockController = SweeperClient & {
   advanceTimeMs: (ms: number) => void;
   invalidateSettings: () => void;
+  setElevationStatus: (status: { isElevated: boolean }) => void;
+  setRelaunchResult: (result: { launched: boolean } | { error: ContractError }) => void;
   reset: () => void;
 };
 
@@ -348,17 +350,21 @@ function analyzerBreakdown(selected: AnalyzerNodeDto[]): PreviewTargetBreakdownD
 }
 
 export function createMockController(): MockController {
+  const init = typeof globalThis !== 'undefined' ? (globalThis as { __SWEEPER_MOCK_INIT__?: { elevationStatus?: { isElevated: boolean }; relaunchResult?: { launched: boolean } | { error: ContractError } } }).__SWEEPER_MOCK_INIT__ : undefined;
   let nowMs = Date.now();
   let settingsGeneration = 1;
   let settingsState: Settings = {
     enableTier1: true,
     enableTier2: true,
     enableTier3: false,
+    enableElevationTargets: false,
     minAgeHours: 24,
     allowDeleteUnknown: false,
     customPaths: [],
     staleProjectDays: 30,
   };
+  let elevationStatus = { isElevated: init?.elevationStatus?.isElevated ?? false };
+  let relaunchResult: { launched: boolean } | { error: ContractError } = init?.relaunchResult ?? { launched: true };
   const sessions = new Map<string, SessionState>();
   const analyzerSessions = new Map<string, AnalyzerSessionState>();
   const previews = new Map<string, PreviewState>();
@@ -693,10 +699,20 @@ export function createMockController(): MockController {
     async updateSettings(settings) {
       settingsState = {
         ...settings,
+        enableElevationTargets: settings.enableElevationTargets ?? false,
         customPaths: [...(settings.customPaths ?? [])],
       };
       bumpSettingsGeneration();
       return { ...settingsState, customPaths: [...settingsState.customPaths] };
+    },
+
+    async getElevationStatus() {
+      return { ...elevationStatus };
+    },
+
+    async relaunchElevated() {
+      if ('error' in relaunchResult) throw relaunchResult.error;
+      return { ...relaunchResult };
     },
 
     async validateCustomPath(path) {
@@ -721,12 +737,16 @@ export function createMockController(): MockController {
 
     advanceTimeMs(ms) { nowMs += ms; },
     invalidateSettings() { bumpSettingsGeneration(); },
+    setElevationStatus(status) { elevationStatus = { ...status }; },
+    setRelaunchResult(result) { relaunchResult = 'error' in result ? result : { ...result }; },
     reset() {
       sessions.clear();
       analyzerSessions.clear();
       previews.clear();
       settingsGeneration = 1;
-      settingsState = { enableTier1: true, enableTier2: true, enableTier3: false, minAgeHours: 24, allowDeleteUnknown: false, customPaths: [], staleProjectDays: 30 };
+      settingsState = { enableTier1: true, enableTier2: true, enableTier3: false, enableElevationTargets: false, minAgeHours: 24, allowDeleteUnknown: false, customPaths: [], staleProjectDays: 30 };
+      elevationStatus = { isElevated: false };
+      relaunchResult = { launched: true };
       scanSeq = 0; analyzerSeq = 0; previewSeq = 0; logSeq = 0; nowMs = Date.now();
       logs.length = 0;
       logs.push(

@@ -1,8 +1,28 @@
 import { useEffect, useState } from 'react';
-import { formatContractError, type Settings, type SweeperClient } from '../api/client';
+import { formatContractError, type ElevationStatus, type Settings, type SweeperClient } from '../api/client';
 import { TYPED_CONFIRMATION_PHRASE } from './cleanShared';
 
-export function SettingsView({ client, settings, onSaved }: { client: SweeperClient; settings: Settings | null; onSaved: (s: Settings) => void }) {
+function ElevationBadge({ isElevated }: { isElevated: boolean }) {
+  return (
+    <span className={`badge ${isElevated ? 'risk-Safe' : 'risk-Caution'}`} aria-label={isElevated ? 'Administrator (Elevated)' : 'Standard (Non-Elevated)'}>
+      {isElevated ? 'Administrator (Elevated)' : 'Standard (Non-Elevated)'}
+    </span>
+  );
+}
+
+export function SettingsView({
+  client,
+  settings,
+  elevationStatus,
+  elevationError,
+  onSaved,
+}: {
+  client: SweeperClient;
+  settings: Settings | null;
+  elevationStatus: ElevationStatus;
+  elevationError: string | null;
+  onSaved: (s: Settings) => void;
+}) {
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [loading, setLoading] = useState(!settings);
   const [saving, setSaving] = useState(false);
@@ -10,6 +30,9 @@ export function SettingsView({ client, settings, onSaved }: { client: SweeperCli
   const [info, setInfo] = useState<string | null>(null);
   const [customPathInput, setCustomPathInput] = useState('');
   const [validatingPath, setValidatingPath] = useState(false);
+  const [relaunching, setRelaunching] = useState(false);
+  const [relaunchInfo, setRelaunchInfo] = useState<string | null>(null);
+  const [relaunchError, setRelaunchError] = useState<string | null>(null);
 
   useEffect(() => {
     if (settings) {
@@ -86,6 +109,24 @@ export function SettingsView({ client, settings, onSaved }: { client: SweeperCli
     await save(next);
   }
 
+  async function runAsAdministrator() {
+    setRelaunching(true);
+    setRelaunchInfo(null);
+    setRelaunchError(null);
+    try {
+      const res = await client.relaunchElevated();
+      if (res.launched) {
+        setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
+      } else {
+        setRelaunchError('Administrator launch was not started.');
+      }
+    } catch (e) {
+      setRelaunchError(formatContractError(e));
+    } finally {
+      setRelaunching(false);
+    }
+  }
+
   if (loading || !draft) {
     return (
       <section className="panel" aria-labelledby="settings-heading">
@@ -97,10 +138,17 @@ export function SettingsView({ client, settings, onSaved }: { client: SweeperCli
 
   return (
     <section className="panel" aria-labelledby="settings-heading">
-      <h2 id="settings-heading">Settings</h2>
+      <div className="row">
+        <h2 id="settings-heading">Settings</h2>
+        <div className="spacer" />
+        <ElevationBadge isElevated={elevationStatus.isElevated} />
+      </div>
       <p className="muted">Advanced settings are validated by the backend on load/save. Invalid or tampered values fall back to safe defaults and Protected Paths are never configurable.</p>
+      {elevationError && <div className="notice error" role="alert">Elevation status unavailable: {elevationError}</div>}
       {error && <div className="notice error" role="alert">{error}</div>}
       {info && <div className="notice info" role="status">{info}</div>}
+      {relaunchInfo && <div className="notice info" role="status">{relaunchInfo}</div>}
+      {relaunchError && <div className="notice error" role="alert">{relaunchError}</div>}
 
       <div className="panel" aria-labelledby="general-settings-heading">
         <h3 id="general-settings-heading" className="section-title">General</h3>
@@ -124,6 +172,26 @@ export function SettingsView({ client, settings, onSaved }: { client: SweeperCli
         <div className="field">
           <label htmlFor="stale-project-days">Stale project threshold (days)</label>
           <input id="stale-project-days" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={!draft.enableTier3} />
+        </div>
+        <div className="panel" aria-labelledby="elevation-targets-heading">
+          <h4 id="elevation-targets-heading" className="section-title">Administrator-only Tier 3 targets</h4>
+          <p className="muted">Windows Temp, Windows Update cache, Prefetch, and Package Cache require administrator elevation and Tier 3 opt-in. Standard startup never triggers UAC.</p>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              aria-label="Allow Administrator-only Tier 3 targets (Windows Temp, Update cache, Prefetch, Package Cache)"
+              checked={draft.enableElevationTargets}
+              onChange={(e) => setDraft({ ...draft, enableElevationTargets: e.target.checked })}
+              disabled={!elevationStatus.isElevated || !draft.enableTier3}
+            />
+            Allow Administrator-only Tier 3 targets (Windows Temp, Update cache, Prefetch, Package Cache)
+          </label>
+          {!elevationStatus.isElevated && <div className="notice warn" role="note">Requires administrator. Enable Tier 3 and run as administrator to unlock these targets.</div>}
+          {elevationStatus.isElevated && !draft.enableTier3 && <div className="notice" role="note">Enable Tier 3 to use Administrator-only targets.</div>}
+          <div className="row" style={{ marginTop: '0.5rem' }}>
+            <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
+            {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
+          </div>
         </div>
         <ul className="list" aria-label="Tier 3 target notes">
           <li><strong>Recycle Bin (opt-in permanent empty):</strong> empties Recycle Bin contents when Tier 3 is enabled (Caution).</li>

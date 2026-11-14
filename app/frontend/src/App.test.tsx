@@ -21,6 +21,13 @@ describe('Sweeper frontend', () => {
     expect(screen.getByRole('button', { name: 'Start Scan' })).toBeEnabled();
   });
 
+  it('shows locked administrator-only notice on Scan & Preview when non-elevated', async () => {
+    const { user } = setup();
+    expect(await screen.findByLabelText('Standard (Non-Elevated)')).toBeInTheDocument();
+    expect(screen.getByText(/Administrator-only Tier 3 targets locked/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Run as administrator' })).toBeInTheDocument();
+  });
+
   it('runs full Scan -> Explain -> Preview -> Clean summary -> Logs viewer flow', async () => {
     const { user } = setup();
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
@@ -88,6 +95,45 @@ describe('Sweeper frontend', () => {
     expect(previewBtn).toBeEnabled();
     await user.click(previewBtn);
     await screen.findByText('Preview Breakdown');
+  });
+
+  it('shows non-elevated status, locks elevation targets, and reports UAC cancellation feedback safely', async () => {
+    mockController.setRelaunchResult({
+      error: { code: 'internal', details: { reason: 'Administrator launch was cancelled.' } },
+    });
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await screen.findByRole('heading', { name: 'Settings' });
+    expect(screen.getByLabelText('Standard (Non-Elevated)')).toBeInTheDocument();
+
+    const elevationToggle = screen.getByLabelText(
+      'Allow Administrator-only Tier 3 targets (Windows Temp, Update cache, Prefetch, Package Cache)',
+    ) as HTMLInputElement;
+    expect(elevationToggle).toBeDisabled();
+    expect(screen.getByText(/Requires administrator/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Run as administrator' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Administrator launch was cancelled/i);
+  });
+
+  it('allows enabling and persisting elevation targets when elevated', async () => {
+    mockController.setElevationStatus({ isElevated: true });
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await screen.findByRole('heading', { name: 'Settings' });
+    expect(screen.getByLabelText('Administrator (Elevated)')).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText('Enable Tier 3 targets'));
+    const elevationToggle = screen.getByLabelText(
+      'Allow Administrator-only Tier 3 targets (Windows Temp, Update cache, Prefetch, Package Cache)',
+    ) as HTMLInputElement;
+    expect(elevationToggle).toBeEnabled();
+    await user.click(elevationToggle);
+    await user.click(screen.getByRole('button', { name: 'Save Settings' }));
+    await screen.findByText(/Settings saved/i);
+
+    const saved = await mockController.getSettings();
+    expect(saved.enableElevationTargets).toBe(true);
   });
 
   it('Advanced Settings supports Tier 3, min-age warning, custom path add/reject/remove, and allow unknown gating', async () => {

@@ -31,6 +31,9 @@ export type ExecuteCleanResponse = {
   logId: string | null;
 };
 
+export type ElevationStatus = { isElevated: boolean };
+export type RelaunchResult = { launched: boolean };
+
 export type ScanProgress =
   | { kind: 'started'; session_id: string }
   | { kind: 'completed'; session_id: string }
@@ -74,6 +77,7 @@ export type Settings = {
   enableTier1: boolean;
   enableTier2: boolean;
   enableTier3: boolean;
+  enableElevationTargets: boolean;
   minAgeHours: number;
   allowDeleteUnknown: boolean;
   customPaths: string[];
@@ -93,6 +97,8 @@ export interface SweeperClient {
   explainItem(itemId: string): Promise<{ itemId: string; title: string; description: string; risk: RiskDto }>;
   getSettings(): Promise<Settings>;
   updateSettings(settings: Settings): Promise<Settings>;
+  getElevationStatus(): Promise<ElevationStatus>;
+  relaunchElevated(): Promise<RelaunchResult>;
   validateCustomPath(path: string): Promise<{ path: string; allowed: boolean; reason: string }>;
   listLogs(): Promise<{ id: string; name: string; modifiedUnixSecs: string | null; sizeBytes: string | null }[]>;
   readLog(logId: string): Promise<{ id: string; content: string }>;
@@ -112,6 +118,10 @@ export function shouldUseMockBackend(): boolean {
 function unwrap<T>(res: { status: 'ok'; data: T } | { status: 'error'; error: ContractError }): T {
   if (res.status === 'ok') return res.data;
   throw res.error;
+}
+
+function normalizeSettings(settings: Settings & { enableElevationTargets?: boolean }): Settings {
+  return { ...settings, enableElevationTargets: settings.enableElevationTargets ?? false };
 }
 
 export function createTauriClient(): SweeperClient {
@@ -166,10 +176,16 @@ export function createTauriClient(): SweeperClient {
       return unwrap(await commands.explainItem(itemId));
     },
     async getSettings() {
-      return unwrap(await commands.getSettings());
+      return normalizeSettings(unwrap(await commands.getSettings()) as Settings & { enableElevationTargets?: boolean });
     },
     async updateSettings(settings) {
-      return unwrap(await commands.updateSettings(settings));
+      return normalizeSettings(unwrap(await commands.updateSettings(settings)) as Settings & { enableElevationTargets?: boolean });
+    },
+    async getElevationStatus() {
+      return unwrap(await commands.getElevationStatus());
+    },
+    async relaunchElevated() {
+      return unwrap(await commands.relaunchElevated());
     },
     async validateCustomPath(path) {
       return unwrap(await commands.validateCustomPath(path));
@@ -184,7 +200,12 @@ export function createTauriClient(): SweeperClient {
 }
 
 export function createClient(): SweeperClient {
-  if (shouldUseMockBackend()) return mockController;
+  if (shouldUseMockBackend()) {
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __sweeperMock?: SweeperClient }).__sweeperMock = mockController;
+    }
+    return mockController;
+  }
   return createTauriClient();
 }
 
