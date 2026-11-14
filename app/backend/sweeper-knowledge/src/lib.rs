@@ -217,6 +217,42 @@ fn p(id: &str, kind: ProtectedPathKind, display: &str, notes: &str) -> Protected
 fn builtin_knowledge_entries_impl() -> Vec<KnowledgeEntry> {
     vec![
         KnowledgeEntry {
+            id: "kb-windows-temp".to_string(),
+            title: "Windows Temp".to_string(),
+            description: "Windows system temporary files under C:\\Windows\\Temp. Contents can be recreated, but active installers or system tasks may still be using files.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::Windows),
+            relative_pattern: "Temp".to_string(),
+            notes: "Caution. Requires administrator elevation. Only this explicit audited subfolder is cleanable; C:\\Windows itself remains a Protected container root.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-windows-update-download-cache".to_string(),
+            title: "Windows Update Download Cache".to_string(),
+            description: "Downloaded Windows Update payloads in C:\\Windows\\SoftwareDistribution\\Download. Clearing can reclaim space but may require updates to be downloaded again.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::Windows),
+            relative_pattern: "SoftwareDistribution\\Download".to_string(),
+            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\Windows remains Protected.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-windows-prefetch".to_string(),
+            title: "Windows Prefetch".to_string(),
+            description: "Windows Prefetch data in C:\\Windows\\Prefetch used to optimize application startup. Removing contents is recoverable but may temporarily slow launches.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::Windows),
+            relative_pattern: "Prefetch".to_string(),
+            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\Windows remains Protected.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-programdata-package-cache".to_string(),
+            title: "ProgramData Package Cache".to_string(),
+            description: "Installer package cache in C:\\ProgramData\\Package Cache used by some installers for repair, modify, or uninstall operations.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::ProgramData),
+            relative_pattern: "Package Cache".to_string(),
+            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\ProgramData remains a Protected container root.".to_string(),
+        },
+        KnowledgeEntry {
             id: "kb-local-programs".to_string(),
             title: "Local Programs".to_string(),
             description: "Per-user installed applications under LocalAppData\\Programs. Removing installed program files can break applications and their updaters.".to_string(),
@@ -442,14 +478,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_allowlist_is_valid_and_tier1_tier2_only() {
+    fn embedded_allowlist_is_valid_and_includes_elevation_targets() {
         let targets = embedded_targets();
         assert!(!targets.is_empty());
-        assert!(targets
-            .iter()
-            .all(|t| matches!(t.tier, Tier::Tier1 | Tier::Tier2)));
-        assert!(targets.iter().all(|t| !t.requires_elevation));
-        assert!(targets.iter().all(|t| matches!(t.scope, Scope::Contents)));
+        let audited_elevated = [
+            "windows-temp",
+            "windows-update-download-cache",
+            "windows-prefetch",
+            "programdata-package-cache",
+        ];
+        for id in audited_elevated {
+            let t = targets
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap_or_else(|| panic!("missing Phase 6 elevation target `{id}`"));
+            assert_eq!(t.tier, Tier::Tier3, "{id}");
+            assert_eq!(t.risk, Risk::Caution, "{id}");
+            assert!(t.requires_elevation, "{id}");
+            assert!(matches!(t.scope, Scope::Contents), "{id}");
+            assert!(t.min_age_hours >= 24, "{id}");
+        }
+        assert!(targets.iter().all(|t| {
+            if audited_elevated.contains(&t.id.as_str()) {
+                t.requires_elevation
+            } else {
+                matches!(t.tier, Tier::Tier1 | Tier::Tier2) && !t.requires_elevation
+            }
+        }));
     }
 
     #[test]

@@ -4,10 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
-    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ExecuteCleanResponse,
-    ExplainItemResponse, LogMetadataDto, LogReadResponse, PreviewCleanResponse,
-    PreviewConfirmationsDto, ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse,
-    TierDto, U64String, ValidateCustomPathResponse,
+    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ElevationStatusDto,
+    ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto, LogReadResponse,
+    PreviewCleanResponse, PreviewConfirmationsDto, RelaunchResultDto, ScanResultsDto, SettingsDto,
+    StartAnalyzerResponse, StartScanResponse, TierDto, U64String, ValidateCustomPathResponse,
 };
 
 use crate::clock::Clock;
@@ -296,6 +296,11 @@ pub fn execute_clean<C: Clock, F>(
 where
     F: FnMut(CleanProgressEvent),
 {
+    if is_e2e_read_only() {
+        return Err(ContractError::Internal {
+            reason: "Clean is disabled while SWEEPER_E2E_READ_ONLY=1 is active".into(),
+        });
+    }
     let settings_gen = state
         .settings
         .lock()
@@ -315,10 +320,99 @@ where
     )
 }
 
+fn is_e2e_read_only() -> bool {
+    std::env::var_os("SWEEPER_E2E_READ_ONLY").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 /// `execute_clean` using default journal log location.
 pub fn execute_clean_default<C: Clock>(
     state: &AppState<C>,
     preview_token: String,
 ) -> Result<ExecuteCleanResponse, ContractError> {
     execute_clean(state, preview_token, None, |_| {})
+}
+
+/// `get_elevation_status` implementation.
+pub fn get_elevation_status<C: Clock>(
+    state: &AppState<C>,
+) -> Result<ElevationStatusDto, ContractError> {
+    crate::elevation::get_elevation_status(state.elevation_provider.as_ref())
+}
+
+/// `relaunch_elevated` implementation.
+pub fn relaunch_elevated<C: Clock>(
+    state: &AppState<C>,
+) -> Result<RelaunchResultDto, ContractError> {
+    crate::elevation::relaunch_elevated(
+        state.elevation_provider.as_ref(),
+        state.single_instance.as_ref(),
+        state.app_exit.as_ref(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SystemClock;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static E2E_READ_ONLY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn execute_clean_rejects_when_e2e_read_only_is_enabled() {
+        let _lock = E2E_READ_ONLY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvVarGuard::set("SWEEPER_E2E_READ_ONLY", "1");
+        let state = AppState::<SystemClock>::new_default();
+
+        let err = execute_clean(&state, "preview-token".to_string(), None, |_| {}).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ContractError::Internal { reason } if reason == "Clean is disabled while SWEEPER_E2E_READ_ONLY=1 is active"
+        ));
+    }
+
+    #[test]
+    fn execute_clean_preserves_normal_behavior_when_e2e_read_only_is_unset() {
+        let _lock = E2E_READ_ONLY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("SWEEPER_E2E_READ_ONLY");
+        std::env::remove_var("SWEEPER_E2E_READ_ONLY");
+        let state = AppState::<SystemClock>::new_default();
+
+        let err = execute_clean(&state, "no-such-token".to_string(), None, |_| {}).unwrap_err();
+
+        match previous {
+            Some(value) => std::env::set_var("SWEEPER_E2E_READ_ONLY", value),
+            None => std::env::remove_var("SWEEPER_E2E_READ_ONLY"),
+        }
+
+        assert!(matches!(err, ContractError::PreviewTokenInvalid { .. }));
+    }
 }

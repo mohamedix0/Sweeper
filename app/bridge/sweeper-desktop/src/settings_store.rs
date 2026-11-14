@@ -94,6 +94,7 @@ fn to_dto(settings: &SweeperSettings) -> SettingsDto {
         enable_tier1: settings.enable_tier1,
         enable_tier2: settings.enable_tier2,
         enable_tier3: settings.enable_tier3,
+        enable_elevation_targets: settings.enable_elevation_targets,
         min_age_hours: settings.min_age_hours,
         allow_delete_unknown: settings.allow_delete_unknown,
         custom_paths: settings.custom_paths.clone(),
@@ -105,6 +106,7 @@ fn scan_affecting_changed(old: &SweeperSettings, new: &SweeperSettings) -> bool 
     old.enable_tier1 != new.enable_tier1
         || old.enable_tier2 != new.enable_tier2
         || old.enable_tier3 != new.enable_tier3
+        || old.enable_elevation_targets != new.enable_elevation_targets
         || old.min_age_hours != new.min_age_hours
         || old.allow_delete_unknown != new.allow_delete_unknown
         || old.custom_paths != new.custom_paths

@@ -737,6 +737,131 @@ fn gate_d_mid_clean_termination_recovery_truncated_journal_and_rotation() {
     assert_sentinel_intact(&sb);
 }
 
+#[test]
+fn gate_d_tier3_project_directory_removed_after_ntfs_mtime_bump_on_emptied_dirs() {
+    let sb = Sandbox::new().unwrap();
+    let target_root = sb.create_dir("proj").unwrap();
+    let stale_dir = target_root.join("target");
+    let nested = stale_dir.join("nested").join("deep");
+    fs::create_dir_all(&nested).unwrap();
+    let f1 = stale_dir.join("a.bin");
+    let f2 = nested.join("b.bin");
+    write_file(&f1, b"aaa");
+    write_file(&f2, b"bbbb");
+    for p in [
+        &f1,
+        &f2,
+        &nested,
+        &nested.parent().unwrap().to_path_buf(),
+        &stale_dir,
+    ] {
+        set_filetime(p, old_mtime_secs());
+    }
+
+    let stale_canon = canonical_str(&stale_dir);
+    let item = remover::ValidatedItem::from_tier3_project_directory(
+        "stale-target",
+        "stale-rust-target",
+        stale_canon.clone(),
+        7,
+        Some(old_mtime_secs()),
+    )
+    .unwrap();
+    let journal_dir = sb.create_dir("journal").unwrap();
+    let clean_now = now();
+    let report = remover::execute_clean(
+        vec![item],
+        CleanOptions {
+            preview_estimated_bytes: 1024 * 1024,
+            min_age: Duration::from_secs(3600),
+            now: clean_now,
+            journal_base_dir: Some(journal_dir),
+        },
+    )
+    .unwrap();
+
+    assert!(!report.aborted, "aborted: {:?}", report.abort_reason);
+    assert!(
+        !stale_dir.exists(),
+        "tier 3 project directory root should be removed after contents cleaned: {:?}",
+        report.items
+    );
+    assert_sentinel_intact(&sb);
+}
+
+#[test]
+fn gate_d_age_checks_still_skip_unemptied_or_non_emptied_entries() {
+    let sb = Sandbox::new().unwrap();
+    let target_root = sb.create_dir("target").unwrap();
+    let min_age = Duration::from_secs(3600);
+    let now_ts = unix_now();
+
+    // Already-empty directory with future mtime: must be skipped.
+    let empty_future = target_root.join("empty_future");
+    fs::create_dir_all(&empty_future).unwrap();
+    set_filetime(&empty_future, now_ts + 7200);
+
+    // Already-empty directory newer than min_age: must be skipped.
+    let empty_recent = target_root.join("empty_recent");
+    fs::create_dir_all(&empty_recent).unwrap();
+    set_filetime(&empty_recent, now_ts - 60);
+
+    // Files with future/recent mtime: must be skipped.
+    let future_file = target_root.join("future.txt");
+    let recent_file = target_root.join("recent.txt");
+    write_file(&future_file, b"f");
+    write_file(&recent_file, b"r");
+    set_filetime(&future_file, now_ts + 7200);
+    set_filetime(&recent_file, now_ts - 60);
+
+    // Directory containing an unemptied recent/future file: file must remain, so dir not emptied.
+    let has_recent = target_root.join("has_recent");
+    fs::create_dir_all(&has_recent).unwrap();
+    let recent_child = has_recent.join("recent_child.txt");
+    write_file(&recent_child, b"x");
+    set_filetime(&recent_child, now_ts - 30);
+    set_filetime(&has_recent, old_mtime_secs());
+
+    let journal_dir = sb.create_dir("journal").unwrap();
+    for (id, path) in [
+        ("empty_future", &empty_future),
+        ("empty_recent", &empty_recent),
+        ("future_file", &future_file),
+        ("recent_file", &recent_file),
+        ("has_recent", &has_recent),
+    ] {
+        let item = make_item(id, &target_root, path, 1, Some(old_mtime_secs()));
+        let report = remover::execute_clean(
+            vec![item],
+            CleanOptions {
+                preview_estimated_bytes: 1024 * 1024,
+                min_age,
+                now: now(),
+                journal_base_dir: Some(journal_dir.clone()),
+            },
+        )
+        .unwrap();
+        assert!(
+            !report.aborted,
+            "aborted for {id}: {:?}",
+            report.abort_reason
+        );
+    }
+
+    assert!(
+        empty_future.exists(),
+        "empty future-mtime dir must be skipped"
+    );
+    assert!(empty_recent.exists(), "empty recent dir must be skipped");
+    assert!(future_file.exists(), "future-mtime file must be skipped");
+    assert!(recent_file.exists(), "recent file must be skipped");
+    assert!(
+        has_recent.exists() && recent_child.exists(),
+        "directory containing unemptied recent file must remain"
+    );
+    assert_sentinel_intact(&sb);
+}
+
 // Ensure test uses std::os::windows::fs::OpenOptionsExt for share_mode
 trait OpenOptionsShareExt {
     fn share_mode(&mut self, val: u32) -> &mut Self;

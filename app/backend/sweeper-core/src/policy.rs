@@ -103,8 +103,8 @@ pub fn is_ancestor_of_subtree_protected(path: &CanonicalPath) -> bool {
             if path.is_self_or_ancestor_of(&prot) && !path.is_same_path(&prot) {
                 return true;
             }
-            // equality handled by subtree-protected match itself
-            if path.is_self_or_ancestor_of(&prot) && path.is_same_path(&prot) {
+            // Explicit equality case: selecting the protected path itself is blocked.
+            if path.is_same_path(&prot) {
                 return true;
             }
         }
@@ -417,16 +417,8 @@ pub fn validate_tier3_target_root(input: &str) -> ValidationVerdict {
         Err(e) => return ValidationVerdict::deny(format!("path resolution failed: {e}")),
     };
     let resolved = validated.canonical();
-    if resolved.segment_count() < 3 {
-        return ValidationVerdict::deny("resolved path must have depth >= 3 segments");
-    }
-    if is_subtree_protected(resolved)
-        || is_ancestor_of_subtree_protected(resolved)
-        || is_protected_container_root(resolved)
-    {
-        return ValidationVerdict::deny(
-            "resolved path is protected or within/above a protected location",
-        );
+    if let Err(reason) = validate_resolved_tier3_root_policy(resolved) {
+        return ValidationVerdict::deny(reason);
     }
     match contains_subtree_protected_descendant(resolved) {
         Ok(true) => return ValidationVerdict::deny("path contains a subtree-protected descendant"),
@@ -434,6 +426,23 @@ pub fn validate_tier3_target_root(input: &str) -> ValidationVerdict {
         Err(e) => return ValidationVerdict::deny(format!("failed to inspect descendants: {e}")),
     }
     ValidationVerdict::allow()
+}
+
+/// Pure resolved-path policy check for Tier 3 target roots.
+///
+/// Kept separate so depth/protection operators are directly unit-testable without requiring
+/// filesystem resolution to specific synthetic paths.
+fn validate_resolved_tier3_root_policy(resolved: &CanonicalPath) -> Result<(), &'static str> {
+    if resolved.segment_count() < 3 {
+        return Err("resolved path must have depth >= 3 segments");
+    }
+    if is_subtree_protected(resolved)
+        || is_ancestor_of_subtree_protected(resolved)
+        || is_protected_container_root(resolved)
+    {
+        return Err("resolved path is protected and cannot be a Tier 3 Target");
+    }
+    Ok(())
 }
 
 /// Returns true if `root` contains any subtree-protected descendant.
@@ -462,22 +471,9 @@ fn contains_subtree_protected_descendant(root: &CanonicalPath) -> Result<bool, S
                     stack.push(ent.path);
                 }
             } else {
-                // If a child path cannot be lexically normalized safely, be conservative only when it
-                // obviously indicates protected names via raw component checks.
-                if let Some(name) = ent.path.file_name().and_then(|s| s.to_str()) {
-                    let u = name.to_ascii_uppercase();
-                    if u == ".GIT"
-                        || u == ".SSH"
-                        || u == ".GNUPG"
-                        || u == ".AWS"
-                        || u == ".KUBE"
-                        || u == ".DOCKER"
-                        || u == "NTUSER.DAT"
-                        || u.starts_with("NTUSER.DAT")
-                    {
-                        return Ok(true);
-                    }
-                }
+                // If a child path cannot be lexically normalized safely, treat it as protected
+                // to preserve safety (deny-by-default) rather than attempting heuristic parsing.
+                return Ok(true);
             }
         }
     }
@@ -518,16 +514,21 @@ pub fn is_rejected_for_selection_input(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::CanonicalPath;
+    use crate::paths::{self, CanonicalPath};
+    use std::fs;
+
+    fn canon(s: &str) -> CanonicalPath {
+        CanonicalPath::parse_lexical(s).expect("valid lexical path")
+    }
+
+    fn root(s: &str) -> CanonicalPath {
+        paths::parse_drive_root(s).expect("valid drive root")
+    }
 
     #[test]
     fn container_roots_blocked() {
         for s in [r"C:\", r"C:\Windows", r"C:\Users", r"C:\ProgramData"] {
-            let p = if s == r"C:\" {
-                paths::parse_drive_root(s).unwrap()
-            } else {
-                CanonicalPath::parse_lexical(s).unwrap()
-            };
+            let p = if s == r"C:\" { root(s) } else { canon(s) };
             assert!(is_protected_container_root(&p), "{s}");
             assert!(is_protected_for_selection(&p), "{s}");
         }
@@ -535,10 +536,447 @@ mod tests {
 
     #[test]
     fn subtree_prefix_segment_safe() {
-        let win = CanonicalPath::parse_lexical(r"C:\Windows").unwrap();
-        let win_old = CanonicalPath::parse_lexical(r"C:\Windows.old").unwrap();
+        let win = canon(r"C:\Windows");
+        let win_old = canon(r"C:\Windows.old");
         assert!(is_protected_container_root(&win));
         assert!(!is_subtree_protected(&win_old));
         assert!(!is_protected_container_root(&win_old));
+    }
+
+    #[test]
+    fn is_drive_root_checks() {
+        assert!(is_drive_root(&root(r"C:\")));
+        assert!(!is_drive_root(&canon(r"C:\Temp")));
+    }
+
+    #[test]
+    fn matches_fixed_subtree_protected_each_pattern() {
+        for p in [
+            r"C:\Users\Alice\.git",
+            r"C:\Users\Alice\.ssh",
+            r"C:\Users\Alice\.gnupg",
+            r"C:\Users\Alice\.aws",
+            r"C:\Users\Alice\.kube",
+            r"C:\Users\Alice\.docker",
+            r"C:\Recovery\foo",
+            r"C:\Windows\System32\drivers",
+            r"C:\Program Files\App",
+            r"C:\Users\Alice\NTUSER.DAT",
+            r"C:\Users\Alice\NTUSER.DAT.LOG1",
+            r"C:\Users\Alice\ntuser.dat{12345678-1234-1234-1234-123456789abc}.TM.blf",
+            r"C:\pagefile.sys",
+        ] {
+            assert!(is_subtree_protected(&canon(p)), "expected protected: {p}");
+        }
+        assert!(!is_subtree_protected(&canon(r"C:\Temp\safe")));
+    }
+
+    #[test]
+    fn ancestor_of_subtree_protected_checks() {
+        assert!(is_ancestor_of_subtree_protected(&root(r"C:\")));
+        assert!(is_ancestor_of_subtree_protected(&canon(r"C:\Windows")));
+        assert!(is_ancestor_of_subtree_protected(&canon(
+            r"C:\Windows\System32"
+        )));
+        assert!(!is_ancestor_of_subtree_protected(&canon(r"C:\Temp\foo")));
+    }
+
+    #[test]
+    fn path_last_segment_returns_exact_value() {
+        assert_eq!(path_last_segment(&canon(r"C:\Temp\Leaf")), Some("Leaf"));
+        assert_eq!(path_last_segment(&root(r"C:\")), None);
+    }
+
+    #[test]
+    fn user_profile_root_checks() {
+        assert!(is_user_profile_root(&canon(r"C:\Users\Alice")));
+        assert!(!is_user_profile_root(&canon(r"C:\Users")));
+        assert!(!is_user_profile_root(&canon(r"C:\Users\Alice\Documents")));
+    }
+
+    #[test]
+    fn user_profile_data_subtree_checks() {
+        // depth boundary: segs.len() < 3 false, ==3 allowed for data folders
+        assert!(is_user_profile_data_subtree(&canon(
+            r"C:\Users\Alice\Documents"
+        )));
+        assert!(is_user_profile_data_subtree(&canon(
+            r"C:\Users\Alice\OneDrive - Contoso"
+        )));
+        assert!(!is_user_profile_data_subtree(&canon(r"C:\Users\Alice")));
+        assert!(!is_user_profile_data_subtree(&canon(
+            r"C:\Other\Alice\Documents"
+        )));
+        assert!(!is_user_profile_data_subtree(&canon(
+            r"C:\Users\Alice\Projects"
+        )));
+    }
+
+    #[test]
+    fn matches_ci_any_checks() {
+        assert!(matches_ci_any("Desktop", &["desktop", "music"]));
+        assert!(!matches_ci_any("Projects", &["desktop", "music"]));
+    }
+
+    #[test]
+    fn browser_container_root_checks() {
+        // "User Data" leaf is always a browser container root (kills L258 replacement/early-return mutants)
+        assert!(is_browser_container_root(&canon(
+            r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data"
+        )));
+
+        // "Default"/"Profile *" only when under a "User Data" path (kills L267 == vs !=, L273 && vs ||)
+        assert!(is_browser_container_root(&canon(
+            r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data\Default"
+        )));
+        assert!(is_browser_container_root(&canon(
+            r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data\Profile 1"
+        )));
+        assert!(!is_browser_container_root(&canon(
+            r"C:\Users\Alice\AppData\Local\Default"
+        )));
+        assert!(!is_browser_container_root(&canon(
+            r"C:\Users\Alice\AppData\Local\Profile 1"
+        )));
+
+        // Negative cases
+        assert!(!is_browser_container_root(&canon(
+            r"C:\Users\Alice\AppData\Local\Temp"
+        )));
+    }
+
+    #[test]
+    fn ensure_safe_custom_path_syntax_depth_boundary() {
+        let ok = canon(r"C:\A\B\C");
+        let bad = canon(r"C:\A\B");
+        assert!(ensure_safe_custom_path_syntax(ok.as_str()).is_ok());
+        let err = ensure_safe_custom_path_syntax(bad.as_str()).unwrap_err();
+        assert!(!err.allowed);
+        assert!(err.reason.contains("depth >= 3"));
+    }
+
+    #[test]
+    fn ensure_not_protected_or_root_depth_and_protection() {
+        let depth2 = CanonicalPath::parse_lexical(r"C:\Foo").unwrap();
+        let depth3 = CanonicalPath::parse_lexical(r"C:\Sandbox\Foo\Leaf").unwrap();
+
+        // Depth 2 resolved=true must be denied by resolved-depth guard
+        // (kills -> Ok(()), < -> ==, < -> <=)
+        let resolved_depth2 = ensure_not_protected_or_root(&depth2, true).unwrap_err();
+        assert!(!resolved_depth2.allowed);
+        assert!(
+            resolved_depth2
+                .reason
+                .contains("resolved path must have depth >= 3"),
+            "unexpected reason: {}",
+            resolved_depth2.reason
+        );
+
+        // Depth 2 resolved=false is not rejected by the resolved-depth guard (guard is resolved-only);
+        // safe non-protected lexical paths remain allowed here.
+        assert!(ensure_not_protected_or_root(&depth2, false).is_ok());
+
+        // Depth 3 resolved=true must be allowed (kills < -> <=)
+        assert!(ensure_not_protected_or_root(&depth3, true).is_ok());
+
+        let protected = canon(r"C:\Windows\System32\drivers");
+        let denied = ensure_not_protected_or_root(&protected, false).unwrap_err();
+        assert!(!denied.allowed);
+        assert!(
+            denied
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "unexpected reason: {}",
+            denied.reason
+        );
+    }
+
+    #[test]
+    fn validate_tier3_target_root_branches() {
+        // Lexical depth boundary (L401): depth 2 denied with depth reason before existence checks
+        let depth2 = validate_tier3_target_root(r"C:\A\B");
+        assert!(!depth2.allowed, "depth 2 should be denied");
+        assert!(
+            depth2.reason.contains("depth >= 3"),
+            "expected depth reason, got: {}",
+            depth2.reason
+        );
+        assert!(
+            !depth2.reason.contains("does not exist"),
+            "lexical depth check must not fall through to from_existing_path: {}",
+            depth2.reason
+        );
+
+        // Lexical depth 3 missing path reaches existence check (kills L401 < -> <=)
+        let missing_depth3 = validate_tier3_target_root(r"C:\NonExistentDepthThree\Sub\Leaf");
+        assert!(!missing_depth3.allowed, "missing depth 3 should be denied");
+        assert!(
+            missing_depth3.reason.contains("does not exist"),
+            "expected existence denial, got: {}",
+            missing_depth3.reason
+        );
+        assert!(
+            !missing_depth3.reason.contains("depth >= 3"),
+            "depth 3 must not be rejected by lexical depth check: {}",
+            missing_depth3.reason
+        );
+
+        // Lexical protected checks (L405-406, || -> &&) must deny before from_existing_path.
+        // Subtree-protected path (depth >= 3), missing on disk.
+        let missing_subtree_protected =
+            validate_tier3_target_root(r"C:\Windows\System32\NonExistentTier3Subdir");
+        assert!(!missing_subtree_protected.allowed);
+        assert!(
+            missing_subtree_protected
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "expected protected lexical denial, got: {}",
+            missing_subtree_protected.reason
+        );
+        assert!(
+            !missing_subtree_protected.reason.contains("does not exist"),
+            "subtree-protected lexical check must run before from_existing_path: {}",
+            missing_subtree_protected.reason
+        );
+
+        // Protected container root by shape (browser User Data, depth >= 3), missing on disk.
+        let missing_container_root = validate_tier3_target_root(
+            r"C:\NonExistentBrowser\AppData\Local\Vendor\Browser\User Data",
+        );
+        assert!(!missing_container_root.allowed);
+        assert!(
+            missing_container_root
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "expected protected container root lexical denial, got: {}",
+            missing_container_root.reason
+        );
+        assert!(
+            !missing_container_root.reason.contains("does not exist"),
+            "container-root lexical check must run before from_existing_path: {}",
+            missing_container_root.reason
+        );
+
+        // Other lexical protections / existing paths
+        let drivers = validate_tier3_target_root(r"C:\Windows\System32\drivers");
+        assert!(!drivers.allowed);
+        assert!(
+            drivers
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "unexpected reason: {}",
+            drivers.reason
+        );
+
+        let windows_root = validate_tier3_target_root(r"C:\Windows");
+        assert!(!windows_root.allowed);
+        assert!(
+            windows_root.reason.contains("depth >= 3") || windows_root.reason.contains("protected")
+        );
+
+        let users_root = validate_tier3_target_root(r"C:\Users");
+        assert!(!users_root.allowed);
+        assert!(
+            users_root.reason.contains("depth >= 3") || users_root.reason.contains("protected")
+        );
+
+        let sandbox = sweeper_testkit::Sandbox::new().expect("sandbox");
+        // clean depth >= 3 directory allowed
+        let clean = sandbox.create_dir("a/b/c").expect("create clean dir");
+        let clean_str = clean.to_string_lossy().to_string();
+        let verdict = validate_tier3_target_root(&clean_str);
+        assert!(
+            verdict.allowed,
+            "expected clean tier3 root allowed: {} ({})",
+            verdict.reason, clean_str
+        );
+
+        // directory containing protected descendant denied
+        let dirty_root = sandbox.create_dir("x/y/z").expect("create dirty root");
+        let git_dir = dirty_root.join(".git");
+        fs::create_dir_all(&git_dir).expect("create .git");
+        let dirty_str = dirty_root.to_string_lossy().to_string();
+        let denied = validate_tier3_target_root(&dirty_str);
+        assert!(!denied.allowed, "expected protected descendant denial");
+        assert!(
+            denied.reason.contains("protected descendant"),
+            "unexpected reason: {}",
+            denied.reason
+        );
+
+        // missing sandbox path denied (no parent fallback) with existence reason
+        let missing = sandbox.guarded_path("missing/a/b");
+        let missing_sandbox = validate_tier3_target_root(&missing.to_string_lossy());
+        assert!(!missing_sandbox.allowed);
+        assert!(
+            missing_sandbox.reason.contains("does not exist"),
+            "unexpected reason: {}",
+            missing_sandbox.reason
+        );
+    }
+
+    #[test]
+    fn contains_subtree_protected_descendant_detects_each_pattern() {
+        let patterns = [
+            ".git",
+            ".ssh",
+            ".gnupg",
+            ".aws",
+            ".kube",
+            ".docker",
+            "NTUSER.DAT",
+        ];
+        for pat in patterns {
+            let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+            let root_dir = sb.create_dir("a/b/c").expect("root dir");
+            let target = root_dir.join(pat);
+            if pat == "NTUSER.DAT" {
+                fs::write(&target, b"x").expect("write file");
+            } else {
+                fs::create_dir_all(&target).expect("create dir");
+            }
+            let cp = CanonicalPath::parse_lexical(&root_dir.to_string_lossy()).expect("canonical");
+            assert!(
+                contains_subtree_protected_descendant(&cp).expect("scan ok"),
+                "expected descendant {pat} to be detected"
+            );
+        }
+
+        let clean_sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+        let clean_root = clean_sb.create_dir("a/b/c").expect("clean root");
+        let clean_cp =
+            CanonicalPath::parse_lexical(&clean_root.to_string_lossy()).expect("canonical");
+        assert!(!contains_subtree_protected_descendant(&clean_cp).expect("scan ok"));
+    }
+
+    #[test]
+    fn contains_subtree_protected_descendant_traverses_normal_dirs_and_finds_nested() {
+        // Kills mutant where traversal/recursion into normal directories is skipped.
+        let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+        let root_dir = sb.create_dir("a/b/c").expect("root dir");
+        let nested = root_dir.join("normal_subdir").join("deeper");
+        fs::create_dir_all(&nested).expect("create nested dirs");
+        fs::create_dir_all(nested.join(".git")).expect("create nested .git");
+        let cp = CanonicalPath::parse_lexical(&root_dir.to_string_lossy()).expect("canonical");
+        assert!(
+            contains_subtree_protected_descendant(&cp).expect("scan ok"),
+            "must detect protected descendant nested under normal directories"
+        );
+    }
+
+    #[test]
+    fn validate_resolved_tier3_root_policy_depth_boundaries_and_protection() {
+        // Depth boundaries (segment_count after drive root): 2 => Err, 3 => Ok when not protected.
+        let depth2 = canon(r"C:\Temp\Sub");
+        assert_eq!(depth2.segment_count(), 2);
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&depth2),
+            Err("resolved path must have depth >= 3 segments")
+        );
+
+        let depth3 = canon(r"C:\Temp\Sub\Leaf");
+        assert_eq!(depth3.segment_count(), 3);
+        assert!(validate_resolved_tier3_root_policy(&depth3).is_ok());
+
+        // Subtree-protected only: segment-named secret under user profile.
+        let subtree_only = canon(r"C:\Users\Alice\.ssh");
+        assert!(is_subtree_protected(&subtree_only));
+        assert!(!is_protected_container_root(&subtree_only));
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&subtree_only),
+            Err("resolved path is protected and cannot be a Tier 3 Target")
+        );
+
+        // Protected container root only (browser User Data shape): not subtree-protected.
+        let container_only = canon(r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data");
+        assert!(is_protected_container_root(&container_only));
+        assert!(!is_subtree_protected(&container_only));
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&container_only),
+            Err("resolved path is protected and cannot be a Tier 3 Target")
+        );
+
+        // Ancestor-of-fixed-subtree-protected also applies to some paths (e.g. C:\Windows is an
+        // ancestor of fixed subtree-protected prefixes), but depth/container protections may also
+        // apply depending on the path. Depth guard is evaluated first for safety.
+        let windows_root = canon(r"C:\Windows");
+        assert!(is_protected_container_root(&windows_root));
+        assert!(is_ancestor_of_subtree_protected(&windows_root));
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&windows_root),
+            Err("resolved path must have depth >= 3 segments")
+        );
+
+        let drive_root = root(r"C:\");
+        assert_eq!(
+            validate_resolved_tier3_root_policy(&drive_root),
+            Err("resolved path must have depth >= 3 segments")
+        );
+    }
+
+    #[test]
+    fn validate_tier3_target_root_resolved_protection_on_existing_paths() {
+        // Keep end-to-end validation on real tempdir paths.
+        let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+
+        let clean = sb.create_dir("tier3/clean/leaf").expect("create clean dir");
+        let clean_v = validate_tier3_target_root(&clean.to_string_lossy());
+        assert!(
+            clean_v.allowed,
+            "clean path should be allowed: {}",
+            clean_v.reason
+        );
+
+        let ssh_root = sb.create_dir("tier3/prot/.ssh").expect("create .ssh root");
+        let ssh_v = validate_tier3_target_root(&ssh_root.to_string_lossy());
+        assert!(!ssh_v.allowed, "subtree-protected root must be denied");
+
+        let user_data_root = sb
+            .create_dir("tier3/prot/AppData/Local/Vendor/Browser/User Data")
+            .expect("create User Data root");
+        let ud_v = validate_tier3_target_root(&user_data_root.to_string_lossy());
+        assert!(!ud_v.allowed, "container root must be denied");
+
+        let profile_root = sb
+            .create_dir("tier3/prot/AppData/Local/Vendor/Browser/User Data/Default")
+            .expect("create profile root");
+        let p_v = validate_tier3_target_root(&profile_root.to_string_lossy());
+        assert!(!p_v.allowed, "profile container root must be denied");
+
+        let dirty_root = sb
+            .create_dir("tier3/dirty/root")
+            .expect("create dirty root");
+        fs::create_dir_all(dirty_root.join("nested").join(".git")).expect("create nested .git");
+        let dirty_v = validate_tier3_target_root(&dirty_root.to_string_lossy());
+        assert!(
+            !dirty_v.allowed,
+            "path containing protected descendant must be denied"
+        );
+        assert!(dirty_v.reason.contains("protected descendant"));
+    }
+
+    #[test]
+    fn sample_protected_paths_is_meaningful() {
+        let samples = sample_protected_paths();
+        assert!(!samples.is_empty(), "sample list must not be empty");
+        assert!(
+            samples.iter().all(|s| !s.is_empty()),
+            "sample list must not contain empty strings"
+        );
+        assert!(samples.contains(&r"C:\Windows"), "must include C:\\Windows");
+        assert!(
+            samples.contains(&r"C:\Windows\System32"),
+            "must include C:\\Windows\\System32"
+        );
+        assert!(samples.contains(&r"C:\"));
+    }
+
+    #[test]
+    fn is_rejected_for_selection_input_checks() {
+        assert!(is_rejected_for_selection_input(r"C:\Windows\System32"));
+        assert!(is_rejected_for_selection_input(r"C:\Windows"));
+        assert!(is_rejected_for_selection_input(r"not-a-path"));
+        assert!(!is_rejected_for_selection_input(r"C:\Sandbox\Cache"));
+        assert!(!is_rejected_for_selection_input(r"C:\Temp\SafeArea\Cache"));
     }
 }

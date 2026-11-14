@@ -5,6 +5,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod elevation;
+pub mod elevation_relaunch;
+
+pub use elevation::is_process_elevated;
+pub use elevation_relaunch::{
+    acquire_single_instance, relaunch_current_exe_elevated, RelaunchOutcome, SingleInstanceGuard,
+};
+
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -115,11 +123,27 @@ pub type Result<T> = std::result::Result<T, WinfsError>;
 pub struct SafeHandle(HANDLE);
 
 impl SafeHandle {
+    /// Wraps a raw Win32 handle and takes ownership for `CloseHandle` on drop.
+    ///
+    /// Caller must ensure `handle` is a valid open handle (or null/invalid sentinel) not owned elsewhere.
+    pub(crate) fn from_raw(handle: HANDLE) -> Self {
+        Self(handle)
+    }
+
     /// Returns the raw handle for FFI calls.
     pub fn raw(&self) -> HANDLE {
         self.0
     }
 }
+
+// SAFETY: Win32 handles are process-scoped kernel objects. Ownership is exclusive to this wrapper;
+// moving the handle to another thread is safe, and concurrent immutable access to the raw value is
+// only used for FFI calls that accept a valid handle. Callers must respect thread-affinity
+// requirements of specific APIs (e.g. mutex release by owning thread), which our usage does.
+unsafe impl Send for SafeHandle {}
+// SAFETY: Sharing `&SafeHandle` across threads is safe because it only exposes `raw()` by value and
+// the handle remains valid until Drop; FFI synchronization/affinity rules are upheld by callers.
+unsafe impl Sync for SafeHandle {}
 
 impl Drop for SafeHandle {
     fn drop(&mut self) {

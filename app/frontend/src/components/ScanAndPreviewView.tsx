@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import {
   formatContractError,
   type CleanProgressEvent,
+  type ElevationStatus,
   type ExecuteCleanResponse,
   type ScanResults,
   type Settings,
@@ -41,7 +42,19 @@ function scanSelectionNeedsConfirmation(targets: TargetScanResultDto[], selected
   return false;
 }
 
-export function ScanAndPreviewView({ client, settings, onOpenLog }: { client: SweeperClient; settings: Settings | null; onOpenLog: (logId: string) => void }) {
+export function ScanAndPreviewView({
+  client,
+  settings,
+  elevationStatus,
+  elevationError,
+  onOpenLog,
+}: {
+  client: SweeperClient;
+  settings: Settings | null;
+  elevationStatus: ElevationStatus;
+  elevationError: string | null;
+  onOpenLog: (logId: string) => void;
+}) {
   const [tier1, setTier1] = useState(true);
   const [tier2, setTier2] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -59,6 +72,9 @@ export function ScanAndPreviewView({ client, settings, onOpenLog }: { client: Sw
   const [cleanSummary, setCleanSummary] = useState<ExecuteCleanResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [relaunching, setRelaunching] = useState(false);
+  const [relaunchInfo, setRelaunchInfo] = useState<string | null>(null);
+  const [relaunchError, setRelaunchError] = useState<string | null>(null);
 
   const targets = useMemo(() => results?.targets ?? [], [results]);
   const allowDeleteUnknown = settings?.allowDeleteUnknown ?? false;
@@ -159,14 +175,50 @@ export function ScanAndPreviewView({ client, settings, onOpenLog }: { client: Sw
     } finally { setCleaning(false); }
   }
 
+  async function runAsAdministrator() {
+    setRelaunching(true);
+    setRelaunchInfo(null);
+    setRelaunchError(null);
+    try {
+      const res = await client.relaunchElevated();
+      if (res.launched) {
+        setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
+      } else {
+        setRelaunchError('Administrator launch was not started.');
+      }
+    } catch (e) {
+      setRelaunchError(formatContractError(e));
+    } finally {
+      setRelaunching(false);
+    }
+  }
+
   const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning && (!requiresConfirmation || confirmText === TYPED_CONFIRMATION_PHRASE);
   const canClean = !!preview && !scanning && !previewLoading && !cleaning;
 
   return (
     <div>
       <section className="panel" aria-labelledby="scan-heading">
-        <h2 id="scan-heading">Scan &amp; Preview</h2>
+        <div className="row">
+          <h2 id="scan-heading">Scan &amp; Preview</h2>
+          <div className="spacer" />
+          <span className={`badge ${elevationStatus.isElevated ? 'risk-Safe' : 'risk-Caution'}`} aria-label={elevationStatus.isElevated ? 'Administrator (Elevated)' : 'Standard (Non-Elevated)'}>
+            {elevationStatus.isElevated ? 'Administrator (Elevated)' : 'Standard (Non-Elevated)'}
+          </span>
+        </div>
         <p className="muted">Discover reclaimable Targets, explain items, preview selections, and run permanent Clean only after confirmation.</p>
+        {elevationError && <div className="notice error" role="alert">Elevation status unavailable: {elevationError}</div>}
+        {relaunchInfo && <div className="notice info" role="status">{relaunchInfo}</div>}
+        {relaunchError && <div className="notice error" role="alert">{relaunchError}</div>}
+        {!elevationStatus.isElevated && (
+          <div className="notice warn" role="note">
+            <div><strong>Administrator-only Tier 3 targets locked.</strong> Windows Temp, Windows Update cache, Prefetch, and Package Cache require administrator elevation and Tier 3 opt-in. Standard startup never triggers UAC.</div>
+            <div className="row row-top">
+              <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
+              {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
+            </div>
+          </div>
+        )}
         <div className="row">
           <label className="checkbox"><input type="checkbox" checked={tier1} onChange={(e) => setTier1(e.target.checked)} /> Tier 1 (system temp and caches)</label>
           <label className="checkbox"><input type="checkbox" checked={tier2} onChange={(e) => setTier2(e.target.checked)} /> Tier 2 (developer caches)</label>
@@ -305,7 +357,7 @@ export function ScanAndPreviewView({ client, settings, onOpenLog }: { client: Sw
                     <ul aria-label="Skipped reasons">{cleanSummary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
                   )}
                 </div>
-                {cleanSummary.logId && <div className="row" style={{ marginTop: '0.5rem' }}><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
+                {cleanSummary.logId && <div className="row row-top"><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
               </div>
             )}
           </section>

@@ -34,13 +34,29 @@ fn embedded_allowlist_passes_lint_and_has_expected_targets() {
     ] {
         assert!(targets.iter().any(|t| t.id == id), "missing {id}");
     }
-    assert!(targets
-        .iter()
-        .all(|t| matches!(t.tier, Tier::Tier1 | Tier::Tier2)));
-    assert!(targets
-        .iter()
-        .all(|t| matches!(t.scope, Scope::Contents) && !t.requires_elevation));
-    assert!(targets.iter().all(|t| t.min_age_hours == 24));
+    let audited_elevated = [
+        "windows-temp",
+        "windows-update-download-cache",
+        "windows-prefetch",
+        "programdata-package-cache",
+    ];
+    for id in audited_elevated {
+        assert!(targets.iter().any(|t| t.id == id), "missing {id}");
+    }
+    assert!(targets.iter().all(|t| {
+        if audited_elevated.contains(&t.id.as_str()) {
+            matches!(t.tier, Tier::Tier3)
+                && matches!(t.risk, Risk::Caution)
+                && t.requires_elevation
+                && matches!(t.scope, Scope::Contents)
+                && t.min_age_hours == 24
+        } else {
+            matches!(t.tier, Tier::Tier1 | Tier::Tier2)
+                && !t.requires_elevation
+                && matches!(t.scope, Scope::Contents)
+                && t.min_age_hours == 24
+        }
+    }));
     assert!(targets
         .iter()
         .any(|t| t.known_folder == KnownFolder::UserProfile));
@@ -60,6 +76,13 @@ fn catalogs_and_knowledge_entries_present() {
         .entries
         .iter()
         .any(|e| e.kind == ProtectedPathKind::ProtectedContainerRoot));
+    assert!(prot.entries.iter().any(|e| {
+        e.kind == ProtectedPathKind::ProtectedContainerRoot && e.display.contains("C:\\Windows")
+    }));
+    assert!(prot.entries.iter().any(|e| {
+        e.kind == ProtectedPathKind::ProtectedContainerRoot && e.display.contains("C:\\ProgramData")
+    }));
+
     let kb = builtin_knowledge_entries();
     assert!(kb.iter().any(|e| e.relative_pattern.contains(".rustup")));
     assert!(kb.iter().any(|e| e.relative_pattern == "Packages"));
@@ -67,6 +90,39 @@ fn catalogs_and_knowledge_entries_present() {
     assert!(kb
         .iter()
         .any(|e| e.risk == Risk::Protected || e.risk == Risk::Unknown || e.risk == Risk::Caution));
+
+    for id in [
+        "windows-temp",
+        "windows-update-download-cache",
+        "windows-prefetch",
+        "programdata-package-cache",
+    ] {
+        let entry = kb.iter().find(|e| {
+            e.id == format!("kb-{id}")
+                || e.id == id
+                || e.relative_pattern.to_ascii_lowercase().contains("temp") && id == "windows-temp"
+                || (id == "windows-update-download-cache"
+                    && e.relative_pattern.contains("SoftwareDistribution"))
+                || (id == "windows-prefetch" && e.relative_pattern.eq_ignore_ascii_case("Prefetch"))
+                || (id == "programdata-package-cache"
+                    && e.relative_pattern.contains("Package Cache"))
+        });
+        let entry = entry.unwrap_or_else(|| panic!("missing knowledge entry for {id}"));
+        assert_eq!(entry.risk, Risk::Caution, "{id}");
+        let text =
+            format!("{} {} {}", entry.description, entry.notes, entry.title).to_ascii_lowercase();
+        assert!(
+            text.contains("administrator")
+                || text.contains("elevation")
+                || text.contains("elevated"),
+            "{id}: {text}"
+        );
+    }
+    assert!(kb.iter().any(|e| {
+        e.risk == Risk::Protected
+            && e.known_folder == Some(KnownFolder::Windows)
+            && e.relative_pattern.is_empty()
+    }));
 }
 
 #[test]
@@ -423,4 +479,87 @@ description="y"
 "#;
     let msg = lint_allowlist_toml(wildcard).unwrap_err().to_string();
     assert!(msg.contains("overlap"), "{msg}");
+}
+
+#[test]
+fn allows_only_audited_elevation_targets() {
+    let cases = [
+        ("windows-temp", "Windows", "Temp"),
+        (
+            "windows-update-download-cache",
+            "Windows",
+            r"SoftwareDistribution\Download",
+        ),
+        ("windows-prefetch", "Windows", "Prefetch"),
+        ("programdata-package-cache", "ProgramData", "Package Cache"),
+    ];
+    for (id, kf, rel) in cases {
+        let toml = format!(
+            r#"
+[[targets]]
+id="{id}"
+name="{id}"
+tier="Tier3"
+risk="Caution"
+known_folder="{kf}"
+relative_subpath='{rel}'
+scope="contents"
+min_age_hours=24
+requires_elevation=true
+description="requires administrator elevation"
+"#
+        );
+        assert!(
+            lint_allowlist_toml(&toml).is_ok(),
+            "{id}: {:?}",
+            lint_allowlist_toml(&toml).err()
+        );
+    }
+}
+
+#[test]
+fn rejects_requires_elevation_on_unaudited_targets() {
+    let toml = r#"
+[[targets]]
+id="user-temp-elevated"
+name="X"
+tier="Tier1"
+risk="Safe"
+known_folder="LocalAppData"
+relative_subpath="Temp"
+scope="contents"
+min_age_hours=24
+requires_elevation=true
+description="x"
+"#;
+    assert!(lint_allowlist_toml(toml).is_err());
+}
+
+#[test]
+fn rejects_nonaudited_descendants_under_protected_container_roots_even_if_elevated() {
+    for (kf, rel) in [
+        ("Windows", r"Foo"),
+        ("ProgramData", r"Random"),
+        ("Windows", r"System32"),
+    ] {
+        let toml = format!(
+            r#"
+[[targets]]
+id="x"
+name="X"
+tier="Tier3"
+risk="Caution"
+known_folder="{kf}"
+relative_subpath='{rel}'
+scope="contents"
+min_age_hours=24
+requires_elevation=true
+description="x"
+"#
+        );
+        assert!(
+            lint_allowlist_toml(&toml).is_err(),
+            "{kf}\\{rel} must be rejected"
+        );
+    }
 }

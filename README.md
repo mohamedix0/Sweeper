@@ -8,6 +8,7 @@ A safety-first Windows desktop disk cleaner built with **Rust**, **Tauri 2**, an
 Sweeper discovers reclaimable disk space on `C:`, explains every item's purpose, size, and `Risk`, and permanently removes only what the user explicitly inspects and confirms.
 
 > **Status:** Active development toward v1.0. Phases 0–4 (Foundation, Read-Only Core, `Scan` / `Preview` UI, Handle-Based `Remover` + `Clean`, and Read-Only Drive `Analyzer`) are complete; Phase 5 (Advanced Settings, `Custom Path`s, and `Tier` 3 `Target`s) and Phase 6 (Windows packaging and optional Admin elevation) are in progress. See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
+> **Release handoff:** Automated gates, packaging evidence, and human-only release steps are documented in [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md).
 
 ---
 

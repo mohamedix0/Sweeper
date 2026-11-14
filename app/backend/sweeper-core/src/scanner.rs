@@ -153,13 +153,35 @@ pub fn scan_targets_with_redirected_temp_override(
     min_age_hours: u32,
     redirected_temp_candidate: Option<&str>,
 ) -> Result<ScanReport, ScanError> {
+    scan_targets_with_redirected_temp_and_elevation_overrides(
+        targets,
+        min_age_hours,
+        redirected_temp_candidate,
+        &BTreeMap::new(),
+    )
+}
+
+/// Scan a provided set of targets with optional redirected-temp and elevation-target root overrides.
+///
+/// Elevation overrides are only applied to `requires_elevation` targets and are validated with the
+/// same safety checks as normal resolved roots (non-bypassing test/harness seam).
+pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
+    targets: Vec<TargetDefinition>,
+    min_age_hours: u32,
+    redirected_temp_candidate: Option<&str>,
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+) -> Result<ScanReport, ScanError> {
     validate_target_definitions(&targets).map_err(ScanError::Targets)?;
     let now = SystemTime::now();
     let started_unix_secs = system_time_to_unix_secs(now);
     let min_age = Duration::from_secs(u64::from(min_age_hours) * 3600);
 
     // Resolve known folder roots used by these targets.
-    let needed_kfs: HashSet<KnownFolder> = targets.iter().map(|t| t.known_folder).collect();
+    let needed_kfs: HashSet<KnownFolder> = targets
+        .iter()
+        .filter(|t| !(t.requires_elevation && elevation_target_root_overrides.contains_key(&t.id)))
+        .map(|t| t.known_folder)
+        .collect();
     let mut kf_roots: BTreeMap<KnownFolder, Result<CanonicalPath, String>> = BTreeMap::new();
     for kf in needed_kfs {
         kf_roots.insert(kf, resolve_validated_known_folder_root(kf));
@@ -169,10 +191,6 @@ pub fn scan_targets_with_redirected_temp_override(
     let mut all_resolved_roots: Vec<(String, CanonicalPath)> = Vec::new();
 
     for target in targets {
-        let kf_res = kf_roots
-            .get(&target.known_folder)
-            .cloned()
-            .unwrap_or_else(|| Err("known folder not resolved".to_string()));
         let mut out = TargetScanResult {
             target_id: target.id.clone(),
             target_name: target.name.clone(),
@@ -191,6 +209,53 @@ pub fn scan_targets_with_redirected_temp_override(
             items: Vec::new(),
         };
 
+        // Test/harness seam: override resolved root for audited elevation targets only.
+        if target.requires_elevation {
+            if let Some(override_path) = elevation_target_root_overrides.get(&target.id) {
+                match CanonicalPath::from_existing_path(override_path) {
+                    Ok(v) => {
+                        let canon = v.into_canonical();
+                        match validate_resolved_canonical_root(&canon) {
+                            Ok(()) => {
+                                let roots = vec![(target.id.clone(), canon)];
+                                if let Err(reason) =
+                                    validate_target_roots_policy(&roots, &all_resolved_roots)
+                                {
+                                    out.status_reason = Some(reason);
+                                    results.push(out);
+                                    continue;
+                                }
+                                for (rid, r) in &roots {
+                                    all_resolved_roots.push((rid.clone(), r.clone()));
+                                }
+                                out.resolved_paths =
+                                    roots.iter().map(|(_, p)| p.to_string()).collect();
+                                scan_resolved_roots(&target, &roots, min_age, now, &mut out);
+                                results.push(out);
+                                continue;
+                            }
+                            Err(e) => {
+                                out.status_reason =
+                                    Some(format!("elevation target root override invalid: {e}"));
+                                results.push(out);
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        out.status_reason =
+                            Some(format!("elevation target root override unresolved: {e}"));
+                        results.push(out);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let kf_res = kf_roots
+            .get(&target.known_folder)
+            .cloned()
+            .unwrap_or_else(|| Err("known folder not resolved".to_string()));
         let base_root = match kf_res {
             Ok(p) => p,
             Err(e) => {
@@ -828,6 +893,13 @@ pub struct ScanSettingsOptions {
     /// Optional injected project search roots for Tier 3 stale `target/` and `node_modules` discovery.
     /// When empty in production opt-in scans, a conservative default (user profile root) is used if available.
     pub tier3_project_search_roots: Vec<String>,
+    /// Optional test/harness-only root overrides for audited elevation targets.
+    ///
+    /// Keys are target ids (e.g. `windows-temp`). When present for a `requires_elevation`
+    /// target, the override path is canonicalized and validated with the same safety checks as
+    /// any resolved target root before scanning; this enables isolated sentinel-sandbox tests
+    /// without touching real system paths.
+    pub elevation_target_root_overrides: BTreeMap<String, String>,
 }
 
 /// Scan Tier 1/2 allowlisted targets plus validated Custom Paths and opt-in Tier 3 conditional targets.
@@ -846,16 +918,55 @@ pub fn scan_with_settings_options(
     settings: &crate::settings::SweeperSettings,
     opts: ScanSettingsOptions,
 ) -> Result<ScanReport, ScanError> {
+    scan_with_settings_options_and_elevation(settings, opts, crate::ScanElevationContext::default())
+}
+
+/// Scan using the current process elevation state (via `sweeper_winfs::is_process_elevated()`).
+pub fn scan_with_settings_current_elevation(
+    settings: &crate::settings::SweeperSettings,
+) -> Result<ScanReport, ScanError> {
+    scan_with_settings_options_current_elevation(settings, ScanSettingsOptions::default())
+}
+
+/// Scan with options using the current process elevation state.
+pub fn scan_with_settings_options_current_elevation(
+    settings: &crate::settings::SweeperSettings,
+    opts: ScanSettingsOptions,
+) -> Result<ScanReport, ScanError> {
+    let elevated = sweeper_winfs::is_process_elevated().unwrap_or(false);
+    scan_with_settings_options_and_elevation(
+        settings,
+        opts,
+        crate::ScanElevationContext {
+            process_elevated: elevated,
+        },
+    )
+}
+
+/// Scan with explicit elevation context (deterministic for tests).
+pub fn scan_with_settings_options_and_elevation(
+    settings: &crate::settings::SweeperSettings,
+    opts: ScanSettingsOptions,
+    elevation: crate::ScanElevationContext,
+) -> Result<ScanReport, ScanError> {
     let now = opts.now.unwrap_or_else(SystemTime::now);
     let started_unix_secs = system_time_to_unix_secs(now);
     let min_age = Duration::from_secs(u64::from(settings.min_age_hours) * 3600);
 
+    let elev_ok =
+        elevation.process_elevated && settings.enable_tier3 && settings.enable_elevation_targets;
     let mut targets: Vec<TargetDefinition> = sweeper_knowledge::embedded_targets()
         .into_iter()
-        .filter(|t| match t.tier {
-            Tier::Tier1 => settings.enable_tier1,
-            Tier::Tier2 => settings.enable_tier2,
-            Tier::Tier3 => settings.enable_tier3,
+        .filter(|t| {
+            if t.requires_elevation {
+                elev_ok
+            } else {
+                match t.tier {
+                    Tier::Tier1 => settings.enable_tier1,
+                    Tier::Tier2 => settings.enable_tier2,
+                    Tier::Tier3 => settings.enable_tier3,
+                }
+            }
         })
         .collect();
 
@@ -868,10 +979,11 @@ pub fn scan_with_settings_options(
             targets: Vec::new(),
         }
     } else {
-        scan_targets_with_redirected_temp_override(
+        scan_targets_with_redirected_temp_and_elevation_overrides(
             std::mem::take(&mut targets),
             settings.min_age_hours,
             opts.redirected_temp_candidate.as_deref(),
+            &opts.elevation_target_root_overrides,
         )?
     };
     report.started_unix_secs = started_unix_secs;

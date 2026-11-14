@@ -61,7 +61,18 @@ fn main() {
         }}
       }}
     }},
-    "windows": []
+    "windows": [
+      {{
+        "label": "main",
+        "title": "Sweeper",
+        "width": 1120,
+        "height": 760,
+        "minWidth": 880,
+        "minHeight": 620,
+        "center": true,
+        "resizable": true
+      }}
+    ]
   }},
   "bundle": {{
     "active": false

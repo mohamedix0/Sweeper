@@ -11,6 +11,64 @@ use sweeper_desktop::session::StoredItem;
 use sweeper_desktop::AppState;
 use sweeper_testkit::{CanaryTree, Sandbox};
 
+#[test]
+fn single_instance_guard_cross_thread_handoff_via_app_state() {
+    use std::sync::Arc;
+
+    fn unique_test_mutex_name(suffix: &str) -> String {
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!(r"Local\SweeperGateF-{pid}-{nanos}-{n}-{suffix}")
+    }
+
+    let name = unique_test_mutex_name("app-state-cross-thread");
+    let guard = sweeper_core::elevation::SingleInstanceGuard::acquire_named(&name, 1_000)
+        .expect("acquire named single-instance guard");
+    let state = Arc::new(AppState::new_default().with_single_instance_guard(guard));
+    assert!(
+        state.single_instance.is_held(),
+        "startup guard should be held in AppState"
+    );
+
+    let state_for_worker = Arc::clone(&state);
+    let contender_name = name.clone();
+    let handle = std::thread::spawn(move || {
+        let mut guard = state_for_worker
+            .single_instance
+            .take()
+            .expect("take guard from AppState on worker thread");
+        assert!(guard.is_held());
+
+        guard
+            .release_for_handoff()
+            .expect("release_for_handoff must succeed on worker thread");
+
+        let contender = std::thread::spawn(move || {
+            sweeper_core::elevation::SingleInstanceGuard::acquire_named(&contender_name, 1_000)
+        })
+        .join()
+        .expect("contender join")
+        .expect("contender acquires released mutex");
+        drop(contender);
+
+        guard
+            .reacquire(1_000)
+            .expect("reacquire must succeed on worker thread");
+        state_for_worker.single_instance.put(guard);
+    });
+    handle.join().expect("worker thread join");
+
+    assert!(
+        state.single_instance.is_held(),
+        "guard should be held again in AppState after cross-thread reacquire"
+    );
+}
+
 fn make_state() -> AppState<FixedClock> {
     // old mtime for scanned items (>=24h before now)
     AppState::with_clock(FixedClock::new(1_800_000_000))
@@ -412,6 +470,26 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
         "capabilities must not reference fs/shell plugins"
     );
 
+    assert_eq!(
+        conf["bundle"]["active"],
+        serde_json::json!(true),
+        "bundle.active must be enabled for Windows packaging"
+    );
+    let bundle_targets = conf["bundle"]["targets"]
+        .as_array()
+        .expect("bundle.targets must be an array");
+    assert!(
+        bundle_targets.iter().any(|t| t.as_str() == Some("nsis")),
+        "bundle.targets must include nsis: {bundle_targets:?}"
+    );
+    assert!(
+        !conf["bundle"]["icon"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .is_empty(),
+        "bundle.icon must be configured"
+    );
+
     let mut cmds = cap["commands"]["allow"]
         .as_array()
         .unwrap()
@@ -424,11 +502,13 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
         vec![
             "execute_clean".to_string(),
             "explain_item".to_string(),
+            "get_elevation_status".to_string(),
             "get_scan_results".to_string(),
             "get_settings".to_string(),
             "list_logs".to_string(),
             "preview_clean".to_string(),
             "read_log".to_string(),
+            "relaunch_elevated".to_string(),
             "start_analyzer".to_string(),
             "start_scan".to_string(),
             "update_settings".to_string(),
@@ -1255,5 +1335,167 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     assert!(
         canary.verify().is_ok(),
         "external canary must remain intact"
+    );
+}
+
+#[derive(Debug)]
+struct FakeElevationProvider {
+    elevated: bool,
+    relaunch_outcome: std::sync::Mutex<Result<sweeper_core::elevation::RelaunchOutcome, String>>,
+    relaunch_calls: std::sync::atomic::AtomicUsize,
+    status_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeElevationProvider {
+    fn new(
+        elevated: bool,
+        outcome: Result<sweeper_core::elevation::RelaunchOutcome, String>,
+    ) -> Self {
+        Self {
+            elevated,
+            relaunch_outcome: std::sync::Mutex::new(outcome),
+            relaunch_calls: std::sync::atomic::AtomicUsize::new(0),
+            status_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl sweeper_desktop::elevation::ElevationProvider for FakeElevationProvider {
+    fn is_elevated(&self) -> Result<bool, String> {
+        self.status_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.elevated)
+    }
+
+    fn relaunch(&self) -> Result<sweeper_core::elevation::RelaunchOutcome, String> {
+        self.relaunch_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.relaunch_outcome.lock().unwrap().clone()
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn make_elevation_test_state(
+    elevated: bool,
+    relaunch_outcome: Result<sweeper_core::elevation::RelaunchOutcome, String>,
+) -> (
+    sweeper_desktop::AppState<FixedClock>,
+    std::sync::Arc<FakeElevationProvider>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::Mutex<Option<i32>>>,
+    std::sync::Arc<sweeper_desktop::elevation::SingleInstanceState>,
+) {
+    let provider = std::sync::Arc::new(FakeElevationProvider::new(elevated, relaunch_outcome));
+    let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exit_code = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let exited_c = exited.clone();
+    let exit_code_c = exit_code.clone();
+    let exit_hook: std::sync::Arc<dyn Fn(i32) + Send + Sync> = std::sync::Arc::new(move |code| {
+        exited_c.store(true, std::sync::atomic::Ordering::SeqCst);
+        *exit_code_c.lock().unwrap() = Some(code);
+    });
+    static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mutex_name = format!(r"Local\SweeperGateFElevation-{pid}-{nanos}-{n}");
+    let guard = sweeper_core::elevation::SingleInstanceGuard::acquire_named(&mutex_name, 1_000)
+        .expect("test should acquire single-instance mutex");
+    let si = std::sync::Arc::new(sweeper_desktop::elevation::SingleInstanceState::with_guard(
+        guard,
+    ));
+    let state = sweeper_desktop::AppState::with_clock(FixedClock::new(1_800_000_000))
+        .with_elevation_test_hooks(provider.clone(), si.clone(), exit_hook);
+    (state, provider, exited, exit_code, si)
+}
+
+#[test]
+fn get_elevation_status_reports_provider_state() {
+    let (state, provider, _exited, _code, _si) = make_elevation_test_state(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    );
+    let got = commands_impl::get_elevation_status(&state).unwrap();
+    assert!(!got.is_elevated);
+    assert_eq!(
+        provider
+            .status_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    let (state2, _p2, _, _, _) =
+        make_elevation_test_state(true, Ok(sweeper_core::elevation::RelaunchOutcome::Launched));
+    let got2 = commands_impl::get_elevation_status(&state2).unwrap();
+    assert!(got2.is_elevated);
+}
+
+#[test]
+fn relaunch_elevated_when_already_elevated_returns_not_launched_without_side_effects() {
+    let (state, provider, exited, exit_code, si) =
+        make_elevation_test_state(true, Ok(sweeper_core::elevation::RelaunchOutcome::Launched));
+    let res = commands_impl::relaunch_elevated(&state).unwrap();
+    assert!(!res.launched);
+    assert_eq!(
+        provider
+            .relaunch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(!exited.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(exit_code.lock().unwrap().is_none());
+    // Guard should remain held/available for future operations.
+    let _ = si; // state owns Arc
+}
+
+#[test]
+fn relaunch_elevated_uac_cancel_returns_error_preserves_guard_and_does_not_exit() {
+    let (state, provider, exited, exit_code, si) = make_elevation_test_state(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::CancelledByUser),
+    );
+    let err = commands_impl::relaunch_elevated(&state).unwrap_err();
+    assert!(
+        matches!(err, sweeper_contract::ContractError::InvalidInput { .. }),
+        "expected sanitized user-cancel error, got {err:?}"
+    );
+    assert_eq!(
+        provider
+            .relaunch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(!exited.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(exit_code.lock().unwrap().is_none());
+    // Guard must be preserved/re-acquired in state after cancel.
+    assert!(
+        si.is_held(),
+        "single-instance guard should remain held after UAC cancel"
+    );
+}
+
+#[test]
+fn relaunch_elevated_success_releases_guard_invokes_launcher_returns_launched_and_triggers_exit() {
+    let (state, provider, exited, exit_code, si) = make_elevation_test_state(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    );
+    let res = commands_impl::relaunch_elevated(&state).unwrap();
+    assert!(res.launched);
+    assert_eq!(
+        provider
+            .relaunch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(*exit_code.lock().unwrap(), Some(0));
+    // Guard handed off/released from this instance's state.
+    assert!(
+        !si.is_held(),
+        "single-instance guard should be released from current instance on successful handoff"
     );
 }

@@ -4,10 +4,10 @@
 //! Sweeper desktop binary (Tauri 2 shell).
 
 use sweeper_contract::{
-    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ExecuteCleanResponse,
-    ExplainItemResponse, LogMetadataDto, LogReadResponse, PreviewCleanResponse,
-    PreviewConfirmationsDto, ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse,
-    TierDto, ValidateCustomPathResponse,
+    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ElevationStatusDto,
+    ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto, LogReadResponse,
+    PreviewCleanResponse, PreviewConfirmationsDto, RelaunchResultDto, ScanResultsDto, SettingsDto,
+    StartAnalyzerResponse, StartScanResponse, TierDto, ValidateCustomPathResponse,
 };
 use sweeper_desktop::{commands_impl, AppState, SystemClock};
 use tauri::Emitter;
@@ -111,8 +111,30 @@ fn read_log(
     commands_impl::read_log(&state, log_id)
 }
 
+#[tauri::command]
+fn get_elevation_status(
+    state: tauri::State<'_, AppState<SystemClock>>,
+) -> Result<ElevationStatusDto, ContractError> {
+    commands_impl::get_elevation_status(&state)
+}
+
+#[tauri::command]
+fn relaunch_elevated(
+    state: tauri::State<'_, AppState<SystemClock>>,
+) -> Result<RelaunchResultDto, ContractError> {
+    commands_impl::relaunch_elevated(&state)
+}
+
 fn main() {
-    let app_state = AppState::new_default();
+    let single_instance_guard = match sweeper_desktop::elevation::acquire_startup_single_instance()
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            eprintln!("another Sweeper instance is already running");
+            std::process::exit(1);
+        }
+    };
+    let app_state = AppState::new_default().with_single_instance_guard(single_instance_guard);
     #[cfg(has_frontend_dist)]
     let context = tauri::generate_context!();
     #[cfg(not(has_frontend_dist))]
@@ -131,7 +153,9 @@ fn main() {
             update_settings,
             validate_custom_path,
             list_logs,
-            read_log
+            read_log,
+            get_elevation_status,
+            relaunch_elevated
         ])
         .run(context)
         .expect("error while running tauri application");
