@@ -5,9 +5,16 @@ on:
     branches: ["**"]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  gate-a:
+  gate-a-and-backend:
+    name: Gate A & backend (A-F)
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,16 +35,15 @@ jobs:
         run: cargo fmt --manifest-path app/Cargo.toml --all -- --check
 
       - name: Gate A checks
-        shell: pwsh
         run: ./scripts/gate-a-check.ps1
 
       - name: cargo clippy (workspace, all targets)
         run: cargo clippy --manifest-path app/Cargo.toml --workspace --all-targets --locked -- -D warnings
 
-      - name: cargo test (workspace)
+      - name: cargo test (workspace, Gates B-F coverage)
         run: cargo test --manifest-path app/Cargo.toml --workspace --locked
 
-      - name: Install cargo audit/deny tools
+      - name: Install cargo-audit and cargo-deny
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny
@@ -50,21 +56,31 @@ jobs:
         working-directory: app
         run: cargo audit
 
+  gate-g-frontend:
+    name: Gate G frontend (Vitest, build, Playwright msedge)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 9
 
-      - name: Frontend install
+      - name: Frontend install (frozen lockfile)
         working-directory: app/frontend
         run: pnpm install --frozen-lockfile
 
-      - name: pnpm audit
+      - name: pnpm audit (high)
         working-directory: app/frontend
         run: pnpm audit --audit-level=high
 
@@ -76,6 +92,163 @@ jobs:
         working-directory: app/frontend
         run: pnpm run lint
 
+      - name: Frontend unit tests (Vitest)
+        working-directory: app/frontend
+        run: pnpm run test
+
       - name: Frontend build
         working-directory: app/frontend
         run: pnpm run build
+
+      - name: Frontend E2E (Playwright, existing Edge channel)
+        working-directory: app/frontend
+        env:
+          CI: "true"
+        run: pnpm run test:e2e
+
+  mutation-gate:
+    name: Mutation gate (cargo-mutants >= 95% policy/paths)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            app -> target
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      - name: Run mutation gate (sweeper-core policy.rs, paths.rs)
+        run: pwsh ./scripts/run-cargo-mutants.ps1
+
+      - name: Upload mutation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-mutants-sweeper-core-policy-paths
+          if-no-files-found: warn
+          path: |
+            target/mutants/mutation-summary.json
+            target/mutants/mutants.out/outcomes.json
+            target/mutants/mutants.out/missed.txt
+
+  package-windows:
+    name: Windows packaging & SHA-256 verification
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            app -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Tauri CLI (and ensure packaging tools)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Ensure NSIS (makensis) is available
+        run: |
+          $nsisCandidates = @(
+            "C:\Program Files (x86)\NSIS",
+            "C:\Program Files\NSIS"
+          )
+          foreach ($p in $nsisCandidates) {
+            $exe = Join-Path $p "makensis.exe"
+            if (Test-Path -LiteralPath $exe) {
+              if ($env:PATH -notlike "*$p*") {
+                Add-Content -LiteralPath $env:GITHUB_PATH -Value $p -Encoding utf8
+                $env:PATH = "$p;$env:PATH"
+              }
+            }
+          }
+          $makensis = Get-Command makensis.exe -ErrorAction SilentlyContinue
+          if (-not $makensis) {
+            Write-Host "NSIS not found; installing via Chocolatey..."
+            choco install nsis -y --no-progress
+            foreach ($p in $nsisCandidates) {
+              $exe = Join-Path $p "makensis.exe"
+              if (Test-Path -LiteralPath $exe) {
+                if ($env:PATH -notlike "*$p*") {
+                  Add-Content -LiteralPath $env:GITHUB_PATH -Value $p -Encoding utf8
+                  $env:PATH = "$p;$env:PATH"
+                }
+              }
+            }
+          }
+          $makensis = Get-Command makensis.exe -ErrorAction SilentlyContinue
+          if (-not $makensis) {
+            throw "NSIS (makensis.exe) is required but could not be found or installed."
+          }
+          Write-Host "makensis: $($makensis.Source)"
+
+      - name: Build and package Windows artifacts (standalone + NSIS) with SHA-256 verification
+        run: pwsh ./scripts/package-windows.ps1
+
+      - name: Verify release artifacts exist (standalone .exe, NSIS .exe, SHA256SUMS.txt)
+        run: |
+          $artifactDir = Join-Path $env:GITHUB_WORKSPACE "target\release-artifacts\windows"
+          if (-not (Test-Path -LiteralPath $artifactDir)) {
+            throw "Release artifact directory not found: $artifactDir"
+          }
+          $exes = @(Get-ChildItem -LiteralPath $artifactDir -File -Filter *.exe | Sort-Object Name)
+          $sha = Join-Path $artifactDir "SHA256SUMS.txt"
+          if ($exes.Count -lt 2) {
+            throw "Expected at least 2 .exe artifacts (standalone and NSIS installer). Found: $($exes.Count)."
+          }
+          if (-not ($exes.Name -match 'standalone\.exe$')) {
+            throw "Standalone .exe artifact not found in $artifactDir"
+          }
+          if (-not ($exes.Name -match 'nsis-setup\.exe$|setup\.exe$')) {
+            throw "NSIS installer .exe artifact not found in $artifactDir"
+          }
+          if (-not (Test-Path -LiteralPath $sha)) {
+            throw "SHA256SUMS.txt not found in $artifactDir"
+          }
+          Write-Host "Verified artifacts in ${artifactDir}:"
+          $exes | ForEach-Object { Write-Host " - $($_.Name)" }
+          Write-Host " - SHA256SUMS.txt"
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweeper-windows-release-artifacts
+          if-no-files-found: error
+          path: |
+            target/release-artifacts/windows/*.exe
+            target/release-artifacts/windows/SHA256SUMS.txt

@@ -88,7 +88,17 @@ try {
         Write-Host "Project target/ size: $targetGb GB ($repoTarget)"
         if ((-not $activeRustBuild) -and ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)) {
             Write-Host "Pruning project target/ cache (threshold: $MaxTargetSizeGb GB)..."
-            cargo clean --manifest-path (Join-Path $NormRepoRoot "app\Cargo.toml") 2>&1 | Out-Null
+            # Use explicit target dir and avoid native stderr becoming a terminating error under $ErrorActionPreference=Stop.
+            $cargoCleanPrevEap = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                & cargo clean --manifest-path (Join-Path $NormRepoRoot "app\Cargo.toml") --target-dir $repoTarget 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "cargo clean failed with exit code $LASTEXITCODE"
+                }
+            } finally {
+                $ErrorActionPreference = $cargoCleanPrevEap
+            }
         } elseif ($activeRustBuild -and ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)) {
             Write-Host "Skipping project target/ prune because cargo/rustc is actively running."
         }

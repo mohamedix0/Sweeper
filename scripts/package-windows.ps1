@@ -239,11 +239,17 @@ if (-not $StandaloneOnly) {
     if (-not $nsisPath) {
         throw "NSIS (makensis.exe) is required for default packaging mode but was not found on PATH or in standard install locations. Install NSIS or run with -StandaloneOnly."
     }
-    Write-Step "Building NSIS bundle via Tauri CLI (--bundles nsis, --no-sign, --ci)"
-    $tauriArgs = @()
-    $tauriArgs += $tauriCmd.PrefixArgs
-    $tauriArgs += @("build", "--manifest-path", $manifestPath, "--config", (Join-Path $desktopDir "tauri.conf.json"), "--bundles", "nsis", "--no-sign", "--ci")
-    Invoke-Checked -FilePath $tauriCmd.FilePath -Arguments $tauriArgs -ErrorMessage "Tauri NSIS bundle build failed"
+    Write-Step "Building NSIS bundle via Tauri CLI (--bundles nsis, --no-sign, --ci, --locked) from sweeper-desktop directory"
+    # Tauri v2 CLI discovers tauri.conf.json/Cargo.toml from cwd; --manifest-path/--config are not accepted for `tauri build`.
+    Push-Location $desktopDir
+    try {
+        $tauriArgs = @()
+        $tauriArgs += $tauriCmd.PrefixArgs
+        $tauriArgs += @("build", "--bundles", "nsis", "--no-sign", "--ci", "--", "--locked")
+        Invoke-Checked -FilePath $tauriCmd.FilePath -Arguments $tauriArgs -ErrorMessage "Tauri NSIS bundle build failed"
+    } finally {
+        Pop-Location
+    }
 } else {
     Write-Step "Standalone-only mode requested (-StandaloneOnly): skipping NSIS bundle generation"
     if (-not $tauriCmd) { Write-Host "Tauri CLI: not detected (not required in -StandaloneOnly mode)." }
