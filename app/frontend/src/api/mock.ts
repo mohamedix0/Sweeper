@@ -383,8 +383,7 @@ export function createMockController(): MockController {
         '{"timestamp":"2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp","size":"1048576","status":"Eligible"}\n' +
         '{"timestamp":"2:00 AM","action":"Crash Dumps & WER","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps","size":"5242880","status":"Eligible"}\n' +
         '{"timestamp":"2:00 AM","action":"npm Package Cache","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache","size":"7340032","status":"Eligible"}\n' +
-        '{"timestamp":"2:00 AM","action":"Custom Path","details":"C:\\\\Users\\\\Alice\\\\CustomCleanup","size":"8192","status":"Skipped · < 24h"}\n' +
-        '{"record":"outcome","status":"completed","event":"scan","categoriesCount":4,"items":5,"totalBytes":"13639680","timestamp":"2:00 AM","action":"Scan completed","details":"4 categories · 13 MB reclaimable"}',
+        '{"record":"outcome","status":"completed","event":"scan","categoriesCount":4,"items":5,"totalBytes":"13639680","timestamp":"2:00 AM"}',
     },
     {
       id: 'log-2',
@@ -392,7 +391,7 @@ export function createMockController(): MockController {
       modifiedUnixSecs: '1794441600',
       sizeBytes: '512',
       content:
-        '{"timestamp":"Yesterday, 2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned"}\n' +
+        '{"record":"item","event":"clean","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned","timestamp":"1794441600"}\n' +
         '{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}',
     },
   ];
@@ -442,7 +441,7 @@ export function createMockController(): MockController {
     const defs: Array<{ tier: TierDto; build: () => ReturnType<typeof buildTarget> }> = [
       { tier: 'Tier1', build: () => buildTarget('t-user-temp', 'User Temp', 'Tier1', 'Safe', 'Temporary files regenerated automatically.', SAMPLE_ITEMS_T1.slice(0, 2)) },
       { tier: 'Tier1', build: () => buildTarget('t-crash', 'Crash Dumps & WER', 'Tier1', 'Safe', 'Local crash reports and error dumps.', SAMPLE_ITEMS_T1.slice(2)) },
-      { tier: 'Tier2', build: () => buildTarget('t-npm', 'npm-cache', 'Tier2', 'Safe', 'Package manager download cache, redownloaded as needed.', SAMPLE_ITEMS_T2) },
+      { tier: 'Tier2', build: () => buildTarget('t-npm', 'npm Package Cache', 'Tier2', 'Safe', 'Package manager download cache, redownloaded as needed.', SAMPLE_ITEMS_T2) },
     ];
 
     for (const def of defs) {

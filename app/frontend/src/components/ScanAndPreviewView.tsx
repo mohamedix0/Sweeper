@@ -11,14 +11,21 @@ import {
 import type { ContractError, ScanItemDto, TargetScanResultDto } from '../contract/bindings';
 import { formatBytes, normalizeDisplayPath, pluralize, sumDecimalStrings } from '../utils/format';
 import {
-  ExplainDrawer,
   InfoTip,
   SESSION_TTL_MS,
   TYPED_CONFIRMATION_PHRASE,
   riskClass,
   type ExplainState,
 } from './cleanShared';
-import { ChevronDownIcon, ChevronRightIcon, CopyIcon, LockIcon, RefreshIcon, ShieldIcon } from './Icons';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CopyIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  RefreshIcon,
+  ShieldIcon,
+} from './Icons';
 
 type PreviewResult = {
   previewToken: string;
@@ -76,13 +83,55 @@ function relativeItemName(itemPath: string, resolvedPaths: string[]): string {
   return parts[parts.length - 1] || itemPath;
 }
 
-async function copyText(text: string) {
-  try { await navigator.clipboard?.writeText(text); } catch { /* ignore */ }
+function itemDisplayName(itemPath: string, resolvedPaths: string[]): { name: string; nestedRel: string } {
+  const rel = relativeItemName(itemPath, resolvedPaths);
+  const parts = rel.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 1) return { name: parts[0] || rel, nestedRel: '' };
+  return { name: parts[parts.length - 1] || rel, nestedRel: rel };
 }
 
 function resolvedRootPath(target: TargetScanResultDto): string {
   const rp = target.resolvedPaths[0] || '';
   return normalizeDisplayPath(rp);
+}
+
+async function copyText(text: string) {
+  try { await navigator.clipboard?.writeText(text); } catch { /* ignore */ }
+}
+
+function openContainingFolder(path: string) {
+  const clean = normalizeDisplayPath(path).replace(/[\\/]+$/, '');
+  const idx = clean.lastIndexOf('\\');
+  const folder = idx > 2 ? clean.slice(0, idx) : (clean || 'C:\\');
+  try { window.open(`file:///${folder.replace(/\\/g, '/')}`, '_blank', 'noopener,noreferrer'); } catch { /* ignore */ }
+}
+
+function statusBadgeForScan(target: TargetScanResultDto, item: ScanItemDto | null, selectable: boolean, allowDeleteUnknown: boolean): { label: string; className: string } {
+  if (target.risk === 'Protected') return { label: 'Protected', className: 'badge risk-Protected' };
+  if (!item) return { label: target.risk, className: riskClass(target.risk) };
+  if (!selectable) return { label: humanizeSkippedReason(target, item, allowDeleteUnknown), className: 'badge status-skipped' };
+  if (target.risk === 'Caution') return { label: 'Caution', className: riskClass('Caution') };
+  if (target.risk === 'Unknown') return { label: 'Unknown', className: riskClass('Unknown') };
+  return { label: 'Safe', className: riskClass('Safe') };
+}
+
+function itemSafetyLabel(target: TargetScanResultDto, item: ScanItemDto, selectable: boolean, allowDeleteUnknown: boolean): string {
+  if (target.risk === 'Protected') return 'Protected';
+  if (!selectable) return humanizeSkippedReason(target, item, allowDeleteUnknown);
+  return target.risk;
+}
+
+function scanGuidance(target: TargetScanResultDto, item: ScanItemDto, selectable: boolean, allowDeleteUnknown: boolean): string {
+  if (target.risk === 'Protected') return 'Protected system location. Sweeper never removes protected paths.';
+  if (target.risk === 'Unknown' && !allowDeleteUnknown) return 'Unknown item is locked by Settings. Enable "Allow deleting unknown folders" to make it eligible.';
+  if (target.risk === 'Unknown') return 'Unknown or custom-path item. Review carefully; typed DELETE confirmation is required before cleaning.';
+  if (!item.ageEligible) return 'Modified within the minimum age window. Sweeper skips recent files for safety.';
+  if (target.targetName === 'User Temp') return 'Temporary files Windows and apps can recreate automatically. Safe to remove when not in active use.';
+  if (target.targetName === 'Crash Dumps & WER') return 'Local crash and error reports kept for diagnostics. Removing them does not affect app functionality.';
+  if (target.targetName.toLowerCase().includes('npm')) return 'Package manager download cache. It can be redownloaded automatically when needed.';
+  if (isCustomPathTargetId(target.targetId)) return 'Custom folder item. Only selected contents are cleaned and protected system directories remain excluded.';
+  if (target.risk === 'Caution') return 'Caution category. Review before removal; selected items are permanently deleted.';
+  return 'Eligible under current safety settings. Selected items are permanently deleted after review and confirmation.';
 }
 
 const RISK_ORDER: Record<string, number> = { Safe: 0, Caution: 1, Unknown: 2, Protected: 3 };
@@ -111,7 +160,6 @@ export function ScanAndPreviewView({
   const [collapsedTargets, setCollapsedTargets] = useState<Set<string>>(new Set());
   const [toolbar, setToolbar] = useState<ScanToolbarState>({ query: '', sort: 'size', filter: 'all' });
   const [inspected, setInspected] = useState<ExplainState>(null);
-  const [drawerExplain, setDrawerExplain] = useState<ExplainState>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [confirmText, setConfirmText] = useState('');
@@ -136,52 +184,56 @@ export function ScanAndPreviewView({
 
   const isSessionExpired = !!scanStartedAt && Date.now() - scanStartedAt > SESSION_TTL_MS;
 
+  // Hide 0 B protected system folders from default scan results (protection logic remains active elsewhere)
+  const visibleBaseTargets = useMemo(() => {
+    return targets.filter((t) => !(t.risk === 'Protected' && BigInt(t.totalBytes || '0') === 0n));
+  }, [targets]);
+
   const selectedBytes = useMemo(() => {
     const sizes: string[] = [];
-    for (const t of targets) for (const item of t.items) if (selectedIds.has(item.id)) sizes.push(item.size);
+    for (const t of visibleBaseTargets) for (const item of t.items) if (selectedIds.has(item.id)) sizes.push(item.size);
     return sumDecimalStrings(sizes);
-  }, [targets, selectedIds]);
+  }, [visibleBaseTargets, selectedIds]);
 
   const selectableCount = useMemo(() => {
     let n = 0;
-    for (const t of targets) for (const i of t.items) if (isSelectableScanItem(i, t, allowDeleteUnknown)) n++;
+    for (const t of visibleBaseTargets) for (const i of t.items) if (isSelectableScanItem(i, t, allowDeleteUnknown)) n++;
     return n;
-  }, [targets, allowDeleteUnknown]);
+  }, [visibleBaseTargets, allowDeleteUnknown]);
 
   const skippedCount = useMemo(() => {
     let n = 0;
-    for (const t of targets) for (const i of t.items) if (!isSelectableScanItem(i, t, allowDeleteUnknown)) n++;
+    for (const t of visibleBaseTargets) for (const i of t.items) if (!isSelectableScanItem(i, t, allowDeleteUnknown)) n++;
     return n;
-  }, [targets, allowDeleteUnknown]);
+  }, [visibleBaseTargets, allowDeleteUnknown]);
 
   const totalItemCount = selectableCount + skippedCount;
-
-  const requiresConfirmation = useMemo(() => scanSelectionNeedsConfirmation(targets, selectedIds), [targets, selectedIds]);
+  const requiresConfirmation = useMemo(() => scanSelectionNeedsConfirmation(visibleBaseTargets, selectedIds), [visibleBaseTargets, selectedIds]);
 
   const eligibleSafeIds = useMemo(() => {
     const ids: string[] = [];
-    for (const t of targets) {
+    for (const t of visibleBaseTargets) {
       if (t.risk !== 'Safe') continue;
       for (const i of t.items) if (isSelectableScanItem(i, t, allowDeleteUnknown)) ids.push(i.id);
     }
     return ids;
-  }, [targets, allowDeleteUnknown]);
+  }, [visibleBaseTargets, allowDeleteUnknown]);
 
   const heroReclaimable = useMemo(() => {
     let total = 0n;
-    for (const t of targets) total += BigInt(t.eligibleBytes || '0');
+    for (const t of visibleBaseTargets) total += BigInt(t.eligibleBytes || '0');
     return total.toString();
-  }, [targets]);
+  }, [visibleBaseTargets]);
   const tier1Reclaimable = useMemo(() => {
     let total = 0n;
-    for (const t of targets) if (t.tier === 'Tier1') total += BigInt(t.eligibleBytes || '0');
+    for (const t of visibleBaseTargets) if (t.tier === 'Tier1') total += BigInt(t.eligibleBytes || '0');
     return total.toString();
-  }, [targets]);
+  }, [visibleBaseTargets]);
   const tier2Reclaimable = useMemo(() => {
     let total = 0n;
-    for (const t of targets) if (t.tier === 'Tier2') total += BigInt(t.eligibleBytes || '0');
+    for (const t of visibleBaseTargets) if (t.tier === 'Tier2') total += BigInt(t.eligibleBytes || '0');
     return total.toString();
-  }, [targets]);
+  }, [visibleBaseTargets]);
 
   function resetForInvalidSession(message?: string) {
     setSessionId(null);
@@ -201,7 +253,7 @@ export function ScanAndPreviewView({
   }
 
   async function runScan() {
-    setError(null); setInfo(null); setPreview(null); setDrawerExplain(null); setInspected(null); setSelectedIds(new Set());
+    setError(null); setInfo(null); setPreview(null); setInspected(null); setSelectedIds(new Set());
     setCollapsedTargets(new Set()); setResults(null); setCleanSummary(null); setCleanProgress(null); setScanning(true);
     setScanStatus('Starting Scan…');
     const tiers = [tier1 ? 'Tier1' : null, tier2 ? 'Tier2' : null].filter(Boolean) as ('Tier1' | 'Tier2')[];
@@ -221,12 +273,18 @@ export function ScanAndPreviewView({
         for (const i of t.items) if (isSelectableScanItem(i, t, settings?.allowDeleteUnknown ?? false)) auto.add(i.id);
       }
       setSelectedIds(auto);
+
+      const baseVisible = data.targets.filter((t) => !(t.risk === 'Protected' && BigInt(t.totalBytes || '0') === 0n));
       const collapsed = new Set<string>();
-      for (const t of data.targets) {
-        if (t.risk === 'Protected') collapsed.add(t.targetId);
+      const firstActive = baseVisible.find((t) => t.targetName === 'User Temp') ?? baseVisible[0] ?? null;
+      for (const t of baseVisible) {
+        if (firstActive && t.targetId === firstActive.targetId) continue;
+        collapsed.add(t.targetId);
       }
       setCollapsedTargets(collapsed);
-      const firstItem = data.targets.flatMap((t) => t.items)[0];
+
+      const firstTarget = firstActive ?? baseVisible[0];
+      const firstItem = firstTarget?.items[0] ?? data.targets.flatMap((t) => t.items)[0];
       if (firstItem) {
         try { setInspected(await client.explainItem(firstItem.id)); } catch { /* ignore */ }
       }
@@ -241,7 +299,7 @@ export function ScanAndPreviewView({
   }
 
   function toggleItem(item: ScanItemDto, target: TargetScanResultDto) {
-    if (!isSelectableScanItem(item, target, allowDeleteUnknown)) return;
+    if (!isSelectableScanItem(item, target, allowDeleteUnknown)) { void inspectItem(item.id); return; }
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => { const next = new Set(prev); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; });
     void inspectItem(item.id);
@@ -271,15 +329,6 @@ export function ScanAndPreviewView({
   function clearSelection() {
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds(new Set());
-  }
-
-  async function onExplain(itemId: string) {
-    setError(null);
-    try {
-      const ex = await client.explainItem(itemId);
-      setDrawerExplain(ex);
-      setInspected(ex);
-    } catch (e) { setError(formatContractError(e)); }
   }
 
   async function runPreview() {
@@ -327,26 +376,21 @@ export function ScanAndPreviewView({
     setRelaunchError(null);
     try {
       const res = await client.relaunchElevated();
-      if (res.launched) {
-        setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
-      } else {
-        setRelaunchError('Administrator launch was not started.');
-      }
+      if (res.launched) setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
+      else setRelaunchError('Administrator launch was not started.');
     } catch (e) {
       setRelaunchError(formatContractError(e));
-    } finally {
-      setRelaunching(false);
-    }
+    } finally { setRelaunching(false); }
   }
 
   function toggleCollapsed(targetId: string) {
     setCollapsedTargets((prev) => { const next = new Set(prev); if (next.has(targetId)) next.delete(targetId); else next.add(targetId); return next; });
   }
 
-  const allCollapsed = targets.length > 0 && collapsedTargets.size === targets.length;
+  const allCollapsed = visibleBaseTargets.length > 0 && collapsedTargets.size === visibleBaseTargets.length;
   function toggleExpandCollapseAll() {
     if (allCollapsed) setCollapsedTargets(new Set());
-    else setCollapsedTargets(new Set(targets.map((t) => t.targetId)));
+    else setCollapsedTargets(new Set(visibleBaseTargets.map((t) => t.targetId)));
   }
 
   const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning && !isSessionExpired && (!requiresConfirmation || confirmText === TYPED_CONFIRMATION_PHRASE);
@@ -354,12 +398,15 @@ export function ScanAndPreviewView({
 
   const q = toolbar.query.trim().toLowerCase();
   const visibleTargets = useMemo(() => {
-    return targets.map((t) => {
+    return visibleBaseTargets.map((t) => {
       let items = t.items.filter((i) => {
         const selectable = isSelectableScanItem(i, t, allowDeleteUnknown);
         if (toolbar.filter === 'eligible' && !selectable) return false;
         if (toolbar.filter === 'skipped' && selectable) return false;
-        if (q && !i.path.toLowerCase().includes(q) && !relativeItemName(i.path, t.resolvedPaths).toLowerCase().includes(q)) return false;
+        if (q) {
+          const rel = relativeItemName(i.path, t.resolvedPaths).toLowerCase();
+          if (!i.path.toLowerCase().includes(q) && !rel.includes(q)) return false;
+        }
         return true;
       });
       items = [...items].sort((a, b) => {
@@ -373,30 +420,39 @@ export function ScanAndPreviewView({
       });
       return { target: t, items };
     }).filter((g) => g.items.length > 0 || (!q && toolbar.filter === 'all'));
-  }, [targets, toolbar, allowDeleteUnknown, q]);
-
-  const selectedBreakdown = useMemo(() => {
-    const by = new Map<string, { name: string; count: number; bytes: bigint }>();
-    for (const t of targets) {
-      for (const i of t.items) {
-        if (!selectedIds.has(i.id)) continue;
-        const e = by.get(t.targetId) ?? { name: t.targetName, count: 0, bytes: 0n };
-        e.count += 1; e.bytes += BigInt(i.size || '0'); by.set(t.targetId, e);
-      }
-    }
-    return Array.from(by.values());
-  }, [targets, selectedIds]);
+  }, [visibleBaseTargets, toolbar, allowDeleteUnknown, q]);
 
   const hasResults = !!results;
+  const allSafeSelected = eligibleSafeIds.length > 0 && eligibleSafeIds.every((id) => selectedIds.has(id));
+
+  const inspectedCtx = useMemo(() => {
+    if (!inspected) return null;
+    for (const t of visibleBaseTargets) {
+      const it = t.items.find((i) => i.id === inspected.itemId);
+      if (it) return { target: t, item: it };
+    }
+    return null;
+  }, [inspected, visibleBaseTargets]);
 
   return (
     <div className="view-stack">
-      <header className="page-header" aria-label="Scan and Clean header">
+      <header className="page-header scan-header-row" aria-label="Scan and Clean header">
         <div className="page-header-left">
           <h1 className="page-title" id="scan-heading">Scan &amp; Clean</h1>
-          {results && <span className="hero-metric-badge num" aria-label="Reclaimable total">{formatBytes(heroReclaimable)} reclaimable · {pluralize(selectableCount, 'eligible item', 'eligible items')}</span>}
+          {results && <span className="hero-metric-badge num" aria-label="Reclaimable total">{formatBytes(heroReclaimable)} reclaimable</span>}
         </div>
-        <div className="page-header-right">
+        <div className="page-header-right scan-header-actions">
+          <button
+            type="button"
+            className={`btn small scope-admin-compact ${!elevationStatus.isElevated ? 'locked' : 'ready'}`}
+            onClick={!elevationStatus.isElevated ? runAsAdministrator : undefined}
+            disabled={relaunching || elevationStatus.isElevated}
+            aria-label={elevationStatus.isElevated ? 'Standard Mode elevated' : 'Standard Mode elevate'}
+            title={elevationStatus.isElevated ? 'System-wide cleanup unlocked' : 'System-Wide Cleanup Locked · Requires Administrator'}
+          >
+            <ShieldIcon aria-hidden="true" />
+            <span>{elevationStatus.isElevated ? 'System-wide cleanup unlocked' : 'Standard Mode · Elevate'}</span>
+          </button>
           <button
             key={hasResults ? 'rescan' : 'scan'}
             className={hasResults ? 'btn secondary-action' : 'btn primary'}
@@ -415,33 +471,38 @@ export function ScanAndPreviewView({
       {error && <div className="notice error" role="alert">{error}</div>}
       {info && <div className="notice info" role="status">{info}</div>}
 
-      <section className="scope-bar" aria-label="Scan scope">
-        <div className={`scope-segment ${tier1 ? 'active' : ''}`}>
-          <label className="scope-check">
+      <section className="scan-filter-bar" aria-label="Scan filters">
+        <div className="scan-filter-chips">
+          <label className={`chip-toggle ${tier1 ? 'active' : ''}`}>
             <input type="checkbox" checked={tier1} onChange={(e) => setTier1(e.target.checked)} disabled={scanning || cleaning} aria-label="System & App Temp" />
-            <span className="scope-segment-label">System &amp; App Temp</span>
+            <span>Temp {results ? formatBytes(tier1Reclaimable) : '6 MB'}</span>
           </label>
-          <span className="scope-segment-meta num">{results ? formatBytes(tier1Reclaimable) : '6 MB'}</span>
           <InfoTip label="About System &amp; App Temp (Tier 1)">
             <p><strong>System &amp; App Temp (Tier 1)</strong><br />Windows Temp, crash dumps &amp; app caches older than 24h.</p>
           </InfoTip>
-        </div>
-        <span className="scope-divider" aria-hidden="true" />
-        <div className={`scope-segment ${tier2 ? 'active' : ''}`}>
-          <label className="scope-check">
+          <label className={`chip-toggle ${tier2 ? 'active' : ''}`}>
             <input type="checkbox" checked={tier2} onChange={(e) => setTier2(e.target.checked)} disabled={scanning || cleaning} aria-label="Developer Caches" />
-            <span className="scope-segment-label">Developer Caches</span>
+            <span>Dev Caches {results ? formatBytes(tier2Reclaimable) : '7 MB'}</span>
           </label>
-          <span className="scope-segment-meta num">{results ? formatBytes(tier2Reclaimable) : '7 MB'}</span>
           <InfoTip label="About Developer Caches (Tier 2)">
             <p><strong>Developer Caches (Tier 2)</strong><br />npm, Cargo, pip &amp; build caches that rebuild automatically.</p>
           </InfoTip>
         </div>
-        <div className={`scope-admin ${!elevationStatus.isElevated ? 'locked' : 'ready scope-admin-clean'}`} aria-label={elevationStatus.isElevated ? 'Admin cleanup ready' : 'System-Wide Cleanup Locked · Requires Administrator'}>
-          <ShieldIcon />
-          <span className="scope-admin-text">{elevationStatus.isElevated ? 'System-wide cleanup unlocked' : 'System-Wide Cleanup Locked · Requires Administrator'}</span>
-          {!elevationStatus.isElevated && <button className="btn small" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>}
+        <input type="search" className="scan-search-input" placeholder="Search files or paths..." value={toolbar.query} onChange={(e) => setToolbar({ ...toolbar, query: e.target.value })} aria-label="Search files or paths" />
+        <label className="toolbar-group">Sort
+          <select value={toolbar.sort} onChange={(e) => setToolbar({ ...toolbar, sort: e.target.value as ScanToolbarState['sort'] })} aria-label="Sort scan results">
+            <option value="size">Size ↓</option>
+            <option value="name">Name</option>
+            <option value="risk">Risk</option>
+          </select>
+        </label>
+        <div className="toolbar-chip-group" role="group" aria-label="Status filters">
+          <button type="button" className={`chip-btn ${toolbar.filter === 'all' ? 'active' : ''}`} onClick={() => setToolbar({ ...toolbar, filter: 'all' })}>All ({totalItemCount})</button>
+          <button type="button" className={`chip-btn ${toolbar.filter === 'eligible' ? 'active' : ''}`} onClick={() => setToolbar({ ...toolbar, filter: 'eligible' })}>Eligible ({selectableCount})</button>
+          <button type="button" className={`chip-btn ${toolbar.filter === 'skipped' ? 'active' : ''}`} onClick={() => setToolbar({ ...toolbar, filter: 'skipped' })}>Skipped ({skippedCount})</button>
         </div>
+        <button className="btn small subtle-btn" onClick={toggleExpandCollapseAll} disabled={cleaning || !results}>{allCollapsed ? 'Expand All' : 'Collapse All'}</button>
+        <button className="btn small" onClick={selectAllSafe} disabled={cleaning || eligibleSafeIds.length === 0}>Select Safe</button>
       </section>
 
       {scanning && (
@@ -462,13 +523,13 @@ export function ScanAndPreviewView({
       {scanning && !results && (
         <section className="master-detail scan-layout" aria-label="Scanning">
           <div className="master-pane">
-            <div className="pane-header"><h2>Scan Results</h2></div>
+            <div className="scan-table-header" aria-hidden="true"><span>Item</span><span>Status</span><span className="num">Size</span></div>
             <div className="pane-body flush" aria-hidden="true">
               <div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" />
             </div>
           </div>
-          <div className="detail-pane selection-pane">
-            <div className="pane-header"><h3 id="preview-heading">Inspector</h3></div>
+          <div className="detail-pane selection-pane scan-inspector-pane">
+            <div className="pane-header"><h3>Inspector</h3></div>
             <div className="detail-scroll"><p className="muted">Scanning for reclaimable space…</p></div>
           </div>
         </section>
@@ -478,32 +539,13 @@ export function ScanAndPreviewView({
         <>
           <section className="master-detail scan-layout scan-layout-with-bar" aria-label="Scan results and review">
             <div className="master-pane scan-master-pane">
-              <div className="scan-toolbar" role="toolbar" aria-label="Scan results toolbar">
-                <input type="search" placeholder="Search files or paths..." value={toolbar.query} onChange={(e) => setToolbar({ ...toolbar, query: e.target.value })} aria-label="Search files or paths" />
-                <label className="toolbar-group">Sort
-                  <select value={toolbar.sort} onChange={(e) => setToolbar({ ...toolbar, sort: e.target.value as ScanToolbarState['sort'] })} aria-label="Sort scan results">
-                    <option value="size">Size ↓</option>
-                    <option value="name">Name</option>
-                    <option value="risk">Risk</option>
-                  </select>
-                </label>
-                <div className="toolbar-chip-group" role="group" aria-label="Status filters">
-                  <button type="button" className={`chip-btn ${toolbar.filter === 'all' ? 'active' : ''}`} onClick={() => setToolbar({ ...toolbar, filter: 'all' })}>All ({totalItemCount})</button>
-                  <button type="button" className={`chip-btn ${toolbar.filter === 'eligible' ? 'active' : ''}`} onClick={() => setToolbar({ ...toolbar, filter: 'eligible' })}>Eligible ({selectableCount})</button>
-                  <button type="button" className={`chip-btn ${toolbar.filter === 'skipped' ? 'active' : ''}`} onClick={() => setToolbar({ ...toolbar, filter: 'skipped' })}>Skipped ({skippedCount})</button>
-                </div>
-                <div className="toolbar-spacer" />
-                <button className="btn small subtle-btn" onClick={toggleExpandCollapseAll} disabled={cleaning}>{allCollapsed ? 'Expand All' : 'Collapse All'}</button>
-                <button className="btn small" onClick={selectAllSafe} disabled={cleaning || eligibleSafeIds.length === 0}>Select All Safe</button>
-              </div>
-              <div className="pane-header scan-results-header">
-                <div className="pane-header-left">
-                  <h2 id="results-heading">Scan Results</h2>
-                  <span className="pane-meta-pill num">{pluralize(selectableCount, 'eligible item', 'eligible items')}</span>
-                </div>
+              <div className="scan-table-header" aria-hidden="true">
+                <span>Item</span>
+                <span>Status</span>
+                <span className="num">Size</span>
               </div>
               <div className="pane-body flush scan-results-body">
-                {targets.length === 0 && <div className="empty-state"><h3>No targets</h3><p>No Targets returned for this Scan.</p></div>}
+                {visibleBaseTargets.length === 0 && <div className="empty-state"><h3>No targets</h3><p>No Targets returned for this Scan.</p></div>}
                 <div className="target-list scan-grid-list">
                   {visibleTargets.map(({ target: t, items: visibleItems }) => {
                     const selectableItems = t.items.filter((i) => isSelectableScanItem(i, t, allowDeleteUnknown));
@@ -514,10 +556,11 @@ export function ScanAndPreviewView({
                     const collapsed = collapsedTargets.has(t.targetId);
                     const rootPath = resolvedRootPath(t);
                     const firstItem = t.items[0];
+                    const groupStatus = t.risk === 'Protected' ? { label: 'Protected', className: 'badge risk-Protected' } : (t.risk === 'Caution' ? { label: 'Caution', className: 'badge risk-Caution' } : null);
                     return (
                       <article key={t.targetId} className="target-card" aria-labelledby={`target-${t.targetId}-name`}>
                         <div
-                          className="scan-row scan-group-row"
+                          className={`scan-row scan-group-row ${inspected?.itemId === firstItem?.id ? 'inspected' : ''}`}
                           role="button"
                           tabIndex={0}
                           onClick={() => { if (firstItem) void inspectItem(firstItem.id); }}
@@ -529,9 +572,7 @@ export function ScanAndPreviewView({
                             </button>
                             <span className="scan-select-slot" onClick={(e) => e.stopPropagation()}>
                               {t.risk === 'Protected' ? (
-                                <span className="lock-slot" aria-label={`${t.targetName} protected`} title="Protected">
-                                  <LockIcon />
-                                </span>
+                                <span className="lock-slot" aria-label={`${t.targetName} protected`} title="Protected"><ShieldIcon /></span>
                               ) : (
                                 <label className="checkbox target-group-check">
                                   <input
@@ -545,19 +586,19 @@ export function ScanAndPreviewView({
                                 </label>
                               )}
                             </span>
+                            <FolderIcon className="row-icon" aria-hidden="true" />
                             <div className="scan-main-text scan-group-main-text">
                               <div className="scan-title-line">
                                 <span className="target-name-btn scan-group-title" id={`target-${t.targetId}-name`}>{t.targetName}</span>
                               </div>
-                              {rootPath && <div className="scan-subpath" title={rootPath}>{rootPath}</div>}
+                              <div className="scan-subpath">{selectedInTarget} of {t.eligibleCount} eligible · {pluralize(Number(t.fileCount || '0'), 'file', 'files')}{rootPath ? ` · ${rootPath}` : ''}</div>
                             </div>
                           </div>
                           <div className="scan-col-status scan-group-status-col">
-                            {t.risk === 'Protected' ? <span className="inline-tag scan-group-protected-badge">Protected</span> : null}
+                            {groupStatus ? <span className={groupStatus.className}>{groupStatus.label}</span> : <span className="status-muted-inline" />}
                           </div>
                           <div className="scan-col-size scan-group-size-col num">
                             <div className="scan-group-size-primary">{formatBytes(t.eligibleBytes)}</div>
-                            <div className="scan-group-size-secondary">{selectedInTarget} of {t.eligibleCount} eligible · {pluralize(Number(t.fileCount || '0'), 'file', 'files')}</div>
                           </div>
                         </div>
                         {!collapsed && (
@@ -567,28 +608,24 @@ export function ScanAndPreviewView({
                             {visibleItems.map((item) => {
                               const selectable = isSelectableScanItem(item, t, allowDeleteUnknown);
                               const checked = selectedIds.has(item.id);
-                              const name = relativeItemName(item.path, t.resolvedPaths);
+                              const { name, nestedRel } = itemDisplayName(item.path, t.resolvedPaths);
                               const isProtected = t.risk === 'Protected';
-                              const isSkipped = !selectable && !isProtected;
                               const inspectedMatch = inspected?.itemId === item.id;
-                              const statusLabel = isProtected ? 'Protected' : (isSkipped ? humanizeSkippedReason(t, item, allowDeleteUnknown) : (t.risk === 'Caution' || t.risk === 'Unknown' ? t.risk : null));
-                              const statusClass = isProtected ? 'status-muted' : (isSkipped || t.risk === 'Caution' || t.risk === 'Unknown' ? (isSkipped ? 'badge status-skipped' : riskClass(t.risk)) : '');
+                              const status = statusBadgeForScan(t, item, selectable, allowDeleteUnknown);
                               return (
                                 <div
                                   key={item.id}
-                                  className={`scan-row scan-item-row ${checked ? 'selected' : ''} ${inspectedMatch ? 'inspected' : ''}`}
+                                  className={`scan-row scan-item-row ${inspectedMatch ? 'inspected' : ''}`}
                                   role="button"
                                   tabIndex={0}
-                                  onClick={() => { void inspectItem(item.id); if (selectable) toggleItem(item, t); }}
-                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void inspectItem(item.id); if (selectable) toggleItem(item, t); } }}
+                                  onClick={() => toggleItem(item, t)}
+                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleItem(item, t); } }}
                                 >
                                   <div className="scan-col-main">
                                     <span className="row-indent" aria-hidden="true" />
                                     <span className="scan-select-slot" onClick={(e) => e.stopPropagation()}>
                                       {isProtected ? (
-                                        <span className="lock-slot" aria-label={`${normalizeDisplayPath(item.path)} protected`} title="Protected">
-                                          <LockIcon />
-                                        </span>
+                                        <span className="lock-slot" aria-label={`${normalizeDisplayPath(item.path)} protected`} title="Protected"><ShieldIcon /></span>
                                       ) : (
                                         <label className="checkbox">
                                           <input type="checkbox" aria-label={`Select ${normalizeDisplayPath(item.path)}`} checked={checked} disabled={!selectable || cleaning} onChange={() => toggleItem(item, t)} />
@@ -598,12 +635,12 @@ export function ScanAndPreviewView({
                                     <div className="scan-main-text">
                                       <div className="scan-title-line">
                                         <span className="item-name" title={normalizeDisplayPath(item.path)}>{name}</span>
+                                        {nestedRel && nestedRel !== name ? <span className="scan-subpath-inline mono" title={nestedRel}>{nestedRel}</span> : null}
                                       </div>
-                                      {rootPath && <div className="scan-subpath" title={rootPath}>{rootPath}</div>}
                                     </div>
                                   </div>
                                   <div className="scan-col-status">
-                                    {statusLabel ? <span className={statusClass} aria-label={`Status ${isSkipped ? 'Skipped' : statusLabel}`}>{statusLabel}</span> : null}
+                                    <span className={status.className} aria-label={status.label.startsWith('Skipped') ? 'Status Skipped' : `Status ${status.label}`}>{status.label}</span>
                                   </div>
                                   <div className="scan-col-size num">{formatBytes(item.size)}</div>
                                 </div>
@@ -624,50 +661,37 @@ export function ScanAndPreviewView({
               </div>
               <div className="detail-scroll">
                 <div className="inspector-section" aria-label="Item inspector">
-                  {inspected ? (() => {
-                    let inspectedItem: ScanItemDto | null = null;
-                    let inspectedTarget: TargetScanResultDto | null = null;
-                    for (const t of targets) {
-                      const it = t.items.find((i) => i.id === inspected.itemId);
-                      if (it) { inspectedItem = it; inspectedTarget = t; break; }
-                    }
-                    const itemTitle = inspectedItem ? relativeItemName(inspectedItem.path, inspectedTarget?.resolvedPaths ?? []) : inspected.title;
-                    const itemSubtitle = inspectedTarget?.targetName ?? null;
-                    const fullPath = inspectedItem ? normalizeDisplayPath(inspectedItem.path) : normalizeDisplayPath(inspected.itemId);
-                    const eligibility = inspectedItem && inspectedTarget
-                      ? (isSelectableScanItem(inspectedItem, inspectedTarget, allowDeleteUnknown) ? 'Eligible for cleanup' : humanizeSkippedReason(inspectedTarget, inspectedItem, allowDeleteUnknown))
-                      : '—';
-                    const whyFlagged = inspectedItem && inspectedTarget
-                      ? (inspectedTarget.risk === 'Protected' ? 'Protected Path. This location is never removable.'
-                        : inspectedTarget.risk === 'Unknown' && !allowDeleteUnknown ? 'Unknown item and "Allow deleting unknown folders" is off in Settings.'
-                          : inspectedItem.ageEligible === false ? 'Modified within the minimum age window and skipped for safety.'
-                            : inspected.risk === 'Caution' ? 'Caution category. Review before removal.'
-                              : inspected.risk === 'Unknown' ? 'Unknown/Custom Path item. Typed confirmation is required before preview/clean.'
-                                : 'Safe category and eligible under current settings.')
-                      : inspected.description;
+                  {inspected && inspectedCtx ? (() => {
+                    const { item, target } = inspectedCtx;
+                    const selectable = isSelectableScanItem(item, target, allowDeleteUnknown);
+                    const fullPath = normalizeDisplayPath(item.path);
+                    const itemTitle = relativeItemName(item.path, target.resolvedPaths).split(/[\\/]/).pop() || inspected.title;
+                    const status = statusBadgeForScan(target, item, selectable, allowDeleteUnknown);
+                    const eligibility = selectable ? 'Eligible' : humanizeSkippedReason(target, item, allowDeleteUnknown);
+                    const ageLabel = item.ageEligible ? 'Eligible age' : 'Recent (< 24h)';
                     return (
                       <>
-                        <p className="inspector-headline">
-                          <span className="inspector-headline-name" title={fullPath}>{itemTitle}</span>
-                          <span className={riskClass(inspected.risk)}>{inspected.risk}</span>
-                        </p>
-                        {itemSubtitle && <p className="inspector-subtitle muted">{itemSubtitle}</p>}
-                        <dl className="kv kv-stacked">
-                          <div className="kv-block"><dt>What is it?</dt><dd>{inspected.description}</dd></div>
-                          <div className="kv-block"><dt>What happens if deleted?</dt><dd>{inspected.risk === 'Protected' ? 'Nothing will be deleted. Protected Paths are never removable.' : 'The selected item is permanently deleted and bypasses the Recycle Bin. Only items you explicitly select and confirm are removed.'}</dd></div>
-                          <div className="kv-block"><dt>Why flagged / skipped?</dt><dd>{whyFlagged}</dd></div>
-                          <div className="kv-block"><dt>Eligibility</dt><dd>{eligibility}</dd></div>
-                          <div className="kv-block kv-path-block"><dt>Full Path</dt>
-                            <dd>
-                              <div className="path-well">
-                                <span className="mono path-well-text" title={fullPath}>{fullPath}</span>
-                                <button type="button" className="icon-only-btn subtle path-copy-btn" onClick={() => void copyText(fullPath)} aria-label="Copy path" title="Copy path"><CopyIcon /></button>
-                              </div>
-                            </dd>
+                        <div className="inspector-header-block">
+                          <div className="inspector-title-row">
+                            <FolderIcon className="inspector-leading-icon" aria-hidden="true" />
+                            <div className="inspector-title-copy">
+                              <span className="inspector-headline-name" title={fullPath}>{itemTitle}</span>
+                              <span className="inspector-subtitle muted">{target.targetName}</span>
+                            </div>
+                            <span className={status.className}>{status.label}</span>
                           </div>
+                        </div>
+                        <dl className="inspector-meta-grid" aria-label="Item metadata">
+                          <div><dt>Size</dt><dd className="num">{formatBytes(item.size)}</dd></div>
+                          <div><dt>Modified / Age</dt><dd>{ageLabel}</dd></div>
+                          <div><dt>Safety</dt><dd>{itemSafetyLabel(target, item, selectable, allowDeleteUnknown)}</dd></div>
+                          <div><dt>Eligibility</dt><dd>{eligibility}</dd></div>
                         </dl>
-                        <div className="row inspector-actions">
-                          <button className="btn small" onClick={() => void onExplain(inspected.itemId)} aria-label="Explain">Explain</button>
+                        <p className="inspector-guidance">{scanGuidance(target, item, selectable, allowDeleteUnknown)}</p>
+                        <div className="path-strip" aria-label="Full path">
+                          <span className="mono path-strip-text" title={fullPath}>{fullPath || 'C:\\'}</span>
+                          <button type="button" className="icon-only-btn subtle path-strip-btn" onClick={() => void copyText(fullPath)} aria-label="Copy path" title="Copy path"><CopyIcon /></button>
+                          <button type="button" className="icon-only-btn subtle path-strip-btn" onClick={() => openContainingFolder(fullPath)} aria-label="Open Folder" title="Open Folder"><FolderOpenIcon /></button>
                         </div>
                       </>
                     );
@@ -748,8 +772,6 @@ export function ScanAndPreviewView({
           </div>
         </>
       )}
-
-      <ExplainDrawer explain={drawerExplain} onClose={() => setDrawerExplain(null)} />
     </div>
   );
 }

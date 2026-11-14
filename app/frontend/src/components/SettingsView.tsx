@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { formatContractError, type ElevationStatus, type Settings, type SweeperClient } from '../api/client';
+﻿import { useEffect, useMemo, useState } from 'react';
+import { formatContractError, type Settings, type SweeperClient } from '../api/client';
 
 type Theme = 'dark' | 'light';
 
@@ -30,7 +30,7 @@ export function SettingsView({
 }: {
   client: SweeperClient;
   settings: Settings | null;
-  elevationStatus: ElevationStatus;
+  elevationStatus: { isElevated: boolean };
   elevationError: string | null;
   onSaved: (s: Settings) => void;
   theme?: Theme;
@@ -131,11 +131,8 @@ export function SettingsView({
     setRelaunchError(null);
     try {
       const res = await client.relaunchElevated();
-      if (res.launched) {
-        setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
-      } else {
-        setRelaunchError('Administrator launch was not started.');
-      }
+      if (res.launched) setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
+      else setRelaunchError('Administrator launch was not started.');
     } catch (e) {
       setRelaunchError(formatContractError(e));
     } finally {
@@ -160,6 +157,8 @@ export function SettingsView({
     );
   }
 
+  const deepDisabled = !draft.enableTier3;
+
   return (
     <div className="view-stack settings-view-stack">
       <header className="page-header" aria-label="Settings header">
@@ -176,208 +175,209 @@ export function SettingsView({
       {relaunchError && <div className="notice error" role="alert">{relaunchError}</div>}
 
       <div className="settings-page-wrap">
-        <div className="settings-form-wrap">
-          <div className="settings-cards-grid">
-          <section className="settings-section-card settings-card-general" aria-labelledby="general-settings-heading">
-            <h2 id="general-settings-heading" className="settings-section-title">General</h2>
-
-            <div className="settings-row">
-              <div className="settings-row-copy">
-                <h3>Standard Temporary Files</h3>
-                <p>Clean system and app temporary files that rebuild automatically.</p>
+        <div className="settings-form-wrap settings-fluent-list">
+          <section className="settings-group" aria-labelledby="general-settings-heading">
+            <h2 id="general-settings-heading" className="settings-group-title">General</h2>
+            <div className="settings-group-card">
+              <div className="settings-list-row">
+                <div className="settings-row-copy">
+                  <h3>Standard Temporary Files</h3>
+                  <p>Clean system and app temporary files that rebuild automatically.</p>
+                </div>
+                <div className="settings-row-control">
+                  <label className="checkbox tier-toggle">
+                    <input type="checkbox" aria-label="Enable Tier 1" checked={draft.enableTier1} onChange={(e) => setDraft({ ...draft, enableTier1: e.target.checked })} />
+                    <span className="tier-switch" aria-hidden="true" />
+                  </label>
+                </div>
               </div>
-              <div className="settings-row-control">
-                <label className="checkbox tier-toggle">
-                  <input type="checkbox" aria-label="Enable Tier 1" checked={draft.enableTier1} onChange={(e) => setDraft({ ...draft, enableTier1: e.target.checked })} />
-                  <span className="tier-switch" aria-hidden="true" />
-                </label>
+              <div className="settings-list-row">
+                <div className="settings-row-copy">
+                  <h3>Developer &amp; Package Caches</h3>
+                  <p>Clean package and build caches that can be downloaded or rebuilt again.</p>
+                </div>
+                <div className="settings-row-control">
+                  <label className="checkbox tier-toggle">
+                    <input type="checkbox" aria-label="Enable Tier 2" checked={draft.enableTier2} onChange={(e) => setDraft({ ...draft, enableTier2: e.target.checked })} />
+                    <span className="tier-switch" aria-hidden="true" />
+                  </label>
+                </div>
               </div>
-            </div>
-
-            <div className="settings-row">
-              <div className="settings-row-copy">
-                <h3>Developer &amp; Package Caches</h3>
-                <p>Clean package and build caches that can be downloaded or rebuilt again.</p>
+              <div className="settings-list-row">
+                <div className="settings-row-copy">
+                  <h3><label htmlFor="min-age-hours">Minimum file age</label></h3>
+                  <p>Skip files changed more recently than this to avoid removing active data.</p>
+                  {draft.minAgeHours < 24 && <span className="inline-warn-text" role="note">Warning: below 24 hours may include very recent files.</span>}
+                </div>
+                <div className="settings-row-control numeric-control">
+                  <input id="min-age-hours" className="compact-number" type="number" min={0} value={draft.minAgeHours} onChange={(e) => setDraft({ ...draft, minAgeHours: Number(e.target.value || 0) })} />
+                  <span className="unit-suffix">hours</span>
+                </div>
               </div>
-              <div className="settings-row-control">
-                <label className="checkbox tier-toggle">
-                  <input type="checkbox" aria-label="Enable Tier 2" checked={draft.enableTier2} onChange={(e) => setDraft({ ...draft, enableTier2: e.target.checked })} />
-                  <span className="tier-switch" aria-hidden="true" />
-                </label>
-              </div>
-            </div>
-
-            <div className="settings-row">
-              <div className="settings-row-copy">
-                <h3><label htmlFor="min-age-hours">Minimum file age</label></h3>
-                <p>Skip files changed more recently than this to avoid removing active data.</p>
-                {draft.minAgeHours < 24 && (
-                  <div className="notice warn inline-note" role="note">Warning: Minimum age below 24 hours may include very recent files. Use with caution.</div>
-                )}
-              </div>
-              <div className="settings-row-control numeric-control">
-                <input id="min-age-hours" className="compact-number" type="number" min={0} value={draft.minAgeHours} onChange={(e) => setDraft({ ...draft, minAgeHours: Number(e.target.value || 0) })} />
-                <span className="unit-suffix">hours</span>
-              </div>
-            </div>
-
-            <div className="settings-row">
-              <div className="settings-row-copy">
-                <h3>Appearance</h3>
-                <p>Choose how Sweeper looks on this device.</p>
-              </div>
-              <div className="settings-row-control">
-                <div className="theme-toggle" role="group" aria-label="Appearance">
-                  <button
-                    type="button"
-                    className={theme === 'dark' ? 'theme-segment active' : 'theme-segment'}
-                    aria-pressed={theme === 'dark'}
-                    onClick={() => onThemeChange?.('dark')}
-                    disabled={!onThemeChange}
-                  >
-                    Dark
-                  </button>
-                  <button
-                    type="button"
-                    className={theme === 'light' ? 'theme-segment active' : 'theme-segment'}
-                    aria-pressed={theme === 'light'}
-                    onClick={() => onThemeChange?.('light')}
-                    disabled={!onThemeChange}
-                  >
-                    Light
-                  </button>
+              <div className="settings-list-row">
+                <div className="settings-row-copy">
+                  <h3>Appearance</h3>
+                  <p>Choose how Sweeper looks on this device.</p>
+                </div>
+                <div className="settings-row-control">
+                  <div className="theme-toggle" role="group" aria-label="Appearance">
+                    <button type="button" className={theme === 'dark' ? 'theme-segment active' : 'theme-segment'} aria-pressed={theme === 'dark'} onClick={() => onThemeChange?.('dark')} disabled={!onThemeChange}>Dark</button>
+                    <button type="button" className={theme === 'light' ? 'theme-segment active' : 'theme-segment'} aria-pressed={theme === 'light'} onClick={() => onThemeChange?.('light')} disabled={!onThemeChange}>Light</button>
+                  </div>
                 </div>
               </div>
             </div>
           </section>
 
-          <section className="settings-section-card settings-card-deep-cleanup" aria-labelledby="tier3-settings-heading">
-            <h2 id="tier3-settings-heading" className="settings-section-title">Deep Cleanup &amp; Inactive Projects</h2>
-            <div className="notice warn inline-note" role="note">Higher risk and opt-in only. Protected Paths are never removable.</div>
-
-            <div className="settings-row">
-              <div className="settings-row-copy">
-                <h3>Enable Deep Cleanup Categories</h3>
-                <p>Opt in to higher-risk cleanup categories. Disabled by default.</p>
-              </div>
-              <div className="settings-row-control">
-                <label className="checkbox tier-toggle">
-                  <input type="checkbox" aria-label="Enable deep cleanup categories" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} />
-                  <span className="tier-switch" aria-hidden="true" />
-                </label>
-              </div>
-            </div>
-
-            <div className="settings-nested" aria-label="Tier 3 dependent options">
-              <div className="settings-row">
+          <section className="settings-group" aria-labelledby="tier3-settings-heading">
+            <h2 id="tier3-settings-heading" className="settings-group-title">Deep Cleanup &amp; Inactive Projects</h2>
+            <div className="settings-group-card">
+              <div className="settings-list-row">
                 <div className="settings-row-copy">
-                  <h3><label htmlFor="stale-project-days">Inactive project cache age</label></h3>
-                  <p>Highlight inactive Rust/Node build caches older than this many days in Analyzer.</p>
+                  <h3>Enable Deep Cleanup Categories</h3>
+                  <p>Opt in to higher-risk cleanup categories. Protected Paths are never removable.</p>
                 </div>
-                <div className="settings-row-control numeric-control">
-                  <input id="stale-project-days" className="compact-number" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={!draft.enableTier3} />
-                  <span className="unit-suffix">days</span>
+                <div className="settings-row-control">
+                  <label className="checkbox tier-toggle">
+                    <input type="checkbox" aria-label="Enable deep cleanup categories" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} />
+                    <span className="tier-switch" aria-hidden="true" />
+                  </label>
                 </div>
               </div>
-
-              <div className="settings-row">
+              <div className={`settings-list-row ${deepDisabled ? 'is-disabled-row' : ''}`}>
+                <div className="settings-row-copy">
+                  <h3>Inactive Node.js dependencies (node_modules/)</h3>
+                  <p>Highlight inactive project caches for cleanup when Deep Cleanup is enabled.</p>
+                </div>
+                <div className="settings-row-control settings-row-control-cluster">
+                  <span className="badge risk-Safe">Safe · Rebuildable</span>
+                  <label className="inline-threshold" htmlFor="stale-project-days-node">
+                    <input id="stale-project-days-node" className="compact-number" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={deepDisabled} aria-label="Inactive Node.js dependencies age" />
+                    <span className="unit-suffix">days</span>
+                  </label>
+                  <label className="checkbox tier-toggle">
+                    <input type="checkbox" aria-label="Inactive Node.js dependencies toggle" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} />
+                    <span className="tier-switch" aria-hidden="true" />
+                  </label>
+                </div>
+              </div>
+              <div className={`settings-list-row ${deepDisabled ? 'is-disabled-row' : ''}`}>
+                <div className="settings-row-copy">
+                  <h3>Inactive Rust build artifacts (target/)</h3>
+                  <p>Highlight inactive Rust build caches older than the configured threshold.</p>
+                </div>
+                <div className="settings-row-control settings-row-control-cluster">
+                  <span className="badge risk-Safe">Safe · Rebuildable</span>
+                  <label className="inline-threshold" htmlFor="stale-project-days">
+                    <input id="stale-project-days" className="compact-number" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={deepDisabled} aria-label="Inactive project cache age" />
+                    <span className="unit-suffix">days</span>
+                  </label>
+                  <label className="checkbox tier-toggle">
+                    <input type="checkbox" aria-label="Inactive Rust build artifacts toggle" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} />
+                    <span className="tier-switch" aria-hidden="true" />
+                  </label>
+                </div>
+              </div>
+              <div className={`settings-list-row ${deepDisabled ? 'is-disabled-row' : ''}`}>
+                <div className="settings-row-copy">
+                  <h3>Empty Windows Recycle Bin</h3>
+                  <p>Permanently empties the Recycle Bin when Deep Cleanup is enabled.</p>
+                </div>
+                <div className="settings-row-control settings-row-control-cluster">
+                  <span className="badge risk-Caution">Caution · Permanent</span>
+                  <label className="checkbox tier-toggle">
+                    <input type="checkbox" aria-label="Empty Windows Recycle Bin toggle" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} />
+                    <span className="tier-switch" aria-hidden="true" />
+                  </label>
+                </div>
+              </div>
+              <div className="settings-list-row">
                 <div className="settings-row-copy">
                   <h3>Allow deleting unknown folders</h3>
                   <p>Advanced. Unknown folders always require explicit typed confirmation before deletion.</p>
                 </div>
-                <div className="settings-row-control">
+                <div className="settings-row-control settings-row-control-cluster">
+                  <span className="badge risk-Unknown">Requires DELETE confirm</span>
                   <label className="checkbox tier-toggle">
                     <input type="checkbox" aria-label="Allow deleting unknown folders (advanced)" checked={draft.allowDeleteUnknown} onChange={(e) => setDraft({ ...draft, allowDeleteUnknown: e.target.checked })} />
                     <span className="tier-switch" aria-hidden="true" />
                   </label>
                 </div>
               </div>
-            </div>
-
-            <div className="deep-cleanup-grid" aria-label="Deep cleanup category notes">
-              <div className="deep-cleanup-card">
-                <div className="deep-cleanup-card-head"><span className="deep-cleanup-title">Empty Recycle Bin</span><span className="badge risk-Caution">Caution</span></div>
-                <p className="deep-cleanup-desc">Permanently empty the Recycle Bin. This is opt-in and bypasses restore.</p>
-              </div>
-              <div className="deep-cleanup-card">
-                <div className="deep-cleanup-card-head"><span className="deep-cleanup-title">Inactive Rust build caches</span><span className="badge">After {draft.staleProjectDays}d</span></div>
-                <p className="deep-cleanup-desc">Rust <code>target/</code> folders not used for {draft.staleProjectDays}+ days can be highlighted for cleanup.</p>
-              </div>
-              <div className="deep-cleanup-card">
-                <div className="deep-cleanup-card-head"><span className="deep-cleanup-title">Inactive Node modules</span><span className="badge">After {draft.staleProjectDays}d</span></div>
-                <p className="deep-cleanup-desc"><code>node_modules/</code> folders not used for {draft.staleProjectDays}+ days can be highlighted for cleanup.</p>
-              </div>
-              <div className="deep-cleanup-card">
-                <div className="deep-cleanup-card-head"><span className="deep-cleanup-title">WSL and Docker virtual disks</span><span className="badge status-readonly">Read-only</span></div>
-                <p className="deep-cleanup-desc">Large <code>.vhdx</code> files are shown for context and cannot be deleted by Sweeper.</p>
-              </div>
-            </div>
-          </section>
-
-          <section className="settings-section-card settings-card-system-wide" aria-labelledby="system-wide-caches-heading">
-            <h2 id="system-wide-caches-heading" className="settings-section-title">System-Wide Windows Caches</h2>
-            <p className="muted section-hint">Requires administrator elevation and deep cleanup opt-in.</p>
-
-            <div className="settings-row">
-              <div className="settings-row-copy">
-                <h3>Allow system-wide Windows caches</h3>
-              </div>
-              <div className="settings-row-control">
-                <label className="checkbox tier-toggle">
-                  <input
-                    type="checkbox"
-                    aria-label="Allow system-wide Windows caches (Admin)"
-                    checked={draft.enableElevationTargets}
-                    onChange={(e) => setDraft({ ...draft, enableElevationTargets: e.target.checked })}
-                    disabled={!elevationStatus.isElevated || !draft.enableTier3}
-                  />
-                  <span className="tier-switch" aria-hidden="true" />
-                </label>
-              </div>
-            </div>
-
-            {!elevationStatus.isElevated && (
-              <div className="notice warn inline-note" role="note">
-                <div className="row">
-                  <span className="spacer">Requires administrator. Enable deep cleanup and run as administrator to unlock system-wide caches.</span>
-                  <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
-                  {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
+              <div className="settings-list-row settings-list-row-info">
+                <div className="settings-row-copy">
+                  <h3>WSL &amp; Docker virtual disks (.vhdx)</h3>
+                  <p>Large virtual disks are shown for context and cannot be deleted by Sweeper.</p>
+                </div>
+                <div className="settings-row-control">
+                  <span className="badge status-readonly">Read-only</span>
                 </div>
               </div>
-            )}
-            {elevationStatus.isElevated && !draft.enableTier3 && <div className="notice inline-note" role="note">Enable deep cleanup categories to use system-wide Windows caches.</div>}
+            </div>
           </section>
 
-          <section className="settings-section-card settings-card-custom-paths" aria-labelledby="custom-paths-heading">
-            <h2 id="custom-paths-heading" className="settings-section-title">Custom Paths</h2>
-            <p className="muted section-hint">Validated before adding. Only contents are cleaned; typed confirmation required.</p>
-            <div className="custom-path-add row">
-              <div className="field custom-path-field">
-                <label htmlFor="custom-path-input">Add Custom Path</label>
+          <section className="settings-group" aria-labelledby="system-wide-caches-heading">
+            <h2 id="system-wide-caches-heading" className="settings-group-title">System-Wide Windows Caches</h2>
+            <div className="settings-group-card">
+              <div className="settings-list-row">
+                <div className="settings-row-copy">
+                  <h3>Allow system-wide Windows caches</h3>
+                  <p>Requires administrator elevation and Deep Cleanup opt-in.</p>
+                </div>
+                <div className="settings-row-control settings-row-control-cluster">
+                  {!elevationStatus.isElevated && (
+                    <button className="btn small" onClick={runAsAdministrator} disabled={relaunching} aria-label="Run as administrator">Elevate &amp; Enable</button>
+                  )}
+                  <label className="checkbox tier-toggle">
+                    <input
+                      type="checkbox"
+                      aria-label="Allow system-wide Windows caches (Admin)"
+                      checked={draft.enableElevationTargets}
+                      onChange={(e) => setDraft({ ...draft, enableElevationTargets: e.target.checked })}
+                      disabled={!elevationStatus.isElevated || !draft.enableTier3}
+                    />
+                    <span className="tier-switch" aria-hidden="true" />
+                  </label>
+                </div>
+              </div>
+              {!elevationStatus.isElevated && (
+                <div className="settings-inline-note muted">Run as administrator to unlock system-wide caches. Deep Cleanup must also be enabled.</div>
+              )}
+              {elevationStatus.isElevated && !draft.enableTier3 && (
+                <div className="settings-inline-note muted">Enable Deep Cleanup categories to use system-wide Windows caches.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="settings-group" aria-labelledby="custom-paths-heading">
+            <h2 id="custom-paths-heading" className="settings-group-title">Custom Paths</h2>
+            <div className="settings-group-card">
+              <div className="settings-list-row settings-list-row-stack">
+                <div className="settings-row-copy">
+                  <h3>Add Custom Path</h3>
+                  <p>Custom folders are scanned for eligible temporary items. Protected system directories are always excluded.</p>
+                </div>
                 <div className="custom-path-input-row">
+                  <label htmlFor="custom-path-input" className="sr-only">Add Custom Path</label>
                   <input id="custom-path-input" type="text" value={customPathInput} onChange={(e) => setCustomPathInput(e.target.value)} placeholder="C:\Path\To\Folder" disabled={saving || validatingPath} />
                   <button type="button" className="btn" onClick={browseCustomPath} disabled={saving || validatingPath} aria-label="Browse for custom path">Browse...</button>
                   <button className="btn" onClick={addCustomPath} disabled={saving || validatingPath || !customPathInput.trim()}>{validatingPath ? 'Validating…' : 'Add Folder'}</button>
                 </div>
               </div>
-            </div>
-            {draft.customPaths.length === 0 ? (
-              <p className="muted small-note">No Custom Paths configured.</p>
-            ) : (
-              <table className="table" aria-label="Custom Paths">
-                <thead><tr><th>Path</th><th></th></tr></thead>
-                <tbody>
+              {draft.customPaths.length === 0 ? (
+                <div className="settings-inline-note muted">No Custom Paths configured.</div>
+              ) : (
+                <div className="custom-path-list">
                   {draft.customPaths.map((p) => (
-                    <tr key={p}>
-                      <td><code>{p}</code></td>
-                      <td><button className="btn" onClick={() => removeCustomPath(p)} disabled={saving}>Remove</button></td>
-                    </tr>
+                    <div key={p} className="custom-path-row">
+                      <code className="custom-path-value">{p}</code>
+                      <button className="btn small" onClick={() => removeCustomPath(p)} disabled={saving}>Remove</button>
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            )}
+                </div>
+              )}
+            </div>
           </section>
-          </div>
 
           {isDirty && (
             <div className="settings-form-actions" aria-label="Settings actions">

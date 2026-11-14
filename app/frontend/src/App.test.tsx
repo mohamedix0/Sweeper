@@ -26,18 +26,18 @@ describe('Sweeper frontend', () => {
   it('shows locked system-wide cleanup notice on Scan & Clean when non-elevated', async () => {
     setup();
     expect((await screen.findAllByLabelText('Standard (Non-Elevated)')).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/System-Wide Cleanup Locked/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByRole('button', { name: 'Run as administrator' }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: /Standard Mode/i }).length).toBeGreaterThan(0);
   });
 
   it('toggles Dark/Light theme and persists choice in localStorage', async () => {
     const { user } = setup();
-    const light = screen.getByRole('button', { name: 'Light' });
-    await user.click(light);
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await screen.findByRole('heading', { name: 'Settings' });
+    const appearance = screen.getByRole('group', { name: 'Appearance' });
+    await user.click(within(appearance).getByRole('button', { name: 'Light' }));
     expect(document.documentElement.dataset.theme).toBe('light');
     expect(window.localStorage.getItem('sweeper-theme')).toBe('light');
-    const dark = screen.getByRole('button', { name: 'Dark' });
-    await user.click(dark);
+    await user.click(within(appearance).getByRole('button', { name: 'Dark' }));
     expect(document.documentElement.dataset.theme).toBe('dark');
     expect(window.localStorage.getItem('sweeper-theme')).toBe('dark');
   });
@@ -57,17 +57,13 @@ describe('Sweeper frontend', () => {
     );
   });
 
-  it('runs full Scan -> Explain -> Preview -> Clean summary -> Logs viewer flow', async () => {
+  it('runs full Scan -> Inspect -> Preview -> Clean summary -> Logs viewer flow', async () => {
     const { user } = setup();
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
-    await screen.findByRole('heading', { name: 'Scan Results' });
+    await screen.findByRole('heading', { name: 'Inspector' });
 
-    const explainButtons = screen.getAllByRole('button', { name: 'Explain' });
-    await user.click(explainButtons[0]);
-    const dialog = await screen.findByRole('dialog', { name: /Explain:/ });
-    expect(within(dialog).getByText(/Risk: Safe/)).toBeInTheDocument();
-    await user.click(within(dialog).getByRole('button', { name: 'Close explanation' }));
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // auto-inspected item renders contextual explanation in Inspector (no Explain button/drawer)
+    expect(await screen.findByText(/Temporary files Windows and apps can recreate automatically/i)).toBeInTheDocument();
 
     const eligibleCheckbox = screen.getByLabelText('Select C:\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp') as HTMLInputElement;
     if (!eligibleCheckbox.checked) await user.click(eligibleCheckbox);
@@ -96,7 +92,9 @@ describe('Sweeper frontend', () => {
   it('enforces typed confirmation for Custom Path/Unknown scan items and requires exact DELETE', async () => {
     const { user } = setup();
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
-    await screen.findByRole('heading', { name: 'Scan Results' });
+    await screen.findByRole('heading', { name: 'Inspector' });
+    const expandCustomPathBtn = screen.queryByRole('button', { name: /Expand Custom Path/i });
+    if (expandCustomPathBtn) await user.click(expandCustomPathBtn);
 
     const unknownCb = screen.getByLabelText('Select C:\\Users\\Alice\\CustomCleanup\\old.bin') as HTMLInputElement;
     expect(unknownCb).toBeDisabled(); // gated by allow_delete_unknown
@@ -110,7 +108,9 @@ describe('Sweeper frontend', () => {
 
     await user.click(screen.getByRole('button', { name: 'Scan & Clean' }));
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
-    await screen.findByRole('heading', { name: 'Scan Results' });
+    await screen.findByRole('heading', { name: 'Inspector' });
+    const expandCustomPathBtn = screen.queryByRole('button', { name: /Expand Custom Path/i });
+    if (expandCustomPathBtn) await user.click(expandCustomPathBtn);
 
     const unknownCb2 = screen.getByLabelText('Select C:\\Users\\Alice\\CustomCleanup\\old.bin') as HTMLInputElement;
     expect(unknownCb2).toBeEnabled();
@@ -175,7 +175,7 @@ describe('Sweeper frontend', () => {
     const minAge = screen.getByLabelText('Minimum file age');
     await user.clear(minAge);
     await user.type(minAge, '0');
-    expect(screen.getByText(/Minimum age below 24 hours/i)).toBeInTheDocument();
+    expect(screen.getByText(/below 24 hours/i)).toBeInTheDocument();
 
     const tier3 = screen.getByLabelText('Enable deep cleanup categories') as HTMLInputElement;
     expect(tier3.checked).toBe(false);
@@ -185,8 +185,8 @@ describe('Sweeper frontend', () => {
     expect(staleDays).toBeEnabled();
     await user.clear(staleDays);
     await user.type(staleDays, '45');
-    expect(screen.getAllByText(/Highlight inactive Rust\/Node build caches/i).length).toBeGreaterThan(0);
-    expect(screen.getByLabelText('Deep cleanup category notes')).toHaveTextContent(/Recycle Bin/i);
+    expect(screen.getByText(/Highlight inactive Rust build caches/i)).toBeInTheDocument();
+    expect(screen.getByText(/Empty Windows Recycle Bin/i)).toBeInTheDocument();
 
     // Custom path reject
     await user.type(screen.getByLabelText('Add Custom Path'), 'C:\\Windows\\Temp\\bad');
@@ -199,11 +199,11 @@ describe('Sweeper frontend', () => {
     await user.type(input, 'C:\\Users\\Alice\\CustomCleanup');
     await user.click(screen.getByRole('button', { name: 'Add Folder' }));
     await screen.findByText(/Settings saved/i);
-    expect(screen.getByRole('table', { name: 'Custom Paths' })).toHaveTextContent('C:\\Users\\Alice\\CustomCleanup');
+    expect(await screen.findByText('C:\\Users\\Alice\\CustomCleanup')).toBeInTheDocument();
 
     // Remove
     await user.click(screen.getByRole('button', { name: 'Remove' }));
-    await waitFor(() => expect(screen.queryByRole('table', { name: 'Custom Paths' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('C:\\Users\\Alice\\CustomCleanup')).not.toBeInTheDocument());
   });
 
   it('Analyzer gates Unknown selection behind allow_unknown and requires typed confirmation for Unknown nodes', async () => {
@@ -268,13 +268,13 @@ describe('Sweeper frontend', () => {
   it('handles expired/invalidated session errors cleanly', async () => {
     const { user } = setup();
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
-    await screen.findByRole('heading', { name: 'Scan Results' });
+    await screen.findByRole('heading', { name: 'Inspector' });
     await user.click(screen.getByLabelText('Select C:\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp'));
     mockController.advanceTimeMs(15 * 60 * 1000 + 1000);
     await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/expired|invalid/i);
-    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan Results' })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Inspector' })).not.toBeInTheDocument());
   });
 
   it('marks non-selectable analyzer nodes (.vhdx / Protected / Link Point) correctly', async () => {
@@ -304,9 +304,9 @@ describe('Sweeper frontend', () => {
   it('supports scan bulk selection, target-group selection, and status filters', async () => {
     const { user } = setup();
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
-    await screen.findByRole('heading', { name: 'Scan Results' });
+    await screen.findByRole('heading', { name: 'Inspector' });
 
-    const selectAllSafe = screen.getByRole('button', { name: 'Select All Safe' });
+    const selectAllSafe = screen.getByRole('button', { name: 'Select Safe' });
     expect(selectAllSafe).toBeEnabled();
     await user.click(selectAllSafe);
 

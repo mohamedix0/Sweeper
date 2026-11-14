@@ -21,8 +21,8 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
     });
     await page.goto('/');
     await expect(page.getByLabel('Standard (Non-Elevated)')).toBeVisible();
-    await expect(page.getByText(/System-Wide Cleanup Locked/i)).toBeVisible();
-    await page.getByRole('button', { name: 'Run as administrator' }).click();
+    await expect(page.getByRole('button', { name: /Standard Mode/i }).first()).toBeVisible();
+    await page.getByRole('button', { name: /Standard Mode/i }).first().click();
     await expect(page.getByRole('alert')).toContainText(/Administrator launch was cancelled/i);
   });
 
@@ -53,7 +53,7 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
 
     const minAge = page.getByLabel('Minimum file age');
     await minAge.fill('0');
-    await expect(page.getByText(/Minimum age below 24 hours/i)).toBeVisible();
+    await expect(page.getByText(/below 24 hours/i)).toBeVisible();
 
     const tier3 = page.getByLabel('Enable deep cleanup categories');
     await expect(tier3).not.toBeChecked();
@@ -115,7 +115,7 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
 
     await page.getByRole('button', { name: 'Scan & Clean' }).click();
     await page.getByRole('button', { name: 'Start Scan' }).click();
-    await expect(page.getByRole('heading', { name: 'Scan Results' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Inspector' })).toBeVisible();
 
     await page.getByLabel('Select C:\\Users\\Alice\\CustomCleanup\\old.bin').check();
     await expect(page.getByLabel('Typed confirmation')).toBeVisible();
@@ -128,13 +128,17 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
     await page.goto('/');
     await expect(page.getByRole('button', { name: 'Start Scan' })).toBeVisible();
     await expect.poll(async () => page.locator('html').getAttribute('data-theme')).toBe('dark');
-    await page.getByRole('button', { name: 'Light' }).click();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
+    const appearance = page.getByRole('group', { name: 'Appearance' });
+    await appearance.getByRole('button', { name: 'Light' }).click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
     await expect.poll(() => page.evaluate(() => localStorage.getItem('sweeper-theme'))).toBe('light');
     await page.reload();
     await expect(page.getByRole('button', { name: 'Start Scan' })).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-    await page.getByRole('button', { name: 'Dark' }).click();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('group', { name: 'Appearance' }).getByRole('button', { name: 'Dark' }).click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect.poll(() => page.evaluate(() => localStorage.getItem('sweeper-theme'))).toBe('dark');
   });

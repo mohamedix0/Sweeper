@@ -134,6 +134,52 @@ export function DriveIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function HardDriveIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <rect x="2" y="4.5" width="12" height="7" rx="1.5" />
+      <path d="M4.5 8h1.5M10.5 8h.01" />
+    </svg>
+  );
+}
+
+export function LinkIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M6.5 9.5 5.4 10.6a2 2 0 0 1-2.8-2.8l2.2-2.2a2 2 0 0 1 2.8 0" />
+      <path d="M9.5 6.5 10.6 5.4a2 2 0 0 1 2.8 2.8l-2.2 2.2a2 2 0 0 1-2.8 0" />
+    </svg>
+  );
+}
+
+export function CloudIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M4.5 11.5h6.5a2.5 2.5 0 0 0 .3-5 3.5 3.5 0 0 0-6.7.9A2.5 2.5 0 0 0 4.5 11.5Z" />
+    </svg>
+  );
+}
+
+export function SettingsLockIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.4} {...props}>
+      <path d="M7 2.8h2l.35 1.1.95.4 1-.55 1.4 1.4-.55 1 .4.95 1.1.35v2l-1.1.35" />
+      <circle cx="8" cy="7.2" r="1.3" />
+      <rect x="2.8" y="9.2" width="5.4" height="4" rx="1" />
+      <path d="M4.2 9.2V8a1.3 1.3 0 0 1 2.6 0v1.2" />
+    </svg>
+  );
+}
+
+export function FolderOpenIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M2.5 5a1 1 0 0 1 1-1H6l1.2 1.2h4.3a1 1 0 0 1 1 1v.5" />
+      <path d="M3.2 7.2h9.6a.8.8 0 0 1 .78 1l-.9 3.3a1 1 0 0 1-.96.7H4.3a1 1 0 0 1-.97-.76L2.5 8.2a.8.8 0 0 1 .7-1Z" />
+    </svg>
+  );
+}
+
 export function QuestionIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>

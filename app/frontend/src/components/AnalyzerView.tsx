@@ -11,12 +11,25 @@ import {
 import type { AnalyzerNodeDto, ContractError, RiskDto } from '../contract/bindings';
 import { formatBytes, normalizeDisplayPath, pluralize } from '../utils/format';
 import {
-  ExplainDrawer,
   TYPED_CONFIRMATION_PHRASE,
   riskClass,
   type ExplainState,
 } from './cleanShared';
-import { BrowseIcon, ChevronDownIcon, ChevronRightIcon, CopyIcon, LockIcon, RefreshIcon } from './Icons';
+import {
+  BrowseIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CloudIcon,
+  CopyIcon,
+  DriveIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  HardDriveIcon,
+  LinkIcon,
+  RefreshIcon,
+  SettingsLockIcon,
+  ShieldIcon,
+} from './Icons';
 
 type FlatAnalyzerRow = { node: AnalyzerNodeDto; depth: number; siblingMax: bigint };
 
@@ -62,27 +75,47 @@ function isNodeSelectable(node: AnalyzerNodeDto, allowDeleteUnknown: boolean): b
   return !!node.selectable;
 }
 
+function isCleanableEligible(node: AnalyzerNodeDto, selectable: boolean): boolean {
+  if (!selectable) return false;
+  const tier = node.tier;
+  return tier === 'Tier1' || tier === 'Tier2' || tier === 'Tier3';
+}
+
+function analyzerStatusPill(node: AnalyzerNodeDto, selectable: boolean, allowDeleteUnknown: boolean): { label: string; className: string } | null {
+  if (node.risk === 'Protected') return { label: 'Protected', className: 'badge risk-Protected' };
+  if (node.path.toLowerCase().endsWith('.vhdx') || node.isLinkPoint || node.isCloudPlaceholder || node.displayOnly) return { label: 'Read-Only', className: 'badge status-readonly-pill' };
+  if (node.risk === 'Unknown' && !allowDeleteUnknown) return { label: 'Unknown', className: 'badge risk-Unknown' };
+  if (node.risk === 'Unknown') return { label: 'Unknown', className: 'badge risk-Unknown' };
+  if (node.risk === 'Caution') return { label: 'Caution', className: 'badge risk-Caution' };
+  if (isCleanableEligible(node, selectable)) return { label: 'Cleanable', className: 'badge status-cleanable' };
+  if (selectable) return { label: 'Safe', className: 'badge risk-Safe' };
+  return null;
+}
+
 function analyzerStatusText(node: AnalyzerNodeDto, selectable: boolean, allowDeleteUnknown: boolean): { text: string; locked: boolean; unknownGated: boolean } {
   if (selectable) {
-    return { text: (node.risk === 'Unknown' || !node.targetId) ? 'Selectable (typed confirmation required)' : 'Selectable', locked: false, unknownGated: false };
+    return { text: (node.risk === 'Unknown' || !node.targetId) ? 'Selectable (typed confirmation required)' : 'Eligible for cleanup', locked: false, unknownGated: false };
   }
   if (node.risk === 'Protected') return { text: 'Protected. Not selectable.', locked: true, unknownGated: false };
   if (node.risk === 'Unknown' && !allowDeleteUnknown) return { text: 'Unknown gated by Settings (Allow deleting unknown folders).', locked: true, unknownGated: true };
   if (node.isLinkPoint) return { text: 'Link Point. Not selectable.', locked: true, unknownGated: false };
   if (node.isCloudPlaceholder) return { text: 'Cloud placeholder (Skipped). Not selectable.', locked: true, unknownGated: false };
-  if (node.path.toLowerCase().endsWith('.vhdx')) return { text: '.vhdx display-only. Not selectable.', locked: true, unknownGated: false };
+  if (node.path.toLowerCase().endsWith('.vhdx')) return { text: 'Read-only virtual disk. Not selectable.', locked: true, unknownGated: false };
   if (node.displayOnly) return { text: 'Display-only. Not selectable.', locked: true, unknownGated: false };
   if (node.reason) return { text: `${node.reason}. Not selectable.`, locked: true, unknownGated: false };
   return { text: 'Not selectable.', locked: true, unknownGated: false };
 }
 
-function guardBadge(node: AnalyzerNodeDto): string | null {
-  if (node.risk === 'Protected') return 'Protected';
-  if (node.path.toLowerCase().endsWith('.vhdx')) return 'Read-Only';
-  if (node.isLinkPoint || node.isCloudPlaceholder || node.displayOnly) return 'Read-Only';
-  if (node.risk === 'Unknown') return 'Unknown';
-  if (node.risk === 'Caution') return 'Caution';
-  return null;
+function analyzerGuidance(node: AnalyzerNodeDto, selectable: boolean, allowDeleteUnknown: boolean): string {
+  if (node.path.toLowerCase().endsWith('.vhdx')) return 'WSL/Hyper-V virtual disk. Read-only in Sweeper. Run `Optimize-VHD` or `wsl --manage` in PowerShell to reclaim unused space.';
+  if (node.risk === 'Protected') return 'Protected system location. Sweeper never removes protected paths.';
+  if (node.isCloudPlaceholder) return 'Cloud placeholder file. Read-only in Analyzer; content may be remote and is not removable here.';
+  if (node.isLinkPoint) return 'Link point (symlink/junction). Read-only in Analyzer to avoid traversing or removing linked targets.';
+  if (node.risk === 'Unknown' && !allowDeleteUnknown) return 'Unknown folder is locked by Settings. Enable "Allow deleting unknown folders" to allow cleanup after typed confirmation.';
+  if (node.risk === 'Unknown') return 'Unknown folder. Review carefully; typed DELETE confirmation is required before cleaning.';
+  if (selectable && isCleanableEligible(node, selectable)) return 'Eligible cache/build artifact under current settings. Selected items are permanently deleted after review and confirmation.';
+  if (selectable) return 'Eligible under current settings. Selected items are permanently deleted after review and confirmation.';
+  return 'Display-only item. It cannot be selected for cleanup in Analyzer.';
 }
 
 function nodeTypeTag(node: AnalyzerNodeDto): string | null {
@@ -92,19 +125,40 @@ function nodeTypeTag(node: AnalyzerNodeDto): string | null {
   return null;
 }
 
-function tierLabel(tier: string | null): string | null {
-  if (tier === 'Tier1') return 'App Temp';
-  if (tier === 'Tier2') return 'Dev Cache';
-  if (tier === 'Tier3') return 'Deep Cleanup';
-  return null;
+function isDriveRoot(node: AnalyzerNodeDto): boolean {
+  return /^[A-Za-z]:\\?$/.test(node.path.trim()) || /^[A-Za-z]:\\$/.test(normalizeDisplayPath(node.path));
+}
+
+function semanticNodeIcon(node: AnalyzerNodeDto) {
+  if (node.path.toLowerCase().endsWith('.vhdx')) return <HardDriveIcon className="row-icon" aria-hidden="true" />;
+  if (node.isLinkPoint) return <LinkIcon className="row-icon" aria-hidden="true" />;
+  if (node.isCloudPlaceholder) return <CloudIcon className="row-icon" aria-hidden="true" />;
+  if (node.risk === 'Protected') return <ShieldIcon className="row-icon" aria-hidden="true" />;
+  if (isDriveRoot(node)) return <DriveIcon className="row-icon" aria-hidden="true" />;
+  return <FolderIcon className="row-icon" aria-hidden="true" />;
+}
+
+function leadingInspectorIcon(node: AnalyzerNodeDto | null) {
+  if (!node) return <FolderIcon className="inspector-leading-icon" aria-hidden="true" />;
+  if (node.path.toLowerCase().endsWith('.vhdx')) return <HardDriveIcon className="inspector-leading-icon" aria-hidden="true" />;
+  if (node.isLinkPoint) return <LinkIcon className="inspector-leading-icon" aria-hidden="true" />;
+  if (node.isCloudPlaceholder) return <CloudIcon className="inspector-leading-icon" aria-hidden="true" />;
+  if (node.risk === 'Protected') return <ShieldIcon className="inspector-leading-icon" aria-hidden="true" />;
+  if (isDriveRoot(node)) return <DriveIcon className="inspector-leading-icon" aria-hidden="true" />;
+  return <FolderIcon className="inspector-leading-icon" aria-hidden="true" />;
 }
 
 async function copyText(text: string) {
   try { await navigator.clipboard?.writeText(text); } catch { /* ignore */ }
 }
+function openContainingFolder(path: string) {
+  const clean = normalizeDisplayPath(path).replace(/[\\/]+$/, '');
+  const idx = clean.lastIndexOf('\\');
+  const folder = idx > 2 ? clean.slice(0, idx) : (clean || 'C:\\');
+  try { window.open(`file:///${folder.replace(/\\/g, '/')}`, '_blank', 'noopener,noreferrer'); } catch { /* ignore */ }
+}
 
 const ALLOC_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#64748b'];
-
 const BROWSE_PATHS = ['C:\\', 'C:\\Users', 'C:\\Windows\\Temp'];
 
 export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { client: SweeperClient; settings: Settings | null; onOpenLog: (logId: string) => void; onOpenSettings?: () => void }) {
@@ -118,7 +172,6 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [inspected, setInspected] = useState<ExplainState>(null);
-  const [drawerExplain, setDrawerExplain] = useState<ExplainState>(null);
   const [preview, setPreview] = useState<{ previewToken: string; breakdown: { targetId: string; targetName: string; selectedCount: string; selectedBytes: string }[]; totalSelectedCount: string; totalSelectedBytes: string; issuedAtMs: number } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [confirmText, setConfirmText] = useState('');
@@ -180,19 +233,10 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   }
 
   function toggleSelect(node: AnalyzerNodeDto) {
-    if (!isNodeSelectable(node, allowDeleteUnknown)) return;
+    if (!isNodeSelectable(node, allowDeleteUnknown)) { void inspectNode(node.id); return; }
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => { const next = new Set(prev); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; });
     void inspectNode(node.id);
-  }
-
-  async function onExplain(itemId: string) {
-    setError(null);
-    try {
-      const ex = await client.explainItem(itemId);
-      setDrawerExplain(ex);
-      setInspected(ex);
-    } catch (e) { setError(formatContractError(e)); }
   }
 
   async function runPreview() {
@@ -256,7 +300,6 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
     let adjusted = raw.map((s) => ({ ...s, pctVisual: s.pct > 0 ? Math.max(minVisual, s.pct) : 0 }));
     const sum = adjusted.reduce((a, b) => a + b.pctVisual, 0);
     if (sum > 100) {
-      // scale down proportionally while keeping min floor
       const over = sum - 100;
       const shrinkable = adjusted.filter((s) => s.pctVisual > minVisual);
       const shrinkSum = shrinkable.reduce((a, b) => a + (b.pctVisual - minVisual), 0);
@@ -325,13 +368,17 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   }
 
   const inspectedNode = inspected ? nodesById.get(inspected.itemId) ?? null : null;
-  const inspectedStatus = inspectedNode ? analyzerStatusText(inspectedNode, isNodeSelectable(inspectedNode, allowDeleteUnknown), allowDeleteUnknown) : null;
+  const inspectedSelectable = inspectedNode ? isNodeSelectable(inspectedNode, allowDeleteUnknown) : false;
+  const inspectedStatus = inspectedNode ? analyzerStatusText(inspectedNode, inspectedSelectable, allowDeleteUnknown) : null;
+  const inspectedPill = inspectedNode ? analyzerStatusPill(inspectedNode, inspectedSelectable, allowDeleteUnknown) : null;
   const hasResult = !!result;
 
+  const displayPath = normalizeDisplayPath((analyzedPath || rootPath).trim() || 'C:\\');
+  const isAtRoot = /^([A-Za-z]:\\)$/.test(displayPath);
   const breadcrumbParts = useMemo(() => {
-    const p = normalizeDisplayPath((analyzedPath || rootPath).trim() || 'C:\\');
+    const p = displayPath;
     return p.split('\\').filter(Boolean).map((seg, i, arr) => ({ label: i === 0 ? `${seg}\\` : seg, path: arr.slice(0, i + 1).join('\\') + (i === 0 ? '\\' : '') }));
-  }, [analyzedPath, rootPath]);
+  }, [displayPath]);
 
   return (
     <div className="view-stack">
@@ -369,7 +416,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
             return <button key={label} type="button" className="pill-btn" onClick={() => { setRootPath(value); if (hasResult) void runAnalyzer(value); }} disabled={analyzing || cleaning}>{label}</button>;
           })}
         </div>
-        <input type="search" className="analyzer-search-input" placeholder="Search folders..." value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search analyzer folders" disabled={!result} />
+        <input type="search" className="analyzer-search-input" placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search analyzer folders" disabled={!result} />
         <label className="toolbar-group">Sort
           <select value={sort} onChange={(e) => setSort(e.target.value as 'size' | 'items' | 'name')} aria-label="Sort analyzer" disabled={!result}>
             <option value="size">Size</option>
@@ -378,7 +425,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
           </select>
         </label>
       </div>
-      {analyzedPath && (
+      {analyzedPath && !isAtRoot && (
         <div className="analyzer-breadcrumb" aria-label="Analyzed path">
           {breadcrumbParts.map((part, i) => (
             <span key={part.path} className="breadcrumb-seg">
@@ -424,25 +471,21 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                 </div>
               </div>
               <div className="pane-body flush">
-                <div
-                  className="analyzer-viewport"
-                  role="tree"
-                  aria-label="Analyzer results tree"
-                  tabIndex={0}
-                >
+                <div className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" tabIndex={0}>
                   {flatRows.map(({ node, depth, siblingMax }) => {
                     const selectable = isNodeSelectable(node, allowDeleteUnknown);
                     const checked = selectedIds.has(node.id);
                     const hasChildren = node.isDir && (node.children?.length ?? 0) > 0;
                     const isExpanded = expanded.has(node.id);
                     const status = analyzerStatusText(node, selectable, allowDeleteUnknown);
-                    const badge = guardBadge(node);
+                    const pill = analyzerStatusPill(node, selectable, allowDeleteUnknown);
                     const typeTag = nodeTypeTag(node);
                     const nodeSize = BigInt(node.sizeBytes || '0');
                     const share = siblingMax > 0n ? Number((nodeSize * 10000n) / siblingMax) / 100 : 0;
                     const shareLabel = share < 0.1 ? '<0.1%' : `${share.toFixed(1)}%`;
                     const pathDisplay = normalizeDisplayPath(node.path);
                     const inspectedMatch = inspected?.itemId === node.id;
+                    const lockedIcon = (node.risk === 'Unknown' && !allowDeleteUnknown) ? <SettingsLockIcon className="analyzer-lock-only" aria-hidden="true" /> : <ShieldIcon className="analyzer-lock-only" aria-hidden="true" />;
                     return (
                       <div
                         key={node.id}
@@ -451,7 +494,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                         aria-selected={checked}
                         aria-level={depth + 1}
                         tabIndex={0}
-                        className={`analyzer-row ${checked ? 'selected' : ''} ${inspectedMatch ? 'inspected' : ''}`}
+                        className={`analyzer-row ${inspectedMatch ? 'inspected' : ''}`}
                         onClick={() => { void inspectNode(node.id); if (selectable) toggleSelect(node); }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
@@ -466,12 +509,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                             {Array.from({ length: depth }).map((_, i) => <span key={i} className="indent-step" />)}
                           </span>
                           {hasChildren ? (
-                            <button
-                              type="button"
-                              className="tree-toggle"
-                              onClick={(e) => { e.stopPropagation(); toggleExpand(node); }}
-                              aria-label={isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`}
-                            >
+                            <button type="button" className="tree-toggle" onClick={(e) => { e.stopPropagation(); toggleExpand(node); }} aria-label={isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`}>
                               {isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
                             </button>
                           ) : (
@@ -480,27 +518,16 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                           <span className={`analyzer-select-wrap ${status.locked ? 'locked' : ''}`} onClick={(e) => e.stopPropagation()}>
                             {status.locked ? (
                               <label className="checkbox analyzer-checkbox analyzer-checkbox-locked" title="Not selectable">
-                                <LockIcon className="analyzer-lock-only" aria-hidden="true" />
-                                <input
-                                  type="checkbox"
-                                  aria-label={`Select analyzer node ${node.path}`}
-                                  checked={checked}
-                                  disabled
-                                  readOnly
-                                />
+                                {lockedIcon}
+                                <input type="checkbox" aria-label={`Select analyzer node ${node.path}`} checked={checked} disabled readOnly />
                               </label>
                             ) : (
                               <label className="checkbox analyzer-checkbox" title={selectable ? 'Select for Review & Clean' : 'Not selectable'}>
-                                <input
-                                  type="checkbox"
-                                  aria-label={`Select analyzer node ${node.path}`}
-                                  checked={checked}
-                                  disabled={!selectable || cleaning}
-                                  onChange={() => toggleSelect(node)}
-                                />
+                                <input type="checkbox" aria-label={`Select analyzer node ${node.path}`} checked={checked} disabled={!selectable || cleaning} onChange={() => toggleSelect(node)} />
                               </label>
                             )}
                           </span>
+                          {semanticNodeIcon(node)}
                           <div className="analyzer-node-main">
                             <div className="analyzer-name-line">
                               <span className="analyzer-name" title={node.name}>{node.name}</span>
@@ -517,7 +544,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                         </div>
                         <div className="analyzer-col-count muted num">{node.itemCount}</div>
                         <div className="analyzer-col-guard">
-                          {badge ? <span className={badge === 'Read-Only' ? 'status-muted status-readonly' : (badge === 'Protected' || badge === 'Unknown' || badge === 'Caution' ? riskClass(badge as RiskDto) : 'status-muted')}>{badge}</span> : <span className="status-muted-inline" />}
+                          {pill ? <span className={pill.className}>{pill.label}</span> : <span className="status-muted-inline" />}
                         </div>
                       </div>
                     );
@@ -533,39 +560,38 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
               </div>
               <div className="detail-scroll">
                 <div className="inspector-section" aria-label="Analyzer inspector">
-                  {inspected ? (
+                  {inspected && inspectedNode ? (
                     <>
-                      <p className="inspector-headline">
-                        <span className="inspector-headline-name" title={normalizeDisplayPath(inspectedNode?.path ?? inspected.itemId)}>{inspected.title}</span>
-                        <span className={riskClass(inspected.risk)}>{inspected.risk}</span>
-                      </p>
-                      <dl className="kv kv-stacked">
-                        <div className="kv-block"><dt>What is it?</dt><dd>{inspected.description}</dd></div>
-                        <div className="kv-block"><dt>What happens if deleted?</dt><dd>{inspected.risk === 'Protected' ? 'Nothing will be deleted. Protected Paths are never removable.' : (inspectedNode && (inspectedNode.displayOnly || inspectedNode.isLinkPoint || inspectedNode.isCloudPlaceholder || inspectedNode.path.toLowerCase().endsWith('.vhdx')) ? 'This item is display-only and cannot be deleted from Analyzer.' : 'The selected item is permanently deleted and bypasses the Recycle Bin when you confirm Review & Clean.')}</dd></div>
-                        <div className="kv-block"><dt>Status &amp; Eligibility</dt><dd>{inspectedStatus ? inspectedStatus.text : '—'}</dd></div>
-                        {inspectedNode?.tier && <div className="kv-block"><dt>Tier</dt><dd>{tierLabel(inspectedNode.tier) ?? inspectedNode.tier}</dd></div>}
-                        <div className="kv-block kv-path-block"><dt>Full Path</dt>
-                          <dd>
-                            <div className="path-well">
-                              <span className="mono path-well-text" title={normalizeDisplayPath(inspectedNode?.path ?? inspected.itemId)}>{normalizeDisplayPath(inspectedNode?.path ?? inspected.itemId)}</span>
-                              <button type="button" className="icon-only-btn subtle path-copy-btn" onClick={() => void copyText(normalizeDisplayPath(inspectedNode?.path ?? inspected.itemId))} aria-label="Copy path" title="Copy path"><CopyIcon /></button>
-                            </div>
-                          </dd>
+                      <div className="inspector-header-block">
+                        <div className="inspector-title-row">
+                          {leadingInspectorIcon(inspectedNode)}
+                          <div className="inspector-title-copy">
+                            <span className="inspector-headline-name" title={normalizeDisplayPath(inspectedNode.path)}>{inspected.title || inspectedNode.name}</span>
+                            <span className="inspector-subtitle muted">{nodeTypeTag(inspectedNode) ?? (isDriveRoot(inspectedNode) ? 'Drive' : 'Folder')}</span>
+                          </div>
+                          {inspectedPill ? <span className={inspectedPill.className}>{inspectedPill.label}</span> : <span className={riskClass(inspected.risk)}>{inspected.risk}</span>}
                         </div>
+                      </div>
+                      <dl className="inspector-meta-grid" aria-label="Node metadata">
+                        <div><dt>Size</dt><dd className="num">{formatBytes(inspectedNode.sizeBytes)}</dd></div>
+                        <div><dt>Items</dt><dd className="num">{inspectedNode.itemCount}</dd></div>
+                        <div><dt>Safety</dt><dd>{inspectedNode.risk === 'Protected' ? 'Protected' : (inspectedNode.path.toLowerCase().endsWith('.vhdx') || inspectedNode.isLinkPoint || inspectedNode.isCloudPlaceholder || inspectedNode.displayOnly ? 'Read-Only' : inspectedNode.risk)}</dd></div>
+                        <div><dt>Eligibility</dt><dd>{inspectedStatus ? (inspectedSelectable ? 'Eligible' : inspectedStatus.text) : '—'}</dd></div>
                       </dl>
-                      <div className="row inspector-actions">
-                        <button className="btn small" onClick={() => void onExplain(inspected.itemId)} aria-label="Explain">Explain</button>
-                        {inspectedStatus?.unknownGated && onOpenSettings && (
-                          <button className="btn small" onClick={onOpenSettings}>Open Settings →</button>
-                        )}
+                      <p className="inspector-guidance">{analyzerGuidance(inspectedNode, inspectedSelectable, allowDeleteUnknown)}</p>
+                      {inspectedStatus?.unknownGated && onOpenSettings && (
+                        <button type="button" className="btn small inspector-inline-link" onClick={onOpenSettings}>Unlock in Settings →</button>
+                      )}
+                      <div className="path-strip" aria-label="Full path">
+                        <span className="mono path-strip-text" title={normalizeDisplayPath(inspectedNode.path)}>{normalizeDisplayPath(inspectedNode.path) || 'C:\\'}</span>
+                        <button type="button" className="icon-only-btn subtle path-strip-btn" onClick={() => void copyText(normalizeDisplayPath(inspectedNode.path))} aria-label="Copy path" title="Copy path"><CopyIcon /></button>
+                        <button type="button" className="icon-only-btn subtle path-strip-btn" onClick={() => openContainingFolder(normalizeDisplayPath(inspectedNode.path))} aria-label="Open Folder" title="Open Folder"><FolderOpenIcon /></button>
                       </div>
                     </>
                   ) : (
                     <p className="inspector-empty">Select a node to see its purpose, risk, full path, and eligibility.</p>
                   )}
                 </div>
-
-                {null}
 
                 {requiresConfirmation && (
                   <div className="notice warn" role="note">
@@ -638,8 +664,6 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
           </div>
         </>
       )}
-
-      <ExplainDrawer explain={drawerExplain} onClose={() => setDrawerExplain(null)} />
     </div>
   );
 }

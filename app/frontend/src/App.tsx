@@ -4,7 +4,7 @@ import './styles/tokens.css';
 import './App.css';
 import { createClient, formatContractError, type ElevationStatus, type Settings } from './api/client';
 import { AnalyzerView } from './components/AnalyzerView';
-import { AnalyzerIcon, LogsIcon, MoonIcon, ScanIcon, SettingsIcon, ShieldIcon, SunIcon } from './components/Icons';
+import { AnalyzerIcon, LogsIcon, ScanIcon, SettingsIcon, ShieldIcon } from './components/Icons';
 import { LogsView } from './components/LogsView';
 import { ScanAndPreviewView } from './components/ScanAndPreviewView';
 import { SettingsView } from './components/SettingsView';
@@ -105,28 +105,6 @@ export function App() {
             >
               <ShieldIcon className="privilege-icon" />
               <span>{privilegeText}</span>
-            </div>
-            <div className="sidebar-theme-icons" role="group" aria-label="Theme">
-              <button
-                type="button"
-                className={`icon-only-btn subtle theme-icon-btn ${theme === 'light' ? 'active' : ''}`}
-                aria-label="Light"
-                aria-pressed={theme === 'light'}
-                title="Light"
-                onClick={() => setTheme('light')}
-              >
-                <SunIcon />
-              </button>
-              <button
-                type="button"
-                className={`icon-only-btn subtle theme-icon-btn ${theme === 'dark' ? 'active' : ''}`}
-                aria-label="Dark"
-                aria-pressed={theme === 'dark'}
-                title="Dark"
-                onClick={() => setTheme('dark')}
-              >
-                <MoonIcon />
-              </button>
             </div>
           </div>
         </div>
