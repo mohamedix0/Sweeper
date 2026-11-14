@@ -70,6 +70,16 @@ export type StartAnalyzerResult = {
   root: AnalyzerNodeDto;
 };
 
+export type Settings = {
+  enableTier1: boolean;
+  enableTier2: boolean;
+  enableTier3: boolean;
+  minAgeHours: number;
+  allowDeleteUnknown: boolean;
+  customPaths: string[];
+  staleProjectDays: number;
+};
+
 export interface SweeperClient {
   startScan(tiers: TierDto[] | null, onProgress?: (e: ScanProgress) => void): Promise<{ sessionId: string }>;
   getScanResults(sessionId: string): Promise<ScanResults>;
@@ -81,26 +91,8 @@ export interface SweeperClient {
   executeClean(previewToken: string, onProgress?: (e: CleanProgressEvent) => void): Promise<ExecuteCleanResponse>;
   startAnalyzer(root: string | null, onProgress?: (e: AnalyzerProgressEvent) => void): Promise<StartAnalyzerResult>;
   explainItem(itemId: string): Promise<{ itemId: string; title: string; description: string; risk: RiskDto }>;
-  getSettings(): Promise<{
-    enableTier1: boolean;
-    enableTier2: boolean;
-    enableTier3: boolean;
-    minAgeHours: number;
-    allowDeleteUnknown: boolean;
-  }>;
-  updateSettings(settings: {
-    enableTier1: boolean;
-    enableTier2: boolean;
-    enableTier3: boolean;
-    minAgeHours: number;
-    allowDeleteUnknown: boolean;
-  }): Promise<{
-    enableTier1: boolean;
-    enableTier2: boolean;
-    enableTier3: boolean;
-    minAgeHours: number;
-    allowDeleteUnknown: boolean;
-  }>;
+  getSettings(): Promise<Settings>;
+  updateSettings(settings: Settings): Promise<Settings>;
   validateCustomPath(path: string): Promise<{ path: string; allowed: boolean; reason: string }>;
   listLogs(): Promise<{ id: string; name: string; modifiedUnixSecs: string | null; sizeBytes: string | null }[]>;
   readLog(logId: string): Promise<{ id: string; content: string }>;

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use sweeper_contract::{
     AnalyzerNodeDto, AnalyzerProgressEvent, ContractError, ExecuteCleanResponse,
     PreviewCleanResponse, PreviewConfirmationsDto, PreviewTargetBreakdownDto, RiskDto, ScanItemDto,
-    ScanResultsDto, SettingsDto, SkippedReasonDto, StartAnalyzerResponse, StartScanResponse,
+    ScanResultsDto, SkippedReasonDto, StartAnalyzerResponse, StartScanResponse,
     TargetScanResultDto, TierDto, U64String,
 };
 use sweeper_core::analyzer::{
@@ -19,12 +19,14 @@ use sweeper_core::analyzer::{
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::remover::{self, CleanOptions, CleanProgress, ValidatedItem};
 use sweeper_core::scanner::{self, ScanReport};
+use sweeper_core::settings::SweeperSettings;
 use sweeper_core::{Risk, Tier};
 
 use crate::clock::Clock;
 
 const SCAN_SESSION_TTL_SECS: u64 = 15 * 60;
 const PREVIEW_TOKEN_TTL_SECS: u64 = 10 * 60;
+const TYPED_CONFIRMATION_PHRASE: &str = "DELETE";
 
 /// Stored scan item with metadata for preview/validation.
 #[derive(Debug, Clone)]
@@ -157,6 +159,13 @@ impl SessionStore {
         self.sessions.insert(session.id.clone(), session);
     }
 
+    /// Explicitly invalidate all active scan/analyzer sessions and preview tokens.
+    pub fn invalidate_all_sessions(&mut self) {
+        self.sessions.clear();
+        self.analyzer_sessions.clear();
+        self.preview_tokens.clear();
+    }
+
     /// Direct access helper for tests: create a basic session with provided items/results.
     pub fn create_test_session_with_items(
         &mut self,
@@ -196,22 +205,24 @@ impl SessionStore {
         &mut self,
         clock: &C,
         tiers: Option<Vec<TierDto>>,
-        settings: &SettingsDto,
+        settings: &SweeperSettings,
         settings_generation: u64,
     ) -> Result<StartScanResponse, ContractError> {
         self.cleanup(clock);
         let now = clock.now_unix_secs();
-        let enabled_tiers = resolve_enabled_tiers(tiers.as_deref(), settings);
-        let targets = sweeper_core::knowledge::embedded_targets()
-            .into_iter()
-            .filter(|t| tier_enabled(t.tier, &enabled_tiers))
-            .collect::<Vec<_>>();
 
-        let report = scanner::scan_targets(targets, settings.min_age_hours).map_err(|e| {
-            ContractError::Internal {
+        let mut effective = settings.clone();
+        if let Some(req) = tiers.as_deref().filter(|t| !t.is_empty()) {
+            let req_set: HashSet<TierDto> = req.iter().copied().collect();
+            effective.enable_tier1 = effective.enable_tier1 && req_set.contains(&TierDto::Tier1);
+            effective.enable_tier2 = effective.enable_tier2 && req_set.contains(&TierDto::Tier2);
+            effective.enable_tier3 = effective.enable_tier3 && req_set.contains(&TierDto::Tier3);
+        }
+
+        let report =
+            scanner::scan_with_settings(&effective).map_err(|e| ContractError::Internal {
                 reason: sanitize_reason(&e.to_string()),
-            }
-        })?;
+            })?;
 
         let session_id = self.next_id("scan", now);
         let (results, items, target_roots) = map_report_to_session(&session_id, report);
@@ -222,7 +233,7 @@ impl SessionStore {
             results,
             items,
             target_roots,
-            min_age_hours: settings.min_age_hours,
+            min_age_hours: effective.min_age_hours,
         };
         self.sessions.insert(session_id.clone(), session);
         Ok(StartScanResponse { session_id })
@@ -246,7 +257,7 @@ impl SessionStore {
         &mut self,
         clock: &C,
         root: Option<String>,
-        settings: &SettingsDto,
+        settings: &SweeperSettings,
         settings_generation: u64,
         progress_cb: Option<P>,
     ) -> Result<StartAnalyzerResponse, ContractError>
@@ -360,8 +371,7 @@ impl SessionStore {
             let ok = confirmations
                 .as_ref()
                 .and_then(|c| c.typed_confirmation.as_deref())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
+                == Some(TYPED_CONFIRMATION_PHRASE);
             if !ok {
                 return Err(ContractError::InvalidInput {
                     reason: "typed confirmation required".to_string(),
@@ -488,8 +498,7 @@ impl SessionStore {
             let ok = confirmations
                 .as_ref()
                 .and_then(|c| c.typed_confirmation.as_deref())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
+                == Some(TYPED_CONFIRMATION_PHRASE);
             if !ok {
                 return Err(ContractError::InvalidInput {
                     reason: "typed confirmation required".to_string(),
@@ -874,45 +883,8 @@ fn analyzer_session_valid_at(
     now.saturating_sub(session.created_at) <= SCAN_SESSION_TTL_SECS
 }
 
-fn resolve_enabled_tiers(
-    requested: Option<&[TierDto]>,
-    settings: &SettingsDto,
-) -> HashSet<TierDto> {
-    let mut set = HashSet::new();
-    let base = |tier: TierDto, settings: &SettingsDto| match tier {
-        TierDto::Tier1 => settings.enable_tier1,
-        TierDto::Tier2 => settings.enable_tier2,
-        TierDto::Tier3 => settings.enable_tier3,
-    };
-    match requested {
-        Some(req) if !req.is_empty() => {
-            for t in req {
-                if base(*t, settings) {
-                    set.insert(*t);
-                }
-            }
-        }
-        _ => {
-            if settings.enable_tier1 {
-                set.insert(TierDto::Tier1);
-            }
-            if settings.enable_tier2 {
-                set.insert(TierDto::Tier2);
-            }
-            if settings.enable_tier3 {
-                set.insert(TierDto::Tier3);
-            }
-        }
-    }
-    set
-}
-
-fn tier_enabled(tier: Tier, enabled: &HashSet<TierDto>) -> bool {
-    match tier {
-        Tier::Tier1 => enabled.contains(&TierDto::Tier1),
-        Tier::Tier2 => enabled.contains(&TierDto::Tier2),
-        Tier::Tier3 => enabled.contains(&TierDto::Tier3),
-    }
+fn is_custom_path_scan_target(target_id: &str) -> bool {
+    target_id == "custom-path" || target_id.starts_with("custom-path-")
 }
 
 fn tier_to_dto(t: Tier) -> TierDto {
@@ -1017,7 +989,7 @@ fn map_report_to_session(
                             tier: t.tier,
                             risk: t.risk,
                             age_eligible: i.age_eligible,
-                            requires_typed_confirmation: false,
+                            requires_typed_confirmation: is_custom_path_scan_target(&t.target_id),
                         },
                     );
                     dto

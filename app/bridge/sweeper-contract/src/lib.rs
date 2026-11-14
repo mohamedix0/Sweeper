@@ -381,10 +381,14 @@ pub struct SettingsDto {
     pub enable_tier2: bool,
     /// Whether Tier 3 targets are enabled (disabled by default in v1).
     pub enable_tier3: bool,
-    /// Minimum age in hours (default 24).
+    /// Minimum age in hours (default 24). Values below 24 are allowed but should be warned in UI.
     pub min_age_hours: u32,
-    /// Allow deleting unknown folders (advanced; still gated).
+    /// Allow deleting/cleaning `Unknown` analyzer selections when explicitly enabled and confirmed.
     pub allow_delete_unknown: bool,
+    /// Validated canonical Custom Path roots (contents-only). Protected paths are never stored.
+    pub custom_paths: Vec<String>,
+    /// Project staleness threshold in days for Tier 3 stale Rust `target/` and `node_modules` discovery.
+    pub stale_project_days: u32,
 }
 
 impl Default for SettingsDto {
@@ -395,6 +399,8 @@ impl Default for SettingsDto {
             enable_tier3: false,
             min_age_hours: 24,
             allow_delete_unknown: false,
+            custom_paths: Vec::new(),
+            stale_project_days: 30,
         }
     }
 }
