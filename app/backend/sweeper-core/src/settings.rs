@@ -119,82 +119,62 @@ impl SweeperSettings {
             return SanitizedSettings { settings, warnings };
         };
 
-        if let Some(v) = obj.get("enable_tier1").or_else(|| obj.get("enableTier1")) {
-            match v.as_bool() {
-                Some(b) => settings.enable_tier1 = b,
-                None => warnings.push("enable_tier1 invalid; using default".to_string()),
-            }
-        }
-        if let Some(v) = obj.get("enable_tier2").or_else(|| obj.get("enableTier2")) {
-            match v.as_bool() {
-                Some(b) => settings.enable_tier2 = b,
-                None => warnings.push("enable_tier2 invalid; using default".to_string()),
-            }
-        }
-        if let Some(v) = obj.get("enable_tier3").or_else(|| obj.get("enableTier3")) {
-            match v.as_bool() {
-                Some(b) => settings.enable_tier3 = b,
-                None => warnings.push("enable_tier3 invalid; using default".to_string()),
-            }
-        }
-
-        if let Some(v) = obj.get("min_age_hours").or_else(|| obj.get("minAgeHours")) {
-            match v.as_u64() {
-                Some(n) if n <= u64::from(MAX_MIN_AGE_HOURS) => settings.min_age_hours = n as u32,
-                Some(_) => {
-                    settings.min_age_hours = DEFAULT_MIN_AGE_HOURS;
-                    warnings
-                        .push("min_age_hours out of bounds; reset to default (24h)".to_string());
-                }
-                None => warnings.push("min_age_hours invalid; using default".to_string()),
-            }
-        }
-
-        if let Some(v) = obj
-            .get("allow_delete_unknown")
-            .or_else(|| obj.get("allowDeleteUnknown"))
-        {
-            match v.as_bool() {
-                Some(b) => settings.allow_delete_unknown = b,
-                None => warnings.push("allow_delete_unknown invalid; using default".to_string()),
-            }
-        }
-
-        if let Some(v) = obj
-            .get("stale_project_days")
-            .or_else(|| obj.get("staleProjectDays"))
-        {
-            match v.as_u64() {
-                Some(n)
-                    if (u64::from(MIN_STALE_PROJECT_DAYS)..=u64::from(MAX_STALE_PROJECT_DAYS))
-                        .contains(&n) =>
-                {
-                    settings.stale_project_days = n as u32;
-                }
-                Some(_) => {
-                    settings.stale_project_days = DEFAULT_STALE_PROJECT_DAYS;
-                    warnings.push(
-                        "stale_project_days out of bounds; reset to default (30d)".to_string(),
-                    );
-                }
-                None => warnings.push("stale_project_days invalid; using default".to_string()),
-            }
-        }
-
-        if let Some(v) = obj.get("custom_paths").or_else(|| obj.get("customPaths")) {
-            settings.custom_paths = sanitize_custom_paths_value(v, &mut warnings);
-        }
-
-        // Protected paths/exclusions are never stored in or overridable via settings.
-        if obj.contains_key("protected_paths")
-            || obj.contains_key("protectedPaths")
-            || obj.contains_key("exclusions")
-        {
-            warnings.push(
-                "protected path/exclusion overrides are ignored (not configurable via settings)"
-                    .to_string(),
-            );
-        }
+        extract_bool_field(
+            obj,
+            &["enable_tier1", "enableTier1"],
+            &mut settings.enable_tier1,
+            "enable_tier1",
+            &mut warnings,
+        );
+        extract_bool_field(
+            obj,
+            &["enable_tier2", "enableTier2"],
+            &mut settings.enable_tier2,
+            "enable_tier2",
+            &mut warnings,
+        );
+        extract_bool_field(
+            obj,
+            &["enable_tier3", "enableTier3"],
+            &mut settings.enable_tier3,
+            "enable_tier3",
+            &mut warnings,
+        );
+        extract_u32_field(
+            obj,
+            U32FieldSpec {
+                keys: &["min_age_hours", "minAgeHours"],
+                min: 0,
+                max: MAX_MIN_AGE_HOURS,
+                default: DEFAULT_MIN_AGE_HOURS,
+                invalid_name: "min_age_hours",
+                out_of_bounds_warning: "min_age_hours out of bounds; reset to default (24h)",
+            },
+            &mut settings.min_age_hours,
+            &mut warnings,
+        );
+        extract_bool_field(
+            obj,
+            &["allow_delete_unknown", "allowDeleteUnknown"],
+            &mut settings.allow_delete_unknown,
+            "allow_delete_unknown",
+            &mut warnings,
+        );
+        extract_u32_field(
+            obj,
+            U32FieldSpec {
+                keys: &["stale_project_days", "staleProjectDays"],
+                min: MIN_STALE_PROJECT_DAYS,
+                max: MAX_STALE_PROJECT_DAYS,
+                default: DEFAULT_STALE_PROJECT_DAYS,
+                invalid_name: "stale_project_days",
+                out_of_bounds_warning: "stale_project_days out of bounds; reset to default (30d)",
+            },
+            &mut settings.stale_project_days,
+            &mut warnings,
+        );
+        parse_custom_paths_field(obj, &mut settings, &mut warnings);
+        push_protected_override_warning(obj, &mut warnings);
 
         SanitizedSettings { settings, warnings }
     }
@@ -276,6 +256,99 @@ fn validate_custom_paths_value(value: &serde_json::Value) -> Result<(), String> 
     Ok(())
 }
 
+fn get_field<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<&'a serde_json::Value> {
+    keys.iter().find_map(|k| obj.get(*k))
+}
+
+fn extract_bool_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+    target: &mut bool,
+    field_name: &str,
+    warnings: &mut Vec<String>,
+) {
+    let Some(v) = get_field(obj, keys) else {
+        return;
+    };
+    match v.as_bool() {
+        Some(b) => *target = b,
+        None => warnings.push(format!("{field_name} invalid; using default")),
+    }
+}
+
+struct U32FieldSpec<'a> {
+    keys: &'a [&'a str],
+    min: u32,
+    max: u32,
+    default: u32,
+    invalid_name: &'a str,
+    out_of_bounds_warning: &'a str,
+}
+
+fn extract_u32_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    spec: U32FieldSpec<'_>,
+    target: &mut u32,
+    warnings: &mut Vec<String>,
+) {
+    let Some(v) = get_field(obj, spec.keys) else {
+        return;
+    };
+    match v.as_u64() {
+        Some(n) if (u64::from(spec.min)..=u64::from(spec.max)).contains(&n) => *target = n as u32,
+        Some(_) => {
+            *target = spec.default;
+            warnings.push(spec.out_of_bounds_warning.to_string());
+        }
+        None => warnings.push(format!("{} invalid; using default", spec.invalid_name)),
+    }
+}
+
+fn parse_custom_paths_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    settings: &mut SweeperSettings,
+    warnings: &mut Vec<String>,
+) {
+    let Some(v) = get_field(obj, &["custom_paths", "customPaths"]) else {
+        return;
+    };
+    settings.custom_paths = sanitize_custom_paths_value(v, warnings);
+}
+
+fn push_protected_override_warning(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    warnings: &mut Vec<String>,
+) {
+    if obj.contains_key("protected_paths")
+        || obj.contains_key("protectedPaths")
+        || obj.contains_key("exclusions")
+    {
+        warnings.push(
+            "protected path/exclusion overrides are ignored (not configurable via settings)"
+                .to_string(),
+        );
+    }
+}
+
+fn try_normalize_custom_path(s: &str, seen: &mut HashSet<String>) -> Result<String, String> {
+    let verdict = crate::policy::validate_custom_path(s);
+    if !verdict.allowed {
+        return Err(format!("custom path dropped: {}", verdict.reason));
+    }
+    let canon = CanonicalPath::parse_lexical(s)
+        .map_err(|_| "custom path dropped: invalid path".to_string())?
+        .as_str()
+        .to_string();
+    let key = canon.to_ascii_uppercase();
+    if !seen.insert(key) {
+        return Err("custom path dropped: duplicate".to_string());
+    }
+    Ok(canon)
+}
+
 fn sanitize_custom_paths_value(
     value: &serde_json::Value,
     warnings: &mut Vec<String>,
@@ -291,24 +364,10 @@ fn sanitize_custom_paths_value(
             warnings.push("custom path entry dropped: not a string".to_string());
             continue;
         };
-        let verdict = crate::policy::validate_custom_path(s);
-        if !verdict.allowed {
-            warnings.push(format!("custom path dropped: {}", verdict.reason));
-            continue;
+        match try_normalize_custom_path(s, &mut seen) {
+            Ok(canon) => out.push(canon),
+            Err(msg) => warnings.push(msg),
         }
-        let canon = match CanonicalPath::parse_lexical(s) {
-            Ok(c) => c.as_str().to_string(),
-            Err(_) => {
-                warnings.push("custom path dropped: invalid path".to_string());
-                continue;
-            }
-        };
-        let key = canon.to_ascii_uppercase();
-        if !seen.insert(key) {
-            warnings.push("custom path dropped: duplicate".to_string());
-            continue;
-        }
-        out.push(canon);
     }
     out
 }

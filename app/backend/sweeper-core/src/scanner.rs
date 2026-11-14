@@ -344,86 +344,94 @@ fn scan_one_root_iterative(
 }
 
 fn process_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
-    match ent.reparse {
-        ReparseTagClass::LinkPoint => {
-            bump_skip(ctx.out, SkipReason::LinkPoint);
-            return;
-        }
-        ReparseTagClass::CloudPlaceholder => {
-            bump_skip(ctx.out, SkipReason::CloudPlaceholder);
-            return;
-        }
-        ReparseTagClass::OtherReparse(_) => {
-            bump_skip(ctx.out, SkipReason::OtherReparse);
-            return;
-        }
-        ReparseTagClass::NotReparse => {}
-    }
+    process_directory_entry(ctx, ent);
+}
 
-    if ent.is_dir {
-        // Re-check via handle reparse inspection for defense-in-depth (no follow).
-        match sweeper_winfs::open_for_inspection(&ent.path)
-            .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
-        {
-            Ok(ReparseTagClass::LinkPoint) => {
-                bump_skip(ctx.out, SkipReason::LinkPoint);
-                return;
-            }
-            Ok(ReparseTagClass::CloudPlaceholder) => {
-                bump_skip(ctx.out, SkipReason::CloudPlaceholder);
-                return;
-            }
-            Ok(ReparseTagClass::OtherReparse(_)) => {
-                bump_skip(ctx.out, SkipReason::OtherReparse);
-                return;
-            }
-            Ok(ReparseTagClass::NotReparse) => {}
-            Err(e) => {
-                bump_skip_with_context(
-                    ctx.out,
-                    SkipReason::Unreadable,
-                    format!("inspect_reparse_point {}: {e}", ent.path.to_string_lossy()),
-                );
-                return;
-            }
-        }
-        ctx.stack.push(ent.path.clone());
+fn process_directory_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
+    if let Some(reason) = skip_reason_for_reparse(ent.reparse) {
+        bump_skip(ctx.out, reason);
         return;
     }
+    if ent.is_dir {
+        handle_directory_entry(ctx, ent);
+        return;
+    }
+    record_file_entry(ctx, ent);
+}
 
-    // Regular file entry.
-    let size = ent.size;
+fn skip_reason_for_reparse(reparse: ReparseTagClass) -> Option<SkipReason> {
+    match reparse {
+        ReparseTagClass::LinkPoint => Some(SkipReason::LinkPoint),
+        ReparseTagClass::CloudPlaceholder => Some(SkipReason::CloudPlaceholder),
+        ReparseTagClass::OtherReparse(_) => Some(SkipReason::OtherReparse),
+        ReparseTagClass::NotReparse => None,
+    }
+}
+
+fn handle_directory_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
+    match inspect_directory_reparse(ent) {
+        Ok(None) => ctx.stack.push(ent.path.clone()),
+        Ok(Some(reason)) => bump_skip(ctx.out, reason),
+        Err(msg) => bump_skip_with_context(ctx.out, SkipReason::Unreadable, msg),
+    }
+}
+
+fn inspect_directory_reparse(ent: &DirEntry) -> Result<Option<SkipReason>, String> {
+    let class = sweeper_winfs::open_for_inspection(&ent.path)
+        .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
+        .map_err(|e| format!("inspect_reparse_point {}: {e}", ent.path.to_string_lossy()))?;
+    Ok(skip_reason_for_reparse(class))
+}
+
+fn record_file_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
     let mtime_secs = filetime_to_unix_secs(ent.last_write_time);
-    let mtime_st = UNIX_EPOCH + Duration::from_secs(mtime_secs);
-    let future = mtime_st > ctx.now;
-    let old_enough = !future
-        && ctx
-            .now
-            .duration_since(mtime_st)
-            .map(|d| d >= ctx.min_age)
-            .unwrap_or(false);
-
-    let file_identity = sweeper_winfs::open_for_inspection(&ent.path)
-        .and_then(|h| sweeper_winfs::get_file_identity(&h))
-        .ok();
-
+    let old_enough = is_file_age_eligible(mtime_secs, ctx.now, ctx.min_age);
     *ctx.next_item_seq += 1;
-    let item = ScanItem {
+    let item = build_scan_item(ctx, ent, mtime_secs, old_enough);
+    accumulate_file_item(ctx.out, &item);
+    ctx.out.items.push(item);
+}
+
+fn is_file_age_eligible(mtime_secs: u64, now: SystemTime, min_age: Duration) -> bool {
+    let mtime_st = UNIX_EPOCH + Duration::from_secs(mtime_secs);
+    if mtime_st > now {
+        return false;
+    }
+    now.duration_since(mtime_st)
+        .map(|d| d >= min_age)
+        .unwrap_or(false)
+}
+
+fn build_scan_item(
+    ctx: &ScanWalkCtx<'_>,
+    ent: &DirEntry,
+    mtime_secs: u64,
+    age_eligible: bool,
+) -> ScanItem {
+    ScanItem {
         id: format!("{}::{}", ctx.target.id, *ctx.next_item_seq),
         target_id: ctx.target.id.clone(),
         path: ent.path.to_string_lossy().to_string(),
-        file_identity,
-        size,
+        file_identity: file_identity_for_path(&ent.path),
+        size: ent.size,
         mtime_unix_secs: mtime_secs,
-        age_eligible: old_enough,
-    };
-    ctx.out.total_bytes = ctx.out.total_bytes.saturating_add(size);
-    ctx.out.file_count = ctx.out.file_count.saturating_add(1);
-    if old_enough {
-        ctx.out.eligible_bytes = ctx.out.eligible_bytes.saturating_add(size);
-        ctx.out.eligible_count = ctx.out.eligible_count.saturating_add(1);
+        age_eligible,
     }
-    ctx.out.items.push(item);
+}
+
+fn file_identity_for_path(path: &Path) -> Option<FileIdentity> {
+    sweeper_winfs::open_for_inspection(path)
+        .and_then(|h| sweeper_winfs::get_file_identity(&h))
+        .ok()
+}
+
+fn accumulate_file_item(out: &mut TargetScanResult, item: &ScanItem) {
+    out.total_bytes = out.total_bytes.saturating_add(item.size);
+    out.file_count = out.file_count.saturating_add(1);
+    if item.age_eligible {
+        out.eligible_bytes = out.eligible_bytes.saturating_add(item.size);
+        out.eligible_count = out.eligible_count.saturating_add(1);
+    }
 }
 
 fn bump_skip(out: &mut TargetScanResult, reason: SkipReason) {
@@ -869,19 +877,8 @@ pub fn scan_with_settings_options(
     report.started_unix_secs = started_unix_secs;
     report.min_age_hours = settings.min_age_hours;
 
-    // Custom Paths (validated at scan time; contents-only; root never listed as removable item)
-    for (idx, raw) in settings.custom_paths.iter().enumerate() {
-        report
-            .targets
-            .push(scan_custom_path_target(idx, raw, min_age, now));
-    }
-
-    // Tier 3 conditional targets (strict opt-in)
-    if settings.enable_tier3 {
-        report.targets.extend(scan_tier3_conditional_targets(
-            settings, &opts, min_age, now,
-        ));
-    }
+    append_custom_path_targets(&mut report, settings, min_age, now);
+    append_tier3_targets(&mut report, settings, &opts, min_age, now);
 
     Ok(report)
 }
@@ -981,6 +978,34 @@ fn empty_target_result(
         skipped_diagnostics: Vec::new(),
         items: Vec::new(),
     }
+}
+
+fn append_custom_path_targets(
+    report: &mut ScanReport,
+    settings: &crate::settings::SweeperSettings,
+    min_age: Duration,
+    now: SystemTime,
+) {
+    for (idx, raw) in settings.custom_paths.iter().enumerate() {
+        report
+            .targets
+            .push(scan_custom_path_target(idx, raw, min_age, now));
+    }
+}
+
+fn append_tier3_targets(
+    report: &mut ScanReport,
+    settings: &crate::settings::SweeperSettings,
+    opts: &ScanSettingsOptions,
+    min_age: Duration,
+    now: SystemTime,
+) {
+    if !settings.enable_tier3 {
+        return;
+    }
+    report
+        .targets
+        .extend(scan_tier3_conditional_targets(settings, opts, min_age, now));
 }
 
 fn scan_tier3_conditional_targets(

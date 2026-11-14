@@ -43,6 +43,10 @@ fn sandbox_base_dir() -> PathBuf {
     }
 }
 
+fn sandbox_in_target(_name: &str) -> Sandbox {
+    Sandbox::new_in(sandbox_base_dir()).unwrap()
+}
+
 fn old_mtime_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -51,8 +55,21 @@ fn old_mtime_secs() -> u64 {
         .saturating_sub(48 * 3600)
 }
 
+fn unix_secs_days_ago(days: u64) -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_sub(days * 24 * 3600)
+}
+
 fn set_old(path: &Path) {
     let ft = sweeper_testkit::filetime_from_unix_secs(old_mtime_secs());
+    sweeper_testkit::set_last_write_time(path, ft).unwrap();
+}
+
+fn set_mtime_days_ago(path: &Path, age_days: u64) {
+    let ft = sweeper_testkit::filetime_from_unix_secs(unix_secs_days_ago(age_days));
     sweeper_testkit::set_last_write_time(path, ft).unwrap();
 }
 
@@ -61,6 +78,11 @@ fn write_file(path: &Path, contents: &[u8]) {
         fs::create_dir_all(p).unwrap();
     }
     fs::write(path, contents).unwrap();
+}
+
+fn write_old_file(path: &Path, age_days: u64) {
+    write_file(path, b"x");
+    set_mtime_days_ago(path, age_days);
 }
 
 fn canon_str(p: &Path) -> String {
@@ -81,6 +103,42 @@ fn find_node_by_suffix(root: &AnalyzerNode, suffix_lower: &str) -> Option<Analyz
         }
     }
     None
+}
+
+fn make_analyzer_node(
+    id: &str,
+    path: &str,
+    risk: Risk,
+    is_dir: bool,
+    selectable: bool,
+    display_only: bool,
+) -> AnalyzerNode {
+    AnalyzerNode {
+        id: id.to_string(),
+        path: path.to_string(),
+        name: "n".to_string(),
+        is_dir,
+        size_bytes: 0,
+        item_count: 0,
+        risk,
+        description: String::new(),
+        tier: None,
+        target_id: None,
+        is_link_point: false,
+        is_cloud_placeholder: false,
+        display_only,
+        selectable,
+        selection_reason: None,
+        children: vec![],
+    }
+}
+
+fn wrap_analyzer_root(root: AnalyzerNode) -> AnalyzerResult {
+    AnalyzerResult {
+        root: root.clone(),
+        progress: sweeper_core::analyzer::AnalyzerProgress::default(),
+        cancelled: false,
+    }
 }
 
 #[test]
@@ -261,7 +319,7 @@ fn custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent() {
 
 #[test]
 fn custom_path_scan_and_clean_contents_only_preserves_root() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb = sandbox_in_target("custom-path-scan-clean");
     let custom = sb.create_dir(r"a\b\custom_root").unwrap();
     let f1 = custom.join("a.txt");
     let sub = custom.join("sub");
@@ -376,26 +434,21 @@ fn tier3_disabled_by_default_yields_no_tier3_conditional_items() {
     );
 }
 
-#[test]
-fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
-    let sb = Sandbox::new().unwrap();
+fn setup_tier3_scan_fixture(
+    sb: &Sandbox,
+) -> (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+) {
     let search_root = sb.create_dir("projects").unwrap();
-    let stale_days_ago = sweeper_testkit::filetime_from_unix_secs(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .saturating_sub(45 * 24 * 3600),
-    );
-    let fresh_time = sweeper_testkit::filetime_from_unix_secs(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .saturating_sub(2 * 3600),
-    );
-
-    // Stale Rust target: sibling Cargo.toml old and exists -> should be included
     let rust_proj = search_root.join("rustproj");
     let rust_target = rust_proj.join("target");
     fs::create_dir_all(&rust_target).unwrap();
@@ -404,10 +457,9 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         b"[package]\nname='x'\nversion='0.0.0'\n",
     );
     write_file(&rust_target.join("artifact.bin"), b"12345");
-    sweeper_testkit::set_last_write_time(&rust_proj.join("Cargo.toml"), stale_days_ago).unwrap();
+    set_mtime_days_ago(&rust_proj.join("Cargo.toml"), 45);
     set_old(&rust_target.join("artifact.bin"));
 
-    // Fresh Rust target: Cargo.toml recent -> must be skipped
     let rust_fresh = search_root.join("rustfresh");
     let rust_fresh_target = rust_fresh.join("target");
     fs::create_dir_all(&rust_fresh_target).unwrap();
@@ -416,14 +468,16 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         b"[package]\nname='y'\nversion='0.0.0'\n",
     );
     write_file(&rust_fresh_target.join("artifact.bin"), b"12345");
-    sweeper_testkit::set_last_write_time(&rust_fresh.join("Cargo.toml"), fresh_time).unwrap();
+    sweeper_testkit::set_last_write_time(
+        &rust_fresh.join("Cargo.toml"),
+        sweeper_testkit::filetime_from_unix_secs(unix_secs_days_ago(0).saturating_sub(2 * 3600)),
+    )
+    .unwrap();
 
-    // Rust target without sibling Cargo.toml -> must be skipped
     let orphan_target = search_root.join("orphan").join("target");
     fs::create_dir_all(&orphan_target).unwrap();
     write_file(&orphan_target.join("artifact.bin"), b"12345");
 
-    // Stale node_modules with old lockfile -> included
     let node_proj = search_root.join("nodeproj");
     let node_modules = node_proj.join("node_modules");
     fs::create_dir_all(node_modules.join("pkg")).unwrap();
@@ -432,35 +486,52 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         &node_modules.join("pkg").join("index.js"),
         b"console.log('x')",
     );
-    sweeper_testkit::set_last_write_time(&node_proj.join("package-lock.json"), stale_days_ago)
-        .unwrap();
+    set_mtime_days_ago(&node_proj.join("package-lock.json"), 45);
     set_old(&node_modules.join("pkg").join("index.js"));
 
-    // node_modules with fresh lockfile -> skipped
     let node_fresh = search_root.join("nodefresh");
     let node_fresh_nm = node_fresh.join("node_modules");
     fs::create_dir_all(&node_fresh_nm).unwrap();
     write_file(&node_fresh.join("pnpm-lock.yaml"), b"lockfileVersion: 9\n");
     write_file(&node_fresh_nm.join("x.js"), b"x");
-    sweeper_testkit::set_last_write_time(&node_fresh.join("pnpm-lock.yaml"), fresh_time).unwrap();
+    sweeper_testkit::set_last_write_time(
+        &node_fresh.join("pnpm-lock.yaml"),
+        sweeper_testkit::filetime_from_unix_secs(unix_secs_days_ago(0).saturating_sub(2 * 3600)),
+    )
+    .unwrap();
 
-    // node_modules without sibling lockfile -> skipped
     let node_orphan = search_root.join("nodeorphan");
     let node_orphan_nm = node_orphan.join("node_modules");
     fs::create_dir_all(&node_orphan_nm).unwrap();
     write_file(&node_orphan_nm.join("x.js"), b"x");
 
-    // Sandbox recycle bin root (contents-only target semantics)
     let recycle = sb.create_dir("recycle_sid").unwrap();
+    write_old_file(&recycle.join("$IABC.txt"), 2);
+    fs::create_dir_all(recycle.join("dir")).unwrap();
+    write_old_file(&recycle.join("dir").join("inside.txt"), 2);
+    set_old(&recycle.join("dir"));
+
     let rec_file = recycle.join("$IABC.txt");
     let rec_dir = recycle.join("dir");
-    fs::create_dir_all(&rec_dir).unwrap();
-    write_file(&rec_file, b"recycle");
-    write_file(&rec_dir.join("inside.txt"), b"in");
-    set_old(&rec_file);
-    set_old(&rec_dir);
-    set_old(&rec_dir.join("inside.txt"));
+    (
+        search_root,
+        rust_target,
+        rust_fresh_target,
+        orphan_target,
+        node_modules,
+        node_fresh_nm,
+        node_orphan_nm,
+        recycle,
+        rec_file,
+        rec_dir,
+    )
+}
 
+#[test]
+fn tier3_stale_rust_target_discovery_respects_marker_and_age() {
+    let sb = Sandbox::new().unwrap();
+    let (search_root, rust_target, rust_fresh_target, orphan_target, _, _, _, recycle, _, _) =
+        setup_tier3_scan_fixture(&sb);
     let settings = SweeperSettings {
         enable_tier1: false,
         enable_tier2: false,
@@ -475,7 +546,6 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         ..Default::default()
     };
     let report = scanner::scan_with_settings_options(&settings, opts).unwrap();
-
     let stale_rust = report
         .targets
         .iter()
@@ -496,7 +566,33 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         .path
         .to_ascii_lowercase()
         .ends_with("\\target"));
+    assert!(rust_fresh_target.exists(), "fresh rust target must remain");
+    assert!(
+        orphan_target.exists(),
+        "target without sibling Cargo.toml must remain"
+    );
+    assert!(rust_target.exists(), "fixture precondition");
+}
 
+#[test]
+fn tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
+    let sb = Sandbox::new().unwrap();
+    let (search_root, _, _, _, node_modules, node_fresh_nm, node_orphan_nm, recycle, _, _) =
+        setup_tier3_scan_fixture(&sb);
+    let settings = SweeperSettings {
+        enable_tier1: false,
+        enable_tier2: false,
+        enable_tier3: true,
+        stale_project_days: 30,
+        min_age_hours: 0,
+        ..SweeperSettings::default()
+    };
+    let opts = ScanSettingsOptions {
+        tier3_project_search_roots: vec![search_root.to_string_lossy().to_string()],
+        recycle_bin_roots: vec![recycle.to_string_lossy().to_string()],
+        ..Default::default()
+    };
+    let report = scanner::scan_with_settings_options(&settings, opts).unwrap();
     let stale_nm = report
         .targets
         .iter()
@@ -517,7 +613,35 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         .path
         .to_ascii_lowercase()
         .ends_with("\\node_modules"));
+    assert!(
+        node_fresh_nm.exists(),
+        "node_modules with fresh lockfile must remain"
+    );
+    assert!(
+        node_orphan_nm.exists(),
+        "node_modules without lockfile must remain"
+    );
+    assert!(node_modules.exists(), "fixture precondition");
+}
 
+#[test]
+fn tier3_recycle_bin_scan_reports_contents_in_sandbox() {
+    let sb = Sandbox::new().unwrap();
+    let (search_root, _, _, _, _, _, _, recycle, _, _) = setup_tier3_scan_fixture(&sb);
+    let settings = SweeperSettings {
+        enable_tier1: false,
+        enable_tier2: false,
+        enable_tier3: true,
+        stale_project_days: 30,
+        min_age_hours: 0,
+        ..SweeperSettings::default()
+    };
+    let opts = ScanSettingsOptions {
+        tier3_project_search_roots: vec![search_root.to_string_lossy().to_string()],
+        recycle_bin_roots: vec![recycle.to_string_lossy().to_string()],
+        ..Default::default()
+    };
+    let report = scanner::scan_with_settings_options(&settings, opts).unwrap();
     let rb = report
         .targets
         .iter()
@@ -533,8 +657,53 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         "recycle-bin contents should be counted: {:?}",
         rb
     );
+}
 
-    // Clean tier 3 results (recycle-bin contents-only; stale dirs removed)
+#[test]
+fn tier3_clean_removes_stale_dirs_and_recycle_contents_only() {
+    let sb = Sandbox::new().unwrap();
+    let (
+        search_root,
+        rust_target,
+        rust_fresh_target,
+        orphan_target,
+        node_modules,
+        node_fresh_nm,
+        node_orphan_nm,
+        recycle,
+        rec_file,
+        rec_dir,
+    ) = setup_tier3_scan_fixture(&sb);
+    let settings = SweeperSettings {
+        enable_tier1: false,
+        enable_tier2: false,
+        enable_tier3: true,
+        stale_project_days: 30,
+        min_age_hours: 0,
+        ..SweeperSettings::default()
+    };
+    let opts = ScanSettingsOptions {
+        tier3_project_search_roots: vec![search_root.to_string_lossy().to_string()],
+        recycle_bin_roots: vec![recycle.to_string_lossy().to_string()],
+        ..Default::default()
+    };
+    let report = scanner::scan_with_settings_options(&settings, opts).unwrap();
+    let stale_rust = report
+        .targets
+        .iter()
+        .find(|t| t.target_id == "stale-rust-target")
+        .unwrap();
+    let stale_nm = report
+        .targets
+        .iter()
+        .find(|t| t.target_id == "stale-node-modules")
+        .unwrap();
+    let rb = report
+        .targets
+        .iter()
+        .find(|t| t.target_id == "recycle-bin")
+        .unwrap();
+
     let validated = vec![
         ValidatedItem::from_tier3_recycle_bin_root("rb", canon_str(&recycle), rb.total_bytes)
             .unwrap(),
@@ -555,7 +724,6 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         )
         .unwrap(),
     ];
-
     let journal_dir = sb.create_dir("journal").unwrap();
     let clean = remover::execute_clean(
         validated,
@@ -575,7 +743,6 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         "tier 3 clean aborted: {:?}",
         clean.abort_reason
     );
-
     assert!(recycle.exists(), "recycle-bin root must be preserved");
     assert!(
         !rec_file.exists() && !rec_dir.exists(),
@@ -605,13 +772,11 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
 }
 
 #[test]
-fn analyzer_allow_unknown_gating_and_conversion_semantics() {
+fn analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_contents_only() {
     let sb = Sandbox::new().unwrap();
     let unknown_ok = sb.create_dir("unknown_ok").unwrap();
     write_file(&unknown_ok.join("f.txt"), b"x");
     set_old(&unknown_ok.join("f.txt"));
-
-    // Eligible Unknown directory becomes selectable when allow_unknown=true and requires typed confirmation; cleans contents only.
     let res = analyze_path(
         Some(&sb.root().to_string_lossy()),
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -638,7 +803,6 @@ fn analyzer_allow_unknown_gating_and_conversion_semantics() {
             "unknown selection must require typed confirmation"
         );
         assert_eq!(preview[0].group_id, "custom-path");
-
         let journal_dir = sb.create_dir("journal").unwrap();
         let clean = remover::execute_clean(
             vec![preview[0].validated_item.clone()],
@@ -660,62 +824,33 @@ fn analyzer_allow_unknown_gating_and_conversion_semantics() {
             "contents should be cleaned"
         );
     } else {
-        // If environment/annotation classifies differently, at least ensure conversion/selection remains safe.
         assert_ne!(node.risk, Risk::Protected);
     }
+}
 
-    // Reject ineligible unknown/custom-path candidates even if allow_unknown=true:
-    // depth < 3, ancestor of protected path, .vhdx, protected/link point.
-    fn mk_node(
-        id: &str,
-        path: &str,
-        risk: Risk,
-        is_dir: bool,
-        selectable: bool,
-        display_only: bool,
-    ) -> AnalyzerNode {
-        AnalyzerNode {
-            id: id.to_string(),
-            path: path.to_string(),
-            name: "n".to_string(),
-            is_dir,
-            size_bytes: 0,
-            item_count: 0,
-            risk,
-            description: String::new(),
-            tier: None,
-            target_id: None,
-            is_link_point: false,
-            is_cloud_placeholder: false,
-            display_only,
-            selectable,
-            selection_reason: None,
-            children: vec![],
-        }
-    }
-    fn wrap(root: AnalyzerNode) -> AnalyzerResult {
-        AnalyzerResult {
-            root: root.clone(),
-            progress: sweeper_core::analyzer::AnalyzerProgress::default(),
-            cancelled: false,
-        }
-    }
-
-    let shallow = mk_node("s", r"C:\Temp", Risk::Unknown, true, true, false); // depth < 3
+#[test]
+fn analyzer_rejects_ineligible_unknown_shallow_path() {
+    let shallow = make_analyzer_node("s", r"C:\Temp", Risk::Unknown, true, true, false);
     assert!(build_analyzer_preview_items(
-        &wrap(shallow.clone()),
+        &wrap_analyzer_root(shallow.clone()),
         std::slice::from_ref(&shallow.id)
     )
     .is_err());
+}
 
-    let ancestor_protected = mk_node("a", r"C:\Users", Risk::Unknown, true, true, false);
+#[test]
+fn analyzer_rejects_ineligible_unknown_ancestor_of_protected() {
+    let ancestor_protected = make_analyzer_node("a", r"C:\Users", Risk::Unknown, true, true, false);
     assert!(build_analyzer_preview_items(
-        &wrap(ancestor_protected.clone()),
+        &wrap_analyzer_root(ancestor_protected.clone()),
         std::slice::from_ref(&ancestor_protected.id)
     )
     .is_err());
+}
 
-    let vhdx = mk_node(
+#[test]
+fn analyzer_rejects_ineligible_unknown_vhdx_and_protected_link_cases() {
+    let vhdx = make_analyzer_node(
         "v",
         r"C:\Users\Public\vm.vhdx",
         Risk::Unknown,
@@ -723,11 +858,13 @@ fn analyzer_allow_unknown_gating_and_conversion_semantics() {
         true,
         false,
     );
-    assert!(
-        build_analyzer_preview_items(&wrap(vhdx.clone()), std::slice::from_ref(&vhdx.id)).is_err()
-    );
+    assert!(build_analyzer_preview_items(
+        &wrap_analyzer_root(vhdx.clone()),
+        std::slice::from_ref(&vhdx.id)
+    )
+    .is_err());
 
-    let mut protected = mk_node(
+    let mut protected = make_analyzer_node(
         "p",
         r"C:\Windows\System32",
         Risk::Protected,
@@ -736,11 +873,13 @@ fn analyzer_allow_unknown_gating_and_conversion_semantics() {
         false,
     );
     protected.selectable = false;
-    assert!(
-        build_analyzer_preview_items(&wrap(protected.clone()), &[protected.id.clone()]).is_err()
-    );
+    assert!(build_analyzer_preview_items(
+        &wrap_analyzer_root(protected.clone()),
+        &[protected.id.clone()]
+    )
+    .is_err());
 
-    let mut link = mk_node(
+    let mut link = make_analyzer_node(
         "l",
         r"C:\Temp\SomeLinkDir",
         Risk::Unknown,
@@ -749,5 +888,8 @@ fn analyzer_allow_unknown_gating_and_conversion_semantics() {
         false,
     );
     link.is_link_point = true;
-    assert!(build_analyzer_preview_items(&wrap(link.clone()), &[link.id.clone()]).is_err());
+    assert!(
+        build_analyzer_preview_items(&wrap_analyzer_root(link.clone()), &[link.id.clone()])
+            .is_err()
+    );
 }
