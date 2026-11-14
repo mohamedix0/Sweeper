@@ -622,9 +622,12 @@ mod tests {
 
     #[test]
     fn browser_container_root_checks() {
+        // "User Data" leaf is always a browser container root (kills L258 replacement/early-return mutants)
         assert!(is_browser_container_root(&canon(
             r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data"
         )));
+
+        // "Default"/"Profile *" only when under a "User Data" path (kills L267 == vs !=, L273 && vs ||)
         assert!(is_browser_container_root(&canon(
             r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data\Default"
         )));
@@ -632,10 +635,15 @@ mod tests {
             r"C:\Users\Alice\AppData\Local\Google\Chrome\User Data\Profile 1"
         )));
         assert!(!is_browser_container_root(&canon(
-            r"C:\Users\Alice\AppData\Local\Temp"
+            r"C:\Users\Alice\AppData\Local\Default"
         )));
         assert!(!is_browser_container_root(&canon(
-            r"C:\Users\Alice\AppData\Local\Default"
+            r"C:\Users\Alice\AppData\Local\Profile 1"
+        )));
+
+        // Negative cases
+        assert!(!is_browser_container_root(&canon(
+            r"C:\Users\Alice\AppData\Local\Temp"
         )));
     }
 
@@ -651,28 +659,128 @@ mod tests {
 
     #[test]
     fn ensure_not_protected_or_root_depth_and_protection() {
-        let depth2 = canon(r"C:\A\B");
-        let depth3 = canon(r"C:\A\B\C");
-        assert!(ensure_not_protected_or_root(&depth2, false).is_ok());
-        assert!(ensure_not_protected_or_root(&depth3, true).is_ok());
+        let depth2 = CanonicalPath::parse_lexical(r"C:\Foo").unwrap();
+        let depth3 = CanonicalPath::parse_lexical(r"C:\Sandbox\Foo\Leaf").unwrap();
+
+        // Depth 2 resolved=true must be denied by resolved-depth guard
+        // (kills -> Ok(()), < -> ==, < -> <=)
         let resolved_depth2 = ensure_not_protected_or_root(&depth2, true).unwrap_err();
         assert!(!resolved_depth2.allowed);
-        assert!(resolved_depth2
-            .reason
-            .contains("resolved path must have depth >= 3"));
+        assert!(
+            resolved_depth2
+                .reason
+                .contains("resolved path must have depth >= 3"),
+            "unexpected reason: {}",
+            resolved_depth2.reason
+        );
+
+        // Depth 2 resolved=false is not rejected by the resolved-depth guard (guard is resolved-only);
+        // safe non-protected lexical paths remain allowed here.
+        assert!(ensure_not_protected_or_root(&depth2, false).is_ok());
+
+        // Depth 3 resolved=true must be allowed (kills < -> <=)
+        assert!(ensure_not_protected_or_root(&depth3, true).is_ok());
 
         let protected = canon(r"C:\Windows\System32\drivers");
         let denied = ensure_not_protected_or_root(&protected, false).unwrap_err();
         assert!(!denied.allowed);
+        assert!(
+            denied
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "unexpected reason: {}",
+            denied.reason
+        );
     }
 
     #[test]
     fn validate_tier3_target_root_branches() {
-        // lexical depth boundary: 2 rejected, 3 allowed (if exists and clean)
-        assert!(!validate_tier3_target_root(r"C:\A\B").allowed);
-        assert!(!validate_tier3_target_root(r"C:\Windows\System32\drivers").allowed);
-        assert!(!validate_tier3_target_root(r"C:\Windows").allowed);
-        assert!(!validate_tier3_target_root(r"C:\Users").allowed);
+        // Lexical depth boundary (L401): depth 2 denied with depth reason before existence checks
+        let depth2 = validate_tier3_target_root(r"C:\A\B");
+        assert!(!depth2.allowed, "depth 2 should be denied");
+        assert!(
+            depth2.reason.contains("depth >= 3"),
+            "expected depth reason, got: {}",
+            depth2.reason
+        );
+        assert!(
+            !depth2.reason.contains("does not exist"),
+            "lexical depth check must not fall through to from_existing_path: {}",
+            depth2.reason
+        );
+
+        // Lexical depth 3 missing path reaches existence check (kills L401 < -> <=)
+        let missing_depth3 = validate_tier3_target_root(r"C:\NonExistentDepthThree\Sub\Leaf");
+        assert!(!missing_depth3.allowed, "missing depth 3 should be denied");
+        assert!(
+            missing_depth3.reason.contains("does not exist"),
+            "expected existence denial, got: {}",
+            missing_depth3.reason
+        );
+        assert!(
+            !missing_depth3.reason.contains("depth >= 3"),
+            "depth 3 must not be rejected by lexical depth check: {}",
+            missing_depth3.reason
+        );
+
+        // Lexical protected checks (L405-406, || -> &&) must deny before from_existing_path.
+        // Subtree-protected path (depth >= 3), missing on disk.
+        let missing_subtree_protected =
+            validate_tier3_target_root(r"C:\Windows\System32\NonExistentTier3Subdir");
+        assert!(!missing_subtree_protected.allowed);
+        assert!(
+            missing_subtree_protected
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "expected protected lexical denial, got: {}",
+            missing_subtree_protected.reason
+        );
+        assert!(
+            !missing_subtree_protected.reason.contains("does not exist"),
+            "subtree-protected lexical check must run before from_existing_path: {}",
+            missing_subtree_protected.reason
+        );
+
+        // Protected container root by shape (browser User Data, depth >= 3), missing on disk.
+        let missing_container_root = validate_tier3_target_root(
+            r"C:\NonExistentBrowser\AppData\Local\Vendor\Browser\User Data",
+        );
+        assert!(!missing_container_root.allowed);
+        assert!(
+            missing_container_root
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "expected protected container root lexical denial, got: {}",
+            missing_container_root.reason
+        );
+        assert!(
+            !missing_container_root.reason.contains("does not exist"),
+            "container-root lexical check must run before from_existing_path: {}",
+            missing_container_root.reason
+        );
+
+        // Other lexical protections / existing paths
+        let drivers = validate_tier3_target_root(r"C:\Windows\System32\drivers");
+        assert!(!drivers.allowed);
+        assert!(
+            drivers
+                .reason
+                .contains("path is protected or within/above a protected location"),
+            "unexpected reason: {}",
+            drivers.reason
+        );
+
+        let windows_root = validate_tier3_target_root(r"C:\Windows");
+        assert!(!windows_root.allowed);
+        assert!(
+            windows_root.reason.contains("depth >= 3") || windows_root.reason.contains("protected")
+        );
+
+        let users_root = validate_tier3_target_root(r"C:\Users");
+        assert!(!users_root.allowed);
+        assert!(
+            users_root.reason.contains("depth >= 3") || users_root.reason.contains("protected")
+        );
 
         let sandbox = sweeper_testkit::Sandbox::new().expect("sandbox");
         // clean depth >= 3 directory allowed
@@ -692,10 +800,21 @@ mod tests {
         let dirty_str = dirty_root.to_string_lossy().to_string();
         let denied = validate_tier3_target_root(&dirty_str);
         assert!(!denied.allowed, "expected protected descendant denial");
+        assert!(
+            denied.reason.contains("protected descendant"),
+            "unexpected reason: {}",
+            denied.reason
+        );
 
-        // missing path denied (no parent fallback)
+        // missing sandbox path denied (no parent fallback) with existence reason
         let missing = sandbox.guarded_path("missing/a/b");
-        assert!(!validate_tier3_target_root(&missing.to_string_lossy()).allowed);
+        let missing_sandbox = validate_tier3_target_root(&missing.to_string_lossy());
+        assert!(!missing_sandbox.allowed);
+        assert!(
+            missing_sandbox.reason.contains("does not exist"),
+            "unexpected reason: {}",
+            missing_sandbox.reason
+        );
     }
 
     #[test]
