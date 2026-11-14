@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
+import sweeperIcon from './assets/sweeper-icon.png';
+import './styles/tokens.css';
 import './App.css';
 import { createClient, formatContractError, type ElevationStatus, type Settings } from './api/client';
 import { AnalyzerView } from './components/AnalyzerView';
@@ -48,7 +50,10 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand">Sweeper</div>
+        <div className="brand">
+          <img className="brand-icon" src={sweeperIcon} alt="" width={28} height={28} />
+          <span>Sweeper</span>
+        </div>
         <nav className="nav" aria-label="Primary">
           <button aria-current={view === 'scan' ? 'page' : undefined} onClick={() => setView('scan')}>Scan &amp; Preview</button>
           <button aria-current={view === 'analyzer' ? 'page' : undefined} onClick={() => setView('analyzer')}>Analyzer</button>

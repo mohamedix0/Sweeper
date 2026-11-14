@@ -172,7 +172,7 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
         <p className="muted">Analyze a folder to build an expandable tree of space usage. Select eligible nodes and route them through the standard Preview &rarr; Clean flow (no direct delete).</p>
         <div className="row">
           <label htmlFor="analyzer-root" className="muted">Root path</label>
-          <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} style={{ minWidth: 280 }} />
+          <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} className="analyzer-root-input" />
           <button className="btn primary" onClick={runAnalyzer} disabled={analyzing || cleaning || !rootPath.trim()}>Analyze</button>
         </div>
         {analyzing && (
@@ -267,10 +267,10 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
               );
             })}
             <div style={{ height: bottomPad }} />
-            {flatRows.length === 0 && <div className="muted" style={{ padding: 12 }}>No nodes.</div>}
+            {flatRows.length === 0 && <div className="muted analyzer-empty">No nodes.</div>}
           </div>
 
-          <section aria-labelledby="analyzer-preview-heading" className="panel" style={{ marginTop: 12 }}>
+          <section aria-labelledby="analyzer-preview-heading" className="panel panel-spaced">
             <h3 id="analyzer-preview-heading">Preview Selected</h3>
             <p className="muted">Selection total: <strong>{formatBytes(selectedBytes)}</strong> ({selectedIds.size} node(s)). Analyzer selections go through the standard Preview &rarr; Clean flow only.</p>
             {requiresConfirmation && (
@@ -326,7 +326,7 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
                     <ul aria-label="Skipped reasons">{cleanSummary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
                   )}
                 </div>
-                {cleanSummary.logId && <div className="row" style={{ marginTop: '0.5rem' }}><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
+                {cleanSummary.logId && <div className="row row-top"><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
               </div>
             )}
           </section>

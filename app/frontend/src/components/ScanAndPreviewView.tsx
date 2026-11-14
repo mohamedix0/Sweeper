@@ -213,7 +213,7 @@ export function ScanAndPreviewView({
         {!elevationStatus.isElevated && (
           <div className="notice warn" role="note">
             <div><strong>Administrator-only Tier 3 targets locked.</strong> Windows Temp, Windows Update cache, Prefetch, and Package Cache require administrator elevation and Tier 3 opt-in. Standard startup never triggers UAC.</div>
-            <div className="row" style={{ marginTop: '0.5rem' }}>
+            <div className="row row-top">
               <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
               {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
             </div>
@@ -357,7 +357,7 @@ export function ScanAndPreviewView({
                     <ul aria-label="Skipped reasons">{cleanSummary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
                   )}
                 </div>
-                {cleanSummary.logId && <div className="row" style={{ marginTop: '0.5rem' }}><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
+                {cleanSummary.logId && <div className="row row-top"><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
               </div>
             )}
           </section>

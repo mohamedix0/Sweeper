@@ -188,7 +188,7 @@ export function SettingsView({
           </label>
           {!elevationStatus.isElevated && <div className="notice warn" role="note">Requires administrator. Enable Tier 3 and run as administrator to unlock these targets.</div>}
           {elevationStatus.isElevated && !draft.enableTier3 && <div className="notice" role="note">Enable Tier 3 to use Administrator-only targets.</div>}
-          <div className="row" style={{ marginTop: '0.5rem' }}>
+          <div className="row row-top">
             <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
             {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
           </div>
@@ -213,8 +213,8 @@ export function SettingsView({
       <div className="panel" aria-labelledby="custom-paths-heading">
         <h3 id="custom-paths-heading" className="section-title">Custom Paths</h3>
         <p className="muted">Custom Paths are validated (must exist, depth &ge; 3, not Protected, no parent fallback). Contents only; root folder is preserved. Selections require typed confirmation.</p>
-        <div className="row" style={{ alignItems: 'flex-end' }}>
-          <div className="field" style={{ flex: 1 }}>
+        <div className="row row-end">
+          <div className="field field-flex">
             <label htmlFor="custom-path-input">Add Custom Path</label>
             <input id="custom-path-input" type="text" value={customPathInput} onChange={(e) => setCustomPathInput(e.target.value)} placeholder="C:\\Path\\To\\Folder" disabled={saving || validatingPath} />
           </div>

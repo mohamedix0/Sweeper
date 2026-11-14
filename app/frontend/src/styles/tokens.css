@@ -1,0 +1,85 @@
+:root {
+  color-scheme: light;
+
+  /* Brand & surface */
+  --bg-topbar: #0B1220;
+  --bg-topbar-elevated: #162238;
+  --bg-canvas: #F4F7FA;
+  --bg-surface: #FFFFFF;
+  --bg-surface-subtle: #EEF2F7;
+  --bg-surface-inset: #F8FAFC;
+  --border-subtle: #DCE4EE;
+  --border-strong: #CBD5E1;
+
+  /* Text hierarchy */
+  --text-primary: #0F172A;
+  --text-secondary: #334155;
+  --text-muted: #475569;
+  --text-on-dark: #F8FAFC;
+  --text-on-dark-muted: #94A3B8;
+
+  /* Interactive & brand accents */
+  --accent-primary: #0369A1;
+  --accent-primary-hover: #075985;
+  --accent-sky: #0EA5E9;
+  --accent-teal: #0D9488;
+  --accent-tint: #E0F2FE;
+
+  /* Semantic safety & Risk palette */
+  --risk-safe-text: #065F46;
+  --risk-safe-bg: #ECFDF5;
+  --risk-safe-border: #A7F3D0;
+
+  --risk-caution-text: #92400E;
+  --risk-caution-bg: #FFFBEB;
+  --risk-caution-border: #FDE68A;
+
+  --risk-unknown-text: #9A3412;
+  --risk-unknown-bg: #FFF7ED;
+  --risk-unknown-border: #FDBA74;
+
+  --risk-protected-text: #334155;
+  --risk-protected-bg: #F1F5F9;
+  --risk-protected-border: #CBD5E1;
+
+  --color-danger-text: #991B1B;
+  --color-danger: #B91C1C;
+  --color-danger-hover: #991B1B;
+  --color-danger-bg: #FEF2F2;
+  --color-danger-border: #FECACA;
+
+  --color-info-text: #075985;
+  --color-info-bg: #F0F9FF;
+  --color-info-border: #BAE6FD;
+
+  /* Typography */
+  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Cascadia Mono', 'Cascadia Code', ui-monospace, SFMono-Regular, Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* Shadows & focus */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--accent-sky);
+  --focus-ring-dark: 0 0 0 2px var(--bg-topbar), 0 0 0 4px var(--accent-sky);
+}
