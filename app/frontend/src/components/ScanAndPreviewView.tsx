@@ -233,8 +233,8 @@ export function ScanAndPreviewView({
         )}
         {!scanning && scanStatus && <div className="notice">{scanStatus}</div>}
         {sessionId && scanStartedAt && (
-          <div className="row muted" aria-label="Scan session status">
-            <span>Session: {sessionId}</span>
+          <div className="meta-strip" aria-label="Scan session status">
+            <span className="meta-chip num">Session: {sessionId}</span>
             <TtlIndicator label="ScanSession TTL (15m)" issuedAtMs={scanStartedAt} ttlMs={SESSION_TTL_MS} />
           </div>
         )}
@@ -315,14 +315,14 @@ export function ScanAndPreviewView({
             )}
             <div className="row"><button className="btn primary" onClick={runPreview} disabled={!canPreview}>{previewLoading ? 'Generating Preview…' : 'Preview Clean'}</button></div>
             {preview && (
-              <div aria-live="polite">
-                <h4 className="section-title">Preview Breakdown</h4>
-                <div className="row">
-                  <span>Preview token: <code>{preview.previewToken}</code></span>
+              <div aria-live="polite" className="preview-breakdown">
+                <h4 className="section-title preview-breakdown-title">Preview Breakdown</h4>
+                <div className="meta-strip preview-meta-strip">
+                  <span className="meta-chip meta-chip-code">Preview token: <code>{preview.previewToken}</code></span>
                   <TtlIndicator label="Preview token TTL (10m)" issuedAtMs={preview.issuedAtMs} ttlMs={PREVIEW_TTL_MS} />
                   {scanStartedAt && <TtlIndicator label="Session TTL (15m)" issuedAtMs={scanStartedAt} ttlMs={SESSION_TTL_MS} />}
                 </div>
-                <p><strong>Total selected:</strong> {preview.totalSelectedCount} item(s), {formatBytes(preview.totalSelectedBytes)}</p>
+                <p className="preview-total"><strong>Total selected:</strong> {preview.totalSelectedCount} item(s), {formatBytes(preview.totalSelectedBytes)}</p>
                 <table className="table" aria-label="Preview breakdown by Target">
                   <thead><tr><th>Target</th><th>Selected count</th><th>Selected bytes</th></tr></thead>
                   <tbody>
@@ -331,8 +331,10 @@ export function ScanAndPreviewView({
                     ))}
                   </tbody>
                 </table>
-                <div className="notice warn" role="alert" aria-live="polite"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
-                <div className="row"><button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">{cleaning ? 'Cleaning…' : 'Clean Permanently'}</button></div>
+                <div className="clean-footer" role="alert" aria-live="polite">
+                  <div className="clean-footer-warning"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
+                  <button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">{cleaning ? 'Cleaning…' : 'Clean Permanently'}</button>
+                </div>
                 {cleaning && (
                   <div className="notice info" role="status" aria-live="polite">
                     <div>Cleaning in progress…</div>

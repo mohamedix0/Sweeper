@@ -55,15 +55,15 @@ export function LogsView({ client, focusLogId, onFocusConsumed }: { client: Swee
           </div>
           {logs.length === 0 ? <p className="muted">No logs found.</p> : (
             <div className="log-table-wrap">
-              <table className="table" aria-label="Log list">
-                <thead><tr><th>Name</th><th>Modified</th><th>Size</th><th></th></tr></thead>
+              <table className="table logs-table" aria-label="Log list">
+                <thead><tr><th>Name</th><th className="log-col-nowrap">Modified</th><th className="log-col-nowrap">Size</th><th></th></tr></thead>
                 <tbody>
                   {logs.map((l) => (
                     <tr key={l.id} className={selected?.id === l.id ? 'log-row-active' : undefined}>
-                      <td><code>{l.name}</code></td>
-                      <td className="num">{formatUnixSeconds(l.modifiedUnixSecs)}</td>
-                      <td className="num">{l.sizeBytes ? formatBytes(l.sizeBytes) : '—'}</td>
-                      <td><button className="btn" onClick={() => openLog(l.id)}>View</button></td>
+                      <td className="log-name-cell"><code>{l.name}</code></td>
+                      <td className="num log-col-nowrap">{formatUnixSeconds(l.modifiedUnixSecs)}</td>
+                      <td className="num log-col-nowrap">{l.sizeBytes ? formatBytes(l.sizeBytes) : '—'}</td>
+                      <td className="log-action-cell"><button className="btn" onClick={() => openLog(l.id)}>View</button></td>
                     </tr>
                   ))}
                 </tbody>

@@ -28,7 +28,7 @@ export function TtlIndicator({ label, issuedAtMs, ttlMs }: { label: string; issu
   const mins = Math.floor(remaining / 60000);
   const secs = Math.floor((remaining % 60000) / 1000);
   return (
-    <span className="muted num">
+    <span className="meta-chip num">
       {label}: {mins}:{secs.toString().padStart(2, '0')} remaining
     </span>
   );
@@ -48,16 +48,18 @@ export function ExplainDrawer({ explain, onClose }: { explain: ExplainState; onC
           if (e.key === 'Escape') onClose();
         }}
       >
-        <div className="row">
+        <div className="row drawer-header">
           <h3 id="explain-title">Explain: {explain.title}</h3>
           <div className="spacer" />
           <button className="btn" onClick={onClose} aria-label="Close explanation">Close</button>
         </div>
-        <p><span className={riskClass(explain.risk)}>Risk: {explain.risk}</span></p>
-        <p>{explain.description}</p>
-        <dl className="kv">
-          <dt>Item ID</dt><dd><code>{explain.itemId}</code></dd>
-        </dl>
+        <p className="drawer-risk"><span className={riskClass(explain.risk)}>Risk: {explain.risk}</span></p>
+        <p className="drawer-description">{explain.description}</p>
+        <div className="drawer-meta-card">
+          <dl className="kv drawer-kv">
+            <dt>Item ID</dt><dd><code>{explain.itemId}</code></dd>
+          </dl>
+        </div>
       </aside>
     </div>
   );

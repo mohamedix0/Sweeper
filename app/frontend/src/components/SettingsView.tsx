@@ -203,7 +203,7 @@ export function SettingsView({
             </div>
           )}
         </div>
-        <ul className="list" aria-label="Tier 3 target notes">
+        <ul className="tier-notes" aria-label="Tier 3 target notes">
           <li><strong>Recycle Bin (opt-in permanent empty):</strong> empties Recycle Bin contents when Tier 3 is enabled (Caution).</li>
           <li><strong>Stale Rust <code>target/</code>:</strong> only when sibling <code>Cargo.toml</code> is unmodified for at least {draft.staleProjectDays} days.</li>
           <li><strong>Stale <code>node_modules/</code>:</strong> only when a sibling lockfile is present and stale by the configured threshold.</li>
@@ -223,8 +223,8 @@ export function SettingsView({
       <div className="settings-section" aria-labelledby="custom-paths-heading">
         <h3 id="custom-paths-heading" className="section-title">Custom Paths</h3>
         <p className="muted">Custom Paths are validated (must exist, depth &ge; 3, not Protected, no parent fallback). Contents only; root folder is preserved. Selections require typed confirmation.</p>
-        <div className="row row-end">
-          <div className="field field-flex">
+        <div className="custom-path-add row">
+          <div className="field field-flex custom-path-field">
             <label htmlFor="custom-path-input">Add Custom Path</label>
             <input id="custom-path-input" type="text" value={customPathInput} onChange={(e) => setCustomPathInput(e.target.value)} placeholder="C:\\Path\\To\\Folder" disabled={saving || validatingPath} />
           </div>

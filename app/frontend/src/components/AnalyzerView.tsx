@@ -176,8 +176,8 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
           <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} className="analyzer-root-input" />
           <button className="btn primary" onClick={runAnalyzer} disabled={analyzing || cleaning || !rootPath.trim()}>Analyze</button>
           {sessionId && startedAt && (
-            <div className="row muted" aria-label="Analyzer session status">
-              <span className="num">Session: {sessionId}</span>
+            <div className="meta-strip" aria-label="Analyzer session status">
+              <span className="meta-chip num">Session: {sessionId}</span>
               <TtlIndicator label="Analyzer session TTL (15m)" issuedAtMs={startedAt} ttlMs={SESSION_TTL_MS} />
             </div>
           )}
@@ -232,30 +232,31 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
                     aria-selected={checked}
                     aria-level={depth + 1}
                     className="analyzer-row"
-                    style={{ paddingLeft: 8 + depth * 18 }}
                   >
-                    <button
-                      type="button"
-                      className="tree-toggle"
-                      onClick={() => toggleExpand(node)}
-                      aria-label={hasChildren ? (isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`) : `Leaf ${node.name}`}
-                      disabled={!hasChildren}
-                    >
-                      {hasChildren ? (isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />) : <DotIcon />}
-                    </button>
-                    <label className="checkbox" title={selectable ? "Select for Preview/Clean" : "Not selectable"}>
-                      <input
-                        type="checkbox"
-                        aria-label={`Select analyzer node ${node.path}`}
-                        checked={checked}
-                        disabled={!selectable || cleaning}
-                        onChange={() => toggleSelect(node)}
-                      />
-                    </label>
-                    <div className="analyzer-node-main">
-                      <div className="item-path">{node.name} <span className="muted">({node.path})</span></div>
-                      <div className="item-status">
-                        {selectable ? (node.risk === "Unknown" || !node.targetId ? "Selectable (typed confirmation required at Preview)" : "Selectable") : `Not selectable${reasons.length ? `: ${reasons.join(", ")}` : ""}`}
+                    <div className="analyzer-tree-cell" style={{ paddingLeft: 8 + depth * 18 }}>
+                      <button
+                        type="button"
+                        className="tree-toggle"
+                        onClick={() => toggleExpand(node)}
+                        aria-label={hasChildren ? (isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`) : `Leaf ${node.name}`}
+                        disabled={!hasChildren}
+                      >
+                        {hasChildren ? (isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />) : <DotIcon />}
+                      </button>
+                      <label className="checkbox" title={selectable ? "Select for Preview/Clean" : "Not selectable"}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select analyzer node ${node.path}`}
+                          checked={checked}
+                          disabled={!selectable || cleaning}
+                          onChange={() => toggleSelect(node)}
+                        />
+                      </label>
+                      <div className="analyzer-node-main">
+                        <div className="item-path">{node.name} <span className="muted">({node.path})</span></div>
+                        <div className="item-status">
+                          {selectable ? (node.risk === "Unknown" || !node.targetId ? "Selectable (typed confirmation required at Preview)" : "Selectable") : `Not selectable${reasons.length ? `: ${reasons.join(", ")}` : ""}`}
+                        </div>
                       </div>
                     </div>
                     <div className="item-size num">{formatBytes(node.sizeBytes)}</div>
@@ -288,14 +289,14 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
             )}
             <div className="row"><button className="btn primary" onClick={runPreview} disabled={!canPreview}>{previewLoading ? 'Generating Preview…' : 'Preview Selected'}</button></div>
             {preview && (
-              <div aria-live="polite">
-                <h4 className="section-title">Preview Breakdown</h4>
-                <div className="row">
-                  <span>Preview token: <code>{preview.previewToken}</code></span>
+              <div aria-live="polite" className="preview-breakdown">
+                <h4 className="section-title preview-breakdown-title">Preview Breakdown</h4>
+                <div className="meta-strip preview-meta-strip">
+                  <span className="meta-chip meta-chip-code">Preview token: <code>{preview.previewToken}</code></span>
                   <TtlIndicator label="Preview token TTL (10m)" issuedAtMs={preview.issuedAtMs} ttlMs={PREVIEW_TTL_MS} />
                   {startedAt && <TtlIndicator label="Analyzer session TTL (15m)" issuedAtMs={startedAt} ttlMs={SESSION_TTL_MS} />}
                 </div>
-                <p><strong>Total selected:</strong> {preview.totalSelectedCount} item(s), {formatBytes(preview.totalSelectedBytes)}</p>
+                <p className="preview-total"><strong>Total selected:</strong> {preview.totalSelectedCount} item(s), {formatBytes(preview.totalSelectedBytes)}</p>
                 <table className="table" aria-label="Preview breakdown by Target">
                   <thead><tr><th>Target</th><th>Selected count</th><th>Selected bytes</th></tr></thead>
                   <tbody>
@@ -304,8 +305,10 @@ export function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperC
                     ))}
                   </tbody>
                 </table>
-                <div className="notice warn" role="alert" aria-live="polite"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
-                <div className="row"><button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">{cleaning ? 'Cleaning…' : 'Clean Permanently'}</button></div>
+                <div className="clean-footer" role="alert" aria-live="polite">
+                  <div className="clean-footer-warning"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
+                  <button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">{cleaning ? 'Cleaning…' : 'Clean Permanently'}</button>
+                </div>
                 {cleaning && (
                   <div className="notice info" role="status" aria-live="polite">
                     <div>Cleaning in progress…</div>
