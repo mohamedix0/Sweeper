@@ -518,12 +518,16 @@ pub fn normalize_lexical(input: &str) -> Result<String, PathError> {
 mod tests {
     use super::*;
 
+    fn canon(s: &str) -> CanonicalPath {
+        CanonicalPath::parse_lexical(s).expect("valid lexical path")
+    }
+
     #[test]
     fn segment_aware_prefix() {
-        let base = CanonicalPath::parse_lexical(r"C:\Windows").unwrap();
-        let a = CanonicalPath::parse_lexical(r"C:\Windows.old").unwrap();
-        let b = CanonicalPath::parse_lexical(r"C:\WindowsApps").unwrap();
-        let c = CanonicalPath::parse_lexical(r"C:\Windows\Temp").unwrap();
+        let base = canon(r"C:\Windows");
+        let a = canon(r"C:\Windows.old");
+        let b = canon(r"C:\WindowsApps");
+        let c = canon(r"C:\Windows\Temp");
         assert!(!is_same_or_under(&a, &base));
         assert!(!is_same_or_under(&b, &base));
         assert!(is_same_or_under(&c, &base));
@@ -532,11 +536,255 @@ mod tests {
 
     #[test]
     fn rejects_short_name_alias_marker_when_mismatched() {
-        // Directly exercise alias rejection helper behavior.
         assert!(matches!(
             reject_short_name_alias(r"C:\PROGRA~1\Foo", r"C:\Program Files\Foo"),
             Err(PathError::ShortNameAlias)
         ));
         assert!(reject_short_name_alias(r"C:\Temp\LongName", r"C:\Temp\LongName").is_ok());
+    }
+
+    #[test]
+    fn debug_fmt_includes_canonical_path() {
+        let c = canon(r"C:\Sandbox\Dir");
+        let dbg = format!("{c:?}");
+        assert!(
+            dbg.contains("CanonicalPath") && dbg.contains("normalized") && dbg.contains("Sandbox"),
+            "Debug output must include canonical path info, got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn drive_prefix_is_exact_drive() {
+        assert_eq!(canon(r"C:\Sandbox\Dir").drive_prefix(), "C:");
+        assert_eq!(canon(r"d:\Sandbox").drive_prefix(), "D:");
+    }
+
+    #[test]
+    fn lexical_parse_length_boundaries() {
+        // Overall input length boundary: > 32_767 rejected, 32_767 allowed.
+        fn build_path_len(target_len: usize) -> String {
+            let mut s = String::from(r"C:\");
+            while s.len() < target_len {
+                let rem = target_len - s.len();
+                if s.ends_with('\\') {
+                    let seg_len = std::cmp::min(rem, 250);
+                    s.push_str(&"a".repeat(seg_len));
+                } else if rem == 1 {
+                    s.push('a');
+                } else {
+                    let seg_len = std::cmp::min(rem - 1, 250);
+                    s.push('\\');
+                    s.push_str(&"a".repeat(seg_len));
+                }
+            }
+            assert_eq!(s.len(), target_len);
+            s
+        }
+
+        let ok = build_path_len(32_767);
+        assert!(
+            CanonicalPath::parse_lexical(&ok).is_ok(),
+            "input length 32767 should be allowed"
+        );
+
+        let too_long = build_path_len(32_768);
+        assert!(matches!(
+            CanonicalPath::parse_lexical(&too_long),
+            Err(PathError::TooLong)
+        ));
+    }
+
+    #[test]
+    fn lexical_parse_rejects_device_and_unc_prefixes_independently() {
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"\\?\C:\Temp"),
+            Err(PathError::DevicePrefix)
+        ));
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"\\.\C:\Temp"),
+            Err(PathError::DevicePrefix)
+        ));
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"\??\C:\Temp"),
+            Err(PathError::DevicePrefix)
+        ));
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"\\server\share\file"),
+            Err(PathError::Unc)
+        ));
+    }
+
+    #[test]
+    fn lexical_parse_drive_form_boundaries() {
+        // len < 2 -> NotAbsoluteDrivePath (e.g. "C")
+        assert!(matches!(
+            CanonicalPath::parse_lexical("C"),
+            Err(PathError::NotAbsoluteDrivePath)
+        ));
+        // len == 2 -> DriveRelative ("C:")
+        assert!(matches!(
+            CanonicalPath::parse_lexical("C:"),
+            Err(PathError::DriveRelative)
+        ));
+        // drive not alphabetic or missing colon
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"1:\Temp"),
+            Err(PathError::NotAbsoluteDrivePath)
+        ));
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"CC\Temp"),
+            Err(PathError::NotAbsoluteDrivePath)
+        ));
+        // "C:foo" drive-relative
+        assert!(matches!(
+            CanonicalPath::parse_lexical("C:foo"),
+            Err(PathError::DriveRelative)
+        ));
+    }
+
+    #[test]
+    fn lexical_parse_rejects_embedded_device_markers_independently() {
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"C:\Temp\??\x"),
+            Err(PathError::DevicePrefix)
+        ));
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"C:\Temp\GLOBALROOT\Device"),
+            Err(PathError::DevicePrefix)
+        ));
+    }
+
+    #[test]
+    fn lexical_parse_segment_boundaries_and_traversal() {
+        // segment length 255 ok, 256 TooLong
+        let seg255 = "a".repeat(255);
+        let ok = format!(r"C:\{seg255}");
+        assert!(CanonicalPath::parse_lexical(&ok).is_ok());
+        let seg256 = "a".repeat(256);
+        let bad = format!(r"C:\{seg256}");
+        assert!(matches!(
+            CanonicalPath::parse_lexical(&bad),
+            Err(PathError::TooLong)
+        ));
+
+        // traversal components rejected individually
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"C:\."),
+            Err(PathError::Traversal)
+        ));
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"C:\.."),
+            Err(PathError::Traversal)
+        ));
+        // empty segment
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"C:\a\\b"),
+            Err(PathError::EmptySegment)
+        ));
+    }
+
+    #[test]
+    fn lexical_parse_normalized_length_boundary() {
+        // Long but valid segmented paths must be accepted (normalized-length guard must not
+        // reject valid long paths within parser limits).
+        let mut s = String::from(r"C:\");
+        while s.len() < 8_000 {
+            let rem = 8_000 - s.len();
+            if s.ends_with('\\') {
+                let seg_len = std::cmp::min(rem, 200);
+                s.push_str(&"a".repeat(seg_len));
+            } else if rem == 1 {
+                s.push('a');
+            } else {
+                let seg_len = std::cmp::min(rem - 1, 200);
+                s.push('\\');
+                s.push_str(&"a".repeat(seg_len));
+            }
+        }
+        assert_eq!(s.len(), 8_000);
+        let parsed = CanonicalPath::parse_lexical(&s).expect("long path should parse");
+        assert_eq!(parsed.as_str().len(), 8_000);
+        assert_eq!(normalize_lexical(&s).unwrap().len(), 8_000);
+    }
+
+    #[test]
+    fn reserved_dos_names_and_unicode_variants() {
+        // Basic reserved names rejected
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"C:\CON"),
+            Err(PathError::ReservedDeviceName)
+        ));
+        assert!(matches!(
+            CanonicalPath::parse_lexical(r"C:\LPT1.txt"),
+            Err(PathError::ReservedDeviceName)
+        ));
+
+        // Unicode superscript variants map to reserved names (each arm matters).
+        for name in [
+            "COM¹", "COM²", "COM³", "COM⁴", "COM⁵", "COM⁶", "COM⁷", "COM⁸", "COM⁹",
+        ] {
+            let p = format!(r"C:\{name}");
+            assert!(
+                matches!(
+                    CanonicalPath::parse_lexical(&p),
+                    Err(PathError::ReservedDeviceName)
+                ),
+                "expected reserved for {name}"
+            );
+        }
+        for name in [
+            "LPT¹", "LPT²", "LPT³", "LPT⁴", "LPT⁵", "LPT⁶", "LPT⁷", "LPT⁸", "LPT⁹",
+        ] {
+            let p = format!(r"C:\{name}");
+            assert!(
+                matches!(
+                    CanonicalPath::parse_lexical(&p),
+                    Err(PathError::ReservedDeviceName)
+                ),
+                "expected reserved for {name}"
+            );
+        }
+        // '⁰' maps to 0: "COM⁰" normalizes to "COM0" which is not reserved.
+        assert!(CanonicalPath::parse_lexical(r"C:\COM⁰").is_ok());
+        // Non-reserved unicode variant-like names return false/are allowed.
+        assert!(CanonicalPath::parse_lexical(r"C:\CONX").is_ok());
+        assert!(CanonicalPath::parse_lexical(r"C:\FOO¹").is_ok());
+    }
+
+    #[test]
+    fn is_strict_ancestor_semantics() {
+        let parent = canon(r"C:\Temp");
+        let child = canon(r"C:\Temp\Sub");
+        let same = canon(r"C:\Temp");
+        let sibling = canon(r"C:\Temp2");
+        assert!(is_strict_ancestor(&parent, &child));
+        assert!(!is_strict_ancestor(&same, &same));
+        assert!(!is_strict_ancestor(&sibling, &parent));
+        assert!(!is_strict_ancestor(&child, &parent));
+    }
+
+    #[test]
+    fn exceeds_legacy_max_path_len_boundary() {
+        let s260 = "a".repeat(260);
+        let s261 = "a".repeat(261);
+        assert!(!exceeds_legacy_max_path_len(&s260));
+        assert!(exceeds_legacy_max_path_len(&s261));
+        assert!(!exceeds_legacy_max_path_len("short"));
+    }
+
+    #[test]
+    fn normalize_lexical_returns_expected_string() {
+        assert_eq!(
+            normalize_lexical(r"c:/Sandbox/Sub").unwrap(),
+            r"C:\Sandbox\Sub"
+        );
+        assert_eq!(
+            normalize_lexical(r"C:\Sandbox\Sub").unwrap(),
+            r"C:\Sandbox\Sub"
+        );
+        assert!(matches!(
+            normalize_lexical(r"\\server\share"),
+            Err(PathError::Unc)
+        ));
     }
 }
