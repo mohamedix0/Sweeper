@@ -92,6 +92,74 @@ fn canon_str(p: &Path) -> String {
         .to_string()
 }
 
+fn clean_diagnostics(clean: &remover::CleanReport, journal_dir: &Path) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "clean.aborted={}\nclean.abort_reason={:?}\nclean.bytes_freed={}\nclean.skipped_count={}\nclean.items={:#?}\n",
+        clean.aborted, clean.abort_reason, clean.bytes_freed, clean.skipped_count, clean.items
+    ));
+    out.push_str("journal_files:\n");
+    match fs::read_dir(journal_dir) {
+        Ok(entries) => {
+            let mut paths: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                .collect();
+            paths.sort();
+            if paths.is_empty() {
+                out.push_str("  <none>\n");
+            }
+            for p in paths {
+                out.push_str(&format!("--- {} ---\n", p.display()));
+                match fs::read_to_string(&p) {
+                    Ok(s) => {
+                        if s.is_empty() {
+                            out.push_str("<empty>\n");
+                        } else {
+                            out.push_str(&s);
+                            if !s.ends_with('\n') {
+                                out.push('\n');
+                            }
+                        }
+                    }
+                    Err(e) => out.push_str(&format!("<read error: {e}>\n")),
+                }
+            }
+        }
+        Err(e) => out.push_str(&format!("  <read_dir error: {e}>\n")),
+    }
+    out
+}
+
+fn journal_has_locked_skip(journal_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(journal_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in contents.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v.get("record").and_then(|r| r.as_str()) == Some("outcome")
+                && v.get("status").and_then(|s| s.as_str()) == Some("Skipped")
+                && v.get("reason")
+                    .and_then(|r| r.as_str())
+                    .is_some_and(|r| r.to_ascii_lowercase().contains("locked"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn find_node_by_suffix(root: &AnalyzerNode, suffix_lower: &str) -> Option<AnalyzerNode> {
     let mut stack = vec![root.clone()];
     while let Some(n) = stack.pop() {
@@ -378,17 +446,27 @@ fn custom_path_scan_and_clean_contents_only_preserves_root() {
             preview_estimated_bytes: cp.total_bytes.max(1),
             min_age: Duration::from_secs(0),
             now: SystemTime::now(),
-            journal_base_dir: Some(journal_dir),
+            journal_base_dir: Some(journal_dir.clone()),
         },
     )
     .unwrap();
-    assert!(!clean.aborted, "clean aborted: {:?}", clean.abort_reason);
+    let diag = clean_diagnostics(&clean, &journal_dir);
+    assert!(
+        !clean.aborted,
+        "clean aborted: {:?}\n{}",
+        clean.abort_reason, diag
+    );
     assert!(
         custom.exists(),
-        "custom path root directory must be preserved"
+        "custom path root directory must be preserved\n{}",
+        diag
     );
-    assert!(!f1.exists(), "child file should be cleaned");
-    assert!(!f2.exists(), "nested child file should be cleaned");
+    assert!(!f1.exists(), "child file should be cleaned\n{}", diag);
+    assert!(
+        !f2.exists(),
+        "nested child file should be cleaned\n{}",
+        diag
+    );
     // subdirectory may be removed as empty child; root must remain.
 }
 
@@ -707,70 +785,112 @@ fn tier3_clean_removes_stale_dirs_and_recycle_contents_only() {
         .find(|t| t.target_id == "recycle-bin")
         .unwrap();
 
-    let validated = vec![
-        ValidatedItem::from_tier3_recycle_bin_root("rb", canon_str(&recycle), rb.total_bytes)
+    let build_validated = || {
+        vec![
+            ValidatedItem::from_tier3_recycle_bin_root("rb", canon_str(&recycle), rb.total_bytes)
+                .unwrap(),
+            ValidatedItem::from_tier3_project_directory(
+                "rust-target",
+                "stale-rust-target",
+                canon_str(&rust_target),
+                stale_rust.total_bytes,
+                Some(old_mtime_secs()),
+            )
             .unwrap(),
-        ValidatedItem::from_tier3_project_directory(
-            "rust-target",
-            "stale-rust-target",
-            canon_str(&rust_target),
-            stale_rust.total_bytes,
-            Some(old_mtime_secs()),
-        )
-        .unwrap(),
-        ValidatedItem::from_tier3_project_directory(
-            "node-modules",
-            "stale-node-modules",
-            canon_str(&node_modules),
-            stale_nm.total_bytes,
-            Some(old_mtime_secs()),
-        )
-        .unwrap(),
-    ];
+            ValidatedItem::from_tier3_project_directory(
+                "node-modules",
+                "stale-node-modules",
+                canon_str(&node_modules),
+                stale_nm.total_bytes,
+                Some(old_mtime_secs()),
+            )
+            .unwrap(),
+        ]
+    };
     let journal_dir = sb.create_dir("journal").unwrap();
-    let clean = remover::execute_clean(
-        validated,
-        CleanOptions {
-            preview_estimated_bytes: rb.total_bytes
-                + stale_rust.total_bytes
-                + stale_nm.total_bytes
-                + 1024,
-            min_age: Duration::from_secs(0),
-            now: SystemTime::now(),
-            journal_base_dir: Some(journal_dir.clone()),
-        },
-    )
-    .unwrap();
+    let clean_opts = || CleanOptions {
+        preview_estimated_bytes: rb.total_bytes
+            + stale_rust.total_bytes
+            + stale_nm.total_bytes
+            + 1024,
+        min_age: Duration::from_secs(0),
+        now: SystemTime::now(),
+        journal_base_dir: Some(journal_dir.clone()),
+    };
+
+    let mut clean = remover::execute_clean(build_validated(), clean_opts()).unwrap();
+    for attempt in 0..3 {
+        let targets_removed = !rec_file.exists()
+            && !rec_dir.exists()
+            && !rust_target.exists()
+            && !node_modules.exists();
+        if targets_removed {
+            break;
+        }
+        let locked = journal_has_locked_skip(&journal_dir);
+        if attempt < 2 && locked {
+            std::thread::sleep(Duration::from_millis(150));
+            clean = remover::execute_clean(build_validated(), clean_opts()).unwrap();
+            continue;
+        }
+        let diag = clean_diagnostics(&clean, &journal_dir);
+        panic!(
+            "tier3 clean left targets behind after attempt {} (locked_skip={}): rec_file_exists={} rec_dir_exists={} rust_target_exists={} node_modules_exists={}\n{}",
+            attempt + 1,
+            locked,
+            rec_file.exists(),
+            rec_dir.exists(),
+            rust_target.exists(),
+            node_modules.exists(),
+            diag
+        );
+    }
+
+    let diag = clean_diagnostics(&clean, &journal_dir);
     assert!(
         !clean.aborted,
-        "tier 3 clean aborted: {:?}",
-        clean.abort_reason
+        "tier 3 clean aborted: {:?}\n{}",
+        clean.abort_reason, diag
     );
-    assert!(recycle.exists(), "recycle-bin root must be preserved");
+    assert!(
+        recycle.exists(),
+        "recycle-bin root must be preserved\n{}",
+        diag
+    );
     assert!(
         !rec_file.exists() && !rec_dir.exists(),
-        "recycle-bin contents should be removed"
+        "recycle-bin contents should be removed\n{}",
+        diag
     );
     assert!(
         !rust_target.exists(),
-        "stale rust target directory should be removed"
+        "stale rust target directory should be removed\n{}",
+        diag
     );
     assert!(
         !node_modules.exists(),
-        "stale node_modules directory should be removed"
+        "stale node_modules directory should be removed\n{}",
+        diag
     );
-    assert!(rust_fresh_target.exists(), "fresh rust target must remain");
+    assert!(
+        rust_fresh_target.exists(),
+        "fresh rust target must remain\n{}",
+        diag
+    );
     assert!(
         orphan_target.exists(),
-        "target without sibling Cargo.toml must remain"
+        "target without sibling Cargo.toml must remain\n{}",
+        diag
     );
     assert!(
         node_fresh_nm.exists(),
-        "node_modules with fresh lockfile must remain"
+        "node_modules with fresh lockfile must remain\n{}",
+        diag
     );
     assert!(
         node_orphan_nm.exists(),
-        "node_modules without lockfile must remain"
+        "node_modules without lockfile must remain\n{}",
+        diag
     );
 }
 
@@ -813,18 +933,25 @@ fn analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_
                 preview_estimated_bytes: preview[0].size_bytes.max(1),
                 min_age: Duration::from_secs(0),
                 now: SystemTime::now(),
-                journal_base_dir: Some(journal_dir),
+                journal_base_dir: Some(journal_dir.clone()),
             },
         )
         .unwrap();
-        assert!(!clean.aborted, "clean aborted: {:?}", clean.abort_reason);
+        let diag = clean_diagnostics(&clean, &journal_dir);
+        assert!(
+            !clean.aborted,
+            "clean aborted: {:?}\n{}",
+            clean.abort_reason, diag
+        );
         assert!(
             unknown_ok.exists(),
-            "unknown custom-path root must be preserved (contents-only)"
+            "unknown custom-path root must be preserved (contents-only)\n{}",
+            diag
         );
         assert!(
             !unknown_ok.join("f.txt").exists(),
-            "contents should be cleaned"
+            "contents should be cleaned\n{}",
+            diag
         );
     } else {
         assert_ne!(node.risk, Risk::Protected);
