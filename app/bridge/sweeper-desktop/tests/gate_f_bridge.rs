@@ -750,12 +750,39 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     // Sentinel-guarded per-test sandbox (auto-cleaned on Drop) and external canary.
     // Use CARGO_TARGET_DIR as base: custom-path validation rejects descendants of protected
     // container roots (e.g. user profile/%TEMP%), but CARGO_TARGET_DIR is outside them.
-    let sandbox_base = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target")
-        })
-        .join("sweeper-test-sandboxes");
+    let sandbox_base = {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target")
+            })
+            .join("sweeper-test-sandboxes");
+        let _ = std::fs::create_dir_all(&base);
+        let normalized = match std::fs::canonicalize(&base) {
+            Ok(c) => {
+                let s = c.to_string_lossy();
+                if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+                    std::path::PathBuf::from(format!(r"\\{}", rest))
+                } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+                    std::path::PathBuf::from(rest.to_string())
+                } else {
+                    c
+                }
+            }
+            Err(_) => {
+                // Fallback: lexical collapse
+                base.components().collect::<std::path::PathBuf>()
+            }
+        };
+        debug_assert!(
+            !normalized
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "sandbox base must not contain '..' components: {}",
+            normalized.display()
+        );
+        normalized
+    };
     let sandbox = Sandbox::new_in(&sandbox_base).unwrap();
     sandbox.assert_sentinel_present();
     let canary = CanaryTree::seed_external("gate-f-analyzer-custom-root").unwrap();

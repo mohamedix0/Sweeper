@@ -263,43 +263,54 @@ fn default_sandbox_base() -> PathBuf {
 
 fn cargo_target_sandbox_base() -> Option<PathBuf> {
     if let Some(v) = std::env::var_os("CARGO_TARGET_TMPDIR") {
-        return Some(PathBuf::from(v).join("sweeper-test-sandboxes"));
+        return Some(normalize_sandbox_base_path(
+            PathBuf::from(v).join("sweeper-test-sandboxes"),
+        ));
     }
     if let Some(v) = std::env::var_os("CARGO_TARGET_DIR") {
-        return Some(PathBuf::from(v).join("sweeper-test-sandboxes"));
+        return Some(normalize_sandbox_base_path(
+            PathBuf::from(v).join("sweeper-test-sandboxes"),
+        ));
     }
 
     // Best-effort workspace-local fallback for testkit users outside cargo-target tmp contexts.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    Some(
-        manifest
-            .join("..\\..\\..\\target\\sweeper-test-sandboxes")
-            .components()
-            .collect::<PathBuf>(),
-    )
+    let fallback = manifest.join("..\\..\\..\\target\\sweeper-test-sandboxes");
+    Some(normalize_sandbox_base_path(fallback))
+}
+
+fn strip_extended_prefix(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{}", rest));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_string());
+    }
+    p
+}
+
+fn normalize_sandbox_base_path(base: PathBuf) -> PathBuf {
+    // Ensure directories exist so canonicalization can resolve .. and remove short-name aliases.
+    let _ = fs::create_dir_all(&base);
+    if let Ok(c) = fs::canonicalize(&base) {
+        return strip_extended_prefix(c);
+    }
+    // Fallback: lexical normalization (collapse ..) without touching FS beyond best effort.
+    let normalized: PathBuf = base.components().collect();
+    let _ = fs::create_dir_all(&normalized);
+    if let Ok(c) = fs::canonicalize(&normalized) {
+        return strip_extended_prefix(c);
+    }
+    strip_extended_prefix(normalized)
 }
 
 fn canonicalize_sandbox_base(base: PathBuf) -> PathBuf {
-    fn strip_extended_prefix(p: PathBuf) -> PathBuf {
-        let s = p.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            return PathBuf::from(format!(r"\\{}", rest));
-        }
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            return PathBuf::from(rest.to_string());
-        }
-        p
-    }
-
-    let _ = fs::create_dir_all(&base);
-    match fs::canonicalize(&base) {
-        Ok(c) => strip_extended_prefix(c),
-        Err(_) => base,
-    }
+    normalize_sandbox_base_path(base)
 }
 
 fn is_safe_sandbox_base(path: &Path) -> bool {
-    !has_short_name_component(path)
+    !has_short_name_component(path) && !has_parent_dir_component(path)
 }
 
 fn has_short_name_component(path: &Path) -> bool {
@@ -307,6 +318,11 @@ fn has_short_name_component(path: &Path) -> bool {
         std::path::Component::Normal(os) => os.to_string_lossy().contains('~'),
         _ => false,
     })
+}
+
+fn has_parent_dir_component(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 /// Create a directory junction at `link` pointing to `target` (Windows).
@@ -474,8 +490,11 @@ pub fn filetime_from_unix_secs(secs: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_short_name_component, is_safe_sandbox_base};
-    use std::path::Path;
+    use super::{
+        has_parent_dir_component, has_short_name_component, is_safe_sandbox_base,
+        normalize_sandbox_base_path,
+    };
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn short_name_component_detection_flags_tilde_segments() {
@@ -495,5 +514,22 @@ mod tests {
         assert!(is_safe_sandbox_base(Path::new(
             r"D:\work\target\sweeper-test-sandboxes"
         )));
+    }
+
+    #[test]
+    fn normalized_sandbox_base_has_no_parent_dir_components() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let p = manifest.join("..\\..\\..\\target\\sweeper-test-sandboxes");
+        let norm = normalize_sandbox_base_path(p);
+        assert!(
+            !has_parent_dir_component(&norm),
+            "normalized path must not contain '..' components: {}",
+            norm.display()
+        );
+        assert!(
+            !has_short_name_component(&norm),
+            "normalized path must not contain short-name '~' segments: {}",
+            norm.display()
+        );
     }
 }
