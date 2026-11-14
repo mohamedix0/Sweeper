@@ -5,6 +5,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod elevation;
+
+pub use elevation::is_process_elevated;
+
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -115,6 +119,13 @@ pub type Result<T> = std::result::Result<T, WinfsError>;
 pub struct SafeHandle(HANDLE);
 
 impl SafeHandle {
+    /// Wraps a raw Win32 handle and takes ownership for `CloseHandle` on drop.
+    ///
+    /// Caller must ensure `handle` is a valid open handle (or null/invalid sentinel) not owned elsewhere.
+    pub(crate) fn from_raw(handle: HANDLE) -> Self {
+        Self(handle)
+    }
+
     /// Returns the raw handle for FFI calls.
     pub fn raw(&self) -> HANDLE {
         self.0
