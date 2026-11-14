@@ -12,6 +12,8 @@ jobs:
   gate-a-and-backend:
     name: Gate A & backend (A-F)
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
     defaults:
       run:
         shell: pwsh
@@ -109,6 +111,8 @@ jobs:
   mutation-gate:
     name: Mutation gate (cargo-mutants >= 95% policy/paths)
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
     defaults:
       run:
         shell: pwsh
@@ -127,10 +131,16 @@ jobs:
           workspaces: |
             app -> target
 
+      - name: Run mutation script self-tests
+        run: pwsh ./scripts/run-cargo-mutants.ps1 -SelfTest
+
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
+
+      - name: Print cargo-mutants version
+        run: cargo mutants --version
 
       - name: Run mutation gate (sweeper-core policy.rs, paths.rs)
         run: pwsh ./scripts/run-cargo-mutants.ps1
@@ -149,6 +159,8 @@ jobs:
   package-windows:
     name: Windows packaging & SHA-256 verification
     runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
     defaults:
       run:
         shell: pwsh
