@@ -66,11 +66,13 @@ impl SingleInstanceState {
         }
     }
 
-    fn take(&self) -> Option<SingleInstanceGuard> {
+    /// Remove and return the held guard, if any.
+    pub fn take(&self) -> Option<SingleInstanceGuard> {
         self.inner.lock().ok().and_then(|mut g| g.take())
     }
 
-    fn put(&self, guard: SingleInstanceGuard) {
+    /// Store a guard.
+    pub fn put(&self, guard: SingleInstanceGuard) {
         if let Ok(mut g) = self.inner.lock() {
             *g = Some(guard);
         }

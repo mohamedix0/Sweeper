@@ -126,8 +126,14 @@ fn relaunch_elevated(
 }
 
 fn main() {
-    let single_instance_guard = sweeper_desktop::elevation::acquire_startup_single_instance()
-        .expect("failed to acquire Sweeper single-instance mutex");
+    let single_instance_guard = match sweeper_desktop::elevation::acquire_startup_single_instance()
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            eprintln!("another Sweeper instance is already running");
+            std::process::exit(1);
+        }
+    };
     let app_state = AppState::new_default().with_single_instance_guard(single_instance_guard);
     #[cfg(has_frontend_dist)]
     let context = tauri::generate_context!();

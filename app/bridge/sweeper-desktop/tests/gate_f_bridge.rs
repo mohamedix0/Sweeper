@@ -11,6 +11,64 @@ use sweeper_desktop::session::StoredItem;
 use sweeper_desktop::AppState;
 use sweeper_testkit::{CanaryTree, Sandbox};
 
+#[test]
+fn single_instance_guard_cross_thread_handoff_via_app_state() {
+    use std::sync::Arc;
+
+    fn unique_test_mutex_name(suffix: &str) -> String {
+        static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!(r"Local\SweeperGateF-{pid}-{nanos}-{n}-{suffix}")
+    }
+
+    let name = unique_test_mutex_name("app-state-cross-thread");
+    let guard = sweeper_core::elevation::SingleInstanceGuard::acquire_named(&name, 1_000)
+        .expect("acquire named single-instance guard");
+    let state = Arc::new(AppState::new_default().with_single_instance_guard(guard));
+    assert!(
+        state.single_instance.is_held(),
+        "startup guard should be held in AppState"
+    );
+
+    let state_for_worker = Arc::clone(&state);
+    let contender_name = name.clone();
+    let handle = std::thread::spawn(move || {
+        let mut guard = state_for_worker
+            .single_instance
+            .take()
+            .expect("take guard from AppState on worker thread");
+        assert!(guard.is_held());
+
+        guard
+            .release_for_handoff()
+            .expect("release_for_handoff must succeed on worker thread");
+
+        let contender = std::thread::spawn(move || {
+            sweeper_core::elevation::SingleInstanceGuard::acquire_named(&contender_name, 1_000)
+        })
+        .join()
+        .expect("contender join")
+        .expect("contender acquires released mutex");
+        drop(contender);
+
+        guard
+            .reacquire(1_000)
+            .expect("reacquire must succeed on worker thread");
+        state_for_worker.single_instance.put(guard);
+    });
+    handle.join().expect("worker thread join");
+
+    assert!(
+        state.single_instance.is_held(),
+        "guard should be held again in AppState after cross-thread reacquire"
+    );
+}
+
 fn make_state() -> AppState<FixedClock> {
     // old mtime for scanned items (>=24h before now)
     AppState::with_clock(FixedClock::new(1_800_000_000))
@@ -1316,7 +1374,15 @@ fn make_elevation_test_state(
         exited_c.store(true, std::sync::atomic::Ordering::SeqCst);
         *exit_code_c.lock().unwrap() = Some(code);
     });
-    let guard = sweeper_core::elevation::acquire_single_instance(1_000)
+    static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mutex_name = format!(r"Local\SweeperGateFElevation-{pid}-{nanos}-{n}");
+    let guard = sweeper_core::elevation::SingleInstanceGuard::acquire_named(&mutex_name, 1_000)
         .expect("test should acquire single-instance mutex");
     let si = std::sync::Arc::new(sweeper_desktop::elevation::SingleInstanceState::with_guard(
         guard,
