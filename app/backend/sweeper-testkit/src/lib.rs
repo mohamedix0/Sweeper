@@ -64,8 +64,14 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// Create a new isolated sandbox with a sentinel file at its root.
+    ///
+    /// Prefers a canonicalized process temp directory so that Windows short-name aliases in
+    /// environment paths (for example `RUNNER~1` on GitHub Actions) are expanded to long names
+    /// while preserving temp-area semantics required by allowlist-sensitive tests (e.g. Gate F).
+    /// Falls back to a cargo-target sandbox base only when canonicalized temp is unavailable or
+    /// still contains short-name segments.
     pub fn new() -> Result<Self> {
-        Self::new_in(std::env::temp_dir())
+        Self::new_in(default_sandbox_base())
     }
 
     /// Create a new isolated sandbox under `base_dir` with a sentinel file at its root.
@@ -229,6 +235,76 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn default_sandbox_base() -> PathBuf {
+    let temp = std::env::temp_dir();
+    let canonical_temp = canonicalize_sandbox_base(temp.clone());
+    if !has_short_name_component(&canonical_temp) {
+        return canonical_temp;
+    }
+
+    if let Some(base) = cargo_target_sandbox_base() {
+        let _ = fs::create_dir_all(&base);
+        let canonical_base = canonicalize_sandbox_base(base.clone());
+        if is_safe_sandbox_base(&canonical_base) {
+            return canonical_base;
+        }
+        if is_safe_sandbox_base(&base) {
+            return base;
+        }
+    }
+
+    // Last resort: preserve behavior even if no known-safe base is available.
+    canonical_temp
+}
+
+fn cargo_target_sandbox_base() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+        return Some(PathBuf::from(v).join("sweeper-test-sandboxes"));
+    }
+    if let Some(v) = std::env::var_os("CARGO_TARGET_DIR") {
+        return Some(PathBuf::from(v).join("sweeper-test-sandboxes"));
+    }
+
+    // Best-effort workspace-local fallback for testkit users outside cargo-target tmp contexts.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    Some(
+        manifest
+            .join("..\\..\\..\\target\\sweeper-test-sandboxes")
+            .components()
+            .collect::<PathBuf>(),
+    )
+}
+
+fn canonicalize_sandbox_base(base: PathBuf) -> PathBuf {
+    fn strip_extended_prefix(p: PathBuf) -> PathBuf {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest.to_string());
+        }
+        p
+    }
+
+    let _ = fs::create_dir_all(&base);
+    match fs::canonicalize(&base) {
+        Ok(c) => strip_extended_prefix(c),
+        Err(_) => base,
+    }
+}
+
+fn is_safe_sandbox_base(path: &Path) -> bool {
+    !has_short_name_component(path)
+}
+
+fn has_short_name_component(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(os) => os.to_string_lossy().contains('~'),
+        _ => false,
+    })
 }
 
 /// Create a directory junction at `link` pointing to `target` (Windows).
