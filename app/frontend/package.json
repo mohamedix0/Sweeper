@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:desktop-e2e": "node scripts/test-desktop-e2e.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
