@@ -329,7 +329,7 @@ fn annotate_path(
                         reason = Some(format!("Caution tier {:?} is disabled in settings", t));
                     }
                 } else {
-                    // Unknown-tier caution should not be auto-selectable
+                    // No tier context (e.g. knowledge-only caution entries) are not auto-selectable.
                     selectable = false;
                     reason = Some("Caution item has no enabled tier context".to_string());
                 }
@@ -337,8 +337,23 @@ fn annotate_path(
             Risk::Unknown => {
                 if !settings.allow_unknown {
                     selectable = false;
-                    reason =
-                        Some("Unknown items are not selectable by default in Phase 4".to_string());
+                    reason = Some("Unknown items require explicit opt-in".to_string());
+                } else if !is_dir {
+                    selectable = false;
+                    reason = Some("Unknown files are not selectable; only eligible directories can be selected".to_string());
+                } else {
+                    let verdict = policy::validate_custom_path(path_str);
+                    if !verdict.allowed {
+                        selectable = false;
+                        reason = Some(format!(
+                            "Unknown directory is not eligible for selection: {}",
+                            verdict.reason
+                        ));
+                    } else {
+                        // Eligible Unknown directory: selectable as a Custom Path root (contents-only)
+                        // and requires typed confirmation at conversion/clean time.
+                        reason = None;
+                    }
                 }
             }
             Risk::Protected => {
