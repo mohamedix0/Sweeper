@@ -171,15 +171,10 @@ fn validate_target(t: &LintTarget) -> Result<(), LintError> {
     if t.scope != "contents" {
         return Err(terr(&t.id, "scope must be \"contents\""));
     }
-    if t.requires_elevation {
-        // Phase 1B Tier 1/2 targets must not require elevation.
-        return Err(terr(
-            &t.id,
-            "requires_elevation must be false for Tier 1 & 2 allowlist targets",
-        ));
-    }
     validate_known_folder(&t.id, &t.known_folder)?;
     let segments = validate_relative_subpath(&t.id, &t.relative_subpath)?;
+    let audited_elevated = is_audited_elevation_target(&t.known_folder, &segments);
+    validate_elevation_policy(t, audited_elevated)?;
 
     // Reject direct targeting of Protected Container Roots
     if is_protected_container_root_target(&t.known_folder, &segments) {
@@ -197,10 +192,72 @@ fn validate_target(t: &LintTarget) -> Result<(), LintError> {
         ));
     }
 
+    validate_not_protected_container_descendant(
+        &t.id,
+        &t.known_folder,
+        &segments,
+        audited_elevated,
+    )?;
+
     // Browser profile roots must not be targeted directly without a leaf cache subfolder
     validate_browser_profile_leaf_rule(&t.id, &segments)?;
 
     Ok(())
+}
+
+fn validate_elevation_policy(t: &LintTarget, audited_elevated: bool) -> Result<(), LintError> {
+    if audited_elevated {
+        if !t.requires_elevation {
+            return Err(terr(
+                &t.id,
+                "audited Phase 6 elevation target must set requires_elevation=true",
+            ));
+        }
+        if t.tier != "Tier3" || t.risk != "Caution" {
+            return Err(terr(
+                &t.id,
+                "audited Phase 6 elevation target must be Tier3 and Caution",
+            ));
+        }
+        return Ok(());
+    }
+    if t.requires_elevation {
+        return Err(terr(
+            &t.id,
+            "requires_elevation=true is only permitted for explicitly audited Phase 6 targets",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_not_protected_container_descendant(
+    id: &str,
+    known_folder: &str,
+    segments: &[String],
+    audited_elevated: bool,
+) -> Result<(), LintError> {
+    if is_under_protected_container_root_namespace(known_folder, segments) && !audited_elevated {
+        return Err(terr(
+            id,
+            "non-audited descendant under a Protected Container Root is not allowed",
+        ));
+    }
+    Ok(())
+}
+
+fn is_under_protected_container_root_namespace(known_folder: &str, segments: &[String]) -> bool {
+    matches!(known_folder, "Windows" | "ProgramData") && !segments.is_empty()
+}
+
+fn is_audited_elevation_target(known_folder: &str, segments: &[String]) -> bool {
+    let rel = segments.join("\\").to_ascii_lowercase();
+    matches!(
+        (known_folder, rel.as_str()),
+        ("Windows", "temp")
+            | ("Windows", "softwaredistribution\\download")
+            | ("Windows", "prefetch")
+            | ("ProgramData", "package cache")
+    )
 }
 
 fn validate_known_folder(id: &str, kf: &str) -> Result<(), LintError> {
