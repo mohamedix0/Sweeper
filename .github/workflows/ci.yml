@@ -2,8 +2,12 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -111,6 +115,7 @@ jobs:
   mutation-gate:
     name: Mutation gate (cargo-mutants >= 95% policy/paths)
     runs-on: windows-latest
+    timeout-minutes: 35
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
     defaults:

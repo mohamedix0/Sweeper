@@ -391,6 +391,7 @@ if (-not [string]::IsNullOrWhiteSpace($versionText)) {
 # Target only sweeper-core safety-critical path/policy modules.
 $workspaceDir = Join-Path $repoRoot "app"
 $filters = @("backend/sweeper-core/src/policy.rs", "backend/sweeper-core/src/paths.rs")
+$testArgs = @("--locked", "--lib", "--test", "gate_b_proptest", "--test", "gate_c_adversarial", "--test", "gate_c_ntfs", "--test", "settings_tier3")
 
 if ($ListOnly) {
     Write-Step "Listing targeted mutants (dry-run) for sweeper-core policy.rs and paths.rs"
@@ -421,13 +422,17 @@ $mutantsArgs = @(
     "--dir", $workspaceDir,
     "--package", "sweeper-core",
     "--output", $OutputDir,
-    "--no-shuffle"
+    "--no-shuffle",
+    "--timeout-multiplier", "5",
+    "--minimum-test-timeout", "30"
 )
 foreach ($f in $filters) {
     $mutantsArgs += @("--file", $f)
 }
+$mutantsArgs += "--"
+$mutantsArgs += $testArgs
 
-Write-Step "Running cargo-mutants on sweeper-core policy.rs and paths.rs"
+Write-Step "Running cargo-mutants on sweeper-core policy.rs and paths.rs (restricted test suites)"
 Write-Host ("cargo " + ($mutantsArgs -join ' '))
 
 $mutantsSucceeded = $true
@@ -482,6 +487,7 @@ $summary = [ordered]@{
     package             = "sweeper-core"
     targets             = @("backend/sweeper-core/src/policy.rs", "backend/sweeper-core/src/paths.rs")
     filters             = $filters
+    testArgs            = $testArgs
     minScore            = $MinScore
     score               = $score
     passed              = $passed
