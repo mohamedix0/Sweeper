@@ -371,6 +371,22 @@ pub struct ExplainItemResponse {
     pub risk: RiskDto,
 }
 
+/// Elevation status for the current process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ElevationStatusDto {
+    /// Whether the current process is running elevated (administrator).
+    pub is_elevated: bool,
+}
+
+/// Result of attempting to relaunch the app elevated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RelaunchResultDto {
+    /// Whether a relaunch was initiated/launched.
+    pub launched: bool,
+}
+
 /// Settings DTO (validated, safe defaults on invalid input at bridge layer).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -381,6 +397,9 @@ pub struct SettingsDto {
     pub enable_tier2: bool,
     /// Whether Tier 3 targets are enabled (disabled by default in v1).
     pub enable_tier3: bool,
+    /// Allow elevation-gated targets (requires running elevated process). Default false.
+    #[serde(default)]
+    pub enable_elevation_targets: bool,
     /// Minimum age in hours (default 24). Values below 24 are allowed but should be warned in UI.
     pub min_age_hours: u32,
     /// Allow deleting/cleaning `Unknown` analyzer selections when explicitly enabled and confirmed.
@@ -397,6 +416,7 @@ impl Default for SettingsDto {
             enable_tier1: true,
             enable_tier2: true,
             enable_tier3: false,
+            enable_elevation_targets: false,
             min_age_hours: 24,
             allow_delete_unknown: false,
             custom_paths: Vec::new(),
@@ -529,6 +549,8 @@ fn render_bindings() -> Result<String, Box<dyn std::error::Error>> {
     let _ = <PreviewCleanResponse as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <ExplainItemResponse as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <SettingsDto as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <ElevationStatusDto as NamedType>::definition_named_data_type(&mut type_map);
+    let _ = <RelaunchResultDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <LogMetadataDto as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <LogReadResponse as NamedType>::definition_named_data_type(&mut type_map);
     let _ = <ContractError as NamedType>::definition_named_data_type(&mut type_map);
@@ -969,6 +991,8 @@ pub fn fuzz_contract_payload_bytes(data: &[u8]) {
         let _ = serde_json::from_str::<ScanProgressEvent>(s);
         let _ = serde_json::from_str::<CleanProgressEvent>(s);
         let _ = serde_json::from_str::<ContractError>(s);
+        let _ = serde_json::from_str::<ElevationStatusDto>(s);
+        let _ = serde_json::from_str::<RelaunchResultDto>(s);
         let _ = serde_json::from_str::<Vec<String>>(s);
         let _ = serde_json::from_str::<Vec<TierDto>>(s);
     }

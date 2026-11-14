@@ -846,16 +846,55 @@ pub fn scan_with_settings_options(
     settings: &crate::settings::SweeperSettings,
     opts: ScanSettingsOptions,
 ) -> Result<ScanReport, ScanError> {
+    scan_with_settings_options_and_elevation(settings, opts, crate::ScanElevationContext::default())
+}
+
+/// Scan using the current process elevation state (via `sweeper_winfs::is_process_elevated()`).
+pub fn scan_with_settings_current_elevation(
+    settings: &crate::settings::SweeperSettings,
+) -> Result<ScanReport, ScanError> {
+    scan_with_settings_options_current_elevation(settings, ScanSettingsOptions::default())
+}
+
+/// Scan with options using the current process elevation state.
+pub fn scan_with_settings_options_current_elevation(
+    settings: &crate::settings::SweeperSettings,
+    opts: ScanSettingsOptions,
+) -> Result<ScanReport, ScanError> {
+    let elevated = sweeper_winfs::is_process_elevated().unwrap_or(false);
+    scan_with_settings_options_and_elevation(
+        settings,
+        opts,
+        crate::ScanElevationContext {
+            process_elevated: elevated,
+        },
+    )
+}
+
+/// Scan with explicit elevation context (deterministic for tests).
+pub fn scan_with_settings_options_and_elevation(
+    settings: &crate::settings::SweeperSettings,
+    opts: ScanSettingsOptions,
+    elevation: crate::ScanElevationContext,
+) -> Result<ScanReport, ScanError> {
     let now = opts.now.unwrap_or_else(SystemTime::now);
     let started_unix_secs = system_time_to_unix_secs(now);
     let min_age = Duration::from_secs(u64::from(settings.min_age_hours) * 3600);
 
+    let elev_ok =
+        elevation.process_elevated && settings.enable_tier3 && settings.enable_elevation_targets;
     let mut targets: Vec<TargetDefinition> = sweeper_knowledge::embedded_targets()
         .into_iter()
-        .filter(|t| match t.tier {
-            Tier::Tier1 => settings.enable_tier1,
-            Tier::Tier2 => settings.enable_tier2,
-            Tier::Tier3 => settings.enable_tier3,
+        .filter(|t| {
+            if t.requires_elevation {
+                elev_ok
+            } else {
+                match t.tier {
+                    Tier::Tier1 => settings.enable_tier1,
+                    Tier::Tier2 => settings.enable_tier2,
+                    Tier::Tier3 => settings.enable_tier3,
+                }
+            }
         })
         .collect();
 

@@ -246,10 +246,11 @@ impl SessionStore {
             effective.enable_tier3 = effective.enable_tier3 && req_set.contains(&TierDto::Tier3);
         }
 
-        let report =
-            scanner::scan_with_settings(&effective).map_err(|e| ContractError::Internal {
+        let report = scanner::scan_with_settings_current_elevation(&effective).map_err(|e| {
+            ContractError::Internal {
                 reason: sanitize_reason(&e.to_string()),
-            })?;
+            }
+        })?;
 
         let session_id = self.next_id("scan", now);
         let (results, items, target_roots) = map_report_to_session(&session_id, report);

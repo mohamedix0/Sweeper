@@ -14,6 +14,13 @@ pub mod knowledge {
 }
 pub use sweeper_knowledge::{Risk, Tier};
 
+/// Elevation context for scan/clean eligibility decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScanElevationContext {
+    /// True when the current process is running elevated (administrator).
+    pub process_elevated: bool,
+}
+
 /// Deterministic fuzz entrypoint for path/policy validation.
 /// Accepts arbitrary bytes (lossy UTF-8) and must never panic.
 pub fn fuzz_path_policy_bytes(data: &[u8]) {

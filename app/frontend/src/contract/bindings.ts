@@ -52,7 +52,7 @@ async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: stri
     else return { status: "error", error: e  as any };
 }
 },
-async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_settings") };
 } catch (e) {
@@ -60,7 +60,7 @@ async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolea
     else return { status: "error", error: e  as any };
 }
 },
-async updateSettings(settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+async updateSettings(settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_settings", { settings }) };
 } catch (e) {

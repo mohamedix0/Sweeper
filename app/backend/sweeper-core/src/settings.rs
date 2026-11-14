@@ -34,6 +34,8 @@ pub struct SweeperSettings {
     pub enable_tier2: bool,
     /// Enable Tier 3 targets (strictly opt-in, disabled by default).
     pub enable_tier3: bool,
+    /// Allow elevation-gated targets (requires running elevated process). Default false.
+    pub enable_elevation_targets: bool,
     /// Minimum file age in hours before eligibility.
     /// Bounded to `0..=8760`; untrusted out-of-bounds values are reset to 24.
     /// `0` is allowed (explicit opt-in/warning handled by UI/bridge layers).
@@ -58,6 +60,7 @@ impl Default for SweeperSettings {
             enable_tier1: true,
             enable_tier2: true,
             enable_tier3: false,
+            enable_elevation_targets: false,
             min_age_hours: DEFAULT_MIN_AGE_HOURS,
             allow_delete_unknown: false,
             custom_paths: Vec::new(),
@@ -138,6 +141,13 @@ impl SweeperSettings {
             &["enable_tier3", "enableTier3"],
             &mut settings.enable_tier3,
             "enable_tier3",
+            &mut warnings,
+        );
+        extract_bool_field(
+            obj,
+            &["enable_elevation_targets", "enableElevationTargets"],
+            &mut settings.enable_elevation_targets,
+            "enable_elevation_targets",
             &mut warnings,
         );
         extract_u32_field(
