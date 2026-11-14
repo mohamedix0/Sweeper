@@ -459,6 +459,7 @@ fn setup_tier3_scan_fixture(
     write_file(&rust_target.join("artifact.bin"), b"12345");
     set_mtime_days_ago(&rust_proj.join("Cargo.toml"), 45);
     set_old(&rust_target.join("artifact.bin"));
+    set_old(&rust_target);
 
     let rust_fresh = search_root.join("rustfresh");
     let rust_fresh_target = rust_fresh.join("target");
@@ -488,6 +489,8 @@ fn setup_tier3_scan_fixture(
     );
     set_mtime_days_ago(&node_proj.join("package-lock.json"), 45);
     set_old(&node_modules.join("pkg").join("index.js"));
+    set_old(&node_modules.join("pkg"));
+    set_old(&node_modules);
 
     let node_fresh = search_root.join("nodefresh");
     let node_fresh_nm = node_fresh.join("node_modules");
