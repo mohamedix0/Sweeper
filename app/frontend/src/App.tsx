@@ -1,23 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import sweeperIcon from './assets/sweeper-icon.png';
 import './styles/tokens.css';
 import './App.css';
 import { createClient, formatContractError, type ElevationStatus, type Settings } from './api/client';
 import { AnalyzerView } from './components/AnalyzerView';
-import { LogsIcon, ScanIcon, AnalyzerIcon, SettingsIcon } from './components/Icons';
+import { AnalyzerIcon, LogsIcon, MoonIcon, ScanIcon, SettingsIcon, ShieldIcon, SunIcon } from './components/Icons';
 import { LogsView } from './components/LogsView';
 import { ScanAndPreviewView } from './components/ScanAndPreviewView';
 import { SettingsView } from './components/SettingsView';
 
 type View = 'scan' | 'analyzer' | 'settings' | 'logs';
 type Theme = 'dark' | 'light';
-
-const VIEW_LABELS: Record<View, string> = {
-  scan: 'Scan & Preview',
-  analyzer: 'Analyzer',
-  settings: 'Settings',
-  logs: 'Logs',
-};
 
 function readStoredTheme(): Theme {
   if (typeof window === 'undefined') return 'dark';
@@ -33,7 +26,7 @@ export function App() {
   const [elevationError, setElevationError] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem('sweeper-theme', theme);
   }, [theme]);
@@ -67,8 +60,8 @@ export function App() {
     setView('logs');
   }
 
-  const elevationLabel = elevationStatus.isElevated ? 'Elevated (Administrator)' : 'Standard (Non-Elevated)';
   const elevationAria = elevationStatus.isElevated ? 'Administrator (Elevated)' : 'Standard (Non-Elevated)';
+  const privilegeText = elevationStatus.isElevated ? 'Administrator' : 'Standard User';
 
   return (
     <div className="app-shell">
@@ -83,7 +76,7 @@ export function App() {
               <div className="nav-group-label">Workspace</div>
               <button aria-current={view === 'scan' ? 'page' : undefined} onClick={() => setView('scan')}>
                 <ScanIcon className="nav-icon" />
-                <span>Scan &amp; Preview</span>
+                <span>Scan &amp; Clean</span>
               </button>
               <button aria-current={view === 'analyzer' ? 'page' : undefined} onClick={() => setView('analyzer')}>
                 <AnalyzerIcon className="nav-icon" />
@@ -98,53 +91,54 @@ export function App() {
               </button>
               <button aria-current={view === 'logs' ? 'page' : undefined} onClick={() => setView('logs')}>
                 <LogsIcon className="nav-icon" />
-                <span>Logs</span>
+                <span>Activity</span>
               </button>
             </div>
           </nav>
         </div>
-        <div className="sidebar-footer">
-          <div className="theme-toggle" role="group" aria-label="Theme">
-            <button
-              type="button"
-              className={theme === 'dark' ? 'theme-segment active' : 'theme-segment'}
-              aria-pressed={theme === 'dark'}
-              onClick={() => setTheme('dark')}
+        <div className="sidebar-footer sidebar-footer-compact">
+          <div className="sidebar-user-row">
+            <div
+              className={`privilege-status ${elevationStatus.isElevated ? 'elevated' : ''}`}
+              aria-label={elevationAria}
+              title={elevationAria}
             >
-              Dark
-            </button>
-            <button
-              type="button"
-              className={theme === 'light' ? 'theme-segment active' : 'theme-segment'}
-              aria-pressed={theme === 'light'}
-              onClick={() => setTheme('light')}
-            >
-              Light
-            </button>
-          </div>
-          <div className="elevation-badge-wrap">
-            <span className={`badge ${elevationStatus.isElevated ? 'risk-Safe' : 'risk-Caution'}`} aria-label={elevationAria}>
-              {elevationLabel}
-            </span>
+              <ShieldIcon className="privilege-icon" />
+              <span>{privilegeText}</span>
+            </div>
+            <div className="sidebar-theme-icons" role="group" aria-label="Theme">
+              <button
+                type="button"
+                className={`icon-only-btn subtle theme-icon-btn ${theme === 'light' ? 'active' : ''}`}
+                aria-label="Light"
+                aria-pressed={theme === 'light'}
+                title="Light"
+                onClick={() => setTheme('light')}
+              >
+                <SunIcon />
+              </button>
+              <button
+                type="button"
+                className={`icon-only-btn subtle theme-icon-btn ${theme === 'dark' ? 'active' : ''}`}
+                aria-label="Dark"
+                aria-pressed={theme === 'dark'}
+                title="Dark"
+                onClick={() => setTheme('dark')}
+              >
+                <MoonIcon />
+              </button>
+            </div>
           </div>
         </div>
       </aside>
       <div className="app-main">
-        <header className="main-topbar" aria-label="Context">
-          <div className="breadcrumb">
-            <span className="crumb-root">Sweeper</span>
-            <span className="crumb-sep" aria-hidden="true">/</span>
-            <span className="crumb-current">{VIEW_LABELS[view]}</span>
-          </div>
-          <div id="main-topbar-actions" className="topbar-actions" />
-        </header>
         <main className="main-content">
           {view === 'scan' && <ScanAndPreviewView client={client} settings={settings} elevationStatus={elevationStatus} elevationError={elevationError} onOpenLog={openLog} />}
-          {view === 'analyzer' && <AnalyzerView client={client} settings={settings} onOpenLog={openLog} />}
-          {view === 'settings' && <SettingsView client={client} settings={settings} elevationStatus={elevationStatus} elevationError={elevationError} onSaved={setSettings} />}
+          {view === 'analyzer' && <AnalyzerView client={client} settings={settings} onOpenLog={openLog} onOpenSettings={() => setView('settings')} />}
+          {view === 'settings' && <SettingsView client={client} settings={settings} elevationStatus={elevationStatus} elevationError={elevationError} onSaved={setSettings} theme={theme} onThemeChange={setTheme} />}
           {view === 'logs' && <LogsView client={client} focusLogId={focusLogId} onFocusConsumed={() => setFocusLogId(null)} />}
         </main>
       </div>
     </div>
   );
-}
+}

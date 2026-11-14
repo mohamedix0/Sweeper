@@ -1,4 +1,4 @@
-﻿import { render, screen, waitFor, within } from '@testing-library/react';
+﻿import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { App } from './App';
@@ -10,22 +10,51 @@ function setup() {
 
 describe('Sweeper frontend', () => {
   beforeEach(() => {
+    window.localStorage.clear();
+    document.documentElement.dataset.theme = 'dark';
     mockController.reset();
   });
 
-  it('renders Scan & Preview shell and primary navigation', async () => {
+  it('renders Scan & Clean shell and primary navigation', async () => {
     setup();
-    expect(screen.getByText('Sweeper')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Scan & Preview' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getByRole('heading', { name: 'Scan & Preview' })).toBeInTheDocument();
+    expect(screen.getAllByText('Sweeper').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Scan & Clean' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('heading', { name: 'Scan & Clean' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start Scan' })).toBeEnabled();
   });
 
-  it('shows locked administrator-only notice on Scan & Preview when non-elevated', async () => {
+  it('shows locked system-wide cleanup notice on Scan & Clean when non-elevated', async () => {
+    setup();
+    expect((await screen.findAllByLabelText('Standard (Non-Elevated)')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/System-Wide Cleanup Locked/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole('button', { name: 'Run as administrator' }).length).toBeGreaterThan(0);
+  });
+
+  it('toggles Dark/Light theme and persists choice in localStorage', async () => {
     const { user } = setup();
-    expect(await screen.findByLabelText('Standard (Non-Elevated)')).toBeInTheDocument();
-    expect(screen.getByText(/Administrator-only Tier 3 targets locked/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Run as administrator' })).toBeInTheDocument();
+    const light = screen.getByRole('button', { name: 'Light' });
+    await user.click(light);
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(window.localStorage.getItem('sweeper-theme')).toBe('light');
+    const dark = screen.getByRole('button', { name: 'Dark' });
+    await user.click(dark);
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(window.localStorage.getItem('sweeper-theme')).toBe('dark');
+  });
+
+  it('shows and hides info tooltip on click and Escape', async () => {
+    setup();
+    const infoBtn = screen.getByRole('button', { name: 'About System & App Temp (Tier 1)' });
+    const text = /Windows Temp, crash dumps & app caches older than 24h/i;
+    fireEvent.click(infoBtn);
+    await waitFor(() =>
+      expect(screen.getAllByRole('tooltip').some((t) => text.test(t.textContent || ''))).toBe(true),
+    );
+    infoBtn.focus();
+    fireEvent.keyDown(infoBtn, { key: 'Escape', code: 'Escape' });
+    await waitFor(() =>
+      expect(screen.queryAllByRole('tooltip').some((t) => text.test(t.textContent || ''))).toBe(false),
+    );
   });
 
   it('runs full Scan -> Explain -> Preview -> Clean summary -> Logs viewer flow', async () => {
@@ -40,11 +69,10 @@ describe('Sweeper frontend', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Close explanation' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
 
-    const eligibleCheckbox = screen.getByLabelText('Select C:\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp');
-    await user.click(eligibleCheckbox);
-    await user.click(screen.getByRole('button', { name: 'Preview Clean' }));
+    const eligibleCheckbox = screen.getByLabelText('Select C:\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp') as HTMLInputElement;
+    if (!eligibleCheckbox.checked) await user.click(eligibleCheckbox);
+    await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
     await screen.findByText('Preview Breakdown');
-    expect(screen.getByText(/mock-preview-/)).toBeInTheDocument();
 
     const cleanBtn = await screen.findByRole('button', { name: 'Clean Permanently' });
     expect(cleanBtn).toBeEnabled();
@@ -57,7 +85,10 @@ describe('Sweeper frontend', () => {
     expect(screen.getByLabelText('Skipped reasons')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'View Operation Log' }));
-    await screen.findByRole('heading', { name: 'Logs' });
+    await screen.findByRole('heading', { name: 'Activity History' });
+    expect(screen.getByRole('button', { name: 'Summary' })).toHaveAttribute('aria-pressed', 'true');
+    await screen.findByLabelText('Structured log summary');
+    await user.click(screen.getByRole('button', { name: 'Raw JSONL' }));
     await screen.findByLabelText('Log content');
     expect(screen.getByLabelText('Log content')).toHaveTextContent(/"record":"intent"/);
   });
@@ -74,10 +105,10 @@ describe('Sweeper frontend', () => {
     await screen.findByRole('heading', { name: 'Settings' });
     const allowUnknown = screen.getByLabelText('Allow deleting unknown folders (advanced)');
     await user.click(allowUnknown);
-    await user.click(screen.getByRole('button', { name: 'Save Settings' }));
+    await user.click(screen.getAllByRole('button', { name: 'Save Settings' })[0]);
     await screen.findByText(/Settings saved/i);
 
-    await user.click(screen.getByRole('button', { name: 'Scan & Preview' }));
+    await user.click(screen.getByRole('button', { name: 'Scan & Clean' }));
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
     await screen.findByRole('heading', { name: 'Scan Results' });
 
@@ -85,7 +116,7 @@ describe('Sweeper frontend', () => {
     expect(unknownCb2).toBeEnabled();
     await user.click(unknownCb2);
     expect(await screen.findByLabelText('Typed confirmation')).toBeInTheDocument();
-    const previewBtn = screen.getByRole('button', { name: 'Preview Clean' });
+    const previewBtn = screen.getByRole('button', { name: 'Review & Clean' });
     expect(previewBtn).toBeDisabled();
 
     await user.type(screen.getByLabelText('Typed confirmation'), 'delete');
@@ -104,16 +135,16 @@ describe('Sweeper frontend', () => {
     const { user } = setup();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await screen.findByRole('heading', { name: 'Settings' });
-    expect(screen.getByLabelText('Standard (Non-Elevated)')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Standard (Non-Elevated)').length).toBeGreaterThan(0);
 
     const elevationToggle = screen.getByLabelText(
-      'Allow Administrator-only Tier 3 targets (Windows Temp, Update cache, Prefetch, Package Cache)',
+      'Allow system-wide Windows caches (Admin)',
     ) as HTMLInputElement;
     expect(elevationToggle).toBeDisabled();
-    expect(screen.getByText(/Requires administrator/i)).toBeInTheDocument();
+    expect(screen.getByText(/unlock system-wide caches/i)).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Run as administrator' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(/Administrator launch was cancelled/i);
+    await user.click(screen.getAllByRole('button', { name: 'Run as administrator' })[0]);
+    expect((await screen.findAllByRole('alert')).some((el) => /Administrator launch was cancelled/i.test(el.textContent || ''))).toBe(true);
   });
 
   it('allows enabling and persisting elevation targets when elevated', async () => {
@@ -121,15 +152,15 @@ describe('Sweeper frontend', () => {
     const { user } = setup();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await screen.findByRole('heading', { name: 'Settings' });
-    expect(screen.getByLabelText('Administrator (Elevated)')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Administrator (Elevated)').length).toBeGreaterThan(0);
 
-    await user.click(screen.getByLabelText('Enable Tier 3 targets'));
+    await user.click(screen.getByLabelText('Enable deep cleanup categories'));
     const elevationToggle = screen.getByLabelText(
-      'Allow Administrator-only Tier 3 targets (Windows Temp, Update cache, Prefetch, Package Cache)',
+      'Allow system-wide Windows caches (Admin)',
     ) as HTMLInputElement;
     expect(elevationToggle).toBeEnabled();
     await user.click(elevationToggle);
-    await user.click(screen.getByRole('button', { name: 'Save Settings' }));
+    await user.click(screen.getAllByRole('button', { name: 'Save Settings' })[0]);
     await screen.findByText(/Settings saved/i);
 
     const saved = await mockController.getSettings();
@@ -141,32 +172,32 @@ describe('Sweeper frontend', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await screen.findByRole('heading', { name: 'Settings' });
 
-    const minAge = screen.getByLabelText('Minimum Age (hours)');
+    const minAge = screen.getByLabelText('Minimum file age');
     await user.clear(minAge);
     await user.type(minAge, '0');
-    expect(screen.getByText(/Minimum Age below 24 hours/i)).toBeInTheDocument();
+    expect(screen.getByText(/Minimum age below 24 hours/i)).toBeInTheDocument();
 
-    const tier3 = screen.getByLabelText('Enable Tier 3 targets') as HTMLInputElement;
+    const tier3 = screen.getByLabelText('Enable deep cleanup categories') as HTMLInputElement;
     expect(tier3.checked).toBe(false);
-    const staleDays = screen.getByLabelText('Stale project threshold (days)') as HTMLInputElement;
+    const staleDays = screen.getByLabelText('Inactive project cache age') as HTMLInputElement;
     expect(staleDays).toBeDisabled();
     await user.click(tier3);
     expect(staleDays).toBeEnabled();
     await user.clear(staleDays);
     await user.type(staleDays, '45');
-    expect(screen.getByText(/display-only/i)).toBeInTheDocument();
-    expect(screen.getByLabelText('Tier 3 target notes')).toHaveTextContent(/Recycle Bin/i);
+    expect(screen.getAllByText(/Highlight inactive Rust\/Node build caches/i).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('Deep cleanup category notes')).toHaveTextContent(/Recycle Bin/i);
 
     // Custom path reject
     await user.type(screen.getByLabelText('Add Custom Path'), 'C:\\Windows\\Temp\\bad');
-    await user.click(screen.getByRole('button', { name: 'Add & Validate' }));
+    await user.click(screen.getByRole('button', { name: 'Add Folder' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/Custom Path rejected/i);
 
     // Custom path add
     const input = screen.getByLabelText('Add Custom Path');
     await user.clear(input);
     await user.type(input, 'C:\\Users\\Alice\\CustomCleanup');
-    await user.click(screen.getByRole('button', { name: 'Add & Validate' }));
+    await user.click(screen.getByRole('button', { name: 'Add Folder' }));
     await screen.findByText(/Settings saved/i);
     expect(screen.getByRole('table', { name: 'Custom Paths' })).toHaveTextContent('C:\\Users\\Alice\\CustomCleanup');
 
@@ -204,7 +235,7 @@ describe('Sweeper frontend', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await screen.findByRole('heading', { name: 'Settings' });
     await user.click(screen.getByLabelText('Allow deleting unknown folders (advanced)'));
-    await user.click(screen.getByRole('button', { name: 'Save Settings' }));
+    await user.click(screen.getAllByRole('button', { name: 'Save Settings' })[0]);
     await screen.findByText(/Settings saved/i);
 
     await user.click(screen.getByRole('button', { name: 'Analyzer' }));
@@ -228,7 +259,7 @@ describe('Sweeper frontend', () => {
     expect(unknownCb2!).toBeEnabled();
     await user.click(unknownCb2!);
     expect(await screen.findByLabelText('Typed confirmation')).toBeInTheDocument();
-    const previewBtn = screen.getByRole('button', { name: 'Preview Selected' });
+    const previewBtn = screen.getByRole('button', { name: 'Review & Clean' });
     expect(previewBtn).toBeDisabled();
     await user.type(screen.getByLabelText('Typed confirmation'), 'DELETE');
     expect(previewBtn).toBeEnabled();
@@ -240,7 +271,7 @@ describe('Sweeper frontend', () => {
     await screen.findByRole('heading', { name: 'Scan Results' });
     await user.click(screen.getByLabelText('Select C:\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp'));
     mockController.advanceTimeMs(15 * 60 * 1000 + 1000);
-    await user.click(screen.getByRole('button', { name: 'Preview Clean' }));
+    await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/expired|invalid/i);
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan Results' })).not.toBeInTheDocument());
@@ -268,5 +299,46 @@ describe('Sweeper frontend', () => {
     expect(linkNode).toBeTruthy();
     expect(linkNode!).toBeDisabled();
     expect(linkNode!.closest('[role="treeitem"]')).toHaveTextContent(/Link Point/i);
+  });
+
+  it('supports scan bulk selection, target-group selection, and status filters', async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await screen.findByRole('heading', { name: 'Scan Results' });
+
+    const selectAllSafe = screen.getByRole('button', { name: 'Select All Safe' });
+    expect(selectAllSafe).toBeEnabled();
+    await user.click(selectAllSafe);
+
+    const safeEligible = screen.getByLabelText('Select C:\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp') as HTMLInputElement;
+    expect(safeEligible).toBeChecked();
+    expect(screen.getAllByRole('button', { name: 'Clear' }).length).toBeGreaterThan(0);
+
+    expect(screen.getAllByLabelText('Status Skipped').length).toBeGreaterThan(0);
+    await user.click(screen.getByRole('button', { name: /^Eligible \(/ }));
+    await waitFor(() => expect(screen.queryAllByLabelText('Status Skipped')).toHaveLength(0));
+
+    await user.click(screen.getAllByRole('button', { name: 'Clear' })[0]);
+    await waitFor(() => expect(safeEligible.checked).toBe(false));
+
+    await user.click(screen.getByRole('button', { name: /^All \(/ }));
+    const userTempGroup = screen.getByLabelText('Select all eligible items in User Temp') as HTMLInputElement;
+    await user.click(userTempGroup);
+    expect(safeEligible).toBeChecked();
+  });
+
+  it('shows Analyzer sticky action bar Review & Clean with disabled/enabled states', async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Analyzer' }));
+    await user.click(screen.getByRole('button', { name: 'Analyze' }));
+    await screen.findByRole('heading', { name: 'Analyzer Tree' });
+
+    const previewBtn = screen.getByRole('button', { name: 'Review & Clean' }) as HTMLButtonElement;
+    expect(previewBtn).toBeDisabled();
+
+    const safeNode = await screen.findByLabelText(/Select analyzer node .*AppData\\Local\\Temp$/);
+    await user.click(safeNode);
+    expect(previewBtn).toBeEnabled();
+    expect(previewBtn.className).toMatch(/primary/);
   });
 });

@@ -55,3 +55,11 @@ export function formatUnixSeconds(secs: string | null | undefined): string {
     return String(secs);
   }
 }
+
+export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+export function normalizeDisplayPath(p: string): string {
+  return p.replace(/\\\\/g, '\\');
+}

@@ -188,8 +188,9 @@ function makeNode(partial: Omit<AnalyzerNodeDto, 'children'> & { children?: Anal
 }
 
 function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNodeDto {
+  const base = rootPath.replace(/[\\/]+$/, '');
   const deepChildren: AnalyzerNodeDto[] = [];
-  const cursorPath = `${rootPath}\\Users\\Alice\\AppData\\Local\\Packages\\DeepVendor`;
+  const cursorPath = `${base}\\Users\\Alice\\AppData\\Local\\Packages\\DeepVendor`;
   let deepLeaf: AnalyzerNodeDto = makeNode({
     id: 'an-deep-leaf', name: 'cache.bin', path: `${cursorPath}\\layer30\\cache.bin`, isDir: false,
     sizeBytes: '2048', itemCount: '1', risk: 'Safe', description: 'Deep nested cache file (Safe).',
@@ -212,7 +213,7 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
     manyFiles.push(makeNode({
       id: `an-bulk-file-${i}`,
       name: `temp-${i}.tmp`,
-      path: `${rootPath}\\Users\\Alice\\AppData\\Local\\Temp\\bulk\\temp-${i}.tmp`,
+      path: `${base}\\Users\\Alice\\AppData\\Local\\Temp\\bulk\\temp-${i}.tmp`,
       isDir: false, sizeBytes: String(1024 * i), itemCount: '1', risk: 'Safe',
       description: 'Temporary file (Safe).', reason: null, tier: 'Tier1', targetId: 'mock-temp',
       isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true,
@@ -220,12 +221,12 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
   }
 
   const protectedGit = makeNode({
-    id: 'an-protected-git', name: '.git', path: `${rootPath}\\Dev\\repo\\.git`, isDir: true,
+    id: 'an-protected-git', name: '.git', path: `${base}\\Dev\\repo\\.git`, isDir: true,
     sizeBytes: '4096', itemCount: '12', risk: 'Protected', description: 'Protected repository metadata (.git).',
     reason: 'Protected Path', tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
     displayOnly: true, selectable: false,
     children: [makeNode({
-      id: 'an-protected-git-obj', name: 'objects', path: `${rootPath}\\Dev\\repo\\.git\\objects`, isDir: true,
+      id: 'an-protected-git-obj', name: 'objects', path: `${base}\\Dev\\repo\\.git\\objects`, isDir: true,
       sizeBytes: '2048', itemCount: '4', risk: 'Protected', description: 'Protected git internals.',
       reason: 'Protected Path', tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
       displayOnly: true, selectable: false,
@@ -233,14 +234,14 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
   });
 
   const linkPoint = makeNode({
-    id: 'an-link-point', name: 'OneDriveLink', path: `${rootPath}\\Users\\Alice\\OneDriveLink`, isDir: true,
+    id: 'an-link-point', name: 'OneDriveLink', path: `${base}\\Users\\Alice\\OneDriveLink`, isDir: true,
     sizeBytes: '0', itemCount: '0', risk: 'Caution', description: 'Link Point (reparse point). Never followed.',
     reason: 'Link Point — not traversed', tier: null, targetId: null, isLinkPoint: true, isCloudPlaceholder: false,
     displayOnly: true, selectable: false,
   });
 
   const vhdxNode = makeNode({
-    id: 'an-vhdx', name: 'dev-machine.vhdx', path: `${rootPath}\\Users\\Alice\\Virtual Machines\\dev-machine.vhdx`,
+    id: 'an-vhdx', name: 'dev-machine.vhdx', path: `${base}\\Users\\Alice\\Virtual Machines\\dev-machine.vhdx`,
     isDir: false, sizeBytes: '1073741824', itemCount: '1', risk: 'Caution',
     description: 'Virtual disk image (.vhdx). Display-only by policy.',
     reason: '.vhdx display-only', tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
@@ -248,7 +249,7 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
   });
 
   const cloudPlaceholder = makeNode({
-    id: 'an-cloud', name: 'CloudPlaceholder.txt', path: `${rootPath}\\Users\\Alice\\OneDrive\\CloudPlaceholder.txt`,
+    id: 'an-cloud', name: 'CloudPlaceholder.txt', path: `${base}\\Users\\Alice\\OneDrive\\CloudPlaceholder.txt`,
     isDir: false, sizeBytes: '0', itemCount: '1', risk: 'Caution',
     description: 'Cloud placeholder file. Skipped by policy.', reason: 'Cloud placeholder — skipped',
     tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: true, displayOnly: true, selectable: false,
@@ -257,13 +258,13 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
   const unknownSelectable = allowUnknown;
   const unknownReason = allowUnknown ? 'Unknown (selectable when explicitly allowed)' : 'Unknown items are not selectable until allowed in Settings';
   const unknownFolder = makeNode({
-    id: 'an-unknown-folder', name: 'MysteryCache', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\MysteryApp\\MysteryCache`,
+    id: 'an-unknown-folder', name: 'MysteryCache', path: `${base}\\Users\\Alice\\AppData\\Local\\MysteryApp\\MysteryCache`,
     isDir: true, sizeBytes: '8192', itemCount: '2', risk: 'Unknown',
     description: 'Unknown folder not in Knowledge Base. May require confirmation/policy to remove.',
     reason: unknownReason, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
     displayOnly: false, selectable: unknownSelectable,
     children: [makeNode({
-      id: 'an-unknown-file', name: 'old.bin', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\MysteryApp\\MysteryCache\\old.bin`,
+      id: 'an-unknown-file', name: 'old.bin', path: `${base}\\Users\\Alice\\AppData\\Local\\MysteryApp\\MysteryCache\\old.bin`,
       isDir: false, sizeBytes: '8192', itemCount: '1', risk: 'Unknown',
       description: 'Unknown cached data file.', reason: unknownReason, tier: null, targetId: null,
       isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: unknownSelectable,
@@ -271,18 +272,18 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
   });
 
   const cautionFolder = makeNode({
-    id: 'an-caution-logs', name: 'Logs', path: `${rootPath}\\ProgramData\\Vendor\\Logs`, isDir: true,
+    id: 'an-caution-logs', name: 'Logs', path: `${base}\\ProgramData\\Vendor\\Logs`, isDir: true,
     sizeBytes: '262144', itemCount: '8', risk: 'Caution', description: 'Vendor logs (Caution). Review before removal.',
     reason: null, tier: 'Tier2', targetId: 'mock-caution-logs', isLinkPoint: false, isCloudPlaceholder: false,
     displayOnly: false, selectable: true,
     children: [
-      makeNode({ id: 'an-caution-log1', name: 'app.log', path: `${rootPath}\\ProgramData\\Vendor\\Logs\\app.log`, isDir: false, sizeBytes: '131072', itemCount: '1', risk: 'Caution', description: 'Application log file.', reason: null, tier: 'Tier2', targetId: 'mock-caution-logs', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
-      makeNode({ id: 'an-caution-log2', name: 'service.log', path: `${rootPath}\\ProgramData\\Vendor\\Logs\\service.log`, isDir: false, sizeBytes: '131072', itemCount: '1', risk: 'Caution', description: 'Service log file.', reason: null, tier: 'Tier2', targetId: 'mock-caution-logs', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
+      makeNode({ id: 'an-caution-log1', name: 'app.log', path: `${base}\\ProgramData\\Vendor\\Logs\\app.log`, isDir: false, sizeBytes: '131072', itemCount: '1', risk: 'Caution', description: 'Application log file.', reason: null, tier: 'Tier2', targetId: 'mock-caution-logs', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
+      makeNode({ id: 'an-caution-log2', name: 'service.log', path: `${base}\\ProgramData\\Vendor\\Logs\\service.log`, isDir: false, sizeBytes: '131072', itemCount: '1', risk: 'Caution', description: 'Service log file.', reason: null, tier: 'Tier2', targetId: 'mock-caution-logs', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
     ],
   });
 
   const safeTempBulk = makeNode({
-    id: 'an-safe-temp-bulk', name: 'bulk', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\Temp\\bulk`, isDir: true,
+    id: 'an-safe-temp-bulk', name: 'bulk', path: `${base}\\Users\\Alice\\AppData\\Local\\Temp\\bulk`, isDir: true,
     sizeBytes: manyFiles.reduce((a, n) => a + BigInt(n.sizeBytes), 0n).toString(),
     itemCount: String(manyFiles.length), risk: 'Safe', description: 'Bulk temporary files (Safe).',
     reason: null, tier: 'Tier1', targetId: 'mock-temp', isLinkPoint: false, isCloudPlaceholder: false,
@@ -290,20 +291,20 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
   });
 
   const safeTemp = makeNode({
-    id: 'an-safe-temp', name: 'Temp', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\Temp`, isDir: true,
+    id: 'an-safe-temp', name: 'Temp', path: `${base}\\Users\\Alice\\AppData\\Local\\Temp`, isDir: true,
     sizeBytes: (1048576n + 2048n + manyFiles.reduce((a, n) => a + BigInt(n.sizeBytes), 0n)).toString(),
     itemCount: String(2 + manyFiles.length), risk: 'Safe', description: 'User temporary files (Safe).',
     reason: null, tier: 'Tier1', targetId: 'mock-temp', isLinkPoint: false, isCloudPlaceholder: false,
     displayOnly: false, selectable: true,
     children: [
-      makeNode({ id: 'an-safe-temp-a', name: 'a.tmp', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp`, isDir: false, sizeBytes: '1048576', itemCount: '1', risk: 'Safe', description: 'Temporary file.', reason: null, tier: 'Tier1', targetId: 'mock-temp', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
-      makeNode({ id: 'an-safe-temp-recent', name: 'recent.log', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\Temp\\recent.log`, isDir: false, sizeBytes: '2048', itemCount: '1', risk: 'Safe', description: 'Recent temp log (not age-eligible in scan, but analyzer node shown for selection policy demo).', reason: 'Recent (demo)', tier: 'Tier1', targetId: 'mock-temp', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
+      makeNode({ id: 'an-safe-temp-a', name: 'a.tmp', path: `${base}\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp`, isDir: false, sizeBytes: '1048576', itemCount: '1', risk: 'Safe', description: 'Temporary file.', reason: null, tier: 'Tier1', targetId: 'mock-temp', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
+      makeNode({ id: 'an-safe-temp-recent', name: 'recent.log', path: `${base}\\Users\\Alice\\AppData\\Local\\Temp\\recent.log`, isDir: false, sizeBytes: '2048', itemCount: '1', risk: 'Safe', description: 'Recent temp log (not age-eligible in scan, but analyzer node shown for selection policy demo).', reason: 'Recent (demo)', tier: 'Tier1', targetId: 'mock-temp', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true }),
       safeTempBulk,
     ],
   });
 
   const deepBranch = makeNode({
-    id: 'an-deep-root', name: 'DeepVendor', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\Packages\\DeepVendor`,
+    id: 'an-deep-root', name: 'DeepVendor', path: `${base}\\Users\\Alice\\AppData\\Local\\Packages\\DeepVendor`,
     isDir: true, sizeBytes: '4096', itemCount: '31', risk: 'Safe', description: 'Deep nested structure (virtualization demo).',
     reason: null, tier: 'Tier2', targetId: 'mock-deep-safe', isLinkPoint: false, isCloudPlaceholder: false,
     displayOnly: false, selectable: true, children: deepChildren,
@@ -313,11 +314,11 @@ function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNod
   const totalBytes = children.reduce((a, n) => a + BigInt(n.sizeBytes), 0n).toString();
   const totalItems = children.reduce((a, n) => a + BigInt(n.itemCount), 0n).toString();
   return makeNode({
-    id: 'an-root', name: rootPath.split('\\').pop() || 'C:', path: rootPath, isDir: true,
+    id: 'an-root', name: base || rootPath, path: rootPath, isDir: true,
     sizeBytes: totalBytes, itemCount: totalItems, risk: 'Caution',
-    description: `Analyzer root for ${rootPath}. Review nodes and select eligible items for Preview/Clean.`,
-    reason: null, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
-    displayOnly: false, selectable: true, children,
+    description: `Analyzer root for ${rootPath}. Expand to review folders and select eligible items for Review & Clean.`,
+    reason: 'Drive root — expand to select specific folders', tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
+    displayOnly: false, selectable: false, children,
   });
 }
 
@@ -373,8 +374,8 @@ export function createMockController(): MockController {
   let previewSeq = 0;
   let logSeq = 0;
   const logs: LogEntry[] = [
-    { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"event":"scan","status":"completed","targets":3}\n{"event":"preview","items":2}' },
-    { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"event":"clean","status":"completed","deleted":1}' },
+    { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"timestamp":"2:00 AM","action":"Category scanned","details":"User Temp · 1 MB eligible (1 of 2 files)"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"recent.log · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\recent.log · 2 KB · Skipped (< 24h)"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"Crash Dumps & WER · 5 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"app.dmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps\\\\app.dmp · 5 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"npm-cache · 7 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"index-v5 · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache\\\\_cacache\\\\index-v5 · 7 MB · Eligible"}\n{"record":"outcome","status":"completed","event":"scan","categoriesCount":3,"items":5,"totalBytes":"13631488","timestamp":"2:00 AM","action":"Scan completed","details":"3 categories · 13 MB reclaimable"}' },
+    { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"record":"intent","action":"clean","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","category":"User Temp","bytes":"1048576"}\n{"timestamp":"Yesterday, 2:00 AM","action":"Deleted file","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Deleted"}\n{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}' },
   ];
 
   function bumpSettingsGeneration() { settingsGeneration += 1; }
@@ -601,7 +602,7 @@ export function createMockController(): MockController {
           if (!node) { unknownCount += 1; continue; }
           if (node.risk === 'Unknown' && !settingsState.allowDeleteUnknown) err('invalidInput', 'Unknown items are gated by allow_delete_unknown.');
           if (!node.selectable || node.displayOnly || node.risk === 'Protected' || node.isLinkPoint || node.isCloudPlaceholder) {
-            err('invalidInput', 'Selected analyzer node is not eligible for Preview/Clean.');
+            err('invalidInput', 'Selected analyzer node is not eligible for Review & Clean.');
           }
           selected.push(node);
         }
@@ -750,8 +751,8 @@ export function createMockController(): MockController {
       scanSeq = 0; analyzerSeq = 0; previewSeq = 0; logSeq = 0; nowMs = Date.now();
       logs.length = 0;
       logs.push(
-        { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"event":"scan","status":"completed","targets":3}\n{"event":"preview","items":2}' },
-        { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"event":"clean","status":"completed","deleted":1}' },
+        { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"timestamp":"2:00 AM","action":"Category scanned","details":"User Temp · 1 MB eligible (1 of 2 files)"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"recent.log · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\recent.log · 2 KB · Skipped (< 24h)"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"Crash Dumps & WER · 5 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"app.dmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps\\\\app.dmp · 5 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"npm-cache · 7 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"index-v5 · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache\\\\_cacache\\\\index-v5 · 7 MB · Eligible"}\n{"record":"outcome","status":"completed","event":"scan","categoriesCount":3,"items":5,"totalBytes":"13631488","timestamp":"2:00 AM","action":"Scan completed","details":"3 categories · 13 MB reclaimable"}' },
+        { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"record":"intent","action":"clean","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","category":"User Temp","bytes":"1048576"}\n{"timestamp":"Yesterday, 2:00 AM","action":"Deleted file","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Deleted"}\n{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}' },
       );
     },
   };

@@ -90,3 +90,110 @@ export function InfoIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+export function LockIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
+      <path d="M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7" />
+    </svg>
+  );
+}
+
+export function ShieldIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M8 2.25 3.5 4v3.5c0 2.8 1.9 4.9 4.5 6.25 2.6-1.35 4.5-3.45 4.5-6.25V4L8 2.25Z" />
+    </svg>
+  );
+}
+
+export function FolderIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={16} height={16} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M2.5 4.5a1 1 0 0 1 1-1H6l1.2 1.5H12.5a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-7Z" />
+    </svg>
+  );
+}
+
+export function FileIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={16} height={16} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M5 2.5h3.8L12 5.7v7.8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1Z" />
+      <path d="M8.5 2.5v3.5H12" />
+    </svg>
+  );
+}
+
+export function DriveIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={16} height={16} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <rect x="2.5" y="4" width="11" height="7.5" rx="1.5" />
+      <path d="M4.5 9.5h1.5M10 9.5h1.5" />
+    </svg>
+  );
+}
+
+export function QuestionIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.6c-.6.3-.8.6-.8 1.2V9.2" />
+      <circle cx="8" cy="11.4" r="0.75" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function RefreshIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M13 8a5 5 0 1 1-1.3-3.4" />
+      <path d="M13 3v3h-3" />
+    </svg>
+  );
+}
+
+export function BrowseIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M2.5 4.5a1 1 0 0 1 1-1H6l1.2 1.5h5.3a1 1 0 0 1 1 1v.8" />
+      <rect x="3.2" y="6.2" width="9.6" height="5.8" rx="1" />
+    </svg>
+  );
+}
+
+export function CopyIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <rect x="5.5" y="5.5" width="7" height="8" rx="1.2" />
+      <path d="M10.5 5.5V3.7a1.2 1.2 0 0 0-1.2-1.2H4.7a1.2 1.2 0 0 0-1.2 1.2v6.6a1.2 1.2 0 0 0 1.2 1.2h.8" />
+    </svg>
+  );
+}
+
+export function ExportIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M8 2.5v7" />
+      <path d="M5.5 5 8 2.5 10.5 5" />
+      <path d="M3.5 9.5v2.5a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V9.5" />
+    </svg>
+  );
+}
+
+export function SunIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <circle cx="8" cy="8" r="3" />
+      <path d="M8 1.5v1.5M8 13v1.5M14.5 8H13M3 8H1.5M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1M12.6 12.6l-1.1-1.1M4.5 4.5L3.4 3.4" />
+    </svg>
+  );
+}
+
+export function MoonIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M13 9.5A5.5 5.5 0 1 1 6.5 3a4.5 4.5 0 0 0 6.5 6.5Z" />
+    </svg>
+  );
+}
