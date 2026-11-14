@@ -22,7 +22,7 @@ The Orchestrator operates strictly as the **coordinator and decision-maker**:
   - Decomposing phases and tasks into bounded, well-scoped briefs anchored to [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) and [GLOSSARY.md](../GLOSSARY.md).
   - Dispatching sub-agents via `delegate_task` with explicit constraints and acceptance gates.
   - Reviewing sub-agent outputs, verifying gate results, resolving cross-module/architectural decisions, and reporting clearly to the user.
-  - Driving `$to-spec` → `$to-tickets` → `$implement-spec` → `$code-review` → `$retro` continuously across Phases 0–6 under standing owner approval, pausing only if a genuine human-only irreversible action (such as running live deletion outside the sentinel test sandbox on real `C:` data) is encountered.
+  - Driving `$to-spec` → `$to-tickets` → `$implement-spec` → `$code-review` → PR creation (`gh pr create --base main`) → CI & CodeScene review continuously across Phases 0–6, pausing for merge decision after each PR is reviewed (and pausing for any human-only irreversible action such as running live deletion outside the sentinel test sandbox on real `C:` data).
 
 ## 3. Standard Sub-Agent Model Configuration
 
@@ -36,6 +36,7 @@ All sub-agents (implementation, research, testing, design, and review) must use 
 
 1. Every delegated task must state which crate/layer (`backend/`, `bridge/`, `frontend/`) it owns, which invariants apply, and which gates (A–H in [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)) must pass.
 2. Separate parallel implementation tasks writing to overlapping scopes should use `isolation: "worktree"` or strict directory boundaries (`sweeper-winfs`, `sweeper-core`, `sweeper-knowledge`, `sweeper-contract`, `sweeper-desktop`, `frontend`).
-3. Code review (`clean-code-guard`), test review (`test-guard`), and doc review (`docs-guard`) are dispatched as separate `review` sub-agent runs using the same standard sub-agent model configuration.
-4. Every sub-agent prompt must specify a repo-root Cargo target directory (for example `$env:CARGO_TARGET_DIR = (Join-Path (git rev-parse --show-toplevel) "target")`) so temporary worktrees on `C:` never accumulate duplicate `target/` caches, and Playwright tests must use `channel: "msedge"`.
-5. After every ticket lands/merges (and on each periodic Watchdog tick), run `powershell -ExecutionPolicy Bypass -File scripts/cleanup-artifacts.ps1` to clean unneeded transient build/test/mutation outputs strictly inside the repository root.
+3. Code review (`clean-code-guard`), test review (`test-guard`), and doc review (`docs-guard`) are dispatched as separate `review` sub-agent runs using the same standard sub-agent model configuration. When CodeScene tools are available in-session, also enforce `.agents/skills/codescense-review/SKILL.md` (`code_health_review`, `pre_commit_code_health_safeguard`, `analyze_change_set`).
+4. **Pull Request & CodeScene Gate:** Never push directly to `main`. Group cohesive tasks or each phase branch into a Pull Request targeting `main` (`gh pr create --base main`), link and watch the PR for **GitHub Actions CI** and **CodeScene** Code Health review, fix any reported regressions or CI failures on the PR branch, and await PR merge review/decision before merging into `main`.
+5. Every sub-agent prompt must specify a repo-root Cargo target directory (for example `$env:CARGO_TARGET_DIR = (Join-Path (git rev-parse --show-toplevel) "target")`) so temporary worktrees on `C:` never accumulate duplicate `target/` caches, and Playwright tests must use `channel: "msedge"`.
+6. After every ticket/PR lands (and on each periodic Watchdog tick), run `powershell -ExecutionPolicy Bypass -File scripts/cleanup-artifacts.ps1` to clean unneeded transient build/test/mutation outputs strictly inside the repository root.
