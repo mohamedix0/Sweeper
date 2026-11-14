@@ -921,7 +921,11 @@ mod tests {
 
         let clean = sb.create_dir("tier3/clean/leaf").expect("create clean dir");
         let clean_v = validate_tier3_target_root(&clean.to_string_lossy());
-        assert!(clean_v.allowed, "clean path should be allowed: {}", clean_v.reason);
+        assert!(
+            clean_v.allowed,
+            "clean path should be allowed: {}",
+            clean_v.reason
+        );
 
         let ssh_root = sb.create_dir("tier3/prot/.ssh").expect("create .ssh root");
         let ssh_v = validate_tier3_target_root(&ssh_root.to_string_lossy());
@@ -939,10 +943,15 @@ mod tests {
         let p_v = validate_tier3_target_root(&profile_root.to_string_lossy());
         assert!(!p_v.allowed, "profile container root must be denied");
 
-        let dirty_root = sb.create_dir("tier3/dirty/root").expect("create dirty root");
+        let dirty_root = sb
+            .create_dir("tier3/dirty/root")
+            .expect("create dirty root");
         fs::create_dir_all(dirty_root.join("nested").join(".git")).expect("create nested .git");
         let dirty_v = validate_tier3_target_root(&dirty_root.to_string_lossy());
-        assert!(!dirty_v.allowed, "path containing protected descendant must be denied");
+        assert!(
+            !dirty_v.allowed,
+            "path containing protected descendant must be denied"
+        );
         assert!(dirty_v.reason.contains("protected descendant"));
     }
 
