@@ -18,20 +18,12 @@ pub fn start_scan<C: Clock>(
     state: &AppState<C>,
     tiers: Option<Vec<TierDto>>,
 ) -> Result<StartScanResponse, ContractError> {
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| ContractError::Internal {
+    let (settings, settings_gen) = {
+        let store = state.settings.lock().map_err(|_| ContractError::Internal {
             reason: "state unavailable".into(),
-        })?
-        .get();
-    let settings_gen = state
-        .settings
-        .lock()
-        .map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?
-        .generation();
+        })?;
+        (store.core(), store.generation())
+    };
     let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
         reason: "state unavailable".into(),
     })?;
@@ -114,7 +106,7 @@ where
         let s = state.settings.lock().map_err(|_| ContractError::Internal {
             reason: "state unavailable".into(),
         })?;
-        (s.get(), s.generation())
+        (s.core(), s.generation())
     };
     let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
         reason: "state unavailable".into(),
@@ -135,27 +127,27 @@ pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, Contra
 }
 
 /// `update_settings` implementation.
+///
+/// Bumps settings generation on scan/analyzer/clean-affecting changes and invalidates active sessions.
 pub fn update_settings<C: Clock>(
     state: &AppState<C>,
     settings: SettingsDto,
 ) -> Result<SettingsDto, ContractError> {
-    if settings.min_age_hours > sweeper_core::settings::MAX_MIN_AGE_HOURS {
-        return Err(ContractError::InvalidInput {
-            reason: "minimum_age_hours is out of bounds".into(),
-        });
-    }
-    // Validate all custom paths in settings payload (if present in JSON shape) via policy/core settings checks.
-    sweeper_core::settings::validate_settings_json(&settings).map_err(|reason| {
-        ContractError::InvalidInput {
-            reason: reason.replace('\n', " "),
-        }
-    })?;
-
     let mut store = state.settings.lock().map_err(|_| ContractError::Internal {
         reason: "state unavailable".into(),
     })?;
-    // Persist safely via sweeper_core::settings through the settings store.
-    Ok(store.update(settings))
+    let prev_gen = store.generation();
+    let updated = store.update(settings);
+    let new_gen = store.generation();
+    drop(store);
+
+    if new_gen != prev_gen {
+        // Explicitly invalidate active scan/analyzer sessions and preview tokens.
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.invalidate_all_sessions();
+        }
+    }
+    Ok(updated)
 }
 
 /// `validate_custom_path` implementation.
@@ -170,9 +162,18 @@ pub fn validate_custom_path<C: Clock>(
         });
     }
     let verdict = sweeper_core::policy::validate_custom_path(trimmed);
-    let normalized = sweeper_core::paths::CanonicalPath::parse_lexical(trimmed)
-        .map(|p| p.to_string())
-        .unwrap_or_else(|_| trimmed.to_string());
+    let normalized = if verdict.allowed {
+        sweeper_core::paths::CanonicalPath::from_existing_path(trimmed)
+            .map(|p| p.canonical().to_string())
+            .or_else(|_| {
+                sweeper_core::paths::CanonicalPath::parse_lexical(trimmed).map(|p| p.to_string())
+            })
+            .unwrap_or_else(|_| trimmed.to_string())
+    } else {
+        sweeper_core::paths::CanonicalPath::parse_lexical(trimmed)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|_| trimmed.to_string())
+    };
     Ok(ValidateCustomPathResponse {
         path: normalized,
         allowed: verdict.allowed,

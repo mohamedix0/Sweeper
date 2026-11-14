@@ -7,6 +7,7 @@ import {
   type CleanProgressEvent,
   type ExecuteCleanResponse,
   type ScanResults,
+  type Settings,
   type StartAnalyzerResult,
   type SweeperClient,
 } from './api/client';
@@ -26,28 +27,43 @@ type PreviewResult = {
 
 const SESSION_TTL_MS = 15 * 60 * 1000;
 const PREVIEW_TTL_MS = 10 * 60 * 1000;
+const TYPED_CONFIRMATION_PHRASE = 'DELETE';
 
 function riskClass(risk: RiskDto): string {
   return `badge risk-${risk}`;
 }
 
-function isSelectableItem(item: { ageEligible: boolean }, targetRisk: RiskDto): boolean {
-  if (targetRisk === 'Protected') return false;
+function isCustomPathTargetId(targetId: string): boolean {
+  return targetId === 'custom-path' || targetId.startsWith('custom-path');
+}
+
+function isSelectableScanItem(item: { ageEligible: boolean }, target: TargetScanResultDto, allowDeleteUnknown: boolean): boolean {
+  if (target.risk === 'Protected') return false;
   if (!item.ageEligible) return false;
+  if (target.risk === 'Unknown' && !allowDeleteUnknown) return false;
   return true;
 }
 
-function needsTypedConfirmation(targets: TargetScanResultDto[], selectedIds: Set<string>): boolean {
+function scanSelectionNeedsConfirmation(targets: TargetScanResultDto[], selectedIds: Set<string>): boolean {
   for (const t of targets) {
-    if (t.risk === 'Unknown') {
-      if (t.items.some((i) => selectedIds.has(i.id))) return true;
-    }
     for (const item of t.items) {
       if (!selectedIds.has(item.id)) continue;
-      if (t.targetId.startsWith('custom-')) return true;
+      if (t.risk === 'Unknown' || isCustomPathTargetId(t.targetId)) return true;
     }
   }
   return false;
+}
+
+function analyzerSelectionNeedsConfirmation(nodes: AnalyzerNodeDto[]): boolean {
+  return nodes.some((n) => n.risk === 'Unknown' || !n.targetId);
+}
+
+function isNodeSelectable(node: AnalyzerNodeDto, allowDeleteUnknown: boolean): boolean {
+  if (node.displayOnly || node.isLinkPoint || node.isCloudPlaceholder) return false;
+  if (node.risk === 'Protected') return false;
+  if (node.path.toLowerCase().endsWith('.vhdx')) return false;
+  if (node.risk === 'Unknown' && !allowDeleteUnknown) return false;
+  return !!node.selectable;
 }
 
 function TtlIndicator({ label, issuedAtMs, ttlMs }: { label: string; issuedAtMs: number; ttlMs: number }) {
@@ -95,7 +111,7 @@ function ExplainDrawer({ explain, onClose }: { explain: ExplainState; onClose: (
   );
 }
 
-function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOpenLog: (logId: string) => void }) {
+function ScanAndPreviewView({ client, settings, onOpenLog }: { client: SweeperClient; settings: Settings | null; onOpenLog: (logId: string) => void }) {
   const [tier1, setTier1] = useState(true);
   const [tier2, setTier2] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -115,6 +131,7 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
   const [info, setInfo] = useState<string | null>(null);
 
   const targets = useMemo(() => results?.targets ?? [], [results]);
+  const allowDeleteUnknown = settings?.allowDeleteUnknown ?? false;
 
   const selectedBytes = useMemo(() => {
     const sizes: string[] = [];
@@ -124,11 +141,11 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
 
   const selectableCount = useMemo(() => {
     let n = 0;
-    for (const t of targets) for (const i of t.items) if (isSelectableItem(i, t.risk)) n++;
+    for (const t of targets) for (const i of t.items) if (isSelectableScanItem(i, t, allowDeleteUnknown)) n++;
     return n;
-  }, [targets]);
+  }, [targets, allowDeleteUnknown]);
 
-  const requiresConfirmation = useMemo(() => needsTypedConfirmation(targets, selectedIds), [targets, selectedIds]);
+  const requiresConfirmation = useMemo(() => scanSelectionNeedsConfirmation(targets, selectedIds), [targets, selectedIds]);
 
   function resetForInvalidSession(message?: string) {
     setSessionId(null);
@@ -166,8 +183,8 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
     }
   }
 
-  function toggleItem(itemId: string, targetRisk: RiskDto, ageEligible: boolean) {
-    if (!isSelectableItem({ ageEligible }, targetRisk)) return;
+  function toggleItem(itemId: string, target: TargetScanResultDto, ageEligible: boolean) {
+    if (!isSelectableScanItem({ ageEligible }, target, allowDeleteUnknown)) return;
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => { const next = new Set(prev); if (next.has(itemId)) next.delete(itemId); else next.add(itemId); return next; });
   }
@@ -201,6 +218,7 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
       setCleanSummary(res);
       setPreview(null);
       setSelectedIds(new Set());
+      setConfirmText('');
       setInfo('Clean completed. Review the summary and operation log below.');
       if (sessionId) { try { setResults(await client.getScanResults(sessionId)); } catch { /* ignore */ } }
     } catch (e) {
@@ -211,7 +229,7 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
     } finally { setCleaning(false); }
   }
 
-  const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning && (!requiresConfirmation || confirmText.trim().length > 0);
+  const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning && (!requiresConfirmation || confirmText === TYPED_CONFIRMATION_PHRASE);
   const canClean = !!preview && !scanning && !previewLoading && !cleaning;
 
   return (
@@ -275,17 +293,21 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
               <div className="items" role="group" aria-label={`${t.targetName} items`}>
                 {t.items.length === 0 && <div className="item-row"><span className="muted">No items.</span></div>}
                 {t.items.map((item) => {
-                  const selectable = isSelectableItem(item, t.risk);
+                  const selectable = isSelectableScanItem(item, t, allowDeleteUnknown);
                   const checked = selectedIds.has(item.id);
-                  const reason = !item.ageEligible ? 'Not eligible (Minimum Age / recent or ineligible)' : (t.risk === 'Protected' ? 'Protected — never selectable' : 'Eligible');
+                  const reason = t.risk === 'Protected'
+                    ? 'Protected — never selectable'
+                    : (t.risk === 'Unknown' && !allowDeleteUnknown)
+                      ? 'Unknown — gated by Settings (Allow deleting unknown folders)'
+                      : (!item.ageEligible ? 'Not eligible (Minimum Age / recent or ineligible)' : 'Eligible');
                   return (
                     <div key={item.id} className="item-row">
                       <label className="checkbox">
-                        <input type="checkbox" aria-label={`Select ${item.path}`} checked={checked} disabled={!selectable || cleaning} onChange={() => toggleItem(item.id, t.risk, item.ageEligible)} />
+                        <input type="checkbox" aria-label={`Select ${item.path}`} checked={checked} disabled={!selectable || cleaning} onChange={() => toggleItem(item.id, t, item.ageEligible)} />
                       </label>
                       <div>
                         <div className="item-path">{item.path}</div>
-                        <div className="item-status">{!selectable ? `Skipped/Not selectable: ${reason}` : 'Eligible for Preview selection'}</div>
+                        <div className="item-status">{!selectable ? `Skipped/Not selectable: ${reason}` : (t.risk === 'Unknown' || isCustomPathTargetId(t.targetId) ? 'Eligible (typed confirmation required at Preview)' : 'Eligible for Preview selection')}</div>
                       </div>
                       <div className="item-size">{formatBytes(item.size)}</div>
                       <button className="btn" onClick={() => onExplain(item.id)}>Explain</button>
@@ -302,10 +324,10 @@ function ScanAndPreviewView({ client, onOpenLog }: { client: SweeperClient; onOp
             <p className="muted">Selection total: <strong>{formatBytes(selectedBytes)}</strong> ({selectedIds.size} item(s)). Preview requires a valid ScanSession and issues a single-use preview token (10m, bounded by session).</p>
             {requiresConfirmation && (
               <div className="notice warn" role="note">
-                <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path items). Enter <code>DELETE</code> to request Preview.</div>
+                <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path items). Enter <code>{TYPED_CONFIRMATION_PHRASE}</code> to request Preview.</div>
                 <div className="field">
                   <label htmlFor="confirm-delete">Typed confirmation</label>
-                  <input id="confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="Type DELETE" autoComplete="off" disabled={cleaning} />
+                  <input id="confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={`Type ${TYPED_CONFIRMATION_PHRASE}`} autoComplete="off" disabled={cleaning} />
                 </div>
               </div>
             )}
@@ -378,11 +400,7 @@ function flattenVisible(root: AnalyzerNodeDto, expanded: Set<string>): FlatAnaly
   return rows;
 }
 
-function isNodeSelectable(node: AnalyzerNodeDto): boolean {
-  return !!node.selectable && !node.displayOnly && !node.isLinkPoint && !node.isCloudPlaceholder && node.risk !== 'Protected';
-}
-
-function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog: (logId: string) => void }) {
+function AnalyzerView({ client, settings, onOpenLog }: { client: SweeperClient; settings: Settings | null; onOpenLog: (logId: string) => void }) {
   const [rootPath, setRootPath] = useState('C:\\');
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState<AnalyzerProgressEvent | null>(null);
@@ -402,6 +420,7 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
   const [info, setInfo] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const allowDeleteUnknown = settings?.allowDeleteUnknown ?? false;
 
   const nodesById = useMemo(() => {
     const map = new Map<string, AnalyzerNodeDto>();
@@ -423,7 +442,7 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
 
   const selectedNodes = useMemo(() => Array.from(selectedIds).map((id) => nodesById.get(id)).filter(Boolean) as AnalyzerNodeDto[], [selectedIds, nodesById]);
   const selectedBytes = useMemo(() => selectedNodes.reduce((a, n) => a + BigInt(n.sizeBytes), 0n).toString(), [selectedNodes]);
-  const requiresConfirmation = useMemo(() => selectedNodes.some((n) => n.risk === 'Unknown' || !n.targetId), [selectedNodes]);
+  const requiresConfirmation = useMemo(() => analyzerSelectionNeedsConfirmation(selectedNodes), [selectedNodes]);
 
   function resetAnalyzerSession(msg?: string) {
     setSessionId(null); setStartedAt(null); setResult(null); setSelectedIds(new Set()); setExpanded(new Set());
@@ -452,7 +471,7 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
   }
 
   function toggleSelect(node: AnalyzerNodeDto) {
-    if (!isNodeSelectable(node)) return;
+    if (!isNodeSelectable(node, allowDeleteUnknown)) return;
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => { const next = new Set(prev); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; });
   }
@@ -486,6 +505,7 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
       setCleanSummary(res);
       setPreview(null);
       setSelectedIds(new Set());
+      setConfirmText('');
       setInfo('Clean completed. Review the summary and operation log below.');
     } catch (e) {
       const ce = e as ContractError | undefined;
@@ -495,7 +515,7 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
     } finally { setCleaning(false); }
   }
 
-  const canPreview = !!sessionId && selectedIds.size > 0 && !analyzing && !previewLoading && !cleaning && (!requiresConfirmation || confirmText.trim().length > 0);
+  const canPreview = !!sessionId && selectedIds.size > 0 && !analyzing && !previewLoading && !cleaning && (!requiresConfirmation || confirmText === TYPED_CONFIRMATION_PHRASE);
   const canClean = !!preview && !analyzing && !previewLoading && !cleaning;
 
   return (
@@ -543,17 +563,18 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
           >
             <div style={{ height: topPad }} />
             {visibleRows.map(({ node, depth }) => {
-              const selectable = isNodeSelectable(node);
+              const selectable = isNodeSelectable(node, allowDeleteUnknown);
               const checked = selectedIds.has(node.id);
               const hasChildren = node.isDir && (node.children?.length ?? 0) > 0;
               const isExpanded = expanded.has(node.id);
               const reasons: string[] = [];
               if (node.risk === 'Protected') reasons.push('Protected');
+              if (node.risk === 'Unknown' && !allowDeleteUnknown) reasons.push('Unknown gated by Settings (Allow deleting unknown folders)');
               if (node.isLinkPoint) reasons.push('Link Point');
               if (node.isCloudPlaceholder) reasons.push('Cloud placeholder (Skipped)');
               if (node.displayOnly) reasons.push('Display-only');
+              if (node.path.toLowerCase().endsWith('.vhdx')) reasons.push('.vhdx display-only');
               if (node.reason) reasons.push(node.reason);
-              if (node.path.toLowerCase().endsWith('.vhdx')) reasons.push('.vhdx');
               return (
                 <div
                   key={node.id}
@@ -585,7 +606,7 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
                   <div className="analyzer-node-main">
                     <div className="item-path">{node.name} <span className="muted">({node.path})</span></div>
                     <div className="item-status">
-                      {selectable ? 'Selectable' : `Not selectable${reasons.length ? `: ${reasons.join(', ')}` : ''}`}
+                      {selectable ? (node.risk === 'Unknown' || !node.targetId ? 'Selectable (typed confirmation required at Preview)' : 'Selectable') : `Not selectable${reasons.length ? `: ${reasons.join(', ')}` : ''}`}
                     </div>
                   </div>
                   <div className="item-size">{formatBytes(node.sizeBytes)}</div>
@@ -607,10 +628,10 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
             <p className="muted">Selection total: <strong>{formatBytes(selectedBytes)}</strong> ({selectedIds.size} node(s)). Analyzer selections go through the standard Preview &rarr; Clean flow only.</p>
             {requiresConfirmation && (
               <div className="notice warn" role="note">
-                <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path nodes). Enter <code>DELETE</code> to request Preview.</div>
+                <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path nodes). Enter <code>{TYPED_CONFIRMATION_PHRASE}</code> to request Preview.</div>
                 <div className="field">
                   <label htmlFor="analyzer-confirm-delete">Typed confirmation</label>
-                  <input id="analyzer-confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="Type DELETE" autoComplete="off" disabled={cleaning} />
+                  <input id="analyzer-confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={`Type ${TYPED_CONFIRMATION_PHRASE}`} autoComplete="off" disabled={cleaning} />
                 </div>
               </div>
             )}
@@ -669,28 +690,177 @@ function AnalyzerView({ client, onOpenLog }: { client: SweeperClient; onOpenLog:
   );
 }
 
-function SettingsView({ client }: { client: SweeperClient }) {
-  const [settings, setSettings] = useState<Awaited<ReturnType<SweeperClient['getSettings']>> | null>(null);
+function SettingsView({ client, settings, onSaved }: { client: SweeperClient; settings: Settings | null; onSaved: (s: Settings) => void }) {
+  const [draft, setDraft] = useState<Settings | null>(settings);
+  const [loading, setLoading] = useState(!settings);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [customPathInput, setCustomPathInput] = useState('');
+  const [validatingPath, setValidatingPath] = useState(false);
+
   useEffect(() => {
-    client.getSettings().then(setSettings).catch((e) => setError(formatContractError(e)));
-  }, [client]);
+    if (settings) {
+      setDraft(settings);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await client.getSettings();
+        if (!cancelled) {
+          setDraft(s);
+          onSaved(s);
+        }
+      } catch (e) {
+        if (!cancelled) setError(formatContractError(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client, settings, onSaved]);
+
+  async function save(next?: Settings) {
+    const toSave = next ?? draft;
+    if (!toSave) return;
+    setSaving(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const saved = await client.updateSettings(toSave);
+      setDraft(saved);
+      onSaved(saved);
+      setInfo('Settings saved. Active sessions may be invalidated when scan-affecting settings change.');
+    } catch (e) {
+      setError(formatContractError(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addCustomPath() {
+    if (!draft) return;
+    const raw = customPathInput.trim();
+    if (!raw) return;
+    setValidatingPath(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const verdict = await client.validateCustomPath(raw);
+      if (!verdict.allowed) {
+        setError(`Custom Path rejected: ${verdict.reason}`);
+        return;
+      }
+      const normalized = verdict.path || raw;
+      if (draft.customPaths.some((p) => p.toLowerCase() === normalized.toLowerCase())) {
+        setError('Custom Path already added.');
+        return;
+      }
+      const next = { ...draft, customPaths: [...draft.customPaths, normalized] };
+      setCustomPathInput('');
+      await save(next);
+    } catch (e) {
+      setError(formatContractError(e));
+    } finally {
+      setValidatingPath(false);
+    }
+  }
+
+  async function removeCustomPath(path: string) {
+    if (!draft) return;
+    const next = { ...draft, customPaths: draft.customPaths.filter((p) => p !== path) };
+    await save(next);
+  }
+
+  if (loading || !draft) {
+    return (
+      <section className="panel" aria-labelledby="settings-heading">
+        <h2 id="settings-heading">Settings</h2>
+        {error ? <div className="notice error" role="alert">{error}</div> : <p>Loading settings…</p>}
+      </section>
+    );
+  }
+
   return (
     <section className="panel" aria-labelledby="settings-heading">
       <h2 id="settings-heading">Settings</h2>
-      <p className="muted">Settings are displayed for review. Editing controls remain limited in this build.</p>
+      <p className="muted">Advanced settings are validated by the backend on load/save. Invalid or tampered values fall back to safe defaults and Protected Paths are never configurable.</p>
       {error && <div className="notice error" role="alert">{error}</div>}
-      {!settings && !error && <p>Loading settings…</p>}
-      {settings && (
-        <dl className="kv">
-          <dt>Tier 1 enabled</dt><dd>{String(settings.enableTier1)}</dd>
-          <dt>Tier 2 enabled</dt><dd>{String(settings.enableTier2)}</dd>
-          <dt>Tier 3 enabled</dt><dd>{String(settings.enableTier3)}</dd>
-          <dt>Minimum Age (hours)</dt><dd>{settings.minAgeHours}</dd>
-          <dt>Allow deleting unknown folders</dt><dd>{String(settings.allowDeleteUnknown)}</dd>
-          <dt>Custom Paths</dt><dd className="muted">Not editable in this build (read-only view; no Custom Paths configured).</dd>
-        </dl>
-      )}
+      {info && <div className="notice info" role="status">{info}</div>}
+
+      <div className="panel" aria-labelledby="general-settings-heading">
+        <h3 id="general-settings-heading" className="section-title">General</h3>
+        <div className="row">
+          <label className="checkbox"><input type="checkbox" checked={draft.enableTier1} onChange={(e) => setDraft({ ...draft, enableTier1: e.target.checked })} /> Enable Tier 1</label>
+          <label className="checkbox"><input type="checkbox" checked={draft.enableTier2} onChange={(e) => setDraft({ ...draft, enableTier2: e.target.checked })} /> Enable Tier 2</label>
+        </div>
+        <div className="field">
+          <label htmlFor="min-age-hours">Minimum Age (hours)</label>
+          <input id="min-age-hours" type="number" min={0} value={draft.minAgeHours} onChange={(e) => setDraft({ ...draft, minAgeHours: Number(e.target.value || 0) })} />
+          {draft.minAgeHours < 24 && (
+            <div className="notice warn" role="note">Warning: Minimum Age below 24 hours may include very recent files. Use with caution.</div>
+          )}
+        </div>
+      </div>
+
+      <div className="panel" aria-labelledby="tier3-settings-heading">
+        <h3 id="tier3-settings-heading" className="section-title">Tier 3 (Opt-in, disabled by default)</h3>
+        <div className="notice warn" role="note">Tier 3 targets are higher risk and require explicit opt-in. No Target may override Protected Paths.</div>
+        <label className="checkbox"><input type="checkbox" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} /> Enable Tier 3 targets</label>
+        <div className="field">
+          <label htmlFor="stale-project-days">Stale project threshold (days)</label>
+          <input id="stale-project-days" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={!draft.enableTier3} />
+        </div>
+        <ul className="list" aria-label="Tier 3 target notes">
+          <li><strong>Recycle Bin (opt-in permanent empty):</strong> empties Recycle Bin contents when Tier 3 is enabled (Caution).</li>
+          <li><strong>Stale Rust <code>target/</code>:</strong> only when sibling <code>Cargo.toml</code> is unmodified for at least {draft.staleProjectDays} days.</li>
+          <li><strong>Stale <code>node_modules/</code>:</strong> only when a sibling lockfile is present and stale by the configured threshold.</li>
+          <li><strong>WSL/Docker <code>.vhdx</code>:</strong> <em>display-only</em> in Analyzer; never deleted.</li>
+        </ul>
+      </div>
+
+      <div className="panel" aria-labelledby="unknown-settings-heading">
+        <h3 id="unknown-settings-heading" className="section-title">Unknown Deletions</h3>
+        <div className="notice warn" role="note">Allowing deletion of unknown folders is advanced and risky. Unknown selections remain gated by typed confirmation (<code>{TYPED_CONFIRMATION_PHRASE}</code>) and Protected Paths remain non-removable.</div>
+        <label className="checkbox">
+          <input type="checkbox" checked={draft.allowDeleteUnknown} onChange={(e) => setDraft({ ...draft, allowDeleteUnknown: e.target.checked })} />
+          Allow deleting unknown folders (advanced)
+        </label>
+      </div>
+
+      <div className="panel" aria-labelledby="custom-paths-heading">
+        <h3 id="custom-paths-heading" className="section-title">Custom Paths</h3>
+        <p className="muted">Custom Paths are validated (must exist, depth &ge; 3, not Protected, no parent fallback). Contents only; root folder is preserved. Selections require typed confirmation.</p>
+        <div className="row" style={{ alignItems: 'flex-end' }}>
+          <div className="field" style={{ flex: 1 }}>
+            <label htmlFor="custom-path-input">Add Custom Path</label>
+            <input id="custom-path-input" type="text" value={customPathInput} onChange={(e) => setCustomPathInput(e.target.value)} placeholder="C:\\Path\\To\\Folder" disabled={saving || validatingPath} />
+          </div>
+          <button className="btn" onClick={addCustomPath} disabled={saving || validatingPath || !customPathInput.trim()}>{validatingPath ? 'Validating…' : 'Add & Validate'}</button>
+        </div>
+        {draft.customPaths.length === 0 ? (
+          <p className="muted">No Custom Paths configured.</p>
+        ) : (
+          <table className="table" aria-label="Custom Paths">
+            <thead><tr><th>Path</th><th></th></tr></thead>
+            <tbody>
+              {draft.customPaths.map((p) => (
+                <tr key={p}>
+                  <td><code>{p}</code></td>
+                  <td><button className="btn" onClick={() => removeCustomPath(p)} disabled={saving}>Remove</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="row">
+        <button className="btn primary" onClick={() => save()} disabled={saving}>{saving ? 'Saving…' : 'Save Settings'}</button>
+        <button className="btn" onClick={() => settings && setDraft(settings)} disabled={saving}>Reset Changes</button>
+      </div>
     </section>
   );
 }
@@ -780,6 +950,13 @@ export function App() {
   const client = useMemo(() => createClient(), []);
   const [view, setView] = useState<View>('scan');
   const [focusLogId, setFocusLogId] = useState<string | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    client.getSettings().then((s) => { if (!cancelled) setSettings(s); }).catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+  }, [client]);
 
   function openLog(logId: string) {
     setFocusLogId(logId);
@@ -798,9 +975,9 @@ export function App() {
         </nav>
       </header>
       <main className="main">
-        {view === 'scan' && <ScanAndPreviewView client={client} onOpenLog={openLog} />}
-        {view === 'analyzer' && <AnalyzerView client={client} onOpenLog={openLog} />}
-        {view === 'settings' && <SettingsView client={client} />}
+        {view === 'scan' && <ScanAndPreviewView client={client} settings={settings} onOpenLog={openLog} />}
+        {view === 'analyzer' && <AnalyzerView client={client} settings={settings} onOpenLog={openLog} />}
+        {view === 'settings' && <SettingsView client={client} settings={settings} onSaved={setSettings} />}
         {view === 'logs' && <LogsView client={client} focusLogId={focusLogId} onFocusConsumed={() => setFocusLogId(null)} />}
       </main>
     </div>

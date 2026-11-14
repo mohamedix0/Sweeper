@@ -7,6 +7,7 @@ import type {
   TargetScanResultDto,
   TierDto,
 } from '../contract/bindings';
+import type { Settings, SweeperClient } from './client';
 
 export type CleanProgressEvent = {
   previewToken: string;
@@ -76,18 +77,10 @@ export type PreviewCleanResult = {
 
 export type ExplainResult = { itemId: string; title: string; description: string; risk: RiskDto };
 
-export type SettingsDto = {
-  enableTier1: boolean;
-  enableTier2: boolean;
-  enableTier3: boolean;
-  minAgeHours: number;
-  allowDeleteUnknown: boolean;
-};
-
 export type LogMeta = { id: string; name: string; modifiedUnixSecs: string | null; sizeBytes: string | null };
 export type LogContent = { id: string; content: string };
 
-type ScanItemInfo = ScanItemDto & { targetId: string; risk: RiskDto; targetName: string; description: string; requiresTypedConfirmation?: boolean };
+type ScanItemInfo = ScanItemDto & { targetId: string; risk: RiskDto; targetName: string; description: string };
 
 type SessionState = {
   id: string;
@@ -119,22 +112,7 @@ type PreviewState = {
 
 type LogEntry = { id: string; name: string; modifiedUnixSecs: string; sizeBytes: string; content: string };
 
-export type MockController = {
-  startScan: (tiers: TierDto[] | null, onProgress?: (e: ScanProgress) => void) => Promise<{ sessionId: string }>;
-  getScanResults: (sessionId: string) => Promise<ScanResults>;
-  startAnalyzer: (root: string | null, onProgress?: (e: AnalyzerProgressEvent) => void) => Promise<StartAnalyzerResult>;
-  previewClean: (
-    sessionId: string,
-    itemIds: string[],
-    confirmations: { typedConfirmation: string | null } | null,
-  ) => Promise<PreviewCleanResult>;
-  executeClean: (previewToken: string, onProgress?: (e: CleanProgressEvent) => void) => Promise<ExecuteCleanResponse>;
-  explainItem: (itemId: string) => Promise<ExplainResult>;
-  getSettings: () => Promise<SettingsDto>;
-  updateSettings: (settings: SettingsDto) => Promise<SettingsDto>;
-  validateCustomPath: (path: string) => Promise<{ path: string; allowed: boolean; reason: string }>;
-  listLogs: () => Promise<LogMeta[]>;
-  readLog: (logId: string) => Promise<LogContent>;
+export type MockController = SweeperClient & {
   advanceTimeMs: (ms: number) => void;
   invalidateSettings: () => void;
   reset: () => void;
@@ -198,7 +176,7 @@ function buildTarget(
     fileCount: BigInt(items.length).toString(),
     eligibleCount: eligibleCount.toString(),
     skippedCount: skipped.toString(),
-    items: items.map(({ risk: _r, targetName: _n, description: _d, requiresTypedConfirmation: _c, ...rest }) => rest),
+    items: items.map(({ risk: _r, targetName: _n, description: _d, ...rest }) => rest),
   };
   return { target, items };
 }
@@ -207,10 +185,9 @@ function makeNode(partial: Omit<AnalyzerNodeDto, 'children'> & { children?: Anal
   return { ...partial, children: partial.children ?? [] };
 }
 
-function buildAnalyzerTree(rootPath: string): AnalyzerNodeDto {
-  // Large mock analyzer tree (Safe/Caution/Unknown/Protected/.vhdx/Link Point, nested/deep nodes)
+function buildAnalyzerTree(rootPath: string, allowUnknown: boolean): AnalyzerNodeDto {
   const deepChildren: AnalyzerNodeDto[] = [];
-  let cursorPath = `${rootPath}\\Users\\Alice\\AppData\\Local\\Packages\\DeepVendor`;
+  const cursorPath = `${rootPath}\\Users\\Alice\\AppData\\Local\\Packages\\DeepVendor`;
   let deepLeaf: AnalyzerNodeDto = makeNode({
     id: 'an-deep-leaf', name: 'cache.bin', path: `${cursorPath}\\layer30\\cache.bin`, isDir: false,
     sizeBytes: '2048', itemCount: '1', risk: 'Safe', description: 'Deep nested cache file (Safe).',
@@ -275,17 +252,19 @@ function buildAnalyzerTree(rootPath: string): AnalyzerNodeDto {
     tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: true, displayOnly: true, selectable: false,
   });
 
+  const unknownSelectable = allowUnknown;
+  const unknownReason = allowUnknown ? 'Unknown (selectable when explicitly allowed)' : 'Unknown items are not selectable until allowed in Settings';
   const unknownFolder = makeNode({
     id: 'an-unknown-folder', name: 'MysteryCache', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\MysteryApp\\MysteryCache`,
     isDir: true, sizeBytes: '8192', itemCount: '2', risk: 'Unknown',
     description: 'Unknown folder not in Knowledge Base. May require confirmation/policy to remove.',
-    reason: 'Unknown', tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
-    displayOnly: false, selectable: true,
+    reason: unknownReason, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false,
+    displayOnly: false, selectable: unknownSelectable,
     children: [makeNode({
       id: 'an-unknown-file', name: 'old.bin', path: `${rootPath}\\Users\\Alice\\AppData\\Local\\MysteryApp\\MysteryCache\\old.bin`,
       isDir: false, sizeBytes: '8192', itemCount: '1', risk: 'Unknown',
-      description: 'Unknown cached data file.', reason: 'Unknown', tier: null, targetId: null,
-      isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true,
+      description: 'Unknown cached data file.', reason: unknownReason, tier: null, targetId: null,
+      isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: unknownSelectable,
     })],
   });
 
@@ -350,7 +329,8 @@ function indexAnalyzerNodes(root: AnalyzerNodeDto): Map<string, AnalyzerNodeDto>
   return map;
 }
 
-function selectionNeedsConfirmation(nodes: AnalyzerNodeDto[]): boolean {
+function selectionNeedsConfirmation(nodes: AnalyzerNodeDto[], scanItems?: ScanItemInfo[]): boolean {
+  if (scanItems && scanItems.some((i) => i.risk === 'Unknown' || i.targetId.startsWith('custom-path'))) return true;
   return nodes.some((n) => n.risk === 'Unknown' || !n.targetId);
 }
 
@@ -370,12 +350,14 @@ function analyzerBreakdown(selected: AnalyzerNodeDto[]): PreviewTargetBreakdownD
 export function createMockController(): MockController {
   let nowMs = Date.now();
   let settingsGeneration = 1;
-  let settingsState: SettingsDto = {
+  let settingsState: Settings = {
     enableTier1: true,
-    enableTier2: false,
+    enableTier2: true,
     enableTier3: false,
     minAgeHours: 24,
     allowDeleteUnknown: false,
+    customPaths: [],
+    staleProjectDays: 30,
   };
   const sessions = new Map<string, SessionState>();
   const analyzerSessions = new Map<string, AnalyzerSessionState>();
@@ -389,9 +371,9 @@ export function createMockController(): MockController {
     { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"event":"clean","status":"completed","deleted":1}' },
   ];
 
-  function isExpired(createdAtMs: number) {
-    return nowMs - createdAtMs > 15 * 60 * 1000;
-  }
+  function bumpSettingsGeneration() { settingsGeneration += 1; }
+  function isExpired(createdAtMs: number) { return nowMs - createdAtMs > 15 * 60 * 1000; }
+
   function getScanSession(sessionId: string): SessionState {
     const s = sessions.get(sessionId);
     if (!s) err('sessionInvalid', 'Session not found.');
@@ -423,7 +405,11 @@ export function createMockController(): MockController {
   }
 
   function makeScanResults(tiers: TierDto[] | null): { targets: TargetScanResultDto[]; itemsById: SessionState['itemsById'] } {
-    const enabled = new Set(tiers ?? ['Tier1', 'Tier2']);
+    const enabled = new Set(tiers ?? ([
+      settingsState.enableTier1 ? 'Tier1' : null,
+      settingsState.enableTier2 ? 'Tier2' : null,
+      settingsState.enableTier3 ? 'Tier3' : null,
+    ].filter(Boolean) as TierDto[]));
     const itemsById: SessionState['itemsById'] = new Map();
     const targets: TargetScanResultDto[] = [];
 
@@ -470,35 +456,34 @@ export function createMockController(): MockController {
       description: 'Protected Path. Displayed for context only and never removable.',
     });
 
-    const unknownItems: ScanItemInfo[] = [
-      {
-        id: 't-unknown-item-1',
-        targetId: 't-unknown-folder',
-        path: 'C:\\Users\\Alice\\AppData\\Local\\SomeApp\\MysteryCache\\old.bin',
-        size: '8192',
-        mtimeUnixSecs: '1700000000',
-        ageEligible: true,
-        risk: 'Unknown',
-        targetName: 'Unknown Folder (Custom/Unrecognized)',
-        description: 'Unknown location. Requires typed confirmation before Preview/Clean flows in advanced scenarios.',
-      },
-    ];
+    const customTargetId = 'custom-path-1';
+    const customItem: ScanItemInfo = {
+      id: `${customTargetId}-item-1`,
+      targetId: customTargetId,
+      path: 'C:\\Users\\Alice\\CustomCleanup\\old.bin',
+      size: '8192',
+      mtimeUnixSecs: '1700000000',
+      ageEligible: true,
+      risk: 'Unknown',
+      targetName: 'Custom Path (Unknown)',
+      description: 'Custom Path selection requires typed confirmation. Unknown items require allow_delete_unknown.',
+    };
     targets.push({
-      targetId: 't-unknown-folder',
-      targetName: 'Unknown Folder (Custom/Unrecognized)',
+      targetId: customTargetId,
+      targetName: 'Custom Path (Unknown)',
       tier: 'Tier2',
       risk: 'Unknown',
-      resolvedPaths: ['C:\\Users\\Alice\\AppData\\Local\\SomeApp\\MysteryCache'],
+      resolvedPaths: ['C:\\Users\\Alice\\CustomCleanup'],
       scanned: true,
-      statusReason: 'Unknown item shown for review. Selection requires typed confirmation in Preview.',
-      totalBytes: '8192',
-      eligibleBytes: '8192',
+      statusReason: settingsState.allowDeleteUnknown ? 'Custom Path / Unknown item requires typed confirmation.' : 'Unknown selection is gated by "Allow deleting unknown folders".',
+      totalBytes: customItem.size,
+      eligibleBytes: customItem.size,
       fileCount: '1',
       eligibleCount: '1',
       skippedCount: '0',
-      items: unknownItems.map(({ risk: _r, targetName: _n, description: _d, requiresTypedConfirmation: _c, ...rest }) => rest),
+      items: [((({ risk: _r, targetName: _n, description: _d, ...rest }) => rest)(customItem))],
     });
-    for (const it of unknownItems) itemsById.set(it.id, it);
+    itemsById.set(customItem.id, customItem);
 
     return { targets, itemsById };
   }
@@ -511,7 +496,7 @@ export function createMockController(): MockController {
       const state: SessionState = {
         id: sessionId,
         createdAtMs: nowMs,
-        minAgeHours: 24,
+        minAgeHours: settingsState.minAgeHours,
         targets,
         itemsById,
         settingsGeneration,
@@ -537,7 +522,7 @@ export function createMockController(): MockController {
       const sessionId = `mock-analyzer-${analyzerSeq}`;
       const rootPath = (root && root.trim()) || 'C:\\';
       onProgress?.({ sessionId, scannedDirs: '1', scannedFiles: '0', scannedBytes: '0', currentPath: rootPath });
-      const tree = buildAnalyzerTree(rootPath);
+      const tree = buildAnalyzerTree(rootPath, settingsState.allowDeleteUnknown);
       const result: StartAnalyzerResult = {
         sessionId,
         rootPath,
@@ -565,19 +550,22 @@ export function createMockController(): MockController {
       if (!itemIds.length) err('invalidInput', 'No items selected.');
       if (sessions.has(sessionId)) {
         const s = getScanSession(sessionId);
-        let unknown = 0;
+        let unknownCount = 0;
         const selected: Array<{ item: ScanItemInfo; targetId: string }> = [];
         for (const id of itemIds) {
           const item = s.itemsById.get(id);
-          if (!item) { unknown += 1; continue; }
+          if (!item) { unknownCount += 1; continue; }
           if (item.risk === 'Protected') err('invalidInput', 'Protected items cannot be selected.');
           if (!item.ageEligible) err('invalidInput', 'Ineligible items cannot be selected.');
+          if (item.risk === 'Unknown' && !settingsState.allowDeleteUnknown) {
+            err('invalidInput', 'Unknown items are gated by allow_delete_unknown.');
+          }
           selected.push({ item, targetId: item.targetId });
         }
-        if (unknown > 0) err('unknownItem', String(unknown));
-        const needsConfirm = selected.some((x) => x.item.risk === 'Unknown' || x.item.targetId.startsWith('custom-'));
+        if (unknownCount > 0) err('unknownItem', String(unknownCount));
+        const needsConfirm = selected.some((x) => x.item.risk === 'Unknown' || x.item.targetId.startsWith('custom-path'));
         if (needsConfirm) {
-          const typed = confirmations?.typedConfirmation?.trim();
+          const typed = confirmations?.typedConfirmation ?? null;
           if (typed !== 'DELETE') err('invalidInput', 'Typed confirmation required: enter DELETE to continue.');
         }
         const byTarget = new Map<string, { targetId: string; targetName: string; count: bigint; bytes: bigint }>();
@@ -600,19 +588,20 @@ export function createMockController(): MockController {
 
       if (analyzerSessions.has(sessionId)) {
         const s = getAnalyzerSession(sessionId);
-        let unknown = 0;
+        let unknownCount = 0;
         const selected: AnalyzerNodeDto[] = [];
         for (const id of itemIds) {
           const node = s.nodesById.get(id);
-          if (!node) { unknown += 1; continue; }
+          if (!node) { unknownCount += 1; continue; }
+          if (node.risk === 'Unknown' && !settingsState.allowDeleteUnknown) err('invalidInput', 'Unknown items are gated by allow_delete_unknown.');
           if (!node.selectable || node.displayOnly || node.risk === 'Protected' || node.isLinkPoint || node.isCloudPlaceholder) {
             err('invalidInput', 'Selected analyzer node is not eligible for Preview/Clean.');
           }
           selected.push(node);
         }
-        if (unknown > 0) err('unknownItem', String(unknown));
+        if (unknownCount > 0) err('unknownItem', String(unknownCount));
         if (selectionNeedsConfirmation(selected)) {
-          const typed = confirmations?.typedConfirmation?.trim();
+          const typed = confirmations?.typedConfirmation ?? null;
           if (typed !== 'DELETE') err('invalidInput', 'Typed confirmation required: enter DELETE to continue.');
         }
         const breakdown = analyzerBreakdown(selected);
@@ -631,7 +620,7 @@ export function createMockController(): MockController {
       if (!p) err('previewTokenInvalid', 'Preview token not found.');
       if (p.used) err('previewTokenInvalid', 'Preview token already used.');
       if (nowMs - p.createdAtMs > 10 * 60 * 1000) err('previewTokenInvalid', 'Preview token expired.');
-      getAnySessionMeta(p.sessionId); // validates session TTL/settings
+      getAnySessionMeta(p.sessionId);
       if (p.settingsGeneration !== settingsGeneration) err('sessionInvalid', 'Session invalidated by settings change.');
       p.used = true;
 
@@ -650,7 +639,7 @@ export function createMockController(): MockController {
         if (scanSession) {
           const item = scanSession.itemsById.get(id);
           targetId = item?.targetId ?? 'unknown';
-          if (item && item.ageEligible && item.risk !== 'Protected') {
+          if (item && item.ageEligible && item.risk !== 'Protected' && !(item.risk === 'Unknown' && !settingsState.allowDeleteUnknown)) {
             ok = true; bytes = BigInt(item.size);
             scanSession.itemsById.delete(id);
             for (const t of scanSession.targets) t.items = t.items.filter((i) => i.id !== id);
@@ -658,7 +647,7 @@ export function createMockController(): MockController {
         } else if (analyzerSession) {
           const node = analyzerSession.nodesById.get(id);
           targetId = node?.targetId ?? 'custom-path';
-          if (node && node.selectable && !node.displayOnly && node.risk !== 'Protected' && !node.isLinkPoint && !node.isCloudPlaceholder) {
+          if (node && node.selectable && !node.displayOnly && node.risk !== 'Protected' && !node.isLinkPoint && !node.isCloudPlaceholder && !(node.risk === 'Unknown' && !settingsState.allowDeleteUnknown)) {
             ok = true; bytes = BigInt(node.sizeBytes);
           }
         }
@@ -698,19 +687,26 @@ export function createMockController(): MockController {
     },
 
     async getSettings() {
-      return { ...settingsState };
+      return { ...settingsState, customPaths: [...settingsState.customPaths] };
     },
 
     async updateSettings(settings) {
-      settingsState = { ...settings };
-      settingsGeneration += 1;
-      return { ...settingsState };
+      settingsState = {
+        ...settings,
+        customPaths: [...(settings.customPaths ?? [])],
+      };
+      bumpSettingsGeneration();
+      return { ...settingsState, customPaths: [...settingsState.customPaths] };
     },
 
     async validateCustomPath(path) {
-      if (!path.trim()) return { path, allowed: false, reason: 'Path is required.' };
-      if (path.toLowerCase().startsWith('c:\\windows')) return { path, allowed: false, reason: 'Protected Path.' };
-      return { path, allowed: true, reason: 'Path is allowed for analyzer/custom-path review.' };
+      const trimmed = path.trim();
+      if (!trimmed) return { path: trimmed, allowed: false, reason: 'Path is required.' };
+      if (!/^[A-Za-z]:\\/.test(trimmed)) return { path: trimmed, allowed: false, reason: 'Path must be absolute.' };
+      if (trimmed.toLowerCase().startsWith('c:\\windows')) return { path: trimmed, allowed: false, reason: 'Protected Path (no fallback to parent).' };
+      if (trimmed.toLowerCase().includes('\\missing')) return { path: trimmed, allowed: false, reason: 'Path does not exist (no fallback to parent).' };
+      if ((trimmed.match(/\\/g) || []).length < 2) return { path: trimmed, allowed: false, reason: 'Path must have depth >= 3 segments.' };
+      return { path: trimmed, allowed: true, reason: 'ok' };
     },
 
     async listLogs() {
@@ -724,13 +720,13 @@ export function createMockController(): MockController {
     },
 
     advanceTimeMs(ms) { nowMs += ms; },
-    invalidateSettings() { settingsGeneration += 1; },
+    invalidateSettings() { bumpSettingsGeneration(); },
     reset() {
       sessions.clear();
       analyzerSessions.clear();
       previews.clear();
       settingsGeneration = 1;
-      settingsState = { enableTier1: true, enableTier2: false, enableTier3: false, minAgeHours: 24, allowDeleteUnknown: false };
+      settingsState = { enableTier1: true, enableTier2: true, enableTier3: false, minAgeHours: 24, allowDeleteUnknown: false, customPaths: [], staleProjectDays: 30 };
       scanSeq = 0; analyzerSeq = 0; previewSeq = 0; logSeq = 0; nowMs = Date.now();
       logs.length = 0;
       logs.push(

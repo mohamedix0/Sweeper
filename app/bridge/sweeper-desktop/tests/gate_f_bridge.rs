@@ -70,6 +70,37 @@ fn seed_session(state: &AppState<FixedClock>, root: &Path, file_path: &Path, mti
         .create_test_session_with_items(1_800_000_000, settings_gen, "scan-test", results, items);
 }
 
+fn sandbox_test_base() -> std::path::PathBuf {
+    let base = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target-fallback")
+        })
+        .join("sweeper-test-sandboxes");
+    let _ = std::fs::create_dir_all(&base);
+    let normalized = match std::fs::canonicalize(&base) {
+        Ok(c) => {
+            let s = c.to_string_lossy();
+            if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+                std::path::PathBuf::from(format!(r"\\{}", rest))
+            } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+                std::path::PathBuf::from(rest.to_string())
+            } else {
+                c
+            }
+        }
+        Err(_) => base.components().collect::<std::path::PathBuf>(),
+    };
+    debug_assert!(
+        !normalized
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir)),
+        "sandbox base must not contain '..' components: {}",
+        normalized.display()
+    );
+    normalized
+}
+
 #[test]
 fn unknown_item_ids_rejected() {
     let state = make_state();
@@ -743,6 +774,352 @@ fn analyzer_unknown_node_not_selectable_and_rejected_when_unknown_deletions_disa
 }
 
 #[test]
+fn validate_custom_path_rejects_missing_and_protected_and_accepts_valid_sandbox_path() {
+    let state = make_state();
+    let sandbox_base = sandbox_test_base();
+    let sandbox = sweeper_testkit::Sandbox::new_in(&sandbox_base).unwrap();
+    let valid_root = sandbox.create_dir("Allowed").unwrap();
+    let nested = sandbox.create_dir("Allowed\\Nested\\Deep").unwrap();
+
+    let ok =
+        commands_impl::validate_custom_path(&state, nested.to_string_lossy().to_string()).unwrap();
+    assert!(
+        ok.allowed,
+        "expected allowed verdict for sandbox path: {ok:?}"
+    );
+
+    let missing = nested.join("does-not-exist");
+    let rejected_missing =
+        commands_impl::validate_custom_path(&state, missing.to_string_lossy().to_string()).unwrap();
+    assert!(
+        !rejected_missing.allowed,
+        "missing path must be rejected: {rejected_missing:?}"
+    );
+
+    let protected =
+        commands_impl::validate_custom_path(&state, r"C:\Windows\System32".to_string()).unwrap();
+    assert!(
+        !protected.allowed,
+        "protected path must be rejected: {protected:?}"
+    );
+
+    drop(valid_root);
+}
+
+#[test]
+fn tampered_settings_json_recovers_to_safe_defaults_with_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let settings_path = tmp.path().join("settings.json");
+    std::fs::write(
+        &settings_path,
+        r#"{
+  "enable_tier1": "nope",
+  "enable_tier3": true,
+  "min_age_hours": 999999,
+  "allow_delete_unknown": "bad",
+  "custom_paths": ["C:\\Windows\\System32", "not\\absolute", "C:\\missing\\nope"],
+  "stale_project_days": 0,
+  "protected_paths": ["C:\\Windows"]
+}"#,
+    )
+    .unwrap();
+
+    let store = sweeper_desktop::settings_store::SettingsStore::with_path(settings_path);
+    let dto = store.get();
+    let core = store.core();
+
+    assert!(dto.enable_tier1, "invalid bool should fall back");
+    assert_eq!(
+        dto.min_age_hours, 24,
+        "out-of-bounds min_age_hours should reset"
+    );
+    assert_eq!(
+        dto.stale_project_days, 30,
+        "out-of-bounds stale_project_days should reset"
+    );
+    assert!(
+        !dto.allow_delete_unknown,
+        "invalid allow_delete_unknown should fall back"
+    );
+    assert!(
+        dto.custom_paths.is_empty(),
+        "unsafe/missing custom paths must be dropped: {:?}",
+        dto.custom_paths
+    );
+    assert!(
+        !store.warnings().is_empty(),
+        "tampered settings should emit sanitization warnings"
+    );
+    assert!(
+        core.enable_tier3,
+        "valid explicit tier3 opt-in should be preserved when field is valid"
+    );
+}
+
+#[test]
+fn update_settings_increments_generation_and_invalidates_active_sessions() {
+    let state = make_state();
+    let sandbox = sweeper_testkit::Sandbox::new().unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
+
+    // seed analyzer session too
+    let settings_gen = state.settings.lock().unwrap().generation();
+    state.sessions.lock().unwrap().insert_test_analyzer_session(
+        sweeper_desktop::session::AnalyzerSession {
+            id: "analyzer-test-session".to_string(),
+            created_at: 1_800_000_000,
+            settings_generation: settings_gen,
+            result: sweeper_core::analyzer::AnalyzerResult {
+                root: sweeper_core::analyzer::AnalyzerNode {
+                    id: "an-root".to_string(),
+                    path: root.to_string_lossy().to_string(),
+                    name: "Temp".to_string(),
+                    is_dir: true,
+                    size_bytes: 3,
+                    item_count: 1,
+                    risk: sweeper_core::Risk::Safe,
+                    description: "d".to_string(),
+                    tier: None,
+                    target_id: None,
+                    is_link_point: false,
+                    is_cloud_placeholder: false,
+                    display_only: false,
+                    selectable: false,
+                    selection_reason: None,
+                    children: vec![],
+                },
+                progress: sweeper_core::analyzer::AnalyzerProgress::default(),
+                cancelled: false,
+            },
+            min_age_hours: 24,
+        },
+    );
+
+    let mut s = commands_impl::get_settings(&state).unwrap();
+    s.custom_paths
+        .push(r"C:\Definitely\Not\A\Real\Valid\Path".to_string()); // will sanitize/drop but still represents change attempt; better change a real field
+    s.stale_project_days = 45;
+    let updated = commands_impl::update_settings(&state, s).unwrap();
+    assert_eq!(updated.stale_project_days, 45);
+
+    let scan_err = commands_impl::get_scan_results(&state, "scan-test".to_string()).unwrap_err();
+    assert!(
+        matches!(scan_err, ContractError::SessionInvalid { .. }),
+        "{scan_err:?}"
+    );
+    let preview_err = commands_impl::preview_clean(
+        &state,
+        "analyzer-test-session".to_string(),
+        vec!["an-root".to_string()],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".to_string()),
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(preview_err, ContractError::SessionInvalid { .. }),
+        "{preview_err:?}"
+    );
+}
+
+#[test]
+fn tier3_default_off_and_opt_in_reflected_in_settings() {
+    let state = make_state();
+    let got = commands_impl::get_settings(&state).unwrap();
+    assert!(!got.enable_tier3, "Tier 3 must default to off");
+    let mut s = got.clone();
+    s.enable_tier3 = true;
+    let updated = commands_impl::update_settings(&state, s).unwrap();
+    assert!(
+        updated.enable_tier3,
+        "Tier 3 opt-in must persist when enabled"
+    );
+}
+
+#[test]
+fn typed_confirmation_rejected_and_accepted_for_custom_path_and_unknown_items() {
+    let state = make_state();
+    let settings_gen = state.settings.lock().unwrap().generation();
+
+    // Custom Path scan target session
+    let sandbox_base = sandbox_test_base();
+    let sandbox = sweeper_testkit::Sandbox::new_in(&sandbox_base).unwrap();
+    let root = sandbox.create_dir("CustomRoot").unwrap();
+    let file_path = sandbox.write_file("CustomRoot\\old.tmp", b"abc").unwrap();
+    let size = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(3);
+    let item = ScanItemDto {
+        id: "custom-path-1::1".to_string(),
+        target_id: "custom-path-1".to_string(),
+        path: file_path.to_string_lossy().to_string(),
+        size: U64String(size),
+        mtime_unix_secs: U64String(1_700_000_000),
+        age_eligible: true,
+    };
+    let target = TargetScanResultDto {
+        target_id: "custom-path-1".to_string(),
+        target_name: "Custom Path".to_string(),
+        tier: TierDto::Tier2,
+        risk: RiskDto::Caution,
+        resolved_paths: vec![root.to_string_lossy().to_string()],
+        scanned: true,
+        status_reason: None,
+        total_bytes: U64String(size),
+        eligible_bytes: U64String(size),
+        file_count: U64String(1),
+        eligible_count: U64String(1),
+        skipped_count: U64String(0),
+        items: vec![item.clone()],
+    };
+    let results = ScanResultsDto {
+        session_id: "scan-custom".to_string(),
+        started_unix_secs: U64String(1_800_000_000),
+        min_age_hours: 24,
+        targets: vec![target],
+    };
+    let mut items = HashMap::new();
+    items.insert(
+        item.id.clone(),
+        StoredItem {
+            dto: item.clone(),
+            target_id: "custom-path-1".to_string(),
+            target_name: "Custom Path".to_string(),
+            tier: sweeper_core::Tier::Tier2,
+            risk: sweeper_core::Risk::Caution,
+            age_eligible: true,
+            requires_typed_confirmation: true,
+        },
+    );
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .create_test_session_with_items(1_800_000_000, settings_gen, "scan-custom", results, items);
+
+    let err = commands_impl::preview_clean(
+        &state,
+        "scan-custom".to_string(),
+        vec![item.id.clone()],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::InvalidInput { .. }),
+        "missing confirmation must be rejected: {err:?}"
+    );
+    let err = commands_impl::preview_clean(
+        &state,
+        "scan-custom".to_string(),
+        vec![item.id.clone()],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("WRONG".to_string()),
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::InvalidInput { .. }),
+        "wrong confirmation must be rejected: {err:?}"
+    );
+    let ok = commands_impl::preview_clean(
+        &state,
+        "scan-custom".to_string(),
+        vec![item.id],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".to_string()),
+        }),
+    )
+    .unwrap();
+    assert!(!ok.preview_token.is_empty());
+
+    // Analyzer Unknown item requires exact typed confirmation (custom-path conversion seam)
+    let state2 = make_state();
+    {
+        let mut s = state2.settings.lock().unwrap().get();
+        s.allow_delete_unknown = true;
+        state2.settings.lock().unwrap().update(s);
+    }
+    let settings_gen2 = state2.settings.lock().unwrap().generation();
+    let sandbox2 = sweeper_testkit::Sandbox::new_in(&sandbox_base).unwrap();
+    let uroot = sandbox2.create_dir("UnknownRoot").unwrap();
+    let unknown_node = sweeper_core::analyzer::AnalyzerNode {
+        id: "node-unknown-custom".to_string(),
+        path: uroot.to_string_lossy().to_string(),
+        name: "UnknownRoot".to_string(),
+        is_dir: true,
+        size_bytes: 0,
+        item_count: 0,
+        risk: sweeper_core::Risk::Unknown,
+        description: "Unknown".to_string(),
+        tier: None,
+        target_id: None,
+        is_link_point: false,
+        is_cloud_placeholder: false,
+        display_only: false,
+        selectable: true,
+        selection_reason: None,
+        children: vec![],
+    };
+    let tree_root = sweeper_core::analyzer::AnalyzerNode {
+        id: "node-tree-root-u".to_string(),
+        path: uroot.to_string_lossy().to_string(),
+        name: "Root".to_string(),
+        is_dir: true,
+        size_bytes: 0,
+        item_count: 1,
+        risk: sweeper_core::Risk::Safe,
+        description: "root".to_string(),
+        tier: None,
+        target_id: None,
+        is_link_point: false,
+        is_cloud_placeholder: false,
+        display_only: false,
+        selectable: false,
+        selection_reason: None,
+        children: vec![unknown_node.clone()],
+    };
+    state2
+        .sessions
+        .lock()
+        .unwrap()
+        .insert_test_analyzer_session(sweeper_desktop::session::AnalyzerSession {
+            id: "analyzer-unknown-ok".to_string(),
+            created_at: 1_800_000_000,
+            settings_generation: settings_gen2,
+            result: sweeper_core::analyzer::AnalyzerResult {
+                root: tree_root,
+                progress: sweeper_core::analyzer::AnalyzerProgress::default(),
+                cancelled: false,
+            },
+            min_age_hours: 24,
+        });
+
+    let err = commands_impl::preview_clean(
+        &state2,
+        "analyzer-unknown-ok".to_string(),
+        vec![unknown_node.id.clone()],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("wrong".to_string()),
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ContractError::InvalidInput { .. }),
+        "wrong confirmation for Unknown analyzer selection must be rejected: {err:?}"
+    );
+    let ok = commands_impl::preview_clean(
+        &state2,
+        "analyzer-unknown-ok".to_string(),
+        vec![unknown_node.id.clone()],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".to_string()),
+        }),
+    )
+    .unwrap();
+    assert!(!ok.preview_token.is_empty());
+}
+
+#[test]
 fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute() {
     let state = make_state();
     let settings_gen = state.settings.lock().unwrap().generation();
@@ -750,39 +1127,7 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     // Sentinel-guarded per-test sandbox (auto-cleaned on Drop) and external canary.
     // Use CARGO_TARGET_DIR as base: custom-path validation rejects descendants of protected
     // container roots (e.g. user profile/%TEMP%), but CARGO_TARGET_DIR is outside them.
-    let sandbox_base = {
-        let base = std::env::var_os("CARGO_TARGET_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target")
-            })
-            .join("sweeper-test-sandboxes");
-        let _ = std::fs::create_dir_all(&base);
-        let normalized = match std::fs::canonicalize(&base) {
-            Ok(c) => {
-                let s = c.to_string_lossy();
-                if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-                    std::path::PathBuf::from(format!(r"\\{}", rest))
-                } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-                    std::path::PathBuf::from(rest.to_string())
-                } else {
-                    c
-                }
-            }
-            Err(_) => {
-                // Fallback: lexical collapse
-                base.components().collect::<std::path::PathBuf>()
-            }
-        };
-        debug_assert!(
-            !normalized
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir)),
-            "sandbox base must not contain '..' components: {}",
-            normalized.display()
-        );
-        normalized
-    };
+    let sandbox_base = sandbox_test_base();
     let sandbox = Sandbox::new_in(&sandbox_base).unwrap();
     sandbox.assert_sentinel_present();
     let canary = CanaryTree::seed_external("gate-f-analyzer-custom-root").unwrap();
