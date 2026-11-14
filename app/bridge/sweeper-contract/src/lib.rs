@@ -626,6 +626,8 @@ fn render_commands(
         cmd_validate_custom_path(cfg, type_map)?,
         cmd_list_logs(cfg, type_map)?,
         cmd_read_log(cfg, type_map)?,
+        cmd_get_elevation_status(cfg, type_map)?,
+        cmd_relaunch_elevated(cfg, type_map)?,
     ];
     Ok(format!(
         "export const commands = {{\n{}\n}}",
@@ -930,6 +932,52 @@ fn cmd_read_log(
         &format!("Result<{ok_ty}, {err_ty}>"),
         "read_log",
         Some("{ logId }"),
+    ))
+}
+
+fn cmd_get_elevation_status(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let ok_ty = datatype_str(
+        cfg,
+        <ElevationStatusDto as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let err_ty = datatype_str(
+        cfg,
+        <ContractError as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    Ok(cmd_fn(
+        "getElevationStatus",
+        &[],
+        &format!("Result<{ok_ty}, {err_ty}>"),
+        "get_elevation_status",
+        None,
+    ))
+}
+
+fn cmd_relaunch_elevated(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let ok_ty = datatype_str(
+        cfg,
+        <RelaunchResultDto as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    let err_ty = datatype_str(
+        cfg,
+        <ContractError as Type>::inline(type_map, Generics::NONE),
+        type_map,
+    )?;
+    Ok(cmd_fn(
+        "relaunchElevated",
+        &[],
+        &format!("Result<{ok_ty}, {err_ty}>"),
+        "relaunch_elevated",
+        None,
     ))
 }
 

@@ -4,10 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
-    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ExecuteCleanResponse,
-    ExplainItemResponse, LogMetadataDto, LogReadResponse, PreviewCleanResponse,
-    PreviewConfirmationsDto, ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse,
-    TierDto, U64String, ValidateCustomPathResponse,
+    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ElevationStatusDto,
+    ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto, LogReadResponse,
+    PreviewCleanResponse, PreviewConfirmationsDto, RelaunchResultDto, ScanResultsDto, SettingsDto,
+    StartAnalyzerResponse, StartScanResponse, TierDto, U64String, ValidateCustomPathResponse,
 };
 
 use crate::clock::Clock;
@@ -321,4 +321,22 @@ pub fn execute_clean_default<C: Clock>(
     preview_token: String,
 ) -> Result<ExecuteCleanResponse, ContractError> {
     execute_clean(state, preview_token, None, |_| {})
+}
+
+/// `get_elevation_status` implementation.
+pub fn get_elevation_status<C: Clock>(
+    state: &AppState<C>,
+) -> Result<ElevationStatusDto, ContractError> {
+    crate::elevation::get_elevation_status(state.elevation_provider.as_ref())
+}
+
+/// `relaunch_elevated` implementation.
+pub fn relaunch_elevated<C: Clock>(
+    state: &AppState<C>,
+) -> Result<RelaunchResultDto, ContractError> {
+    crate::elevation::relaunch_elevated(
+        state.elevation_provider.as_ref(),
+        state.single_instance.as_ref(),
+        state.app_exit.as_ref(),
+    )
 }

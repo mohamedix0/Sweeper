@@ -1,4 +1,4 @@
-﻿#![forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 
 pub mod analyzer;
 pub mod journal;
@@ -19,6 +19,14 @@ pub use sweeper_knowledge::{Risk, Tier};
 pub struct ScanElevationContext {
     /// True when the current process is running elevated (administrator).
     pub process_elevated: bool,
+}
+
+/// Process elevation, elevated relaunch, and single-instance primitives (safe wrappers over `sweeper-winfs`).
+pub mod elevation {
+    pub use sweeper_winfs::{
+        acquire_single_instance, is_process_elevated, relaunch_current_exe_elevated,
+        RelaunchOutcome, SingleInstanceGuard,
+    };
 }
 
 /// Deterministic fuzz entrypoint for path/policy validation.

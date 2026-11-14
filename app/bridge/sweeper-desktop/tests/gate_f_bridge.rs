@@ -424,11 +424,13 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
         vec![
             "execute_clean".to_string(),
             "explain_item".to_string(),
+            "get_elevation_status".to_string(),
             "get_scan_results".to_string(),
             "get_settings".to_string(),
             "list_logs".to_string(),
             "preview_clean".to_string(),
             "read_log".to_string(),
+            "relaunch_elevated".to_string(),
             "start_analyzer".to_string(),
             "start_scan".to_string(),
             "update_settings".to_string(),
@@ -1255,5 +1257,159 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     assert!(
         canary.verify().is_ok(),
         "external canary must remain intact"
+    );
+}
+
+#[derive(Debug)]
+struct FakeElevationProvider {
+    elevated: bool,
+    relaunch_outcome: std::sync::Mutex<Result<sweeper_core::elevation::RelaunchOutcome, String>>,
+    relaunch_calls: std::sync::atomic::AtomicUsize,
+    status_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeElevationProvider {
+    fn new(
+        elevated: bool,
+        outcome: Result<sweeper_core::elevation::RelaunchOutcome, String>,
+    ) -> Self {
+        Self {
+            elevated,
+            relaunch_outcome: std::sync::Mutex::new(outcome),
+            relaunch_calls: std::sync::atomic::AtomicUsize::new(0),
+            status_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl sweeper_desktop::elevation::ElevationProvider for FakeElevationProvider {
+    fn is_elevated(&self) -> Result<bool, String> {
+        self.status_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.elevated)
+    }
+
+    fn relaunch(&self) -> Result<sweeper_core::elevation::RelaunchOutcome, String> {
+        self.relaunch_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.relaunch_outcome.lock().unwrap().clone()
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn make_elevation_test_state(
+    elevated: bool,
+    relaunch_outcome: Result<sweeper_core::elevation::RelaunchOutcome, String>,
+) -> (
+    sweeper_desktop::AppState<FixedClock>,
+    std::sync::Arc<FakeElevationProvider>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::Mutex<Option<i32>>>,
+    std::sync::Arc<sweeper_desktop::elevation::SingleInstanceState>,
+) {
+    let provider = std::sync::Arc::new(FakeElevationProvider::new(elevated, relaunch_outcome));
+    let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exit_code = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let exited_c = exited.clone();
+    let exit_code_c = exit_code.clone();
+    let exit_hook: std::sync::Arc<dyn Fn(i32) + Send + Sync> = std::sync::Arc::new(move |code| {
+        exited_c.store(true, std::sync::atomic::Ordering::SeqCst);
+        *exit_code_c.lock().unwrap() = Some(code);
+    });
+    let guard = sweeper_core::elevation::acquire_single_instance(1_000)
+        .expect("test should acquire single-instance mutex");
+    let si = std::sync::Arc::new(sweeper_desktop::elevation::SingleInstanceState::with_guard(
+        guard,
+    ));
+    let state = sweeper_desktop::AppState::with_clock(FixedClock::new(1_800_000_000))
+        .with_elevation_test_hooks(provider.clone(), si.clone(), exit_hook);
+    (state, provider, exited, exit_code, si)
+}
+
+#[test]
+fn get_elevation_status_reports_provider_state() {
+    let (state, provider, _exited, _code, _si) = make_elevation_test_state(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    );
+    let got = commands_impl::get_elevation_status(&state).unwrap();
+    assert!(!got.is_elevated);
+    assert_eq!(
+        provider
+            .status_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    let (state2, _p2, _, _, _) =
+        make_elevation_test_state(true, Ok(sweeper_core::elevation::RelaunchOutcome::Launched));
+    let got2 = commands_impl::get_elevation_status(&state2).unwrap();
+    assert!(got2.is_elevated);
+}
+
+#[test]
+fn relaunch_elevated_when_already_elevated_returns_not_launched_without_side_effects() {
+    let (state, provider, exited, exit_code, si) =
+        make_elevation_test_state(true, Ok(sweeper_core::elevation::RelaunchOutcome::Launched));
+    let res = commands_impl::relaunch_elevated(&state).unwrap();
+    assert!(!res.launched);
+    assert_eq!(
+        provider
+            .relaunch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(!exited.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(exit_code.lock().unwrap().is_none());
+    // Guard should remain held/available for future operations.
+    let _ = si; // state owns Arc
+}
+
+#[test]
+fn relaunch_elevated_uac_cancel_returns_error_preserves_guard_and_does_not_exit() {
+    let (state, provider, exited, exit_code, si) = make_elevation_test_state(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::CancelledByUser),
+    );
+    let err = commands_impl::relaunch_elevated(&state).unwrap_err();
+    assert!(
+        matches!(err, sweeper_contract::ContractError::InvalidInput { .. }),
+        "expected sanitized user-cancel error, got {err:?}"
+    );
+    assert_eq!(
+        provider
+            .relaunch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(!exited.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(exit_code.lock().unwrap().is_none());
+    // Guard must be preserved/re-acquired in state after cancel.
+    assert!(
+        si.is_held(),
+        "single-instance guard should remain held after UAC cancel"
+    );
+}
+
+#[test]
+fn relaunch_elevated_success_releases_guard_invokes_launcher_returns_launched_and_triggers_exit() {
+    let (state, provider, exited, exit_code, si) = make_elevation_test_state(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    );
+    let res = commands_impl::relaunch_elevated(&state).unwrap();
+    assert!(res.launched);
+    assert_eq!(
+        provider
+            .relaunch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(*exit_code.lock().unwrap(), Some(0));
+    // Guard handed off/released from this instance's state.
+    assert!(
+        !si.is_held(),
+        "single-instance guard should be released from current instance on successful handoff"
     );
 }
