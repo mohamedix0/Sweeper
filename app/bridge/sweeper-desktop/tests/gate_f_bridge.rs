@@ -16,6 +16,17 @@ fn make_state() -> AppState<FixedClock> {
     AppState::with_clock(FixedClock::new(1_800_000_000))
 }
 
+fn state_with_temp_settings<F>(mutate: F) -> AppState<FixedClock>
+where
+    F: FnOnce(&mut sweeper_contract::SettingsDto),
+{
+    let state = make_state();
+    let mut settings = state.settings.lock().unwrap().get();
+    mutate(&mut settings);
+    state.settings.lock().unwrap().update(settings);
+    state
+}
+
 fn seed_session(state: &AppState<FixedClock>, root: &Path, file_path: &Path, mtime_secs: u64) {
     let settings_gen = state.settings.lock().unwrap().generation();
     let root_s = root.to_string_lossy().to_string();
@@ -506,14 +517,10 @@ fn start_analyzer_on_sandbox_returns_tree_marks_non_selectable_and_populates_ses
 
 #[test]
 fn analyzer_eligible_node_preview_and_execute_clean_in_sentinel_sandbox() {
-    let state = make_state();
     // Custom-path sandbox nodes are Unknown and require allow_delete_unknown to be selectable.
-    {
-        let mut settings = state.settings.lock().unwrap();
-        let mut s = settings.get();
+    let state = state_with_temp_settings(|s| {
         s.allow_delete_unknown = true;
-        let _ = settings.update(s);
-    }
+    });
     let canary = CanaryTree::seed_external("gate-f-analyzer-exec").unwrap();
     let sandbox = Sandbox::new().unwrap();
     let root = sandbox.create_dir("CleanMe").unwrap();
@@ -747,7 +754,7 @@ fn analyzer_unknown_node_not_selectable_and_rejected_when_unknown_deletions_disa
         children: vec![unknown_dir.clone()],
     };
     state.sessions.lock().unwrap().insert_test_analyzer_session(
-        sweeper_desktop::session::AnalyzerSession {
+        sweeper_desktop::session::AnalyzerSessionInput {
             id: "analyzer-unknown-test".to_string(),
             created_at: 1_800_000_000,
             settings_generation: settings_gen,
@@ -867,7 +874,7 @@ fn update_settings_increments_generation_and_invalidates_active_sessions() {
     // seed analyzer session too
     let settings_gen = state.settings.lock().unwrap().generation();
     state.sessions.lock().unwrap().insert_test_analyzer_session(
-        sweeper_desktop::session::AnalyzerSession {
+        sweeper_desktop::session::AnalyzerSessionInput {
             id: "analyzer-test-session".to_string(),
             created_at: 1_800_000_000,
             settings_generation: settings_gen,
@@ -939,7 +946,7 @@ fn tier3_default_off_and_opt_in_reflected_in_settings() {
 }
 
 #[test]
-fn typed_confirmation_rejected_and_accepted_for_custom_path_and_unknown_items() {
+fn typed_confirmation_rejected_and_accepted_for_custom_path_scan_target() {
     let state = make_state();
     let settings_gen = state.settings.lock().unwrap().generation();
 
@@ -1031,14 +1038,15 @@ fn typed_confirmation_rejected_and_accepted_for_custom_path_and_unknown_items() 
     )
     .unwrap();
     assert!(!ok.preview_token.is_empty());
+}
 
+#[test]
+fn typed_confirmation_rejected_and_accepted_for_unknown_analyzer_items() {
     // Analyzer Unknown item requires exact typed confirmation (custom-path conversion seam)
-    let state2 = make_state();
-    {
-        let mut s = state2.settings.lock().unwrap().get();
+    let sandbox_base = sandbox_test_base();
+    let state2 = state_with_temp_settings(|s| {
         s.allow_delete_unknown = true;
-        state2.settings.lock().unwrap().update(s);
-    }
+    });
     let settings_gen2 = state2.settings.lock().unwrap().generation();
     let sandbox2 = sweeper_testkit::Sandbox::new_in(&sandbox_base).unwrap();
     let uroot = sandbox2.create_dir("UnknownRoot").unwrap();
@@ -1082,7 +1090,7 @@ fn typed_confirmation_rejected_and_accepted_for_custom_path_and_unknown_items() 
         .sessions
         .lock()
         .unwrap()
-        .insert_test_analyzer_session(sweeper_desktop::session::AnalyzerSession {
+        .insert_test_analyzer_session(sweeper_desktop::session::AnalyzerSessionInput {
             id: "analyzer-unknown-ok".to_string(),
             created_at: 1_800_000_000,
             settings_generation: settings_gen2,
@@ -1190,7 +1198,7 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
         children: vec![custom_root_node.clone()],
     };
     state.sessions.lock().unwrap().insert_test_analyzer_session(
-        sweeper_desktop::session::AnalyzerSession {
+        sweeper_desktop::session::AnalyzerSessionInput {
             id: "analyzer-custom-root-test".to_string(),
             created_at: 1_800_000_000,
             settings_generation: settings_gen,

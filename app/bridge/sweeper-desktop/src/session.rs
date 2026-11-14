@@ -81,6 +81,21 @@ pub struct AnalyzerSession {
     pub min_age_hours: u32,
 }
 
+/// Cohesive input for inserting/storing an analyzer session.
+#[derive(Debug, Clone)]
+pub struct AnalyzerSessionInput {
+    /// Session id.
+    pub id: String,
+    /// Creation time (unix secs).
+    pub created_at: u64,
+    /// Settings generation at creation (invalidate if changed).
+    pub settings_generation: u64,
+    /// Analyzer result (tree + progress metadata).
+    pub result: AnalyzerResult,
+    /// Minimum age hours at time of analysis (for clean options).
+    pub min_age_hours: u32,
+}
+
 /// Preview token state.
 #[derive(Debug, Clone)]
 pub struct PreviewTokenState {
@@ -196,7 +211,19 @@ impl SessionStore {
 
     /// Direct access helper for integration tests: insert a synthetic analyzer session.
     #[doc(hidden)]
-    pub fn insert_test_analyzer_session(&mut self, session: AnalyzerSession) {
+    pub fn insert_test_analyzer_session(&mut self, input: AnalyzerSessionInput) {
+        self.insert_analyzer_session(input);
+    }
+
+    /// Insert an analyzer session from cohesive input.
+    pub fn insert_analyzer_session(&mut self, input: AnalyzerSessionInput) {
+        let session = AnalyzerSession {
+            id: input.id.clone(),
+            created_at: input.created_at,
+            settings_generation: input.settings_generation,
+            result: input.result,
+            min_age_hours: input.min_age_hours,
+        };
         self.analyzer_sessions.insert(session.id.clone(), session);
     }
 
@@ -288,16 +315,13 @@ impl SessionStore {
         let result = analyzer::analyze_path(root.as_deref(), cancel, progress, options)
             .map_err(map_analyzer_error)?;
         let dto = map_analyzer_result_to_dto(&session_id, &result);
-        self.analyzer_sessions.insert(
-            session_id,
-            AnalyzerSession {
-                id: dto.session_id.clone(),
-                created_at: now,
-                settings_generation,
-                result,
-                min_age_hours: settings.min_age_hours,
-            },
-        );
+        self.insert_analyzer_session(AnalyzerSessionInput {
+            id: dto.session_id.clone(),
+            created_at: now,
+            settings_generation,
+            result,
+            min_age_hours: settings.min_age_hours,
+        });
         Ok(dto)
     }
 
@@ -651,7 +675,7 @@ impl SessionStore {
         preview_token: &str,
         current_settings_generation: u64,
         journal_base_dir: Option<PathBuf>,
-        mut on_progress: F,
+        on_progress: F,
     ) -> Result<ExecuteCleanResponse, ContractError>
     where
         C: Clock,
@@ -659,14 +683,36 @@ impl SessionStore {
     {
         let (min_age_hours, validated_items, preview_estimated_bytes) = self
             .consume_preview_token_for_execute(clock, preview_token, current_settings_generation)?;
+        Self::execute_validated_clean_batch(
+            clock,
+            preview_token,
+            min_age_hours,
+            validated_items,
+            preview_estimated_bytes,
+            journal_base_dir,
+            on_progress,
+        )
+    }
 
-        let _total_items = validated_items.len() as u64;
+    fn execute_validated_clean_batch<C, F>(
+        clock: &C,
+        preview_token: &str,
+        min_age_hours: u32,
+        validated_items: Vec<ValidatedItem>,
+        preview_estimated_bytes: u64,
+        journal_base_dir: Option<PathBuf>,
+        mut on_progress: F,
+    ) -> Result<ExecuteCleanResponse, ContractError>
+    where
+        C: Clock,
+        F: FnMut(sweeper_contract::CleanProgressEvent),
+    {
         let now = UNIX_EPOCH + Duration::from_secs(clock.now_unix_secs());
         let opts = CleanOptions {
             preview_estimated_bytes,
             min_age: Duration::from_secs(u64::from(min_age_hours) * 3600),
             now,
-            journal_base_dir: journal_base_dir.clone(),
+            journal_base_dir,
         };
 
         let log_dir = opts
