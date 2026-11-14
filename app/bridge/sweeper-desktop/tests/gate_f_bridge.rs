@@ -470,6 +470,26 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
         "capabilities must not reference fs/shell plugins"
     );
 
+    assert_eq!(
+        conf["bundle"]["active"],
+        serde_json::json!(true),
+        "bundle.active must be enabled for Windows packaging"
+    );
+    let bundle_targets = conf["bundle"]["targets"]
+        .as_array()
+        .expect("bundle.targets must be an array");
+    assert!(
+        bundle_targets.iter().any(|t| t.as_str() == Some("nsis")),
+        "bundle.targets must include nsis: {bundle_targets:?}"
+    );
+    assert!(
+        !conf["bundle"]["icon"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .is_empty(),
+        "bundle.icon must be configured"
+    );
+
     let mut cmds = cap["commands"]["allow"]
         .as_array()
         .unwrap()
