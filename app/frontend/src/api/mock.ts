@@ -133,7 +133,7 @@ const SAMPLE_ITEMS_T1: Array<Omit<ScanItemDto, 'id'>> = [
   { targetId: 't-crash', path: 'C:\\Users\\Alice\\AppData\\Local\\CrashDumps\\app.dmp', size: '5242880', mtimeUnixSecs: '1700000000', ageEligible: true },
 ];
 const SAMPLE_ITEMS_T2: Array<Omit<ScanItemDto, 'id'>> = [
-  { targetId: 't-npm', path: 'C:\\Users\\Alice\\AppData\\Local\\npm-cache\\_cacache\\index-v5', size: '7340032', mtimeUnixSecs: '1705000000', ageEligible: true },
+  { targetId: 't-npm', path: 'C:\\Users\\Alice\\AppData\\Local\\npm-cache\\package-cache-tarballs', size: '7340032', mtimeUnixSecs: '1705000000', ageEligible: true },
 ];
 
 function buildTarget(
@@ -142,7 +142,7 @@ function buildTarget(
   tier: TierDto,
   risk: RiskDto,
   description: string,
-  rawItems: Array<Omit<ScanItemDto, 'id'>>,
+  rawItems: Array<Omit<ScanItemDto, 'id' | 'targetId'> & { targetId?: string }>,
 ): { target: TargetScanResultDto; items: ScanItemInfo[] } {
   const items = rawItems.map((it, i) => ({
     ...it,
@@ -374,8 +374,27 @@ export function createMockController(): MockController {
   let previewSeq = 0;
   let logSeq = 0;
   const logs: LogEntry[] = [
-    { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"timestamp":"2:00 AM","action":"Category scanned","details":"User Temp · 1 MB eligible (1 of 2 files)"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"recent.log · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\recent.log · 2 KB · Skipped (< 24h)"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"Crash Dumps & WER · 5 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"app.dmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps\\\\app.dmp · 5 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"npm-cache · 7 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"index-v5 · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache\\\\_cacache\\\\index-v5 · 7 MB · Eligible"}\n{"record":"outcome","status":"completed","event":"scan","categoriesCount":3,"items":5,"totalBytes":"13631488","timestamp":"2:00 AM","action":"Scan completed","details":"3 categories · 13 MB reclaimable"}' },
-    { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"record":"intent","action":"clean","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","category":"User Temp","bytes":"1048576"}\n{"timestamp":"Yesterday, 2:00 AM","action":"Deleted file","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Deleted"}\n{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}' },
+    {
+      id: 'log-1',
+      name: '2026-11-13-scan.jsonl',
+      modifiedUnixSecs: '1794528000',
+      sizeBytes: '2048',
+      content:
+        '{"timestamp":"2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp","size":"1048576","status":"Eligible"}\n' +
+        '{"timestamp":"2:00 AM","action":"Crash Dumps & WER","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps","size":"5242880","status":"Eligible"}\n' +
+        '{"timestamp":"2:00 AM","action":"npm Package Cache","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache","size":"7340032","status":"Eligible"}\n' +
+        '{"timestamp":"2:00 AM","action":"Custom Path","details":"C:\\\\Users\\\\Alice\\\\CustomCleanup","size":"8192","status":"Skipped · < 24h"}\n' +
+        '{"record":"outcome","status":"completed","event":"scan","categoriesCount":4,"items":5,"totalBytes":"13639680","timestamp":"2:00 AM","action":"Scan completed","details":"4 categories · 13 MB reclaimable"}',
+    },
+    {
+      id: 'log-2',
+      name: '2026-11-12-clean.jsonl',
+      modifiedUnixSecs: '1794441600',
+      sizeBytes: '512',
+      content:
+        '{"timestamp":"Yesterday, 2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned"}\n' +
+        '{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}',
+    },
   ];
 
   function bumpSettingsGeneration() { settingsGeneration += 1; }
@@ -426,42 +445,12 @@ export function createMockController(): MockController {
       { tier: 'Tier2', build: () => buildTarget('t-npm', 'npm-cache', 'Tier2', 'Safe', 'Package manager download cache, redownloaded as needed.', SAMPLE_ITEMS_T2) },
     ];
 
-    const protectedTarget: TargetScanResultDto = {
-      targetId: 't-protected-system32',
-      targetName: 'System32 (Protected)',
-      tier: 'Tier1',
-      risk: 'Protected',
-      resolvedPaths: ['C:\\Windows\\System32'],
-      scanned: true,
-      statusReason: 'Protected Path — never selectable or removable.',
-      totalBytes: '4096',
-      eligibleBytes: '0',
-      fileCount: '1',
-      eligibleCount: '0',
-      skippedCount: '1',
-      items: [
-        { id: 't-protected-system32-item-1', targetId: 't-protected-system32', path: 'C:\\Windows\\System32\\kernel32.dll', size: '4096', mtimeUnixSecs: '1600000000', ageEligible: false },
-      ],
-    };
-
     for (const def of defs) {
       if (!enabled.has(def.tier)) continue;
       const { target, items } = def.build();
       targets.push(target);
       for (const it of items) itemsById.set(it.id, it);
     }
-    targets.push(protectedTarget);
-    itemsById.set('t-protected-system32-item-1', {
-      id: 't-protected-system32-item-1',
-      targetId: 't-protected-system32',
-      path: 'C:\\Windows\\System32\\kernel32.dll',
-      size: '4096',
-      mtimeUnixSecs: '1600000000',
-      ageEligible: false,
-      risk: 'Protected',
-      targetName: 'System32 (Protected)',
-      description: 'Protected Path. Displayed for context only and never removable.',
-    });
 
     const customTargetId = 'custom-path-1';
     const customItem: ScanItemInfo = {
@@ -751,8 +740,27 @@ export function createMockController(): MockController {
       scanSeq = 0; analyzerSeq = 0; previewSeq = 0; logSeq = 0; nowMs = Date.now();
       logs.length = 0;
       logs.push(
-        { id: 'log-1', name: '2026-11-13-scan.jsonl', modifiedUnixSecs: '1794528000', sizeBytes: '2048', content: '{"timestamp":"2:00 AM","action":"Category scanned","details":"User Temp · 1 MB eligible (1 of 2 files)"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"recent.log · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\recent.log · 2 KB · Skipped (< 24h)"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"Crash Dumps & WER · 5 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"app.dmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps\\\\app.dmp · 5 MB · Eligible"}\n{"timestamp":"2:00 AM","action":"Category scanned","details":"npm-cache · 7 MB eligible"}\n{"timestamp":"2:00 AM","action":"Item scanned","details":"index-v5 · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache\\\\_cacache\\\\index-v5 · 7 MB · Eligible"}\n{"record":"outcome","status":"completed","event":"scan","categoriesCount":3,"items":5,"totalBytes":"13631488","timestamp":"2:00 AM","action":"Scan completed","details":"3 categories · 13 MB reclaimable"}' },
-        { id: 'log-2', name: '2026-11-12-clean.jsonl', modifiedUnixSecs: '1794441600', sizeBytes: '512', content: '{"record":"intent","action":"clean","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","category":"User Temp","bytes":"1048576"}\n{"timestamp":"Yesterday, 2:00 AM","action":"Deleted file","details":"a.tmp · C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp · 1 MB · Deleted"}\n{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}' },
+        {
+          id: 'log-1',
+          name: '2026-11-13-scan.jsonl',
+          modifiedUnixSecs: '1794528000',
+          sizeBytes: '2048',
+          content:
+            '{"timestamp":"2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp","size":"1048576","status":"Eligible"}\n' +
+            '{"timestamp":"2:00 AM","action":"Crash Dumps & WER","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps","size":"5242880","status":"Eligible"}\n' +
+            '{"timestamp":"2:00 AM","action":"npm Package Cache","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache","size":"7340032","status":"Eligible"}\n' +
+            '{"timestamp":"2:00 AM","action":"Custom Path","details":"C:\\\\Users\\\\Alice\\\\CustomCleanup","size":"8192","status":"Skipped · < 24h"}\n' +
+            '{"record":"outcome","status":"completed","event":"scan","categoriesCount":4,"items":5,"totalBytes":"13639680","timestamp":"2:00 AM","action":"Scan completed","details":"4 categories · 13 MB reclaimable"}',
+        },
+        {
+          id: 'log-2',
+          name: '2026-11-12-clean.jsonl',
+          modifiedUnixSecs: '1794441600',
+          sizeBytes: '512',
+          content:
+            '{"timestamp":"Yesterday, 2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned"}\n' +
+            '{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}',
+        },
       );
     },
   };
