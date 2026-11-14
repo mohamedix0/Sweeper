@@ -395,7 +395,8 @@ fn deep_directory_tree_finishes_without_stack_overflow_and_safe_drop() {
 #[test]
 fn cancellation_stops_cleanly() {
     let sb = Sandbox::new_in(sandbox_base_dir()).expect("sandbox");
-    // Build a tree large enough to observe cancellation without scanning huge OS directories.
+    // Fixture is intentionally moderate; cancellation is triggered deterministically on the first
+    // progress callback so this remains stable on fast CI SSDs and local machines.
     for i in 0..60 {
         let dir = format!("d{i}");
         sb.create_dir(&dir).expect("dir");
@@ -404,13 +405,14 @@ fn cancellation_stops_cleanly() {
                 .expect("file");
         }
     }
+
+    // 1) Cancellation requested during the walk must be observed and reported cleanly.
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_cb = Arc::clone(&cancel);
     let cb: Arc<dyn Fn(sweeper_core::analyzer::AnalyzerProgress) + Send + Sync> =
-        Arc::new(move |p| {
-            if p.scanned_dirs >= 5 {
-                cancel_for_cb.store(true, Ordering::Relaxed);
-            }
+        Arc::new(move |_p| {
+            // Trigger on the first emitted progress tick to avoid races with fast completion.
+            cancel_for_cb.store(true, Ordering::Relaxed);
         });
 
     let res = analyze_path(
@@ -419,14 +421,39 @@ fn cancellation_stops_cleanly() {
         Some(cb),
         AnalyzerOptions {
             worker_threads: 2,
-            progress_interval: std::time::Duration::from_millis(5),
+            progress_interval: std::time::Duration::from_millis(1),
             ..AnalyzerOptions::default()
         },
     )
     .expect("analyze with cancellation should return result");
 
     assert!(cancel.load(Ordering::Relaxed), "cancel flag should be set");
-    assert!(res.cancelled, "result should report cancellation");
+    assert!(
+        res.cancelled,
+        "result should report cancellation when requested during analysis"
+    );
+    // Dropping a (possibly partial) analyzer tree must be safe.
+    drop(res);
+
+    // 2) A pre-cancelled token must also be honored deterministically.
+    let pre_cancelled = Arc::new(AtomicBool::new(true));
+    let res = analyze_path(
+        Some(&sb.root().to_string_lossy()),
+        pre_cancelled,
+        None,
+        AnalyzerOptions {
+            worker_threads: 2,
+            progress_interval: std::time::Duration::from_millis(5),
+            ..AnalyzerOptions::default()
+        },
+    )
+    .expect("pre-cancelled analysis should return result cleanly");
+
+    assert!(
+        res.cancelled,
+        "result should report cancellation for pre-cancelled token"
+    );
+    drop(res);
 }
 
 #[test]
