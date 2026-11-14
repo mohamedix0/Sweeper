@@ -478,7 +478,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_allowlist_is_valid_and_includes_phase6_elevation_targets() {
+    fn embedded_allowlist_is_valid_and_includes_elevation_targets() {
         let targets = embedded_targets();
         assert!(!targets.is_empty());
         let audited_elevated = [

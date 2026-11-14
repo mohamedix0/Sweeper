@@ -482,7 +482,7 @@ description="y"
 }
 
 #[test]
-fn allows_only_audited_phase6_elevation_targets() {
+fn allows_only_audited_elevation_targets() {
     let cases = [
         ("windows-temp", "Windows", "Temp"),
         (
