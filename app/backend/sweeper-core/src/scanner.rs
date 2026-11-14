@@ -807,6 +807,616 @@ pub fn format_report(report: &ScanReport) -> String {
     out
 }
 
+/// Options for settings-driven scans (custom paths and Tier 3 conditionals).
+#[derive(Debug, Clone, Default)]
+pub struct ScanSettingsOptions {
+    /// Override current time (tests). Uses `SystemTime::now()` when `None`.
+    pub now: Option<SystemTime>,
+    /// Optional injected redirected `%TEMP%` candidate path for deterministic tests.
+    pub redirected_temp_candidate: Option<String>,
+    /// Optional injected recycle-bin scan roots (directories whose contents are scanned as Tier 3 recycle-bin).
+    /// When empty and Tier 3 recycle-bin scan is requested in production, accessible `$Recycle.Bin\<SID>` dirs are discovered.
+    pub recycle_bin_roots: Vec<String>,
+    /// Optional injected project search roots for Tier 3 stale `target/` and `node_modules` discovery.
+    /// When empty in production opt-in scans, a conservative default (user profile root) is used if available.
+    pub tier3_project_search_roots: Vec<String>,
+}
+
+/// Scan Tier 1/2 allowlisted targets plus validated Custom Paths and opt-in Tier 3 conditional targets.
+///
+/// - Tier toggles are respected (`enable_tier1/2/3`).
+/// - Custom Paths are re-validated at scan time; missing/unsafe paths emit zero items and diagnostics (never fallback to parent).
+/// - Tier 3 targets (`recycle-bin`, `stale-rust-target`, `stale-node-modules`) run only when `enable_tier3` is true.
+pub fn scan_with_settings(
+    settings: &crate::settings::SweeperSettings,
+) -> Result<ScanReport, ScanError> {
+    scan_with_settings_options(settings, ScanSettingsOptions::default())
+}
+
+/// Scan with injectable options for deterministic/testable Tier 3 and custom-path behavior.
+pub fn scan_with_settings_options(
+    settings: &crate::settings::SweeperSettings,
+    opts: ScanSettingsOptions,
+) -> Result<ScanReport, ScanError> {
+    let now = opts.now.unwrap_or_else(SystemTime::now);
+    let started_unix_secs = system_time_to_unix_secs(now);
+    let min_age = Duration::from_secs(u64::from(settings.min_age_hours) * 3600);
+
+    let mut targets: Vec<TargetDefinition> = sweeper_knowledge::embedded_targets()
+        .into_iter()
+        .filter(|t| match t.tier {
+            Tier::Tier1 => settings.enable_tier1,
+            Tier::Tier2 => settings.enable_tier2,
+            Tier::Tier3 => settings.enable_tier3,
+        })
+        .collect();
+
+    // If Tier 1/2 are disabled, we still may scan custom paths / Tier 3 conditionals.
+    // For allowlisted targets, reuse existing pipeline (it validates/lints and resolves roots).
+    let mut report = if targets.is_empty() {
+        ScanReport {
+            started_unix_secs,
+            min_age_hours: settings.min_age_hours,
+            targets: Vec::new(),
+        }
+    } else {
+        scan_targets_with_redirected_temp_override(
+            std::mem::take(&mut targets),
+            settings.min_age_hours,
+            opts.redirected_temp_candidate.as_deref(),
+        )?
+    };
+    report.started_unix_secs = started_unix_secs;
+    report.min_age_hours = settings.min_age_hours;
+
+    // Custom Paths (validated at scan time; contents-only; root never listed as removable item)
+    for (idx, raw) in settings.custom_paths.iter().enumerate() {
+        report
+            .targets
+            .push(scan_custom_path_target(idx, raw, min_age, now));
+    }
+
+    // Tier 3 conditional targets (strict opt-in)
+    if settings.enable_tier3 {
+        report.targets.extend(scan_tier3_conditional_targets(
+            settings, &opts, min_age, now,
+        ));
+    }
+
+    Ok(report)
+}
+
+fn scan_custom_path_target(
+    idx: usize,
+    raw_path: &str,
+    min_age: Duration,
+    now: SystemTime,
+) -> TargetScanResult {
+    let target_id = format!("custom-path-{}", idx + 1);
+    let mut out = empty_target_result(
+        target_id,
+        "Custom Path".to_string(),
+        Tier::Tier2, // display grouping tier; custom paths are Caution/contents-only
+        Risk::Caution,
+    );
+
+    let verdict = policy::validate_custom_path(raw_path);
+    if !verdict.allowed {
+        out.scanned = false;
+        out.status_reason = Some(format!(
+            "custom path invalid/missing (no fallback): {}",
+            verdict.reason
+        ));
+        out.skipped_diagnostics.push(format!(
+            "custom path rejected: {} ({})",
+            raw_path, verdict.reason
+        ));
+        return out;
+    }
+
+    let canon = match CanonicalPath::from_existing_path(raw_path) {
+        Ok(v) => v.into_canonical(),
+        Err(e) => {
+            out.scanned = false;
+            out.status_reason = Some(format!(
+                "custom path missing/unresolvable (no fallback): {e}"
+            ));
+            out.skipped_diagnostics
+                .push(format!("custom path unresolved: {raw_path} ({e})"));
+            return out;
+        }
+    };
+
+    if let Err(e) = validate_resolved_canonical_root(&canon) {
+        out.scanned = false;
+        out.status_reason = Some(format!("custom path not allowed at scan time: {e}"));
+        out.skipped_diagnostics
+            .push(format!("custom path rejected at scan time: {e}"));
+        return out;
+    }
+
+    let td = TargetDefinition {
+        id: out.target_id.clone(),
+        name: out.target_name.clone(),
+        tier: Tier::Tier2,
+        risk: Risk::Caution,
+        known_folder: KnownFolder::LocalAppData, // unused for custom resolved scan
+        relative_subpath: String::new(),
+        scope: sweeper_knowledge::Scope::Contents,
+        min_age_hours: (min_age.as_secs() / 3600) as u32,
+        description: "User-validated custom path (contents only).".to_string(),
+        requires_elevation: false,
+    };
+    out.resolved_paths = vec![canon.to_string()];
+    scan_resolved_roots(
+        &td,
+        &[(out.target_id.clone(), canon)],
+        min_age,
+        now,
+        &mut out,
+    );
+    out
+}
+
+fn empty_target_result(
+    target_id: String,
+    target_name: String,
+    tier: Tier,
+    risk: Risk,
+) -> TargetScanResult {
+    TargetScanResult {
+        target_id,
+        target_name,
+        tier,
+        risk,
+        resolved_paths: Vec::new(),
+        scanned: false,
+        status_reason: None,
+        total_bytes: 0,
+        eligible_bytes: 0,
+        file_count: 0,
+        eligible_count: 0,
+        skipped_count: 0,
+        skipped_reasons: BTreeMap::new(),
+        skipped_diagnostics: Vec::new(),
+        items: Vec::new(),
+    }
+}
+
+fn scan_tier3_conditional_targets(
+    settings: &crate::settings::SweeperSettings,
+    opts: &ScanSettingsOptions,
+    min_age: Duration,
+    now: SystemTime,
+) -> Vec<TargetScanResult> {
+    let mut out = Vec::new();
+    out.push(scan_tier3_recycle_bin(opts, min_age, now));
+    out.extend(scan_tier3_stale_project_dirs(settings, opts, min_age, now));
+    out
+}
+
+fn scan_tier3_recycle_bin(
+    opts: &ScanSettingsOptions,
+    min_age: Duration,
+    now: SystemTime,
+) -> TargetScanResult {
+    let mut result = empty_target_result(
+        "recycle-bin".to_string(),
+        "Recycle Bin (current user)".to_string(),
+        Tier::Tier3,
+        Risk::Caution,
+    );
+
+    let roots = if !opts.recycle_bin_roots.is_empty() {
+        opts.recycle_bin_roots.clone()
+    } else {
+        discover_recycle_bin_roots()
+    };
+
+    let mut valid_roots: Vec<(String, CanonicalPath)> = Vec::new();
+    for r in roots {
+        if r.trim().is_empty() {
+            continue;
+        }
+        match CanonicalPath::from_existing_path(&r) {
+            Ok(v) => {
+                let canon = v.into_canonical();
+                match validate_recycle_bin_root(&canon) {
+                    Ok(()) => valid_roots.push((result.target_id.clone(), canon)),
+                    Err(e) => result
+                        .skipped_diagnostics
+                        .push(format!("recycle-bin root skipped: {} ({e})", canon)),
+                }
+            }
+            Err(e) => result
+                .skipped_diagnostics
+                .push(format!("recycle-bin root unresolved: {r} ({e})")),
+        }
+    }
+
+    if valid_roots.is_empty() {
+        result.scanned = false;
+        result.status_reason = Some("no accessible user recycle-bin root found".to_string());
+        return result;
+    }
+
+    valid_roots.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
+    valid_roots.dedup_by(|a, b| a.1.is_same_path(&b.1));
+    result.resolved_paths = valid_roots.iter().map(|(_, p)| p.to_string()).collect();
+
+    let td = TargetDefinition {
+        id: "recycle-bin".to_string(),
+        name: "Recycle Bin (current user)".to_string(),
+        tier: Tier::Tier3,
+        risk: Risk::Caution,
+        known_folder: KnownFolder::Windows, // unused
+        relative_subpath: String::new(),
+        scope: sweeper_knowledge::Scope::Contents,
+        min_age_hours: (min_age.as_secs() / 3600) as u32,
+        description: "Permanently empties user-accessible Recycle Bin contents (opt-in)."
+            .to_string(),
+        requires_elevation: false,
+    };
+    scan_resolved_roots(&td, &valid_roots, min_age, now, &mut result);
+    result
+}
+
+fn validate_recycle_bin_root(canon: &CanonicalPath) -> Result<(), String> {
+    let verdict = policy::validate_tier3_target_root(canon.as_str());
+    if !verdict.allowed {
+        return Err(verdict.reason);
+    }
+    if path_has_link_point_ancestor(canon)? {
+        return Err("traverses link point".to_string());
+    }
+    Ok(())
+}
+
+fn discover_recycle_bin_roots() -> Vec<String> {
+    let mut out = Vec::new();
+    let system_drive = sweeper_winfs::env_var("SystemDrive").unwrap_or_else(|| "C:".to_string());
+    let base = PathBuf::from(format!(
+        r"{}\$Recycle.Bin",
+        system_drive.trim_end_matches('\\')
+    ));
+    if !base.exists() {
+        return out;
+    }
+    let entries = match sweeper_winfs::read_dir_entries(&base) {
+        Ok(v) => v,
+        Err(_) => return out,
+    };
+    for ent in entries {
+        if !ent.is_dir {
+            continue;
+        }
+        if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
+            continue;
+        }
+        let p = ent.path.to_string_lossy().to_string();
+        if let Ok(v) = CanonicalPath::from_existing_path(&p) {
+            let canon = v.into_canonical();
+            // Prefer SID-like subfolders (S-1-*) when discoverable; still only include handle-accessible safe ones.
+            let name = ent.name.to_string_lossy();
+            let sid_like = name.starts_with("S-1-");
+            if !sid_like {
+                // Allow non-SID named dirs only if accessible and safe (best-effort); keep conservative.
+            }
+            if validate_recycle_bin_root(&canon).is_ok() {
+                out.push(canon.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn scan_tier3_stale_project_dirs(
+    settings: &crate::settings::SweeperSettings,
+    opts: &ScanSettingsOptions,
+    min_age: Duration,
+    now: SystemTime,
+) -> Vec<TargetScanResult> {
+    let mut out = Vec::new();
+    let search_roots = if !opts.tier3_project_search_roots.is_empty() {
+        opts.tier3_project_search_roots.clone()
+    } else {
+        default_tier3_project_search_roots()
+    };
+
+    let stale_days = settings.stale_project_days;
+    let stale_threshold = Duration::from_secs(u64::from(stale_days) * 24 * 3600);
+
+    let mut rust_dirs: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new(); // path,total,eligible,file,eligible_count,mtime
+    let mut node_dirs: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new();
+
+    for root in search_roots {
+        discover_stale_project_dirs(&root, stale_threshold, now, &mut rust_dirs, &mut node_dirs);
+    }
+
+    out.push(build_stale_project_target_result(
+        "stale-rust-target",
+        "Stale Rust target/",
+        rust_dirs,
+        min_age,
+    ));
+    out.push(build_stale_project_target_result(
+        "stale-node-modules",
+        "Stale node_modules/",
+        node_dirs,
+        min_age,
+    ));
+    out
+}
+
+fn default_tier3_project_search_roots() -> Vec<String> {
+    let mut roots = Vec::new();
+    if let Ok(p) = sweeper_winfs::resolve_known_folder(KnownFolderId::UserProfile) {
+        if let Ok(v) = CanonicalPath::from_existing_path(&p.to_string_lossy()) {
+            let canon = v.into_canonical();
+            if !policy::is_subtree_protected(&canon)
+                && !policy::is_ancestor_of_subtree_protected(&canon)
+                && !policy::is_protected_container_root(&canon)
+            {
+                roots.push(canon.to_string());
+            }
+        }
+    }
+    roots
+}
+
+fn discover_stale_project_dirs(
+    search_root: &str,
+    stale_threshold: Duration,
+    now: SystemTime,
+    rust_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+    node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+) {
+    let root = match CanonicalPath::from_existing_path(search_root) {
+        Ok(v) => v.into_canonical(),
+        Err(_) => return,
+    };
+    if policy::is_subtree_protected(&root)
+        || policy::is_ancestor_of_subtree_protected(&root)
+        || policy::is_protected_container_root(&root)
+    {
+        return;
+    }
+    // Never scan Windows / Program Files etc. (subtree-protected/container roots already blocked)
+    let mut stack: Vec<PathBuf> = vec![PathBuf::from(root.as_str())];
+    let mut seen: HashSet<String> = HashSet::new();
+
+    while let Some(dir) = stack.pop() {
+        let dir_key = dir.to_string_lossy().to_ascii_uppercase();
+        if !seen.insert(dir_key) {
+            continue;
+        }
+        if is_disallowed_tier3_scan_path(&dir) {
+            continue;
+        }
+        let entries = match sweeper_winfs::read_dir_entries(&dir) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // Check child dirs for stale project artifacts.
+        for ent in &entries {
+            if !ent.is_dir {
+                continue;
+            }
+            if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
+                continue;
+            }
+            let name = ent.name.to_string_lossy();
+            if name.eq_ignore_ascii_case("target") {
+                if let Some(info) = stale_rust_target_info(&ent.path, stale_threshold, now) {
+                    rust_dirs.push(info);
+                }
+            } else if name.eq_ignore_ascii_case("node_modules") {
+                if let Some(info) = stale_node_modules_info(&ent.path, stale_threshold, now) {
+                    node_dirs.push(info);
+                }
+            }
+        }
+        // Traverse deeper for discovery, but skip link points/protected/disallowed dirs and known heavy dirs.
+        for ent in entries {
+            if !ent.is_dir {
+                continue;
+            }
+            if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
+                continue;
+            }
+            let name = ent.name.to_string_lossy();
+            if name.eq_ignore_ascii_case("$Recycle.Bin")
+                || name.eq_ignore_ascii_case("System Volume Information")
+                || name.eq_ignore_ascii_case("Windows")
+                || name.eq_ignore_ascii_case("Program Files")
+                || name.eq_ignore_ascii_case("Program Files (x86)")
+            {
+                continue;
+            }
+            // Avoid descending into discovered stale dirs themselves.
+            if name.eq_ignore_ascii_case("target") && ent.path.join("..\\Cargo.toml").exists() {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("node_modules") {
+                continue;
+            }
+            if !is_disallowed_tier3_scan_path(&ent.path) {
+                stack.push(ent.path);
+            }
+        }
+    }
+
+    rust_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    rust_dirs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+    node_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    node_dirs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+}
+
+fn is_disallowed_tier3_scan_path(path: &Path) -> bool {
+    let Ok(canon) = CanonicalPath::parse_lexical(&path.to_string_lossy()) else {
+        return true;
+    };
+    if policy::is_subtree_protected(&canon)
+        || policy::is_ancestor_of_subtree_protected(&canon)
+        || policy::is_protected_container_root(&canon)
+    {
+        return true;
+    }
+    // Extra hard blocks by name/path anchors.
+    let s = canon.as_str().to_ascii_uppercase();
+    s.starts_with(r"C:\WINDOWS")
+        || s.starts_with(r"C:\PROGRAM FILES")
+        || s.starts_with(r"C:\PROGRAM FILES (X86)")
+        || s.contains(r"\SYSTEM VOLUME INFORMATION")
+}
+
+fn stale_rust_target_info(
+    target_dir: &Path,
+    stale_threshold: Duration,
+    now: SystemTime,
+) -> Option<(String, u64, u64, u64, u64, u64)> {
+    let parent = target_dir.parent()?;
+    let cargo_toml = parent.join("Cargo.toml");
+    if !cargo_toml.is_file() {
+        return None;
+    }
+    if !is_path_stale_enough(&cargo_toml, stale_threshold, now) {
+        return None;
+    }
+    stale_dir_item_info(target_dir)
+}
+
+fn stale_node_modules_info(
+    node_modules_dir: &Path,
+    stale_threshold: Duration,
+    now: SystemTime,
+) -> Option<(String, u64, u64, u64, u64, u64)> {
+    let parent = node_modules_dir.parent()?;
+    let lockfiles = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    ];
+    let mut found = false;
+    for lf in lockfiles {
+        let p = parent.join(lf);
+        if p.is_file() {
+            found = true;
+            if !is_path_stale_enough(&p, stale_threshold, now) {
+                return None;
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    stale_dir_item_info(node_modules_dir)
+}
+
+fn is_path_stale_enough(path: &Path, stale_threshold: Duration, now: SystemTime) -> bool {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let mtime = match meta.modified() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    if mtime > now {
+        return false;
+    }
+    now.duration_since(mtime)
+        .map(|age| age >= stale_threshold)
+        .unwrap_or(false)
+}
+
+fn stale_dir_item_info(dir: &Path) -> Option<(String, u64, u64, u64, u64, u64)> {
+    let canon = CanonicalPath::from_existing_path(&dir.to_string_lossy())
+        .ok()?
+        .into_canonical();
+    // Safety: must be eligible Tier 3 root and not protected/link point.
+    if !policy::validate_tier3_target_root(canon.as_str()).allowed {
+        return None;
+    }
+    let (total, eligible, count, eligible_count, mtime) = summarize_directory_for_scan(dir).ok()?;
+    Some((
+        canon.to_string(),
+        total,
+        eligible,
+        count,
+        eligible_count,
+        mtime,
+    ))
+}
+
+fn summarize_directory_for_scan(dir: &Path) -> Result<(u64, u64, u64, u64, u64), String> {
+    let mut total: u64 = 0;
+    let mut eligible: u64 = 0;
+    let mut count: u64 = 0;
+    let mut eligible_count: u64 = 0;
+    let mut max_mtime: u64 = 0;
+    let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = sweeper_winfs::read_dir_entries(&d).map_err(|e| e.to_string())?;
+        for ent in entries {
+            match ent.reparse {
+                ReparseTagClass::NotReparse => {}
+                _ => continue, // do not traverse/count skipped reparse entries in aggregate
+            }
+            if ent.is_dir {
+                stack.push(ent.path);
+            } else {
+                let mt = filetime_to_unix_secs(ent.last_write_time);
+                max_mtime = max_mtime.max(mt);
+                total = total.saturating_add(ent.size);
+                eligible = eligible.saturating_add(ent.size); // staleness decided by project marker; treat contents as eligible
+                count = count.saturating_add(1);
+                eligible_count = eligible_count.saturating_add(1);
+            }
+        }
+    }
+    Ok((total, eligible, count, eligible_count, max_mtime))
+}
+
+fn build_stale_project_target_result(
+    target_id: &str,
+    target_name: &str,
+    dirs: Vec<(String, u64, u64, u64, u64, u64)>,
+    _min_age: Duration,
+) -> TargetScanResult {
+    let mut result = empty_target_result(
+        target_id.to_string(),
+        target_name.to_string(),
+        Tier::Tier3,
+        Risk::Caution,
+    );
+    if dirs.is_empty() {
+        result.scanned = false;
+        result.status_reason = Some("no stale directories found".to_string());
+        return result;
+    }
+    result.scanned = true;
+    for (i, (path, total, eligible, count, eligible_count, mtime)) in dirs.into_iter().enumerate() {
+        result.resolved_paths.push(path.clone());
+        result.total_bytes = result.total_bytes.saturating_add(total);
+        result.eligible_bytes = result.eligible_bytes.saturating_add(eligible);
+        result.file_count = result.file_count.saturating_add(count);
+        result.eligible_count = result.eligible_count.saturating_add(eligible_count);
+        result.items.push(ScanItem {
+            id: format!("{}::{}", target_id, i + 1),
+            target_id: target_id.to_string(),
+            path,
+            file_identity: None,
+            size: total,
+            mtime_unix_secs: mtime,
+            age_eligible: true,
+        });
+    }
+    result
+}
+
 fn validate_target_definitions(targets: &[TargetDefinition]) -> Result<(), String> {
     let lint_targets: Vec<sweeper_knowledge::LintTarget> = targets
         .iter()

@@ -39,6 +39,14 @@ pub enum ValidatedSource {
     },
     /// User-validated custom path root (contents cleaned under this root, root kept).
     CustomPath,
+    /// Tier 3 stale project directory (`target/` or `node_modules`) discovered by strict heuristics.
+    /// The matched directory itself may be removed after contents are safely cleaned.
+    Tier3ProjectDirectory {
+        /// Logical target id (e.g. `stale-rust-target`, `stale-node-modules`).
+        target_id: String,
+    },
+    /// Tier 3 recycle-bin scope rooted at a user-accessible recycle-bin directory (contents cleaned, root kept).
+    Tier3RecycleBin,
 }
 
 /// A deletion candidate that has passed parse/validation pipeline construction.
@@ -197,7 +205,74 @@ impl ValidatedItem {
             size_bytes,
             mtime_unix_secs: None,
             source: ValidatedSource::CustomPath,
-            risk: None,
+            risk: Some(Risk::Caution),
+        })
+    }
+
+    /// Construct a validated Tier 3 recycle-bin root item (contents-only; root kept).
+    ///
+    /// Used for user-scoped recycle-bin cleanup. The root must pass Tier 3 safety validation.
+    pub fn from_tier3_recycle_bin_root(
+        id: impl Into<String>,
+        path: impl Into<String>,
+        size_bytes: u64,
+    ) -> Result<Self, String> {
+        let id = id.into();
+        let path = path.into();
+        let verdict = policy::validate_tier3_target_root(&path);
+        if !verdict.allowed {
+            return Err(format!("recycle bin path not allowed: {}", verdict.reason));
+        }
+        let canon = CanonicalPath::parse_lexical(&path)
+            .map_err(|e| format!("invalid recycle bin path: {e}"))?
+            .to_string();
+        Ok(Self {
+            id,
+            target_id: "recycle-bin".to_string(),
+            target_root: canon.clone(),
+            path: canon,
+            size_bytes,
+            mtime_unix_secs: None,
+            source: ValidatedSource::Tier3RecycleBin,
+            risk: Some(Risk::Caution),
+        })
+    }
+
+    /// Construct a validated Tier 3 stale project directory item.
+    ///
+    /// `path` is the stale `target/` or `node_modules/` directory to remove. `target_root` is the
+    /// same directory and may be deleted after its contents are safely cleaned (unlike custom paths).
+    pub fn from_tier3_project_directory(
+        id: impl Into<String>,
+        logical_target_id: impl Into<String>,
+        path: impl Into<String>,
+        size_bytes: u64,
+        mtime_unix_secs: Option<u64>,
+    ) -> Result<Self, String> {
+        let id = id.into();
+        let logical_target_id = logical_target_id.into();
+        let path = path.into();
+        let verdict = policy::validate_tier3_target_root(&path);
+        if !verdict.allowed {
+            return Err(format!(
+                "stale project directory not allowed: {}",
+                verdict.reason
+            ));
+        }
+        let canon = CanonicalPath::parse_lexical(&path)
+            .map_err(|e| format!("invalid stale project directory: {e}"))?
+            .to_string();
+        Ok(Self {
+            id,
+            target_id: logical_target_id.clone(),
+            target_root: canon.clone(),
+            path: canon,
+            size_bytes,
+            mtime_unix_secs,
+            source: ValidatedSource::Tier3ProjectDirectory {
+                target_id: logical_target_id,
+            },
+            risk: Some(Risk::Caution),
         })
     }
 }
@@ -445,14 +520,36 @@ fn process_item(
         return Ok(ProcessOutcome::Skipped(reason));
     }
 
-    // Determine if item is the target root itself (custom path root must be kept: clean contents only).
+    // Determine if item is the target root itself.
     let is_root_itself = paths_equal_str(&item.path, &item.target_root);
     if is_root_itself {
-        // For contents-only semantics, if selected item is root directory, delete its children only.
         if item_path.is_dir() {
-            return clean_directory_contents(item, opts, journal, deleted_total);
+            let outcome = clean_directory_contents(item, opts, journal, deleted_total)?;
+            if let ProcessOutcome::Deleted(bytes) = outcome {
+                // For Tier 3 stale project directories, remove the now-cleaned directory root itself.
+                if matches!(item.source, ValidatedSource::Tier3ProjectDirectory { .. }) {
+                    if let Err(reason) = ensure_target_root_safe(&item.target_root) {
+                        return Ok(ProcessOutcome::Aborted(reason));
+                    }
+                    let root_empty = sweeper_winfs::read_dir_entries(item_path)
+                        .map(|v| v.is_empty())
+                        .unwrap_or(false);
+                    if root_empty {
+                        return delete_path_entry_allowing_root(
+                            item,
+                            &item.path,
+                            opts,
+                            journal,
+                            deleted_total,
+                            Some(bytes),
+                        );
+                    }
+                    return Ok(ProcessOutcome::Deleted(bytes));
+                }
+            }
+            return Ok(outcome);
         }
-        // Should not occur for custom-path root semantics, but do not delete root file unexpectedly.
+        // Do not delete root file unexpectedly.
         journal.write_intent(&journal::intent_record(
             &item.id,
             &item.path,
@@ -623,6 +720,37 @@ fn delete_path_entry(
     journal: &mut JournalWriter,
     deleted_total: &mut u64,
 ) -> Result<ProcessOutcome, CleanError> {
+    delete_path_entry_inner(item, path_str, opts, journal, deleted_total, false, None)
+}
+
+fn delete_path_entry_allowing_root(
+    item: &ValidatedItem,
+    path_str: &str,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    base_bytes_deleted: Option<u64>,
+) -> Result<ProcessOutcome, CleanError> {
+    delete_path_entry_inner(
+        item,
+        path_str,
+        opts,
+        journal,
+        deleted_total,
+        true,
+        base_bytes_deleted,
+    )
+}
+
+fn delete_path_entry_inner(
+    item: &ValidatedItem,
+    path_str: &str,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    allow_delete_root: bool,
+    base_bytes_deleted: Option<u64>,
+) -> Result<ProcessOutcome, CleanError> {
     let path = Path::new(path_str);
     // Intent before each deletion batch/item.
     journal.write_intent(&journal::intent_record(
@@ -676,7 +804,7 @@ fn delete_path_entry(
     };
 
     // Moment-of-deletion re-validation on opened handle.
-    if let Err(reason) = revalidate_handle(item, path_str, &inspection, opts) {
+    if let Err(reason) = revalidate_handle(item, path_str, &inspection, opts, allow_delete_root) {
         journal.write_outcome(&journal::outcome_record(
             &item.id, path_str, 0, "Skipped", &reason, None,
         ))?;
@@ -729,15 +857,13 @@ fn delete_path_entry(
     match delete_result {
         Ok(()) => {
             *deleted_total = deleted_total.saturating_add(bytes_accounted);
+            let reported = base_bytes_deleted
+                .unwrap_or(0)
+                .saturating_add(bytes_accounted);
             journal.write_outcome(&journal::outcome_record(
-                &item.id,
-                path_str,
-                bytes_accounted,
-                "deleted",
-                "",
-                None,
+                &item.id, path_str, reported, "deleted", "", None,
             ))?;
-            Ok(ProcessOutcome::Deleted(bytes_accounted))
+            Ok(ProcessOutcome::Deleted(reported))
         }
         Err(e) => {
             let reason = match e {
@@ -762,6 +888,7 @@ fn revalidate_handle(
     _requested_path: &str,
     inspection: &sweeper_winfs::HandleInspection,
     opts: &CleanOptions,
+    allow_delete_root: bool,
 ) -> Result<(), String> {
     let final_path = strip_extended_prefix(&inspection.final_path);
     let final_canon = CanonicalPath::parse_lexical(&final_path)
@@ -769,9 +896,12 @@ fn revalidate_handle(
     let target_root = CanonicalPath::parse_lexical(&item.target_root)
         .map_err(|e| format!("Skipped: target root invalid: {e}"))?;
 
-    // 1) Allowlist / validated Custom Path match (encoded in ValidatedItem source).
+    // 1) Authorized source (allowlisted target, validated custom path, or opt-in Tier 3 conditional target).
     match &item.source {
-        ValidatedSource::AllowlistedTarget { .. } | ValidatedSource::CustomPath => {}
+        ValidatedSource::AllowlistedTarget { .. }
+        | ValidatedSource::CustomPath
+        | ValidatedSource::Tier3ProjectDirectory { .. }
+        | ValidatedSource::Tier3RecycleBin => {}
     }
 
     // 2) Protected Path exclusion (Container & Subtree via canonical handle identity).
@@ -789,14 +919,26 @@ fn revalidate_handle(
         return Err("aborted: handle escaped target root".to_string());
     }
     if final_canon.is_same_path(&target_root) {
-        // Must not delete the target/custom root itself.
-        return Err("Skipped: target root must not be deleted".to_string());
-    }
-    if path_has_link_point_ancestor(&final_canon, &target_root, true)
+        if !(allow_delete_root
+            && matches!(item.source, ValidatedSource::Tier3ProjectDirectory { .. }))
+        {
+            // Must not delete the target/custom/recycle-bin root itself.
+            return Err("Skipped: target root must not be deleted".to_string());
+        }
+    } else if path_has_link_point_ancestor(&final_canon, &target_root, true)
         .map_err(|e| format!("Skipped: ancestor reparse check failed: {e}"))?
     {
         return Err("aborted: target root/ancestor link point detected".to_string());
     }
+    // For root-deletion case, still ensure ancestors up to (but excluding) root were not link points in ensure_target_root_safe;
+    // and root itself must not be a link point (checked below/elsewhere).
+    if final_canon.is_same_path(&target_root)
+        && path_has_link_point_ancestor(&target_root, &root_parent_or_self(&target_root), false)
+            .map_err(|e| format!("Skipped: ancestor reparse check failed: {e}"))?
+    {
+        return Err("aborted: target root/ancestor link point detected".to_string());
+    }
+    // (ancestor link-point checks handled above)
 
     // 4) Reparse tag checks.
     match inspection.reparse {
