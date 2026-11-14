@@ -255,8 +255,10 @@ fn default_sandbox_base() -> PathBuf {
         }
     }
 
-    // Last resort: preserve behavior even if no known-safe base is available.
-    canonical_temp
+    panic!(
+        "no safe non-short-name sandbox base found (canonical temp '{}' still contains a short-name segment and no safe cargo-target fallback was available)",
+        canonical_temp.display()
+    );
 }
 
 fn cargo_target_sandbox_base() -> Option<PathBuf> {
@@ -468,4 +470,30 @@ pub fn filetime_from_unix_secs(secs: u64) -> u64 {
     const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
     secs.saturating_mul(10_000_000)
         .saturating_add(EPOCH_DIFF_100NS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_short_name_component, is_safe_sandbox_base};
+    use std::path::Path;
+
+    #[test]
+    fn short_name_component_detection_flags_tilde_segments() {
+        assert!(has_short_name_component(Path::new(
+            r"C:\Temp\SHORT~1\AppData\Local\Temp"
+        )));
+        assert!(!has_short_name_component(Path::new(
+            r"C:\Temp\longname\AppData\Local\Temp"
+        )));
+    }
+
+    #[test]
+    fn safe_sandbox_base_requires_no_short_name_segments() {
+        assert!(!is_safe_sandbox_base(Path::new(
+            r"C:\Temp\SHORT~1\AppData\Local\Temp"
+        )));
+        assert!(is_safe_sandbox_base(Path::new(
+            r"D:\work\target\sweeper-test-sandboxes"
+        )));
+    }
 }
