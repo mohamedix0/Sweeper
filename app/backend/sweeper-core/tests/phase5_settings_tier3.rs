@@ -13,6 +13,36 @@ use sweeper_core::settings::{self, SweeperSettings, MAX_MIN_AGE_HOURS};
 use sweeper_knowledge::Risk;
 use sweeper_testkit::Sandbox;
 
+fn sandbox_base_dir() -> PathBuf {
+    fn strip_extended_prefix(p: PathBuf) -> PathBuf {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest.to_string());
+        }
+        p
+    }
+
+    let base = if let Some(v) = std::env::var_os("CARGO_TARGET_DIR") {
+        PathBuf::from(v).join("sweeper-test-sandboxes")
+    } else if let Some(v) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+        PathBuf::from(v).join("sweeper-test-sandboxes")
+    } else {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .join("../../target/sweeper-test-sandboxes")
+            .components()
+            .collect::<PathBuf>()
+    };
+    let _ = fs::create_dir_all(&base);
+    match std::fs::canonicalize(&base) {
+        Ok(c) => strip_extended_prefix(c),
+        Err(_) => base,
+    }
+}
+
 fn old_mtime_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -40,25 +70,6 @@ fn canon_str(p: &Path) -> String {
         .to_string()
 }
 
-fn allowed_custom_root(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from(format!(
-        r"C:\__sweeper_phase5_{}_{}_{}",
-        label,
-        std::process::id(),
-        nanos
-    ))
-}
-
-fn cleanup_dir_cmd(path: &Path) {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "rmdir", "/S", "/Q", path.to_string_lossy().as_ref()])
-        .status();
-}
-
 fn find_node_by_suffix(root: &AnalyzerNode, suffix_lower: &str) -> Option<AnalyzerNode> {
     let mut stack = vec![root.clone()];
     while let Some(n) = stack.pop() {
@@ -83,19 +94,13 @@ fn settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized()
     );
 
     // tampered/out-of-bounds + invalid custom paths + protected overrides injected
-    let valid_custom_base = allowed_custom_root("settings_valid");
-    let valid_custom = valid_custom_base.join(r"a\b\custom_ok");
-    fs::create_dir_all(&valid_custom).unwrap();
-    let missing_custom = valid_custom_base.join(r"a\b\missing_custom_path_dir");
-    let _ = std::process::Command::new("cmd")
-        .args([
-            "/C",
-            "rmdir",
-            "/S",
-            "/Q",
-            missing_custom.to_string_lossy().as_ref(),
-        ])
-        .status();
+    let custom_sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let valid_custom = custom_sb.create_dir(r"a\b\custom_ok").unwrap();
+    let missing_custom = custom_sb.root().join(r"a\b\missing_custom_path_dir");
+    assert!(
+        !missing_custom.exists(),
+        "missing custom path fixture must not exist"
+    );
     let json = format!(
         r#"{{
   "enable_tier1": false,
@@ -178,7 +183,6 @@ fn settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized()
         parsed.warnings
     );
     const { assert!(MAX_MIN_AGE_HOURS >= 8760) };
-    cleanup_dir_cmd(&valid_custom_base);
 }
 
 #[test]
@@ -257,9 +261,8 @@ fn custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent() {
 
 #[test]
 fn custom_path_scan_and_clean_contents_only_preserves_root() {
-    let custom_base = allowed_custom_root("custom_scan_clean");
-    let custom = custom_base.join(r"a\b\custom_root");
-    fs::create_dir_all(&custom).unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let custom = sb.create_dir(r"a\b\custom_root").unwrap();
     let f1 = custom.join("a.txt");
     let sub = custom.join("sub");
     fs::create_dir_all(&sub).unwrap();
@@ -310,22 +313,14 @@ fn custom_path_scan_and_clean_contents_only_preserves_root() {
     let root_item =
         ValidatedItem::from_custom_path_root("custom-root", canon_str(&custom), cp.total_bytes)
             .unwrap();
-    let journal_dir = std::env::temp_dir().join(format!(
-        "sweeper-phase5-journal-custom-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&journal_dir).unwrap();
+    let journal_dir = sb.create_dir("journal-custom").unwrap();
     let clean = remover::execute_clean(
         vec![root_item],
         CleanOptions {
             preview_estimated_bytes: cp.total_bytes.max(1),
             min_age: Duration::from_secs(0),
             now: SystemTime::now(),
-            journal_base_dir: Some(journal_dir.clone()),
+            journal_base_dir: Some(journal_dir),
         },
     )
     .unwrap();
@@ -337,9 +332,6 @@ fn custom_path_scan_and_clean_contents_only_preserves_root() {
     assert!(!f1.exists(), "child file should be cleaned");
     assert!(!f2.exists(), "nested child file should be cleaned");
     // subdirectory may be removed as empty child; root must remain.
-    cleanup_dir_cmd(&custom_base);
-    cleanup_dir_cmd(&journal_dir);
-    cleanup_dir_cmd(&journal_dir);
 }
 
 #[test]
@@ -610,7 +602,6 @@ fn tier3_stale_rust_target_and_node_modules_and_recycle_bin_sandboxed_opt_in() {
         node_orphan_nm.exists(),
         "node_modules without lockfile must remain"
     );
-    cleanup_dir_cmd(&journal_dir);
 }
 
 #[test]

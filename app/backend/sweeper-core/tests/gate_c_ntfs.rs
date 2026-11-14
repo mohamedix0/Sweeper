@@ -1,14 +1,44 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::policy;
 use sweeper_testkit::Sandbox;
 
+fn sandbox_base_dir() -> PathBuf {
+    fn strip_extended_prefix(p: PathBuf) -> PathBuf {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest.to_string());
+        }
+        p
+    }
+
+    let base = if let Some(v) = std::env::var_os("CARGO_TARGET_DIR") {
+        PathBuf::from(v).join("sweeper-test-sandboxes")
+    } else if let Some(v) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+        PathBuf::from(v).join("sweeper-test-sandboxes")
+    } else {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .join("../../target/sweeper-test-sandboxes")
+            .components()
+            .collect::<PathBuf>()
+    };
+    let _ = fs::create_dir_all(&base);
+    match std::fs::canonicalize(&base) {
+        Ok(c) => strip_extended_prefix(c),
+        Err(_) => base,
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn ntfs_junction_is_detected_as_link_point_and_rejected() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
     let target = sb.create_dir(r"real\target\dir").unwrap();
     let link_parent = sb.create_dir(r"links\here").unwrap();
     let link = link_parent.join("junc");
@@ -27,7 +57,7 @@ fn ntfs_junction_is_detected_as_link_point_and_rejected() {
 #[cfg(windows)]
 #[test]
 fn ntfs_symlink_is_rejected_when_privilege_available() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
     let target = sb.write_file(r"real\target\file.txt", b"hi").unwrap();
     let link = sb.root().join("linksym.txt");
     match sweeper_testkit::create_file_symlink(&link, &target) {
@@ -51,7 +81,7 @@ fn ntfs_symlink_is_rejected_when_privilege_available() {
 
 #[test]
 fn unicode_names_can_be_parsed_and_resolved() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
     let p = sb.create_dir(r"uni\مرحبا\😀emoji\dir").unwrap();
     let v = CanonicalPath::from_existing_path(&p.to_string_lossy());
     assert!(v.is_ok(), "resolve unicode path failed: {v:?}");
@@ -69,7 +99,7 @@ fn long_lexical_paths_over_260_are_rejected_or_handled_safely() {
 
 #[test]
 fn prefix_collision_paths_are_segment_aware_on_disk() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
     let base = sb.create_dir(r"Windows").unwrap();
     let old = sb.create_dir(r"Windows.old\Temp").unwrap();
     let apps = sb.create_dir(r"WindowsApps\Temp").unwrap();
@@ -88,19 +118,19 @@ fn prefix_collision_paths_are_segment_aware_on_disk() {
 
 #[test]
 fn custom_path_validation_requires_existing_path() {
-    let p = make_allowed_test_dir("custom_exists", r"a\b\c");
+    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let p = sb.create_dir(r"a\b\c").unwrap();
     let verdict = policy::validate_custom_path(&p.to_string_lossy());
     assert!(verdict.allowed, "expected allowed, got: {}", verdict.reason);
     let missing = p.join("does-not-exist");
     let v2 = policy::validate_custom_path(&missing.to_string_lossy());
     assert!(!v2.allowed, "missing must be rejected: {}", v2.reason);
-    cleanup_test_dir(&allowed_test_root("custom_exists"));
 }
 
 #[test]
 fn real_long_path_over_260_is_supported_for_legitimate_sandbox_paths() {
-    let root = allowed_test_root("long_path");
-    let mut long_dir = root.clone();
+    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let mut long_dir = sb.root().to_path_buf();
     long_dir.push("long_base_for_gate_c");
     long_dir.push("a".repeat(80));
     long_dir.push("b".repeat(80));
@@ -126,14 +156,12 @@ fn real_long_path_over_260_is_supported_for_legitimate_sandbox_paths() {
         verdict.reason,
         path_str.len()
     );
-    cleanup_test_dir(&root);
 }
 
 #[test]
 fn custom_path_validation_rejects_directory_containing_pattern_protected_descendant() {
-    let base1 = allowed_test_root("desc_git");
-    let root = base1.join(r"proj\safe\rootdir");
-    fs::create_dir_all(to_extended_path(&root)).unwrap();
+    let sb_git = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let root = sb_git.create_dir(r"proj\safe\rootdir").unwrap();
     let git_dir = root.join(".git");
     fs::create_dir_all(to_extended_path(&git_dir)).unwrap();
     fs::write(git_dir.join("config"), b"x").unwrap();
@@ -143,11 +171,9 @@ fn custom_path_validation_rejects_directory_containing_pattern_protected_descend
         "path containing .git descendant must be rejected: {}",
         verdict_git.reason
     );
-    cleanup_test_dir(&base1);
 
-    let base2 = allowed_test_root("desc_ssh");
-    let root2 = base2.join(r"proj2\safe\rootdir");
-    fs::create_dir_all(to_extended_path(&root2)).unwrap();
+    let sb_ssh = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let root2 = sb_ssh.create_dir(r"proj2\safe\rootdir").unwrap();
     let ssh_dir = root2.join(".ssh");
     fs::create_dir_all(to_extended_path(&ssh_dir)).unwrap();
     let verdict_ssh = policy::validate_custom_path(&root2.to_string_lossy());
@@ -156,11 +182,10 @@ fn custom_path_validation_rejects_directory_containing_pattern_protected_descend
         "path containing .ssh descendant must be rejected: {}",
         verdict_ssh.reason
     );
-    cleanup_test_dir(&base2);
 }
 
 #[cfg(windows)]
-fn to_extended_path(path: &std::path::Path) -> PathBuf {
+fn to_extended_path(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     if s.starts_with(r"\\?\") {
         path.to_path_buf()
@@ -170,35 +195,6 @@ fn to_extended_path(path: &std::path::Path) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn to_extended_path(path: &std::path::Path) -> PathBuf {
+fn to_extended_path(path: &Path) -> PathBuf {
     path.to_path_buf()
-}
-
-fn allowed_test_root(label: &str) -> PathBuf {
-    // Create under C:\ root (outside Users/Windows/ProgramData container descendants) to satisfy
-    // custom-path selection policy in integration tests on real NTFS.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from(format!(
-        r"C:\__sweeper_core_gatec_{}_{}_{}",
-        label,
-        std::process::id(),
-        nanos
-    ))
-}
-
-fn make_allowed_test_dir(label: &str, rel: &str) -> PathBuf {
-    let p = allowed_test_root(label).join(rel);
-    fs::create_dir_all(to_extended_path(&p)).expect("create allowed test dir");
-    p
-}
-
-fn cleanup_test_dir(path: &std::path::Path) {
-    // Avoid std::fs::remove_* (disallowed by clippy Gate A config) in backend test code.
-    let target = to_extended_path(path);
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "rmdir", "/S", "/Q", target.to_string_lossy().as_ref()])
-        .status();
 }
