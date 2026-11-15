@@ -134,8 +134,10 @@ async function main() {
     : path.resolve(scriptDir, '../../../target/debug/sweeper-desktop.exe');
 
   if (!fs.existsSync(exePath)) {
+    const repoRoot = path.resolve(scriptDir, '../../..');
+    const targetDir = path.join(repoRoot, 'target');
     throw new Error(
-      `sweeper-desktop executable not found at ${exePath}. Build it first (cargo build --manifest-path app/Cargo.toml --package sweeper-desktop --locked).`,
+      `sweeper-desktop executable not found at ${exePath}. Build it first with CARGO_TARGET_DIR set to the repository-root target directory so Cargo writes to <repo>/target/debug/ instead of app/target/debug/ (PowerShell: $env:CARGO_TARGET_DIR='${targetDir}'; cargo build --manifest-path app/Cargo.toml --package sweeper-desktop --locked).`,
     );
   }
 

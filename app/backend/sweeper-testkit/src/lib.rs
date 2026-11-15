@@ -18,6 +18,9 @@ use walkdir::WalkDir;
 /// Sentinel file name required at the root of every deletion/test sandbox.
 pub const SENTINEL_FILE_NAME: &str = ".sweeper-sandbox-sentinel";
 
+/// Owner lock file held for the lifetime of a Sweeper-owned sandbox/canary instance.
+pub const OWNER_LOCK_FILE_NAME: &str = ".sweeper-owner.lock";
+
 /// Directory name prefix for Sweeper-owned test sandboxes.
 pub const SANDBOX_DIR_PREFIX: &str = "sweeper-sandbox-";
 /// Directory name prefix for Sweeper-owned canary trees.
@@ -64,8 +67,9 @@ pub type Result<T> = std::result::Result<T, TestkitError>;
 /// stage deletion targets must refuse if the sentinel is missing.
 #[derive(Debug)]
 pub struct Sandbox {
-    _dir: TempDir,
+    _dir: Option<TempDir>,
     root: PathBuf,
+    _owner_lock: Option<fs::File>,
 }
 
 impl Sandbox {
@@ -79,8 +83,13 @@ impl Sandbox {
     ///
     /// Opportunistically cleans up stale, sentinel-marked `sweeper-sandbox-*` directories left in
     /// the selected base by previously aborted test runs (age-gated, never touching active runs).
-    pub fn new() -> Result<Self> {
-        Self::new_in(default_sandbox_base())
+    pub fn new() -> Self {
+        Self::try_new().unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Non-panicking sandbox creation with actionable diagnostics when no safe base is available.
+    pub fn try_new() -> std::io::Result<Self> {
+        Self::try_new_in(default_sandbox_base_checked()?)
     }
 
     /// Create a new isolated sandbox under `base_dir` with a sentinel file at its root.
@@ -90,7 +99,12 @@ impl Sandbox {
     ///
     /// Before creating a new sandbox, attempts opportunistic cleanup of stale `sweeper-sandbox-*`
     /// orphans in `base_dir` (best-effort; failures are ignored so sandbox creation can proceed).
-    pub fn new_in(base_dir: impl AsRef<Path>) -> Result<Self> {
+    pub fn new_in(base_dir: impl AsRef<Path>) -> Self {
+        Self::try_new_in(base_dir).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Non-panicking sandbox creation in an explicit base directory.
+    pub fn try_new_in(base_dir: impl AsRef<Path>) -> std::io::Result<Self> {
         fs::create_dir_all(base_dir.as_ref())?;
         let _ = cleanup_stale_sandboxes(base_dir.as_ref(), Duration::from_secs(3600));
         let dir = tempfile::Builder::new()
@@ -101,7 +115,12 @@ impl Sandbox {
         let mut f = fs::File::create(&sentinel)?;
         writeln!(f, "sweeper-testkit sentinel; do not remove during test run")?;
         f.sync_all()?;
-        Ok(Self { _dir: dir, root })
+        let owner_lock = acquire_owner_lock(&root.join(OWNER_LOCK_FILE_NAME))?;
+        Ok(Self {
+            _dir: Some(dir),
+            root,
+            _owner_lock: Some(owner_lock),
+        })
     }
 
     /// Returns the sandbox root path.
@@ -151,15 +170,29 @@ impl Sandbox {
     }
 }
 
+impl Default for Sandbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        // The sentinel must be present for this to be a Sweeper-owned sandbox root.
-        // Best-effort, extended-length, non-following removal is used so deep/long-path trees
-        // (e.g. > MAX_PATH on Windows) do not leak sandbox directories in %TEMP%.
+        // Disarm TempDir auto-cleanup before sentinel validation so a missing sentinel
+        // never allows TempDir's destructor to delete an unowned/non-sandbox directory.
+        let dir = self._dir.take();
+        if let Some(dir) = dir {
+            let _ = dir.keep();
+        }
+
         let sentinel = self.root.join(SENTINEL_FILE_NAME);
         if !sentinel.is_file() {
+            // Not a Sweeper-owned sandbox root; preserve contents for inspection/retry safety.
             return;
         }
+
+        // Release the exclusive owner lock before removing lock/marker files.
+        let _ = self._owner_lock.take();
         let _ = remove_dir_all_sandbox_root(&self.root);
     }
 }
@@ -260,6 +293,10 @@ fn cleanup_stale_owned_dirs(
         if !is_older_than(&meta, now, max_age) {
             continue;
         }
+        // Never remove directories owned by a live Sandbox/CanaryTree instance.
+        if is_owner_lock_held(&path.join(OWNER_LOCK_FILE_NAME)) {
+            continue;
+        }
 
         // Final guard: canonicalized child must still be a direct child of canonical base.
         let child_canon = match fs::canonicalize(&path) {
@@ -328,7 +365,7 @@ fn remove_dir_all_sandbox_root(root: &Path) -> std::io::Result<()> {
         ));
     }
     let target = to_extended_path_for_removal(root);
-    remove_dir_all_no_follow(&target)
+    remove_owned_root_no_follow(&target)
 }
 
 #[cfg(windows)]
@@ -350,36 +387,23 @@ fn to_extended_path_for_removal(path: &Path) -> PathBuf {
 
 /// Removes a Sweeper-owned sandbox/canary directory without following reparse points.
 ///
-/// Iterative (non-recursive) so very deep trees (> MAX_PATH depth scenarios) do not overflow the
-/// stack during test teardown. This is test-harness cleanup for sentinel/marker-guarded temp
-/// artifacts only; it must never be used on user/system paths.
+/// Ownership markers are removed only after all other contents are removed successfully so a
+/// partial failure leaves the directory recognizable for safe retry/cleanup.
 #[allow(clippy::disallowed_methods)]
-fn remove_dir_all_no_follow(path: &Path) -> std::io::Result<()> {
+fn remove_owned_root_no_follow(path: &Path) -> std::io::Result<()> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-
     let ft = meta.file_type();
-    if ft.is_symlink() || is_reparse_point(path, &meta) {
-        // Never traverse reparse points; remove the link/entry itself.
-        return if meta.is_dir() {
-            fs::remove_dir(path)
-        } else {
-            fs::remove_file(path)
-        };
+    if ft.is_symlink() || is_reparse_point(path, &meta) || !meta.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "owned root is not a removable directory or is a reparse point",
+        ));
     }
 
-    if ft.is_file() {
-        return fs::remove_file(path);
-    }
-
-    if !meta.is_dir() {
-        return Ok(());
-    }
-
-    // Iterative post-order deletion: collect child directories to remove after their contents.
     let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
     let mut dirs_postorder: Vec<PathBuf> = Vec::new();
 
@@ -397,7 +421,6 @@ fn remove_dir_all_no_follow(path: &Path) -> std::io::Result<()> {
         }
 
         dirs_postorder.push(dir.clone());
-
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -407,23 +430,22 @@ fn remove_dir_all_no_follow(path: &Path) -> std::io::Result<()> {
         for entry in entries {
             let entry = entry?;
             let child = entry.path();
-            let child_meta = match entry.metadata().or_else(|_| fs::symlink_metadata(&child)) {
+            if is_deferred_ownership_marker(path, &dir, &child) {
+                continue;
+            }
+
+            let child_meta = match fs::symlink_metadata(&child) {
                 Ok(m) => m,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e),
             };
 
-            if child_meta.file_type().is_symlink() || is_reparse_point(&child, &child_meta) {
-                // Never traverse reparse points/junctions; unlink entry only.
-                if child_meta.is_dir() {
-                    let _ = fs::remove_dir(&child).or_else(|_| fs::remove_file(&child));
-                } else {
-                    let _ = fs::remove_file(&child);
-                }
+            if is_directory_reparse_entry(&child, &child_meta) {
+                remove_reparse_entry(&child, &child_meta)?;
                 continue;
             }
 
-            if child_meta.is_dir() {
+            if child_meta.is_dir() && !is_reparse_point(&child, &child_meta) {
                 stack.push(child);
             } else {
                 match fs::remove_file(&child) {
@@ -435,24 +457,144 @@ fn remove_dir_all_no_follow(path: &Path) -> std::io::Result<()> {
         }
     }
 
-    // Remove directories deepest-first.
     for dir in dirs_postorder.into_iter().rev() {
         match fs::remove_dir(&dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Root dir may still contain ownership markers; remove them only after
+                // all other contents/dirs were removed successfully.
+                if dir == path && is_retryable_dir_not_empty(&e) {
+                    remove_ownership_markers(path)?;
+                    match fs::remove_dir(&dir) {
+                        Ok(()) => {}
+                        Err(e2) if e2.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e2) => return Err(e2),
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
         }
     }
 
     Ok(())
 }
 
+fn is_retryable_dir_not_empty(e: &std::io::Error) -> bool {
+    // Windows ERROR_DIR_NOT_EMPTY=145, POSIX ENOTEMPTY varies; fall back to string match.
+    matches!(e.raw_os_error(), Some(145 | 39))
+        || e.kind()
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("not empty")
+}
+
+fn is_deferred_ownership_marker(root: &Path, current_dir: &Path, child: &Path) -> bool {
+    let name = child.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name == OWNER_LOCK_FILE_NAME {
+        return true;
+    }
+    let root_is_sandbox = root.join(SENTINEL_FILE_NAME).is_file();
+    if root_is_sandbox {
+        return current_dir == root && name == SENTINEL_FILE_NAME;
+    }
+    // Canary roots: preserve canary identity markers until all other contents are removed.
+    let root_is_canary = has_canary_markers(root);
+    if root_is_canary {
+        if current_dir == root && name == "root.txt" {
+            return true;
+        }
+        if current_dir == root && name == "nested" {
+            // defer entire nested marker dir (contains marker files) until final cleanup
+            return true;
+        }
+    }
+    false
+}
+
+#[allow(clippy::disallowed_methods)]
+fn remove_ownership_markers(root: &Path) -> std::io::Result<()> {
+    // Remove owner lock marker first (handle already dropped by caller), then sandbox/canary markers.
+    let lock = root.join(OWNER_LOCK_FILE_NAME);
+    match fs::remove_file(&lock) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    // Sandbox sentinel
+    let sentinel = root.join(SENTINEL_FILE_NAME);
+    if sentinel.exists() || fs::symlink_metadata(&sentinel).is_ok() {
+        match fs::remove_file(&sentinel) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // Canary markers (remove only after non-marker contents are gone)
+    if has_canary_markers(root) || root.join("root.txt").exists() {
+        for p in [
+            root.join("nested").join("data.bin"),
+            root.join("nested").join("file.txt"),
+            root.join("nested"),
+            root.join("root.txt"),
+        ] {
+            if let Ok(m) = fs::symlink_metadata(&p) {
+                let res = if m.is_dir() && !is_reparse_point(&p, &m) {
+                    fs::remove_dir(&p)
+                } else {
+                    fs::remove_file(&p)
+                };
+                match res {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_directory_reparse_entry(_path: &Path, meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::{FileTypeExt, MetadataExt};
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    let attrs = meta.file_attributes();
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+        return false;
+    }
+    (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 || meta.file_type().is_symlink_dir()
+}
+
+#[cfg(not(windows))]
+fn is_directory_reparse_entry(_path: &Path, meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
+#[allow(clippy::disallowed_methods)]
+fn remove_reparse_entry(path: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
+    // Directory junctions/symlink-dirs must be unlinked with remove_dir; files with remove_file.
+    let res = if is_directory_reparse_entry(path, meta) || meta.is_dir() {
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match res {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// External canary tree with SHA-256 manifest for post-run integrity verification.
 #[derive(Debug)]
 pub struct CanaryTree {
-    _dir: TempDir,
+    _dir: Option<TempDir>,
     root: PathBuf,
     manifest: BTreeMap<String, String>,
+    _owner_lock: Option<fs::File>,
 }
 
 impl CanaryTree {
@@ -470,12 +612,14 @@ impl CanaryTree {
         write_bytes(root.join("root.txt"), b"canary-root")?;
         write_bytes(root.join("nested").join("file.txt"), b"canary-nested")?;
         write_bytes(root.join("nested").join("data.bin"), &[0, 1, 2, 3, 4, 5])?;
+        let owner_lock = acquire_owner_lock(&root.join(OWNER_LOCK_FILE_NAME))?;
 
         let manifest = build_manifest(&root)?;
         Ok(Self {
-            _dir: dir,
+            _dir: Some(dir),
             root,
             manifest,
+            _owner_lock: Some(owner_lock),
         })
     }
 
@@ -509,6 +653,20 @@ impl CanaryTree {
     }
 }
 
+impl Drop for CanaryTree {
+    fn drop(&mut self) {
+        // Disarm TempDir auto-cleanup so marker/lock-aware cleanup controls removal.
+        if let Some(dir) = self._dir.take() {
+            let _ = dir.keep();
+        }
+        if !has_canary_markers(&self.root) {
+            return;
+        }
+        let _ = self._owner_lock.take();
+        let _ = remove_dir_all_sandbox_root(&self.root);
+    }
+}
+
 fn write_bytes(path: PathBuf, bytes: &[u8]) -> Result<()> {
     let mut f = fs::File::create(path)?;
     f.write_all(bytes)?;
@@ -521,6 +679,9 @@ fn build_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry.map_err(|e| TestkitError::Walk(e.to_string()))?;
         if entry.file_type().is_file() {
+            if entry.file_name() == OWNER_LOCK_FILE_NAME {
+                continue;
+            }
             let rel = entry
                 .path()
                 .strip_prefix(root)
@@ -550,31 +711,63 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 /// Selects the default base directory for test sandboxes.
 ///
-/// Prefers canonicalized process temp only when it is safe (no short-name/`..` components and
-/// not under protected container roots that would make sandbox contents unselectable by policy).
-/// Falls back to cargo-target sandbox locations when temp is unsafe.
+/// Resolution order:
+/// 1. `SWEEPER_SANDBOX_BASE` (explicit, documented override), if set and safe
+/// 2. Canonicalized process temp directory, if safe
+/// 3. Cargo target sandbox locations (`CARGO_TARGET_TMPDIR`/`CARGO_TARGET_DIR`/workspace target), if safe
 pub fn default_sandbox_base() -> PathBuf {
+    default_sandbox_base_checked().unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Non-panicking sandbox base resolution with actionable diagnostics.
+pub fn default_sandbox_base_checked() -> std::io::Result<PathBuf> {
+    if let Some(v) = std::env::var_os("SWEEPER_SANDBOX_BASE") {
+        let raw = PathBuf::from(&v);
+        let normalized = normalize_sandbox_base_path(raw.clone());
+        let base = if is_safe_sandbox_base(&normalized) {
+            normalized
+        } else if is_safe_sandbox_base(&raw) {
+            raw
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "SWEEPER_SANDBOX_BASE is set but unsafe for sandboxing: '{}'. \
+Set SWEEPER_SANDBOX_BASE to a safe directory outside protected container roots (not under Users/Windows/ProgramData, drive root, or browser User Data), \
+or set CARGO_TARGET_DIR to a safe workspace target and retry.",
+                    PathBuf::from(v).display()
+                ),
+            ));
+        };
+        let _ = fs::create_dir_all(&base);
+        return Ok(base);
+    }
+
     let temp = std::env::temp_dir();
     let canonical_temp = canonicalize_sandbox_base(temp.clone());
     if is_safe_sandbox_base(&canonical_temp) {
-        return canonical_temp;
+        return Ok(canonical_temp);
     }
 
     if let Some(base) = cargo_target_sandbox_base() {
         let _ = fs::create_dir_all(&base);
         let canonical_base = canonicalize_sandbox_base(base.clone());
         if is_safe_sandbox_base(&canonical_base) {
-            return canonical_base;
+            return Ok(canonical_base);
         }
         if is_safe_sandbox_base(&base) {
-            return base;
+            return Ok(base);
         }
     }
 
-    panic!(
-        "no safe sandbox base found (temp '{}' is unsafe for sandboxing; no safe cargo-target fallback was available)",
-        canonical_temp.display()
-    );
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!(
+            "no safe sandbox base found (temp '{}' is unsafe for sandboxing; no safe cargo-target fallback was available). \
+Set SWEEPER_SANDBOX_BASE to a safe directory outside protected container roots, or set CARGO_TARGET_DIR to a safe workspace target and retry.",
+            canonical_temp.display()
+        ),
+    ))
 }
 
 fn cargo_target_sandbox_base() -> Option<PathBuf> {
@@ -679,6 +872,55 @@ fn has_short_name_component(path: &Path) -> bool {
 fn has_parent_dir_component(path: &Path) -> bool {
     path.components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+fn acquire_owner_lock(path: &Path) -> std::io::Result<fs::File> {
+    use std::fs::OpenOptions;
+    let mut opts = OpenOptions::new();
+    opts.create(true).read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Exclusive lock for liveness detection: any concurrent open/cleanup attempt fails while held.
+        opts.share_mode(0);
+    }
+    let file = opts.open(path)?;
+    // Best-effort: ensure file exists and is lock marker.
+    let _ = file.set_len(0);
+    Ok(file)
+}
+
+fn is_owner_lock_held(lock_path: &Path) -> bool {
+    if !lock_path.exists() {
+        return false;
+    }
+    use std::fs::OpenOptions;
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0);
+        match opts.open(lock_path) {
+            Ok(_f) => {
+                // Successfully acquired exclusive access => lock not held by a live owner.
+                // (Dropping _f immediately releases; file may remain on disk.)
+                false
+            }
+            Err(e) => {
+                // Sharing violation / access denied while another process holds exclusive handle => live.
+                matches!(e.raw_os_error(), Some(32 | 33 | 5))
+                    || e.kind() == std::io::ErrorKind::PermissionDenied
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // No OS-enforced exclusive open lock on non-Windows in this testkit; treat existing lock file
+        // conservatively as not provably live.
+        let _ = opts.open(lock_path);
+        false
+    }
 }
 
 /// Create a directory junction at `link` pointing to `target` (Windows).

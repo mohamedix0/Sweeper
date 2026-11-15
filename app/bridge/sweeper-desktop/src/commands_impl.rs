@@ -88,17 +88,17 @@ where
 
     match scan_result {
         Ok(report) => {
-            let current_settings_gen = state
-                .settings
-                .lock()
-                .map_err(|_| ContractError::Internal {
-                    reason: "state unavailable".into(),
-                })?
-                .generation();
             let finish_result = {
                 let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
                     reason: "state unavailable".into(),
                 })?;
+                let current_settings_gen = state
+                    .settings
+                    .lock()
+                    .map_err(|_| ContractError::Internal {
+                        reason: "state unavailable".into(),
+                    })?
+                    .generation();
                 sessions.finish_scan(
                     &state.clock,
                     &session_id,
@@ -276,6 +276,9 @@ where
             }
         };
 
+    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
+        reason: "state unavailable".into(),
+    })?;
     let current_settings_gen = state
         .settings
         .lock()
@@ -283,9 +286,6 @@ where
             reason: "state unavailable".into(),
         })?
         .generation();
-    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-        reason: "state unavailable".into(),
-    })?;
     sessions.finish_analyzer(
         &state.clock,
         &prepared.session_id,

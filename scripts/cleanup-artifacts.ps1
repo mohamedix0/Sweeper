@@ -55,6 +55,32 @@ function Test-SweeperTempOwnedMarker {
     }
 }
 
+function Test-SweeperOwnerLockLive {
+    param([System.IO.DirectoryInfo]$Dir)
+
+    $lockPath = Join-Path $Dir.FullName ".sweeper-owner.lock"
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { return $false }
+
+    try {
+        $fs = [System.IO.File]::Open(
+            $lockPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        $fs.Dispose()
+        return $false
+    }
+    catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+        # Exclusive lock held by a live Sandbox/CanaryTree owner.
+        return $true
+    }
+    catch {
+        # Be conservative on unexpected probe failures.
+        return $true
+    }
+}
+
 function Remove-StaleSweeperTempDirs {
     param([int]$MinAgeMinutes = 60)
 
@@ -86,6 +112,7 @@ function Remove-StaleSweeperTempDirs {
             if (($dir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return }
             if ($dir.LastWriteTime -ge $cutoff) { return }
             if (-not (Test-SweeperTempOwnedMarker -Dir $dir -Kind $spec.Kind)) { return }
+            if (Test-SweeperOwnerLockLive -Dir $dir) { return }
 
             Write-Host "Cleaning stale Sweeper temp $($spec.Kind): $full"
             Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
@@ -148,13 +175,28 @@ try {
             Write-Host "Pruning project target/ cache (threshold: $MaxTargetSizeGb GB)..."
             # Use explicit target dir and avoid native stderr becoming a terminating error under $ErrorActionPreference=Stop.
             $cargoCleanPrevEap = $ErrorActionPreference
+            $cachedirTag = Join-Path $repoTarget "CACHEDIR.TAG"
+            $createdCachedirTag = $false
             try {
                 $ErrorActionPreference = 'Continue'
-                & cargo clean --manifest-path (Join-Path $NormRepoRoot "app\Cargo.toml") --target-dir $repoTarget 2>&1 | Out-Null
+                if (-not (Test-Path -LiteralPath $cachedirTag -PathType Leaf)) {
+                    # Cargo clean requires CACHEDIR.TAG; sweeper test sandboxes may be created before Cargo initializes it.
+                    Set-Content -LiteralPath $cachedirTag -Value "Signature: 8a477f597d28d172789f06886806bc55" -NoNewline -Encoding ASCII
+                    $createdCachedirTag = $true
+                }
+                $cargoCleanOutput = & cargo clean --manifest-path (Join-Path $NormRepoRoot "app\Cargo.toml") --target-dir $repoTarget 2>&1
                 if ($LASTEXITCODE -ne 0) {
-                    throw "cargo clean failed with exit code $LASTEXITCODE"
+                    $msg = ($cargoCleanOutput | Out-String).Trim()
+                    if ($msg -match "missing or invalid CACHEDIR\.TAG" -and (Test-Path -LiteralPath (Join-Path $repoTarget "sweeper-test-sandboxes"))) {
+                        Write-Host "Skipping cargo clean: target/ is missing/invalid CACHEDIR.TAG but contains sweeper-test-sandboxes; preserving target directory."
+                    } else {
+                        throw "cargo clean failed with exit code $LASTEXITCODE`n$msg"
+                    }
                 }
             } finally {
+                if ($createdCachedirTag -and (Test-Path -LiteralPath $repoTarget) -and -not (Get-ChildItem -LiteralPath $repoTarget -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'CACHEDIR.TAG' })) {
+                    # Leave an empty marker-only target dir cleanable; harmless if it remains.
+                }
                 $ErrorActionPreference = $cargoCleanPrevEap
             }
         } elseif ($activeRustBuild -and ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)) {

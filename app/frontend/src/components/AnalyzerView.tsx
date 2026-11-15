@@ -281,6 +281,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   function invalidatePreviewRequest() {
     previewRevisionRef.current += 1;
     activePreviewRequestRef.current += 1;
+    setPreviewLoading(false);
   }
 
   const nodesById = useMemo(() => {
@@ -1034,7 +1035,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                       {!isDriveRoot(inspectedNode) && <p className="inspector-guidance">{analyzerGuidance(inspectedNode, inspectedSelectable, allowDeleteUnknown)}</p>}
                       {inspectedNode.path.toLowerCase().endsWith('.vhdx') && (() => {
                         const vhdxPath = normalizeDisplayPath(inspectedNode.path);
-                        const quotedVhdxPath = `'${vhdxPath.replace(/'/g, "''")}'`;
+                        const quotedVhdxPath = `'${vhdxPath.replace(/['\u2018\u2019\u201A\u201B]/g, (q) => q + q)}'`;
                         const cmd = `wsl --shutdown\nOptimize-VHD -Path ${quotedVhdxPath} -Mode Full`;
                         return (
                           <div className="notice info analyzer-vhdx-callout" role="note">

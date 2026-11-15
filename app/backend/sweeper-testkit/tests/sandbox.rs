@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,7 +11,7 @@ use sweeper_testkit::{
 
 #[test]
 fn sandbox_creates_isolated_root_with_sentinel() {
-    let sandbox = Sandbox::new().expect("sandbox should be created");
+    let sandbox = Sandbox::new();
     let root = sandbox.root();
     assert!(root.exists(), "sandbox root must exist");
     assert!(
@@ -20,7 +22,7 @@ fn sandbox_creates_isolated_root_with_sentinel() {
 
 #[test]
 fn sandbox_refuses_operation_when_sentinel_missing() {
-    let sandbox = Sandbox::new().expect("sandbox should be created");
+    let sandbox = Sandbox::new();
     let sentinel = sandbox.root().join(SENTINEL_FILE_NAME);
     #[allow(clippy::disallowed_methods)]
     fs::remove_file(&sentinel).expect("remove sentinel for test");
@@ -33,7 +35,7 @@ fn sandbox_refuses_operation_when_sentinel_missing() {
 
 #[test]
 fn canary_tree_seed_and_verify_hashes_outside_sandbox() {
-    let sandbox = Sandbox::new().expect("sandbox should be created");
+    let sandbox = Sandbox::new();
     // Canary lives outside the sandbox target area (separate temp root).
     let canary = CanaryTree::seed_external("phase0-canary").expect("seed canary");
     assert!(
@@ -98,7 +100,7 @@ fn set_path_mtime_old(path: &Path, secs_ago: u64) {
 #[cfg(windows)]
 #[test]
 fn sandbox_drop_cleans_deep_tree_with_extended_paths() {
-    let sandbox = Sandbox::new().expect("sandbox should be created");
+    let sandbox = Sandbox::new();
     let root = sandbox.root().to_path_buf();
     let deep_leaf = create_deep_tree_extended(&root, 320);
     let deep_file = deep_leaf.join("leaf.txt");
@@ -213,7 +215,7 @@ fn default_sandbox_base_selects_safe_non_protected_location() {
 #[cfg(windows)]
 #[test]
 fn junction_helper_creates_link_point_inside_sandbox() {
-    let sandbox = Sandbox::new().expect("sandbox should be created");
+    let sandbox = Sandbox::new();
     let target = sandbox.root().join("target_dir");
     let link = sandbox.root().join("link_dir");
     fs::create_dir_all(&target).expect("create target dir");
@@ -234,7 +236,7 @@ fn junction_helper_creates_link_point_inside_sandbox() {
 #[cfg(windows)]
 #[test]
 fn symlink_file_helper_creates_symlink_inside_sandbox() {
-    let sandbox = Sandbox::new().expect("sandbox should be created");
+    let sandbox = Sandbox::new();
     let target = sandbox.root().join("target.txt");
     let link = sandbox.root().join("link.txt");
     fs::write(&target, b"payload").expect("write target");
@@ -255,6 +257,153 @@ fn symlink_file_helper_creates_symlink_inside_sandbox() {
                 eprintln!("skipping symlink assertion due to insufficient privilege: {e}");
             } else {
                 panic!("create file symlink failed: {e}");
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn sandbox_drop_disarms_tempdir_when_sentinel_missing() {
+    let sandbox = Sandbox::new();
+    let root = sandbox.root().to_path_buf();
+    let sentinel = root.join(SENTINEL_FILE_NAME);
+    fs::remove_file(&sentinel).expect("remove sentinel");
+    drop(sandbox);
+    assert!(
+        root.exists(),
+        "sandbox root must remain when sentinel is missing (TempDir auto-cleanup disarmed)"
+    );
+    // Best-effort manual cleanup for test hygiene.
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_stale_sandboxes_skips_live_owner_lock() {
+    let base = tempfile::tempdir().expect("temp base");
+    let base_path = base.path();
+
+    // Live sandbox holds exclusive owner lock and must not be removed even if old.
+    let live = Sandbox::new_in(base_path);
+    let live_root = live.root().to_path_buf();
+    set_path_mtime_old(&live_root, 7200);
+
+    let stale = base_path.join(format!("{SANDBOX_DIR_PREFIX}stale-unlocked"));
+    fs::create_dir_all(&stale).expect("create stale dir");
+    fs::write(stale.join(SENTINEL_FILE_NAME), b"sentinel").expect("write sentinel");
+    set_path_mtime_old(&stale, 7200);
+
+    let removed = cleanup_stale_sandboxes(base_path, Duration::from_secs(3600)).expect("cleanup");
+    assert!(removed >= 1, "expected stale unlocked sandbox removed");
+    assert!(
+        live_root.exists(),
+        "live locked sandbox must not be removed"
+    );
+    assert!(!stale.exists(), "stale unlocked sandbox should be removed");
+    drop(live);
+}
+
+#[cfg(windows)]
+#[test]
+fn partial_failure_preserves_sandbox_ownership_markers_for_retry() {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let base = tempfile::tempdir().expect("temp base");
+    let stale = base.path().join(format!("{SANDBOX_DIR_PREFIX}partial"));
+    fs::create_dir_all(&stale).expect("create stale dir");
+    fs::write(stale.join(SENTINEL_FILE_NAME), b"sentinel").expect("write sentinel");
+    let locked = stale.join("locked.txt");
+    fs::write(&locked, b"locked").expect("write locked file");
+    // Exclusive handle prevents deletion while held.
+    let _handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(&locked)
+        .expect("lock file exclusively");
+    set_path_mtime_old(&stale, 7200);
+
+    let _ = cleanup_stale_sandboxes(base.path(), Duration::from_secs(3600));
+    assert!(
+        stale.join(SENTINEL_FILE_NAME).exists(),
+        "sentinel/ownership marker must remain after partial cleanup failure"
+    );
+    assert!(
+        locked.exists(),
+        "locked file should remain after partial failure"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn junction_cleanup_unlinks_junction_without_touching_target() {
+    let base = tempfile::tempdir().expect("temp base");
+    let stale = base
+        .path()
+        .join(format!("{SANDBOX_DIR_PREFIX}junction-clean"));
+    fs::create_dir_all(&stale).expect("create stale dir");
+    fs::write(stale.join(SENTINEL_FILE_NAME), b"sentinel").expect("write sentinel");
+
+    let outside = tempfile::tempdir().expect("outside target");
+    let keep = outside.path().join("keep.txt");
+    fs::write(&keep, b"keep").expect("write target file");
+    sweeper_testkit::create_junction(&stale.join("link"), outside.path()).expect("create junction");
+    set_path_mtime_old(&stale, 7200);
+
+    let removed = cleanup_stale_sandboxes(base.path(), Duration::from_secs(3600)).expect("cleanup");
+    assert!(
+        removed >= 1,
+        "stale sandbox with junction should be removed"
+    );
+    assert!(!stale.exists(), "sandbox root should be removed");
+    assert!(
+        keep.exists(),
+        "junction target contents must not be deleted by cleanup"
+    );
+}
+
+#[test]
+fn try_new_returns_actionable_error_when_no_safe_base_exists() {
+    // Force unsafe temp and no usable cargo-target fallback.
+    let _guard = EnvGuard::set_multi(&[
+        ("SWEEPER_SANDBOX_BASE", None),
+        ("TEMP", Some(r"C:\Users")),
+        ("TMP", Some(r"C:\Users")),
+        ("CARGO_TARGET_TMPDIR", None),
+        ("CARGO_TARGET_DIR", Some(r"C:\Users")),
+    ]);
+    let err = sweeper_testkit::Sandbox::try_new().expect_err("expected unsafe-base error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("SWEEPER_SANDBOX_BASE") || msg.contains("CARGO_TARGET_DIR"),
+        "error should be actionable and mention SWEEPER_SANDBOX_BASE/CARGO_TARGET_DIR: {msg}"
+    );
+}
+
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+impl EnvGuard {
+    fn set_multi(vars: &[(&'static str, Option<&str>)]) -> Self {
+        let mut saved = Vec::new();
+        for (k, v) in vars {
+            saved.push((*k, std::env::var_os(k)));
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        Self { saved }
+    }
+}
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in self.saved.drain(..).rev() {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
             }
         }
     }

@@ -232,10 +232,12 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   const previewRevisionRef = useRef(0);
   const activePreviewRequestRef = useRef(0);
   const inspectReqIdRef = useRef(0);
+  const activeScanRunRef = useRef(0);
 
   function invalidatePreviewRequest() {
     previewRevisionRef.current += 1;
     activePreviewRequestRef.current += 1;
+    setPreviewLoading(false);
   }
 
   const targets = useMemo(() => results?.targets ?? [], [results]);
@@ -358,6 +360,9 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   }, [client]);
 
   const runScan = useCallback(async () => {
+    if (activeScanRunRef.current !== 0) return;
+    const runId = activeScanRunRef.current + 1;
+    activeScanRunRef.current = runId;
     invalidatePreviewRequest();
     inspectReqIdRef.current += 1;
     setPreviewLoading(false);
@@ -368,6 +373,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
     const tiers = [tier1 ? 'Tier1' : null, tier2 ? 'Tier2' : null].filter(Boolean) as ('Tier1' | 'Tier2')[];
     try {
       const { sessionId: sid } = await client.startScan(tiers.length ? tiers : null, (ev) => {
+        if (activeScanRunRef.current !== runId) return;
         if (ev.kind === 'started') {
           setScanStatus('Scan in progress…');
           setScanProgress({ completedTargets: 0, totalTargets: 0, currentTargetName: null, scannedItems: '0', scannedBytes: '0' });
@@ -388,9 +394,11 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
           setScanStatus('Scan failed.');
         }
       });
+      if (activeScanRunRef.current !== runId) return;
       setSessionId(sid);
       setScanStartedAt(Date.now());
       const data = await client.getScanResults(sid);
+      if (activeScanRunRef.current !== runId) return;
       setResults(data);
       setScanSettingsVersion(settingsVersion ?? 0);
       const auto = new Set<string>();
@@ -415,23 +423,32 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
       const firstItem = firstTarget?.items[0] ?? data.targets.flatMap((t) => t.items)[0];
       if (firstItem) {
         setFocus({ kind: 'item', itemId: firstItem.id });
-        try {
+        void (async () => {
           const reqId = inspectReqIdRef.current + 1;
           inspectReqIdRef.current = reqId;
-          const result = await client.explainItem(firstItem.id);
-          if (inspectReqIdRef.current === reqId) setInspected(result);
-        } catch { /* ignore */ }
+          try {
+            const result = await client.explainItem(firstItem.id);
+            if (inspectReqIdRef.current === reqId) {
+              setInspected(result);
+            }
+          } catch { /* ignore */ }
+        })();
       } else {
         setFocus(null);
       }
       setScanStatus('');
       setScanProgress(null);
     } catch (e) {
-      setError(formatContractError(e));
-      const ce = e as ContractError | undefined;
-      if (ce?.code === 'sessionInvalid') resetForInvalidSession();
+      if (activeScanRunRef.current === runId) {
+        setError(formatContractError(e));
+        const ce = e as ContractError | undefined;
+        if (ce?.code === 'sessionInvalid') resetForInvalidSession();
+      }
     } finally {
-      setScanning(false);
+      if (activeScanRunRef.current === runId) {
+        activeScanRunRef.current = 0;
+        setScanning(false);
+      }
     }
   }, [tier1, tier2, client, settings, settingsVersion, resetForInvalidSession]);
 
@@ -453,6 +470,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   }
 
   function toggleItem(item: ScanItemDto, target: TargetScanResultDto) {
+    if (cleaning) return;
     if (!isSelectableScanItem(item, target, allowDeleteUnknown)) { focusItem(item.id); return; }
     invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);

@@ -108,7 +108,7 @@ fn set_filetime(path: &Path, secs: u64) {
 
 #[test]
 fn gate_d_junction_or_symlink_inside_target_unlinks_entry_and_preserves_canary() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let victim = target_root.join("file.txt");
     write_file(&victim, b"delete me");
@@ -147,7 +147,7 @@ fn gate_d_junction_or_symlink_inside_target_unlinks_entry_and_preserves_canary()
 
 #[test]
 fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let canary = CanaryTree::seed_external("gate_d_toctou_shared").unwrap();
     let journal_dir = sb.create_dir("journal").unwrap();
@@ -218,7 +218,7 @@ fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() 
 
 #[test]
 fn gate_d_target_root_or_ancestor_swapped_to_junction_rejected_zero_deletions() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let real_root = sb.create_dir("real_target").unwrap();
     let victim = real_root.join("victim.txt");
     write_file(&victim, b"must survive");
@@ -266,7 +266,7 @@ fn gate_d_target_root_or_ancestor_swapped_to_junction_rejected_zero_deletions() 
 
 #[test]
 fn gate_d_hard_link_to_outside_file_outside_intact() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let outside_dir = sb.create_dir("outside").unwrap();
     let outside_file = outside_dir.join("outside.txt");
@@ -296,7 +296,7 @@ fn gate_d_hard_link_to_outside_file_outside_intact() {
 
 #[test]
 fn gate_d_locked_file_skipped_remaining_eligible_cleaned() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let locked = target_root.join("locked.txt");
     let deletable = target_root.join("deletable.txt");
@@ -332,7 +332,7 @@ fn gate_d_locked_file_skipped_remaining_eligible_cleaned() {
 
 #[test]
 fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
 
     let readonly = target_root.join("readonly.txt");
@@ -387,7 +387,7 @@ fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
 
 #[test]
 fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sensitive() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
 
     // Deep 1000-level tree (iterative walker)
@@ -419,8 +419,8 @@ fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sens
     set_filetime(&ads_base, old_mtime_secs());
 
     // Arabic & emoji filenames
-    let arabic = target_root.join("مرحبا العربية.txt");
-    let emoji = target_root.join("emoji 😀 file.txt");
+    let arabic = target_root.join("\u{0645}\u{0631}\u{062d}\u{0628}\u{0627} \u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}.txt");
+    let emoji = target_root.join("emoji ðŸ˜€ file.txt");
     write_file(&arabic, b"arabic");
     write_file(&emoji, b"emoji");
     set_filetime(&arabic, old_mtime_secs());
@@ -485,7 +485,7 @@ fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sens
 
 #[test]
 fn gate_d_volume_mount_point_directory_junction_never_traversed() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let canary = CanaryTree::seed_external("gate_d_mount").unwrap();
     // Directory junction acts as mount point/link point; must be treated as Link Point and never traversed.
@@ -522,7 +522,7 @@ fn gate_d_volume_mount_point_directory_junction_never_traversed() {
 
 #[test]
 fn gate_d_reparse_tag_matrix_cloud_and_unknown_skipped() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let cloud_file = target_root.join("cloud.txt");
     let unknown_file = target_root.join("unknown_reparse.txt");
@@ -596,7 +596,7 @@ fn gate_d_reparse_tag_matrix_cloud_and_unknown_skipped() {
 
 #[test]
 fn gate_d_missing_custom_path_zero_deletions_parent_untouched() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let parent = sb.create_dir("parent").unwrap();
     let parent_file = parent.join("keep.txt");
     write_file(&parent_file, b"keep");
@@ -630,7 +630,7 @@ fn gate_d_missing_custom_path_zero_deletions_parent_untouched() {
 
 #[test]
 fn gate_d_120_percent_circuit_breaker_aborts_cleanly() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     // Create files totaling more than 120% of preview estimate.
     for i in 0..10 {
@@ -676,7 +676,7 @@ fn gate_d_120_percent_circuit_breaker_aborts_cleanly() {
 
 #[test]
 fn gate_d_mid_clean_termination_recovery_truncated_journal_and_rotation() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let journal_base = sb.create_dir("logsbase").unwrap();
     let log_dir = journal::resolve_log_dir(&journal_base);
     fs::create_dir_all(&log_dir).unwrap();
@@ -739,7 +739,7 @@ fn gate_d_mid_clean_termination_recovery_truncated_journal_and_rotation() {
 
 #[test]
 fn gate_d_tier3_project_directory_removed_after_ntfs_mtime_bump_on_emptied_dirs() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("proj").unwrap();
     let stale_dir = target_root.join("target");
     let nested = stale_dir.join("nested").join("deep");
@@ -791,7 +791,7 @@ fn gate_d_tier3_project_directory_removed_after_ntfs_mtime_bump_on_emptied_dirs(
 
 #[test]
 fn gate_d_age_checks_still_skip_unemptied_or_non_emptied_entries() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let min_age = Duration::from_secs(3600);
     let now_ts = unix_now();

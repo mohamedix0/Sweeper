@@ -274,9 +274,28 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
     cancel: Arc<AtomicBool>,
     progress_cb: Option<ScanProgressCallback>,
 ) -> Result<ScanReport, ScanError> {
+    let mut progress = ScanProgressRuntime::new(targets.len() as u32, cancel, progress_cb);
+    let started_unix_secs = system_time_to_unix_secs(SystemTime::now());
+    scan_allowlisted_targets_with_progress_runtime(
+        targets,
+        min_age_hours,
+        redirected_temp_candidate,
+        elevation_target_root_overrides,
+        &mut progress,
+        started_unix_secs,
+    )
+}
+
+fn scan_allowlisted_targets_with_progress_runtime(
+    targets: Vec<TargetDefinition>,
+    min_age_hours: u32,
+    redirected_temp_candidate: Option<&str>,
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+    progress: &mut ScanProgressRuntime,
+    started_unix_secs: u64,
+) -> Result<ScanReport, ScanError> {
     validate_target_definitions(&targets).map_err(ScanError::Targets)?;
-    let now = SystemTime::now();
-    let started_unix_secs = system_time_to_unix_secs(now);
+    let now = UNIX_EPOCH + Duration::from_secs(started_unix_secs);
     let min_age = Duration::from_secs(u64::from(min_age_hours) * 3600);
 
     // Resolve known folder roots used by these targets.
@@ -290,7 +309,6 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
         kf_roots.insert(kf, resolve_validated_known_folder_root(kf));
     }
 
-    let mut progress = ScanProgressRuntime::new(targets.len() as u32, cancel, progress_cb);
     let mut results = Vec::with_capacity(targets.len());
     let mut all_resolved_roots: Vec<(String, CanonicalPath)> = Vec::new();
 
@@ -342,12 +360,7 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
                                 out.resolved_paths =
                                     roots.iter().map(|(_, p)| p.to_string()).collect();
                                 scan_resolved_roots(
-                                    &target,
-                                    &roots,
-                                    min_age,
-                                    now,
-                                    &mut out,
-                                    &mut progress,
+                                    &target, &roots, min_age, now, &mut out, progress,
                                 )?;
                                 progress.completed_targets =
                                     progress.completed_targets.saturating_add(1);
@@ -433,14 +446,7 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
                                 all_resolved_roots.push((rid.clone(), r.clone()));
                             }
                             out.resolved_paths = roots.iter().map(|(_, p)| p.to_string()).collect();
-                            scan_resolved_roots(
-                                &target,
-                                &roots,
-                                min_age,
-                                now,
-                                &mut out,
-                                &mut progress,
-                            )?;
+                            scan_resolved_roots(&target, &roots, min_age, now, &mut out, progress)?;
                             progress.completed_targets =
                                 progress.completed_targets.saturating_add(1);
                             progress.emit(None, None);
@@ -486,7 +492,7 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
                     all_resolved_roots.push((rid.clone(), r.clone()));
                 }
                 out.resolved_paths = roots.iter().map(|(_, p)| p.to_string()).collect();
-                scan_resolved_roots(&target, &roots, min_age, now, &mut out, &mut progress)?;
+                scan_resolved_roots(&target, &roots, min_age, now, &mut out, progress)?;
                 progress.completed_targets = progress.completed_targets.saturating_add(1);
                 progress.emit(None, None);
                 results.push(out);
@@ -587,6 +593,8 @@ fn scan_one_root_iterative(
                 return Err(ScanError::Cancelled);
             }
             process_entry(&mut ctx, &ent);
+            ctx.progress
+                .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
         }
         ctx.progress
             .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
@@ -1160,7 +1168,7 @@ pub fn scan_with_settings_options_and_elevation_with_progress(
 
     let elev_ok =
         elevation.process_elevated && settings.enable_tier3 && settings.enable_elevation_targets;
-    let mut targets: Vec<TargetDefinition> = sweeper_knowledge::embedded_targets()
+    let allowlisted_targets: Vec<TargetDefinition> = sweeper_knowledge::embedded_targets()
         .into_iter()
         .filter(|t| {
             if t.requires_elevation {
@@ -1175,29 +1183,36 @@ pub fn scan_with_settings_options_and_elevation_with_progress(
         })
         .collect();
 
-    // If Tier 1/2 are disabled, we still may scan custom paths / Tier 3 conditionals.
-    // For allowlisted targets, reuse existing pipeline (it validates/lints and resolves roots).
-    let mut report = if targets.is_empty() {
+    let tier3_append_count = if settings.enable_tier3 {
+        1 /* recycle-bin */ + 2 /* stale rust target + stale node_modules */
+    } else {
+        0
+    };
+    let total_targets =
+        (allowlisted_targets.len() + settings.custom_paths.len() + tier3_append_count) as u32;
+    let mut progress = ScanProgressRuntime::new(total_targets, cancel, progress_cb);
+
+    let mut report = if allowlisted_targets.is_empty() {
         ScanReport {
             started_unix_secs,
             min_age_hours: settings.min_age_hours,
             targets: Vec::new(),
         }
     } else {
-        scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
-            std::mem::take(&mut targets),
+        scan_allowlisted_targets_with_progress_runtime(
+            allowlisted_targets,
             settings.min_age_hours,
             opts.redirected_temp_candidate.as_deref(),
             &opts.elevation_target_root_overrides,
-            cancel.clone(),
-            progress_cb.clone(),
+            &mut progress,
+            started_unix_secs,
         )?
     };
     report.started_unix_secs = started_unix_secs;
     report.min_age_hours = settings.min_age_hours;
 
-    append_custom_path_targets(&mut report, settings, min_age, now);
-    append_tier3_targets(&mut report, settings, &opts, min_age, now);
+    append_custom_path_targets(&mut report, settings, min_age, now, &mut progress)?;
+    append_tier3_targets(&mut report, settings, &opts, min_age, now, &mut progress)?;
 
     Ok(report)
 }
@@ -1240,7 +1255,8 @@ fn scan_custom_path_target(
     raw_path: &str,
     min_age: Duration,
     now: SystemTime,
-) -> TargetScanResult {
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
     let target_id = format!("custom-path-{}", idx + 1);
     let mut out = empty_target_result(
         target_id,
@@ -1248,6 +1264,13 @@ fn scan_custom_path_target(
         Tier::Tier2, // display grouping tier; custom paths are Caution/contents-only
         Risk::Caution,
     );
+    if progress.cancelled() {
+        return Err(ScanError::Cancelled);
+    }
+    progress.emit(Some(&out.target_id), Some(&out.target_name));
+    if progress.cancelled() {
+        return Err(ScanError::Cancelled);
+    }
 
     let verdict = policy::validate_custom_path(raw_path);
     if !verdict.allowed {
@@ -1260,7 +1283,9 @@ fn scan_custom_path_target(
             "custom path rejected: {} ({})",
             raw_path, verdict.reason
         ));
-        return out;
+        progress.completed_targets = progress.completed_targets.saturating_add(1);
+        progress.emit(None, None);
+        return Ok(out);
     }
 
     let canon = match CanonicalPath::from_existing_path(raw_path) {
@@ -1272,7 +1297,9 @@ fn scan_custom_path_target(
             ));
             out.skipped_diagnostics
                 .push(format!("custom path unresolved: {raw_path} ({e})"));
-            return out;
+            progress.completed_targets = progress.completed_targets.saturating_add(1);
+            progress.emit(None, None);
+            return Ok(out);
         }
     };
 
@@ -1281,7 +1308,9 @@ fn scan_custom_path_target(
         out.status_reason = Some(format!("custom path not allowed at scan time: {e}"));
         out.skipped_diagnostics
             .push(format!("custom path rejected at scan time: {e}"));
-        return out;
+        progress.completed_targets = progress.completed_targets.saturating_add(1);
+        progress.emit(None, None);
+        return Ok(out);
     }
 
     let td = TargetDefinition {
@@ -1297,16 +1326,17 @@ fn scan_custom_path_target(
         requires_elevation: false,
     };
     out.resolved_paths = vec![canon.to_string()];
-    let mut progress = ScanProgressRuntime::new(0, Arc::new(AtomicBool::new(false)), None);
-    let _ = scan_resolved_roots(
+    scan_resolved_roots(
         &td,
         &[(out.target_id.clone(), canon)],
         min_age,
         now,
         &mut out,
-        &mut progress,
-    );
-    out
+        progress,
+    )?;
+    progress.completed_targets = progress.completed_targets.saturating_add(1);
+    progress.emit(None, None);
+    Ok(out)
 }
 
 fn empty_target_result(
@@ -1339,12 +1369,17 @@ fn append_custom_path_targets(
     settings: &crate::settings::SweeperSettings,
     min_age: Duration,
     now: SystemTime,
-) {
+    progress: &mut ScanProgressRuntime,
+) -> Result<(), ScanError> {
     for (idx, raw) in settings.custom_paths.iter().enumerate() {
+        if progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
         report
             .targets
-            .push(scan_custom_path_target(idx, raw, min_age, now));
+            .push(scan_custom_path_target(idx, raw, min_age, now, progress)?);
     }
+    Ok(())
 }
 
 fn append_tier3_targets(
@@ -1353,38 +1388,38 @@ fn append_tier3_targets(
     opts: &ScanSettingsOptions,
     min_age: Duration,
     now: SystemTime,
-) {
+    progress: &mut ScanProgressRuntime,
+) -> Result<(), ScanError> {
     if !settings.enable_tier3 {
-        return;
+        return Ok(());
     }
     report
         .targets
-        .extend(scan_tier3_conditional_targets(settings, opts, min_age, now));
-}
-
-fn scan_tier3_conditional_targets(
-    settings: &crate::settings::SweeperSettings,
-    opts: &ScanSettingsOptions,
-    min_age: Duration,
-    now: SystemTime,
-) -> Vec<TargetScanResult> {
-    let mut out = Vec::new();
-    out.push(scan_tier3_recycle_bin(opts, min_age, now));
-    out.extend(scan_tier3_stale_project_dirs(settings, opts, min_age, now));
-    out
+        .push(scan_tier3_recycle_bin(opts, min_age, now, progress)?);
+    let stale = scan_tier3_stale_project_dirs(settings, opts, min_age, now, progress)?;
+    report.targets.extend(stale);
+    Ok(())
 }
 
 fn scan_tier3_recycle_bin(
     opts: &ScanSettingsOptions,
     min_age: Duration,
     now: SystemTime,
-) -> TargetScanResult {
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
     let mut result = empty_target_result(
         "recycle-bin".to_string(),
         "Recycle Bin (current user)".to_string(),
         Tier::Tier3,
         Risk::Caution,
     );
+    if progress.cancelled() {
+        return Err(ScanError::Cancelled);
+    }
+    progress.emit(Some(&result.target_id), Some(&result.target_name));
+    if progress.cancelled() {
+        return Err(ScanError::Cancelled);
+    }
 
     let roots = if !opts.recycle_bin_roots.is_empty() {
         opts.recycle_bin_roots.clone()
@@ -1394,6 +1429,9 @@ fn scan_tier3_recycle_bin(
 
     let mut valid_roots: Vec<(String, CanonicalPath)> = Vec::new();
     for r in roots {
+        if progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
         if r.trim().is_empty() {
             continue;
         }
@@ -1416,7 +1454,9 @@ fn scan_tier3_recycle_bin(
     if valid_roots.is_empty() {
         result.scanned = false;
         result.status_reason = Some("no accessible user recycle-bin root found".to_string());
-        return result;
+        progress.completed_targets = progress.completed_targets.saturating_add(1);
+        progress.emit(None, None);
+        return Ok(result);
     }
 
     valid_roots.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
@@ -1436,9 +1476,10 @@ fn scan_tier3_recycle_bin(
             .to_string(),
         requires_elevation: false,
     };
-    let mut progress = ScanProgressRuntime::new(0, Arc::new(AtomicBool::new(false)), None);
-    let _ = scan_resolved_roots(&td, &valid_roots, min_age, now, &mut result, &mut progress);
-    result
+    scan_resolved_roots(&td, &valid_roots, min_age, now, &mut result, progress)?;
+    progress.completed_targets = progress.completed_targets.saturating_add(1);
+    progress.emit(None, None);
+    Ok(result)
 }
 
 fn validate_recycle_bin_root(canon: &CanonicalPath) -> Result<(), String> {
@@ -1493,10 +1534,10 @@ fn discover_recycle_bin_roots() -> Vec<String> {
 fn scan_tier3_stale_project_dirs(
     settings: &crate::settings::SweeperSettings,
     opts: &ScanSettingsOptions,
-    min_age: Duration,
+    _min_age: Duration,
     now: SystemTime,
-) -> Vec<TargetScanResult> {
-    let mut out = Vec::new();
+    progress: &mut ScanProgressRuntime,
+) -> Result<Vec<TargetScanResult>, ScanError> {
     let search_roots = if !opts.tier3_project_search_roots.is_empty() {
         opts.tier3_project_search_roots.clone()
     } else {
@@ -1506,26 +1547,48 @@ fn scan_tier3_stale_project_dirs(
     let stale_days = settings.stale_project_days;
     let stale_threshold = Duration::from_secs(u64::from(stale_days) * 24 * 3600);
 
-    let mut rust_dirs: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new(); // path,total,eligible,file,eligible_count,mtime
+    let mut rust_dirs: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new();
     let mut node_dirs: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new();
 
     for root in search_roots {
-        discover_stale_project_dirs(&root, stale_threshold, now, &mut rust_dirs, &mut node_dirs);
+        if progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        discover_stale_project_dirs(
+            &root,
+            stale_threshold,
+            now,
+            &mut rust_dirs,
+            &mut node_dirs,
+            progress,
+        )?;
     }
 
+    let mut out = Vec::new();
+    if progress.cancelled() {
+        return Err(ScanError::Cancelled);
+    }
+    progress.emit(Some("stale-rust-target"), Some("Stale Rust target/"));
     out.push(build_stale_project_target_result(
         "stale-rust-target",
         "Stale Rust target/",
         rust_dirs,
-        min_age,
     ));
+    progress.completed_targets = progress.completed_targets.saturating_add(1);
+    progress.emit(None, None);
+    if progress.cancelled() {
+        return Err(ScanError::Cancelled);
+    }
+
+    progress.emit(Some("stale-node-modules"), Some("Stale node_modules/"));
     out.push(build_stale_project_target_result(
         "stale-node-modules",
         "Stale node_modules/",
         node_dirs,
-        min_age,
     ));
-    out
+    progress.completed_targets = progress.completed_targets.saturating_add(1);
+    progress.emit(None, None);
+    Ok(out)
 }
 
 fn default_tier3_project_search_roots() -> Vec<String> {
@@ -1550,22 +1613,26 @@ fn discover_stale_project_dirs(
     now: SystemTime,
     rust_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
     node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
-) {
+    progress: &ScanProgressRuntime,
+) -> Result<(), ScanError> {
     let root = match CanonicalPath::from_existing_path(search_root) {
         Ok(v) => v.into_canonical(),
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     if policy::is_subtree_protected(&root)
         || policy::is_ancestor_of_subtree_protected(&root)
         || policy::is_protected_container_root(&root)
     {
-        return;
+        return Ok(());
     }
     // Never scan Windows / Program Files etc. (subtree-protected/container roots already blocked)
     let mut stack: Vec<PathBuf> = vec![PathBuf::from(root.as_str())];
     let mut seen: HashSet<String> = HashSet::new();
 
     while let Some(dir) = stack.pop() {
+        if progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
         let dir_key = dir.to_string_lossy().to_ascii_uppercase();
         if !seen.insert(dir_key) {
             continue;
@@ -1630,6 +1697,7 @@ fn discover_stale_project_dirs(
     rust_dirs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
     node_dirs.sort_by(|a, b| a.0.cmp(&b.0));
     node_dirs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+    Ok(())
 }
 
 fn is_disallowed_tier3_scan_path(path: &Path) -> bool {
@@ -1764,7 +1832,6 @@ fn build_stale_project_target_result(
     target_id: &str,
     target_name: &str,
     dirs: Vec<(String, u64, u64, u64, u64, u64)>,
-    _min_age: Duration,
 ) -> TargetScanResult {
     let mut result = empty_target_result(
         target_id.to_string(),
@@ -2022,6 +2089,65 @@ mod tests {
             24,
             None,
             &BTreeMap::new(),
+            cancel,
+            Some(cb),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ScanError::Cancelled));
+    }
+
+    #[test]
+    fn settings_scan_cancel_interrupts_custom_path_phase() {
+        let settings = crate::settings::SweeperSettings {
+            enable_tier1: false,
+            enable_tier2: false,
+            enable_tier3: false,
+            custom_paths: vec![r"C:\SweeperNonExistentCustomPathCancel\Nested".to_string()],
+            ..crate::settings::SweeperSettings::default()
+        };
+
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_cb = cancel.clone();
+        let cb: ScanProgressCallback = std::sync::Arc::new(move |p| {
+            if p.current_target_id.as_deref() == Some("custom-path-1") {
+                cancel_cb.store(true, Ordering::Relaxed);
+            }
+        });
+        let err = scan_with_settings_options_and_elevation_with_progress(
+            &settings,
+            ScanSettingsOptions::default(),
+            crate::ScanElevationContext::default(),
+            cancel,
+            Some(cb),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ScanError::Cancelled));
+    }
+
+    #[test]
+    fn settings_scan_cancel_interrupts_recycle_bin_phase() {
+        let settings = crate::settings::SweeperSettings {
+            enable_tier1: false,
+            enable_tier2: false,
+            enable_tier3: true,
+            ..crate::settings::SweeperSettings::default()
+        };
+
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_cb = cancel.clone();
+        let cb: ScanProgressCallback = std::sync::Arc::new(move |p| {
+            if p.current_target_id.as_deref() == Some("recycle-bin") {
+                cancel_cb.store(true, Ordering::Relaxed);
+            }
+        });
+        let opts = ScanSettingsOptions {
+            recycle_bin_roots: vec![r"C:\SweeperNonExistentRecycleBinCancel\Root".to_string()],
+            ..ScanSettingsOptions::default()
+        };
+        let err = scan_with_settings_options_and_elevation_with_progress(
+            &settings,
+            opts,
+            crate::ScanElevationContext::default(),
             cancel,
             Some(cb),
         )

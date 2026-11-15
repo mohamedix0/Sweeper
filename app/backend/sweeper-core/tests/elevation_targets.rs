@@ -101,7 +101,7 @@ fn elevated_scan_discovers_and_cleans_sandboxed_elevation_target_contents_only()
     }
 
     fn sandbox_in_target() -> Sandbox {
-        Sandbox::new_in(sandbox_base_dir()).unwrap()
+        Sandbox::new_in(sandbox_base_dir())
     }
 
     fn old_mtime_secs() -> u64 {

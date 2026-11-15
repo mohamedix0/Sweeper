@@ -1,9 +1,10 @@
 ﻿import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { createRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { AnalyzerView } from './components/AnalyzerView';
-import { ScanAndPreviewView } from './components/ScanAndPreviewView';
+import { ScanAndPreviewView, type ScanAndPreviewViewHandle } from './components/ScanAndPreviewView';
 import { SettingsView } from './components/SettingsView';
 import { InfoTip } from './components/cleanShared';
 import { mockController } from './api/mock';
@@ -80,7 +81,9 @@ describe('Sweeper frontend', () => {
     await screen.findByRole('heading', { name: 'Inspector' });
 
     // auto-inspected item renders contextual explanation in Inspector (no Explain button/drawer)
-    expect(await screen.findByText(/Temporary files Windows and apps can recreate automatically/i)).toBeInTheDocument();
+    await waitFor(async () => {
+      expect(await screen.findByText(/Temporary files Windows and apps can recreate automatically/i)).toBeInTheDocument();
+    });
 
     const eligibleCheckbox = screen.getByLabelText('Select C:\\Users\\Alice\\AppData\\Local\\Temp\\a.tmp') as HTMLInputElement;
     if (!eligibleCheckbox.checked) await user.click(eligibleCheckbox);
@@ -894,7 +897,7 @@ describe('Sweeper frontend', () => {
     render(<ScanAndPreviewView client={client} settings={{ allowDeleteUnknown: false } as Settings} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />);
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
     await screen.findByRole('heading', { name: 'Inspector' });
-    // Initial auto-inspect focuses item a and shows its details.
+    // Initial auto-inspect focuses item a and shows its details (auto-inspect may resolve after scan completion).
     await waitFor(() => {
       const inspector = screen.getByLabelText('Item inspector');
       expect(within(inspector).getByText('a.tmp', { selector: '.inspector-headline-name' })).toBeInTheDocument();
@@ -1190,4 +1193,292 @@ describe('Sweeper frontend', () => {
       expect(within(inspector).queryByText('SafeA')).not.toBeInTheDocument();
     });
   });
+
+  it('ScanAndPreviewView completes scan immediately while auto-inspect explainItem is pending and ignores stale auto-inspect after focus change', async () => {
+    const user = userEvent.setup();
+    let resolveAutoExplain!: (v: any) => void;
+    const autoExplainPromise = new Promise<any>((resolve) => { resolveAutoExplain = resolve; });
+    let explainCalls = 0;
+    const scanResults: ScanResults = {
+      sessionId: 'scan-pending-explain',
+      startedUnixSecs: '1710000000',
+      minAgeHours: 24,
+      targets: [{
+        targetId: 't-safe', targetName: 'User Temp', tier: 'Tier1', risk: 'Safe', resolvedPaths: ['C:\\Temp'], scanned: true, statusReason: null,
+        totalBytes: '200', eligibleBytes: '200', fileCount: '2', eligibleCount: '2', skippedCount: '0',
+        items: [
+          { id: 'a', targetId: 't-safe', path: 'C:\\Temp\\a.tmp', size: '100', mtimeUnixSecs: '1700000000', ageEligible: true },
+          { id: 'b', targetId: 't-safe', path: 'C:\\Temp\\b.tmp', size: '100', mtimeUnixSecs: '1700000000', ageEligible: true },
+        ],
+      }],
+    };
+    const client = {
+      startScan: async () => ({ sessionId: 'scan-pending-explain' }),
+      getScanResults: async () => scanResults,
+      explainItem: (itemId: string) => {
+        explainCalls += 1;
+        if (explainCalls === 1) return autoExplainPromise;
+        return Promise.resolve({ itemId, title: `${itemId} focused`, description: 'focused', risk: 'Safe' as const });
+      },
+    } as unknown as SweeperClient;
+
+    render(<ScanAndPreviewView client={client} settings={{ allowDeleteUnknown: false } as Settings} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+
+    await screen.findByRole('heading', { name: 'Inspector' });
+    expect(screen.getByRole('button', { name: 'Start Scan' })).toBeEnabled();
+    expect(screen.queryByText(/Starting Scan|Scanning/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByLabelText('Select C:\\Temp\\b.tmp'));
+    await waitFor(() => {
+      const inspector = screen.getByLabelText('Item inspector');
+      expect(within(inspector).getByText('b.tmp', { selector: '.inspector-headline-name' })).toBeInTheDocument();
+    });
+
+    resolveAutoExplain({ itemId: 'a', title: 'a stale', description: 'stale auto', risk: 'Safe' });
+    await act(async () => { await autoExplainPromise; });
+    await waitFor(() => {
+      const inspector = screen.getByLabelText('Item inspector');
+      expect(within(inspector).getByText('b.tmp', { selector: '.inspector-headline-name' })).toBeInTheDocument();
+      expect(within(inspector).queryByText('a.tmp', { selector: '.inspector-headline-name' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('ScanAndPreviewView clears previewLoading when selection changes during in-flight previewClean', async () => {
+    const user = userEvent.setup();
+    const previewCalls: Array<{ itemIds: string[]; resolve: (v: any) => void; promise: Promise<any> }> = [];
+    const scanResults: ScanResults = {
+      sessionId: 'scan-preview-loading',
+      startedUnixSecs: '1710000000',
+      minAgeHours: 24,
+      targets: [{
+        targetId: 't-safe', targetName: 'User Temp', tier: 'Tier1', risk: 'Safe', resolvedPaths: ['C:\\Temp'], scanned: true, statusReason: null,
+        totalBytes: '200', eligibleBytes: '200', fileCount: '2', eligibleCount: '2', skippedCount: '0',
+        items: [
+          { id: 'i1', targetId: 't-safe', path: 'C:\\Temp\\a.tmp', size: '100', mtimeUnixSecs: '1700000000', ageEligible: true },
+          { id: 'i2', targetId: 't-safe', path: 'C:\\Temp\\b.tmp', size: '100', mtimeUnixSecs: '1700000000', ageEligible: true },
+        ],
+      }],
+    };
+    const client = {
+      startScan: async () => ({ sessionId: 'scan-preview-loading' }),
+      getScanResults: async () => scanResults,
+      explainItem: async (itemId: string) => ({ itemId, title: itemId, description: 'desc', risk: 'Safe' as const }),
+      previewClean: (_sid: string, itemIds: string[]) => {
+        let resolve!: (v: any) => void;
+        const promise = new Promise<any>((r) => { resolve = r; });
+        previewCalls.push({ itemIds, resolve, promise });
+        return promise;
+      },
+    } as unknown as SweeperClient;
+
+    render(<ScanAndPreviewView client={client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await screen.findByRole('heading', { name: 'Inspector' });
+    const cb1 = screen.getByLabelText('Select C:\\Temp\\a.tmp') as HTMLInputElement;
+    const cb2 = screen.getByLabelText('Select C:\\Temp\\b.tmp') as HTMLInputElement;
+    if (!cb1.checked) await user.click(cb1);
+    if (!cb2.checked) await user.click(cb2);
+    await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+    await waitFor(() => expect(previewCalls.length).toBe(1));
+    expect(previewCalls[0].itemIds).toEqual(['i1', 'i2']);
+
+    await user.click(cb2);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Review & Clean/ })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Generating Preview…' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+    await waitFor(() => expect(previewCalls.length).toBe(2));
+    expect(previewCalls[1].itemIds).toEqual(['i1']);
+
+    await act(async () => {
+      previewCalls[0].resolve({ sessionId: 'scan-preview-loading', previewToken: 'tok-stale', breakdown: [{ targetId: 't-safe', targetName: 'User Temp', selectedCount: '2', selectedBytes: '200' }], totalSelectedCount: '2', totalSelectedBytes: '200' });
+      previewCalls[1].resolve({ sessionId: 'scan-preview-loading', previewToken: 'tok-new', breakdown: [{ targetId: 't-safe', targetName: 'User Temp', selectedCount: '1', selectedBytes: '100' }], totalSelectedCount: '1', totalSelectedBytes: '100' });
+      await Promise.all([previewCalls[0].promise, previewCalls[1].promise]);
+    });
+
+    await waitFor(() => expect(screen.getByText('Preview Breakdown')).toBeInTheDocument());
+    const breakdown = screen.getByText('Preview Breakdown').closest('.preview-breakdown') as HTMLElement;
+    expect(within(breakdown).getByText(/1 item/i)).toBeInTheDocument();
+    expect(within(breakdown).getAllByText(/100 B/).length).toBeGreaterThan(0);
+    expect(within(breakdown).queryByText(/2 items/i)).not.toBeInTheDocument();
+    expect(within(breakdown).queryByText(/200 B/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+  });
+
+  it('AnalyzerView clears previewLoading when selection changes during in-flight previewClean', async () => {
+    const user = userEvent.setup();
+    const previewCalls: Array<{ itemIds: string[]; resolve: (v: any) => void; promise: Promise<any> }> = [];
+    const analyzerResult: StartAnalyzerResult = {
+      sessionId: 'an-preview-loading',
+      rootPath: 'C:\\',
+      totalBytes: '200',
+      totalItems: '2',
+      scannedDirs: '1',
+      scannedFiles: '2',
+      cancelled: false,
+      warnings: [],
+      root: {
+        id: 'root', name: 'C:', path: 'C:\\', isDir: true, sizeBytes: '200', itemCount: '2', risk: 'Safe', description: 'root', reason: null, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: false,
+        children: [
+          { id: 'n1', name: 'SafeA', path: 'C:\\SafeA', isDir: true, sizeBytes: '100', itemCount: '1', risk: 'Safe', description: 'safe', reason: null, tier: 'Tier1', targetId: 't1', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true, children: [] },
+          { id: 'n2', name: 'SafeB', path: 'C:\\SafeB', isDir: true, sizeBytes: '100', itemCount: '1', risk: 'Safe', description: 'safe', reason: null, tier: 'Tier1', targetId: 't1', isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true, children: [] },
+        ],
+      },
+    };
+    const client = {
+      startAnalyzer: async () => analyzerResult,
+      explainItem: async (itemId: string) => ({ itemId, title: itemId, description: 'desc', risk: 'Safe' as const }),
+      previewClean: (_sid: string, itemIds: string[]) => {
+        let resolve!: (v: any) => void;
+        const promise = new Promise<any>((r) => { resolve = r; });
+        previewCalls.push({ itemIds, resolve, promise });
+        return promise;
+      },
+    } as unknown as SweeperClient;
+
+    render(<AnalyzerView client={client} settings={{ allowDeleteUnknown: false } as any} onOpenLog={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Analyze' }));
+    await screen.findByRole('heading', { name: 'Analyzer Tree' });
+    const cb1 = await screen.findByLabelText('Select analyzer node C:\\SafeA') as HTMLInputElement;
+    const cb2 = await screen.findByLabelText('Select analyzer node C:\\SafeB') as HTMLInputElement;
+    await user.click(cb1);
+    await user.click(cb2);
+    await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
+    await waitFor(() => expect(previewCalls.length).toBe(1));
+    expect(previewCalls[0].itemIds).toEqual(['n1', 'n2']);
+
+    await user.click(cb2);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Review & Clean/ })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Generating Preview…' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
+    await waitFor(() => expect(previewCalls.length).toBe(2));
+    expect(previewCalls[1].itemIds).toEqual(['n1']);
+
+    await act(async () => {
+      previewCalls[0].resolve({ sessionId: 'an-preview-loading', previewToken: 'tok-stale-an', breakdown: [{ targetId: 't1', targetName: 'SafeA/SafeB', selectedCount: '2', selectedBytes: '200' }], totalSelectedCount: '2', totalSelectedBytes: '200' });
+      previewCalls[1].resolve({ sessionId: 'an-preview-loading', previewToken: 'tok-new-an', breakdown: [{ targetId: 't1', targetName: 'SafeA', selectedCount: '1', selectedBytes: '100' }], totalSelectedCount: '1', totalSelectedBytes: '100' });
+      await Promise.all([previewCalls[0].promise, previewCalls[1].promise]);
+    });
+
+    await waitFor(() => expect(screen.getByText('Preview Breakdown')).toBeInTheDocument());
+    const breakdown = screen.getByText('Preview Breakdown').closest('.preview-breakdown') as HTMLElement;
+    expect(within(breakdown).getByText(/1 item/i)).toBeInTheDocument();
+    expect(within(breakdown).getAllByText(/100 B/).length).toBeGreaterThan(0);
+    expect(within(breakdown).queryByText(/2 items/i)).not.toBeInTheDocument();
+    expect(within(breakdown).queryByText(/200 B/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+  });
+
+  it('ScanAndPreviewView does not start a second concurrent startScan while scan is active (Scan Again overlap)', async () => {
+    const scanRef = createRef<ScanAndPreviewViewHandle>();
+    let resolveScan!: (v: { sessionId: string }) => void;
+    const scanPromise = new Promise<{ sessionId: string }>((resolve) => { resolveScan = resolve; });
+    const startScan = vi.fn(() => scanPromise);
+    const client = {
+      startScan,
+      getScanResults: vi.fn(async () => ({ sessionId: 'scan-overlap', startedUnixSecs: '1710000000', minAgeHours: 24, targets: [] } as ScanResults)),
+      explainItem: vi.fn(async (itemId: string) => ({ itemId, title: itemId, description: 'desc', risk: 'Safe' as const })),
+      previewClean: vi.fn(),
+    } as unknown as SweeperClient;
+
+    render(<ScanAndPreviewView ref={scanRef} client={client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />);
+
+    const firstRun = scanRef.current?.runScan();
+    await waitFor(() => expect(startScan).toHaveBeenCalledTimes(1));
+
+    void scanRef.current?.runScan();
+    await waitFor(() => expect(startScan).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      resolveScan({ sessionId: 'scan-overlap' });
+      await firstRun;
+    });
+  });
+
+  it('ScanAndPreviewView blocks row activation while cleaning', async () => {
+    const user = userEvent.setup();
+    let resolveClean!: (v: any) => void;
+    const cleanPromise = new Promise<any>((resolve) => { resolveClean = resolve; });
+    const scanResults: ScanResults = {
+      sessionId: 'scan-cleaning-block',
+      startedUnixSecs: '1710000000',
+      minAgeHours: 24,
+      targets: [{
+        targetId: 't-safe', targetName: 'User Temp', tier: 'Tier1', risk: 'Safe', resolvedPaths: ['C:\\Temp'], scanned: true, statusReason: null,
+        totalBytes: '100', eligibleBytes: '100', fileCount: '1', eligibleCount: '1', skippedCount: '0',
+        items: [{ id: 'i1', targetId: 't-safe', path: 'C:\\Temp\\a.tmp', size: '100', mtimeUnixSecs: '1700000000', ageEligible: true }],
+      }],
+    };
+    const client = {
+      startScan: async () => ({ sessionId: 'scan-cleaning-block' }),
+      getScanResults: async () => scanResults,
+      explainItem: async (itemId: string) => ({ itemId, title: itemId, description: 'desc', risk: 'Safe' as const }),
+      previewClean: async () => ({ sessionId: 'scan-cleaning-block', previewToken: 'tok', issuedAtUnixSecs: '1', expiresAtUnixSecs: '2', totalBytes: '100', totalItems: '1', requiresConfirmation: false, requiresElevation: false, perTarget: [], breakdown: [] }),
+      executeClean: () => cleanPromise,
+    } as unknown as SweeperClient;
+
+    render(<ScanAndPreviewView client={client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await screen.findByRole('heading', { name: 'Inspector' });
+    const row = screen.getByLabelText('Select C:\\Temp\\a.tmp').closest('[role="button"]') as HTMLElement;
+    const cb = screen.getByLabelText('Select C:\\Temp\\a.tmp') as HTMLInputElement;
+    if (!cb.checked) await user.click(cb);
+    await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
+    const cleanBtn = await screen.findByRole('button', { name: 'Clean Permanently' });
+    await user.click(cleanBtn);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start Scan' })).toBeDisabled());
+    await waitFor(() => expect(cb).toBeDisabled());
+    const before = cb.checked;
+    await user.click(row);
+    fireEvent.keyDown(row, { key: 'Enter', code: 'Enter', bubbles: true });
+    fireEvent.keyDown(row, { key: ' ', code: 'Space', bubbles: true });
+    expect(cb.checked).toBe(before);
+    await act(async () => { resolveClean({ bytesFreed: '100', deletedCount: '1', skippedCount: '0', skippedReasons: [], aborted: false, abortReason: null, logId: null }); await cleanPromise; });
+  });
+
+  it('AnalyzerView escapes ASCII and typographic smart single quotes in VHDX PowerShell command', async () => {
+    const user = userEvent.setup();
+    const maliciousPath = "C:\\VMs\\evil'\u2018\u2019\u201A\u201B$(calc).vhdx";
+    const escapedPath = "C:\\VMs\\evil''\u2018\u2018\u2019\u2019\u201A\u201A\u201B\u201B$(calc).vhdx";
+    const analyzerResult: StartAnalyzerResult = {
+      sessionId: 'an-vhdx-smart', rootPath: 'C:\\', totalBytes: '10', totalItems: '1', scannedDirs: '1', scannedFiles: '1', cancelled: false, warnings: [],
+      root: { id: 'root', name: 'C:', path: 'C:\\', isDir: true, sizeBytes: '10', itemCount: '1', risk: 'Safe', description: 'root', reason: null, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: false, children: [
+        { id: 'v1', name: 'evil.vhdx', path: maliciousPath, isDir: false, sizeBytes: '10', itemCount: '1', risk: 'Caution', description: 'vhdx', reason: null, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false, displayOnly: true, selectable: false, children: [] },
+      ] },
+    };
+    const client = {
+      startAnalyzer: async () => analyzerResult,
+      explainItem: async (itemId: string) => ({ itemId, title: 'evil.vhdx', description: 'desc', risk: 'Caution' as const }),
+    } as unknown as SweeperClient;
+
+    render(<AnalyzerView client={client} settings={{ allowDeleteUnknown: false } as any} onOpenLog={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Analyze' }));
+    await screen.findByRole('heading', { name: 'Analyzer Tree' });
+    const vhdxRow = (await screen.findAllByText(/evil\.vhdx/i))[0].closest('[role="treeitem"]') as HTMLElement;
+    await user.click(vhdxRow);
+    const expectedCmd = `wsl --shutdown\nOptimize-VHD -Path '${escapedPath}' -Mode Full`;
+    await waitFor(() => expect(screen.getByText(/Optimize-VHD -Path/).closest('code')?.textContent).toBe(expectedCmd));
+  });
+
+  it('guards overlapping imperative runScan when a duplicate trigger fires while scan is active', async () => {
+    let resolveStart!: (v: any) => void;
+    const startPromise = new Promise<any>((resolve) => { resolveStart = resolve; });
+    let startCalls = 0;
+    const scanResults: ScanResults = { sessionId: 'scan-overlap', startedUnixSecs: '1710000000', minAgeHours: 24, targets: [] };
+    const client = {
+      startScan: () => { startCalls += 1; return startPromise; },
+      getScanResults: async () => scanResults,
+      explainItem: async (itemId: string) => ({ itemId, title: itemId, description: 'desc', risk: 'Safe' as const }),
+    } as unknown as SweeperClient;
+    const ref = createRef<ScanAndPreviewViewHandle>();
+
+    render(<ScanAndPreviewView ref={ref} client={client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />);
+    const p1 = ref.current!.runScan();
+    const p2 = ref.current!.runScan();
+    expect(startCalls).toBe(1);
+    await act(async () => { resolveStart({ sessionId: 'scan-overlap' }); await Promise.all([p1, p2]); });
+    expect(screen.getByRole('button', { name: 'Start Scan' })).toBeEnabled();
+  });
 });
