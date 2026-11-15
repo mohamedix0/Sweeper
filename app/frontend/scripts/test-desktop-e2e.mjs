@@ -5,6 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 function assert(condition, message) {
@@ -127,9 +128,10 @@ function assertSweeperWindowVisible(pid) {
 }
 
 async function main() {
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
   const exePath = process.env.SWEEPER_DESKTOP_EXE
     ? path.resolve(process.env.SWEEPER_DESKTOP_EXE)
-    : path.resolve(process.cwd(), '../../target/debug/sweeper-desktop.exe');
+    : path.resolve(scriptDir, '../../../target/debug/sweeper-desktop.exe');
 
   if (!fs.existsSync(exePath)) {
     throw new Error(
@@ -179,7 +181,7 @@ async function main() {
     });
 
     await page.waitForLoadState('domcontentloaded', { timeout: 30_000 });
-    await page.getByRole('button', { name: 'Scan & Preview' }).waitFor({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
     await page.getByRole('button', { name: 'Analyzer' }).waitFor({ timeout: 30_000 });
     await page.getByRole('button', { name: 'Settings' }).waitFor({ timeout: 30_000 });
 
@@ -188,11 +190,100 @@ async function main() {
     await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
     await page.getByText(/Standard \(Non-Elevated\)|Administrator \(Elevated\)/).waitFor({ timeout: 30_000 });
 
-    await page.getByRole('button', { name: 'Scan & Preview' }).click();
-    await page.getByRole('heading', { name: 'Scan & Preview' }).waitFor({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'Scan & Clean' }).click();
+    await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
     await page.getByRole('button', { name: 'Start Scan' }).waitFor({ timeout: 30_000 });
 
-    // Allow late async console/page errors from startup IPC to surface.
+    // UI responsiveness probe (Bug 1 guard): measure renderer responsiveness while Start Scan runs/completes.
+    await page.evaluate(() => {
+      const state = { maxDelta: 0, last: performance.now(), running: true, samples: 0 };
+      (window).__sweeperUiProbe = state;
+      const tick = () => {
+        if (!state.running) return;
+        const now = performance.now();
+        const delta = now - state.last;
+        if (delta > state.maxDelta) state.maxDelta = delta;
+        state.last = now;
+        state.samples += 1;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
+    let sawProgress = false;
+    try {
+      await page.getByRole('button', { name: 'Start Scan' }).click();
+
+      // Fast scans may complete before progress UI is observed; slower scans should show progress ticks/counts.
+      try {
+        await page.locator('.scan-progress-notice, [aria-label="Scan target progress"]').first().waitFor({ timeout: 5_000 });
+        sawProgress = true;
+      } catch {
+        sawProgress = false;
+      }
+
+      await page.waitForFunction(
+        () => {
+          const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
+          const hasResults = document.querySelectorAll('article.target-card').length > 0;
+          const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
+          const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
+          const progressVisible = !!document.querySelector('.scan-progress-notice');
+          const errorNotice = Array.from(document.querySelectorAll('[role="alert"]')).some((el) => /scan failed|session expired|invalid/i.test(el.textContent || ''));
+          const resultsReady = hasResults || noTargets;
+          return !progressVisible && !errorNotice && inspector && resultsReady && !readyVisible;
+        },
+        undefined,
+        // Debug-mode cold-cache scans on real disks can take several minutes.
+        { timeout: 300_000 },
+      );
+
+      const initialScanState = await page.evaluate(() => {
+        const hasResults = document.querySelectorAll('article.target-card').length > 0;
+        const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
+        const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
+        const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
+        return { hasResults, noTargets, inspector, readyVisible };
+      });
+
+      // Bug 4: navigating to Settings and back to Scan & Clean preserves scan results.
+      await page.getByRole('button', { name: 'Settings' }).click();
+      await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
+      await page.getByRole('button', { name: 'Scan & Clean' }).click();
+      await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
+      const preserved = await page.evaluate(() => {
+        const hasResults = document.querySelectorAll('article.target-card').length > 0;
+        const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
+        const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
+        const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
+        return { hasResults, noTargets, inspector, readyVisible };
+      });
+      assert(
+        preserved.hasResults === initialScanState.hasResults &&
+          preserved.noTargets === initialScanState.noTargets &&
+          preserved.inspector &&
+          !preserved.readyVisible,
+        `Scan state was not preserved after navigating Settings -> Scan & Clean (initial=${JSON.stringify(initialScanState)}, preserved=${JSON.stringify(preserved)})`,
+      );
+    } finally {
+      // Allow a brief tail sample so we catch stalls at completion boundary, then stop probe.
+      await delay(250);
+      const probe = await page
+        .evaluate(() => {
+          const state = /** @type {{ maxDelta: number; samples: number; running: boolean } | undefined} */ (window.__sweeperUiProbe);
+          if (!state) return null;
+          state.running = false;
+          return { maxDelta: state.maxDelta, samples: state.samples };
+        })
+        .catch(() => null);
+      assert(probe && typeof probe.maxDelta === 'number', 'UI responsiveness probe did not run');
+      assert(
+        probe.maxDelta < 2000,
+        `UI responsiveness probe detected main-thread stall (max RAF delta ${probe.maxDelta.toFixed(1)}ms >= 2000ms, samples=${probe.samples}, sawProgress=${sawProgress})`,
+      );
+    }
+
+    // Allow late async console/page errors from startup/scan IPC to surface.
     await delay(1500);
 
     assertSweeperWindowVisible(child.pid);
@@ -212,7 +303,7 @@ async function main() {
     );
 
     process.stdout.write(
-      `desktop-e2e: ok (exe=${exePath}, pid=${child.pid}, cdpPort=${port}, consoleErrors=0, pageErrors=0, cspIsolationRuntimeErrors=0)\n`,
+      `desktop-e2e: ok (exe=${exePath}, pid=${child.pid}, cdpPort=${port}, consoleErrors=0, pageErrors=0, cspIsolationRuntimeErrors=0, sawProgress=${sawProgress})\n`,
     );
   } finally {
     try {
@@ -224,7 +315,11 @@ async function main() {
     }
     killProcessTree(child.pid);
     await waitForExit(child, 10_000);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup: WebView2 may briefly hold temp profile files on Windows.
+    }
   }
 }
 

@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import {
   formatContractError,
   type CleanProgressEvent,
@@ -65,10 +65,24 @@ function scanSelectionNeedsConfirmation(targets: TargetScanResultDto[], selected
   return false;
 }
 
-function humanizeSkippedReason(target: TargetScanResultDto, item: ScanItemDto, allowDeleteUnknown: boolean): string {
+function formatMinAgeLabel(minAgeHours: number | null | undefined): string {
+  if (minAgeHours == null) return 'minimum age';
+  if (minAgeHours === 0) return 'no minimum age';
+  return `${minAgeHours}h`;
+}
+
+function humanizeSkippedReason(
+  target: TargetScanResultDto,
+  item: ScanItemDto,
+  allowDeleteUnknown: boolean,
+  minAgeHours?: number | null,
+): string {
   if (target.risk === 'Protected') return 'Protected';
   if (target.risk === 'Unknown' && !allowDeleteUnknown) return 'Skipped · Unverified';
-  if (!item.ageEligible) return 'Skipped · < 24h';
+  if (!item.ageEligible) {
+    const label = formatMinAgeLabel(minAgeHours);
+    return label === 'minimum age' || label === 'no minimum age' ? 'Skipped · Recent' : `Skipped · < ${label}`;
+  }
   return 'Skipped · Not eligible';
 }
 
@@ -97,12 +111,21 @@ function resolvedRootPath(target: TargetScanResultDto): string {
   return normalizeDisplayPath(rp);
 }
 
-function childStatusForScan(target: TargetScanResultDto, item: ScanItemDto, selectable: boolean, allowDeleteUnknown: boolean): { label: string; kind: 'safe' | 'skipped' | 'caution' | 'unknown' | 'protected' } {
+function childStatusForScan(
+  target: TargetScanResultDto,
+  item: ScanItemDto,
+  selectable: boolean,
+  allowDeleteUnknown: boolean,
+  minAgeHours?: number | null,
+): { label: string; kind: 'safe' | 'skipped' | 'caution' | 'unknown' | 'protected' } {
   if (target.risk === 'Protected') return { label: 'Protected', kind: 'protected' };
   if (!selectable) {
     if ((isCustomPathTargetId(target.targetId) && target.risk === 'Unknown') || (target.risk === 'Unknown' && !allowDeleteUnknown)) return { label: 'Skipped · Unverified', kind: 'skipped' };
-    if (!item.ageEligible) return { label: 'Skipped · < 24h', kind: 'skipped' };
-    return { label: humanizeSkippedReason(target, item, allowDeleteUnknown), kind: 'skipped' };
+    if (!item.ageEligible) {
+      const label = formatMinAgeLabel(minAgeHours);
+      return { label: label === 'minimum age' || label === 'no minimum age' ? 'Skipped · Recent' : `Skipped · < ${label}`, kind: 'skipped' };
+    }
+    return { label: humanizeSkippedReason(target, item, allowDeleteUnknown, minAgeHours), kind: 'skipped' };
   }
   if (target.risk === 'Caution') return { label: 'Caution', kind: 'caution' };
   if (target.risk === 'Unknown') return { label: 'Unknown', kind: 'unknown' };
@@ -128,13 +151,23 @@ function statusDisplayLabel(kind: 'safe' | 'skipped' | 'caution' | 'unknown' | '
   return label;
 }
 
-function scanGuidance(target: TargetScanResultDto, item: ScanItemDto, selectable: boolean, allowDeleteUnknown: boolean): string {
+function scanGuidance(
+  target: TargetScanResultDto,
+  item: ScanItemDto,
+  selectable: boolean,
+  allowDeleteUnknown: boolean,
+  minAgeHours?: number | null,
+): string {
   if (target.risk === 'Protected') return 'Protected system location. Sweeper never removes protected paths.';
   if (isCustomPathTargetId(target.targetId) && target.risk === 'Unknown' && !allowDeleteUnknown) return 'Unverified custom folder is locked by Settings. Enable "Allow deleting unknown folders" to make it eligible, then review carefully.';
   if (target.risk === 'Unknown' && !allowDeleteUnknown) return 'Unknown item is locked by Settings. Enable "Allow deleting unknown folders" to make it eligible.';
   if (target.risk === 'Unknown' && isCustomPathTargetId(target.targetId)) return 'Unverified custom folder item. Review carefully; typed DELETE confirmation is required before cleaning.';
   if (target.risk === 'Unknown') return 'Unknown item. Review carefully; typed DELETE confirmation is required before cleaning.';
-  if (!item.ageEligible) return 'Modified within the minimum age window. Sweeper skips recent files for safety.';
+  if (!item.ageEligible) {
+    if (minAgeHours === 0) return 'Recently modified. Sweeper skips recent files for safety under the current minimum age setting.';
+    if (minAgeHours == null) return 'Modified within the minimum age window. Sweeper skips recent files for safety.';
+    return `Modified within the minimum age window (${minAgeHours}h). Sweeper skips recent files for safety.`;
+  }
   if (target.targetName === 'User Temp') return 'Temporary files Windows and apps can recreate automatically. Safe to remove when not in active use.';
   if (target.targetName === 'Crash Dumps & WER') return 'Local crash and error reports kept for diagnostics. Removing them does not affect app functionality.';
   if (target.targetName.toLowerCase().includes('npm')) return 'Package manager download cache. It can be redownloaded automatically when needed.';
@@ -167,6 +200,13 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   const [tier2, setTier2] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState<string>('');
+  const [scanProgress, setScanProgress] = useState<{
+    completedTargets: number;
+    totalTargets: number;
+    currentTargetName: string | null;
+    scannedItems: string;
+    scannedBytes: string;
+  } | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [scanStartedAt, setScanStartedAt] = useState<number | null>(null);
   const [results, setResults] = useState<ScanResults | null>(null);
@@ -189,9 +229,18 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   const [showAllGroups, setShowAllGroups] = useState<Set<string>>(new Set());
   const [scanSettingsVersion, setScanSettingsVersion] = useState<number | null>(null);
   const [, setTick] = useState(0);
+  const previewRevisionRef = useRef(0);
+  const activePreviewRequestRef = useRef(0);
+  const inspectReqIdRef = useRef(0);
+
+  function invalidatePreviewRequest() {
+    previewRevisionRef.current += 1;
+    activePreviewRequestRef.current += 1;
+  }
 
   const targets = useMemo(() => results?.targets ?? [], [results]);
   const allowDeleteUnknown = settings?.allowDeleteUnknown ?? false;
+  const effectiveMinAgeHours = results?.minAgeHours ?? settings?.minAgeHours;
 
   useEffect(() => {
     if (!scanStartedAt || !sessionId) return;
@@ -241,6 +290,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   }, [eligibleSafeIds, selectedIds]);
 
   function toggleSelectAllEligibleSafe() {
+    invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -273,7 +323,10 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
 
   const settingsStale = !!(results && scanSettingsVersion !== null && settingsVersion !== undefined && scanSettingsVersion !== settingsVersion);
 
-  function resetForInvalidSession(message?: string) {
+  const resetForInvalidSession = useCallback((message?: string) => {
+    invalidatePreviewRequest();
+    inspectReqIdRef.current += 1;
+    setPreviewLoading(false);
     setSessionId(null);
     setScanStartedAt(null);
     setResults(null);
@@ -284,25 +337,56 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
     setPreview(null);
     setConfirmText('');
     setCleanProgress(null);
+    setScanProgress(null);
+    setScanStatus('');
     setFocus(null);
     setInspected(null);
     if (message) setInfo(message);
-  }
+  }, []);
 
-  async function inspectItem(itemId: string) {
-    try { setInspected(await client.explainItem(itemId)); } catch { /* non-fatal */ }
-  }
+  const inspectItem = useCallback(async (itemId: string) => {
+    const reqId = inspectReqIdRef.current + 1;
+    inspectReqIdRef.current = reqId;
+    try {
+      const result = await client.explainItem(itemId);
+      if (inspectReqIdRef.current === reqId) {
+        setInspected(result);
+      }
+    } catch {
+      /* non-fatal */
+    }
+  }, [client]);
 
   const runScan = useCallback(async () => {
+    invalidatePreviewRequest();
+    inspectReqIdRef.current += 1;
+    setPreviewLoading(false);
     setError(null); setInfo(null); setPreview(null); setFocus(null); setInspected(null); setSelectedIds(new Set());
     setCollapsedTargets(new Set()); setShowAllGroups(new Set()); setResults(null); setCleanSummary(null); setCleanProgress(null); setScanning(true);
     setScanStatus('Starting Scan…');
+    setScanProgress(null);
     const tiers = [tier1 ? 'Tier1' : null, tier2 ? 'Tier2' : null].filter(Boolean) as ('Tier1' | 'Tier2')[];
     try {
       const { sessionId: sid } = await client.startScan(tiers.length ? tiers : null, (ev) => {
-        if (ev.kind === 'started') setScanStatus('Scan in progress…');
-        if (ev.kind === 'completed') setScanStatus('');
-        if (ev.kind === 'failed') setScanStatus('Scan failed.');
+        if (ev.kind === 'started') {
+          setScanStatus('Scan in progress…');
+          setScanProgress({ completedTargets: 0, totalTargets: 0, currentTargetName: null, scannedItems: '0', scannedBytes: '0' });
+        } else if (ev.kind === 'progress') {
+          setScanStatus(ev.current_target_name ? `Scanning ${ev.current_target_name}…` : 'Scan in progress…');
+          setScanProgress({
+            completedTargets: ev.completed_targets,
+            totalTargets: ev.total_targets,
+            currentTargetName: ev.current_target_name,
+            scannedItems: ev.scanned_items,
+            scannedBytes: ev.scanned_bytes,
+          });
+        } else if (ev.kind === 'cancelled') {
+          setScanStatus('Scan cancelled.');
+        } else if (ev.kind === 'completed') {
+          setScanStatus('');
+        } else if (ev.kind === 'failed') {
+          setScanStatus('Scan failed.');
+        }
       });
       setSessionId(sid);
       setScanStartedAt(Date.now());
@@ -314,6 +398,8 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
         if (t.risk !== 'Safe') continue;
         for (const i of t.items) if (isSelectableScanItem(i, t, settings?.allowDeleteUnknown ?? false)) auto.add(i.id);
       }
+      // Initial auto-selection starts a new selection state; invalidate any in-flight preview assumptions.
+      invalidatePreviewRequest();
       setSelectedIds(auto);
 
       const baseVisible = data.targets.filter((t) => !(t.risk === 'Protected' && BigInt(t.totalBytes || '0') === 0n));
@@ -329,11 +415,17 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
       const firstItem = firstTarget?.items[0] ?? data.targets.flatMap((t) => t.items)[0];
       if (firstItem) {
         setFocus({ kind: 'item', itemId: firstItem.id });
-        try { setInspected(await client.explainItem(firstItem.id)); } catch { /* ignore */ }
+        try {
+          const reqId = inspectReqIdRef.current + 1;
+          inspectReqIdRef.current = reqId;
+          const result = await client.explainItem(firstItem.id);
+          if (inspectReqIdRef.current === reqId) setInspected(result);
+        } catch { /* ignore */ }
       } else {
         setFocus(null);
       }
       setScanStatus('');
+      setScanProgress(null);
     } catch (e) {
       setError(formatContractError(e));
       const ce = e as ContractError | undefined;
@@ -341,7 +433,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
     } finally {
       setScanning(false);
     }
-  }, [tier1, tier2, client, settings, settingsVersion]);
+  }, [tier1, tier2, client, settings, settingsVersion, resetForInvalidSession]);
 
   useImperativeHandle(ref, () => ({ runScan }), [runScan]);
 
@@ -362,12 +454,14 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
 
   function toggleItem(item: ScanItemDto, target: TargetScanResultDto) {
     if (!isSelectableScanItem(item, target, allowDeleteUnknown)) { focusItem(item.id); return; }
+    invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => { const next = new Set(prev); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; });
     focusItem(item.id);
   }
 
   function setTargetSelection(target: TargetScanResultDto, select: boolean) {
+    invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -380,6 +474,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   }
 
   function selectAllSafe() {
+    invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -390,6 +485,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
   }
 
   function clearSelection() {
+    invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds(new Set());
   }
@@ -401,17 +497,39 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
       resetForInvalidSession('Scan session expired or was invalidated. Start a new Scan.');
       return;
     }
+    const requestId = activePreviewRequestRef.current + 1;
+    activePreviewRequestRef.current = requestId;
+    const requestRevision = previewRevisionRef.current;
+    const requestSessionId = sessionId;
     setError(null); setInfo(null); setPreviewLoading(true); setCleanSummary(null); setCleanProgress(null);
     try {
       const confirmations = requiresConfirmation ? { typedConfirmation: confirmText || null } : null;
-      const res = await client.previewClean(sessionId, Array.from(selectedIds), confirmations);
+      const res = await client.previewClean(requestSessionId, Array.from(selectedIds), confirmations);
+      if (
+        activePreviewRequestRef.current !== requestId ||
+        previewRevisionRef.current !== requestRevision ||
+        sessionId !== requestSessionId
+      ) {
+        return;
+      }
       setPreview({ ...res, issuedAtMs: Date.now() });
     } catch (e) {
+      if (
+        activePreviewRequestRef.current !== requestId ||
+        previewRevisionRef.current !== requestRevision ||
+        sessionId !== requestSessionId
+      ) {
+        return;
+      }
       const ce = e as ContractError | undefined;
       setError(formatContractError(e));
       if (ce?.code === 'sessionInvalid') resetForInvalidSession('Scan session expired or was invalidated. Start a new Scan.');
       else if (ce?.code === 'previewTokenInvalid') setPreview(null);
-    } finally { setPreviewLoading(false); }
+    } finally {
+      if (activePreviewRequestRef.current === requestId) {
+        setPreviewLoading(false);
+      }
+    }
   }
 
   async function runClean() {
@@ -652,12 +770,40 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
       </section>
 
       {scanning && (
-        <div role="status" aria-live="polite" className="notice info scanning-pulse">
-          {scanStatus || 'Scanning…'}
-          <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
+        <div role="status" aria-live="polite" className="notice info scanning-pulse scan-progress-notice">
+          <div className="scan-progress-header">
+            <span className="scan-progress-status">{scanStatus || 'Scanning…'}</span>
+            {scanProgress && scanProgress.totalTargets > 0 && (
+              <span className="scan-progress-targets num" aria-label="Scan target progress">
+                {scanProgress.completedTargets} / {scanProgress.totalTargets} Targets
+              </span>
+            )}
+          </div>
+          {scanProgress && (
+            <div className="scan-progress-meta">
+              {scanProgress.currentTargetName && (
+                <span className="scan-progress-current">Current: <span className="scan-progress-current-name">{scanProgress.currentTargetName}</span></span>
+              )}
+              <span className="scan-progress-counts num">
+                {(() => { try { return BigInt(scanProgress.scannedItems || '0').toLocaleString(); } catch { return scanProgress.scannedItems || '0'; } })()} items · {formatBytes(scanProgress.scannedBytes || '0')}
+              </span>
+            </div>
+          )}
+          <div className="progress">
+            {scanProgress && scanProgress.totalTargets > 0 ? (
+              <progress
+                className="scan-progress-meter"
+                value={scanProgress.completedTargets}
+                max={scanProgress.totalTargets}
+                aria-label="Scan progress"
+              />
+            ) : (
+              <div className="progress-bar progress-indeterminate" aria-hidden="true" />
+            )}
+          </div>
         </div>
       )}
-      {!scanning && scanStatus && <div className={`notice ${scanStatus.toLowerCase().includes('failed') ? 'error' : ''}`} role={scanStatus.toLowerCase().includes('failed') ? 'alert' : 'status'}>{scanStatus}</div>}
+      {!scanning && scanStatus && <div className={`notice ${scanStatus.toLowerCase().includes('failed') || scanStatus.toLowerCase().includes('cancelled') ? 'error' : 'info'}`} role={scanStatus.toLowerCase().includes('failed') || scanStatus.toLowerCase().includes('cancelled') ? 'alert' : 'status'}>{scanStatus}</div>}
 
       {!results && !scanning && (
         <section className="empty-state" aria-label="Scan onboarding">
@@ -758,11 +904,14 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                     } else if (eligibleInTarget === 0 && totalInTarget > 0) {
                       groupStatus = { label: 'Skipped', kind: 'skipped', aria: 'Status Skipped' };
                     } else if (eligibleInTarget > 0 && skippedInTargetCount === 0) {
-                      groupStatus = { label: 'Safe', kind: 'safe', aria: 'Status Safe' };
+                      const riskKind = t.risk === 'Caution' ? 'caution' : t.risk === 'Unknown' ? 'unknown' : 'safe';
+                      const riskLabel = t.risk === 'Caution' ? 'Caution' : t.risk === 'Unknown' ? 'Unknown' : 'Safe';
+                      groupStatus = { label: riskLabel, kind: riskKind, aria: `Status ${riskLabel}` };
                     } else if (eligibleInTarget > 0 && skippedInTargetCount > 0) {
-                      groupStatus = eligibleInTarget === 1
-                        ? { label: '1 Safe', kind: 'safe', aria: 'Status Safe' }
-                        : { label: 'Partial', kind: 'safe', aria: 'Status Safe' };
+                      const riskKind = t.risk === 'Caution' ? 'caution' : t.risk === 'Unknown' ? 'unknown' : 'safe';
+                      const riskLabel = t.risk === 'Caution' ? 'Caution' : t.risk === 'Unknown' ? 'Unknown' : 'Safe';
+                      const partialLabel = eligibleInTarget === 1 ? `1 ${riskLabel}` : `Partial ${riskLabel}`;
+                      groupStatus = { label: partialLabel, kind: riskKind, aria: `Status ${riskLabel}` };
                     } else {
                       groupStatus = null;
                     }
@@ -775,7 +924,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                           tabIndex={0}
                           aria-label={`Inspect ${t.targetName}`}
                           onClick={() => focusGroup(t.targetId)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); focusGroup(t.targetId); } }}
+                          onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); focusGroup(t.targetId); } }}
                         >
                           <div className="scan-col-main">
                             <button type="button" className="target-collapse-btn" onClick={(e) => { e.stopPropagation(); toggleCollapsed(t.targetId); }} aria-label={expandLabel}>
@@ -847,7 +996,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                               const { name, nestedRel } = itemDisplayName(item.path, t.resolvedPaths);
                               const isProtected = t.risk === 'Protected';
                               const inspectedMatch = focus?.kind === 'item' && focus.itemId === item.id;
-                              const status = childStatusForScan(t, item, selectable, allowDeleteUnknown);
+                              const status = childStatusForScan(t, item, selectable, allowDeleteUnknown, effectiveMinAgeHours);
                               const isStatusSkipped = status.label.startsWith('Skipped') || status.kind === 'skipped';
                               return (
                                 <div
@@ -856,7 +1005,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                                   role="button"
                                   tabIndex={0}
                                   onClick={() => toggleItem(item, t)}
-                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleItem(item, t); } }}
+                                  onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleItem(item, t); } }}
                                 >
                                   <div className="scan-col-main">
                                     <span className="row-indent" aria-hidden="true" />
@@ -932,9 +1081,10 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                     const topFiles = [...t.items].sort((a, b) => BigInt(b.size) === BigInt(a.size) ? 0 : (BigInt(b.size) > BigInt(a.size) ? 1 : -1)).slice(0, 5);
                     const eligibleBytes = sumDecimalStrings(selectableItems.map((i) => i.size));
                     const skippedBytes = sumDecimalStrings(t.items.filter((i) => !isSelectableScanItem(i, t, allowDeleteUnknown)).map((i) => i.size));
+                    const policyAgeLabel = effectiveMinAgeHours == null ? 'configured minimum age' : (effectiveMinAgeHours === 0 ? 'no minimum age' : `${effectiveMinAgeHours}h`);
                     const policyText = t.targetName === 'User Temp'
-                      ? 'Policy: Minimum age > 24h · Auto-recreated by Windows/apps'
-                      : `Policy: Minimum age > ${settings?.minAgeHours ?? 24}h · Governed by ${t.targetName} safety rules`;
+                      ? `Policy: Minimum age ${effectiveMinAgeHours === 0 ? '(none)' : `> ${policyAgeLabel}`} · Auto-recreated by Windows/apps`
+                      : `Policy: Minimum age ${effectiveMinAgeHours === 0 ? '(none)' : `> ${policyAgeLabel}`} · Governed by ${t.targetName} safety rules`;
                     const desc = t.items[0] ? (t.targetName === 'User Temp' ? 'Temporary files Windows and apps can recreate automatically. Safe to remove when not in active use.' : (t.statusReason || 'Category-level cleanup target governed by Sweeper safety rules.')) : (t.statusReason || 'Category-level cleanup target governed by Sweeper safety rules.');
                     return (
                       <>
@@ -960,7 +1110,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                             <ul className="inspector-top-files-list">
                               {topFiles.map((item) => {
                                 const name = itemDisplayName(item.path, t.resolvedPaths).name;
-                                const st = childStatusForScan(t, item, isSelectableScanItem(item, t, allowDeleteUnknown), allowDeleteUnknown);
+                                const st = childStatusForScan(t, item, isSelectableScanItem(item, t, allowDeleteUnknown), allowDeleteUnknown, effectiveMinAgeHours);
                                 return <li key={item.id}><span className="inspector-top-file-name" title={normalizeDisplayPath(item.path)}>{name}</span><span className="num muted">{formatBytes(item.size)}</span><span className="muted">{statusDisplayLabel(st.kind, st.label)}</span></li>;
                               })}
                             </ul>
@@ -982,9 +1132,11 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                     const selectable = isSelectableScanItem(item, target, allowDeleteUnknown);
                     const fullPath = normalizeDisplayPath(item.path);
                     const itemTitle = relativeItemName(item.path, target.resolvedPaths).split(/[\\/]/).pop() || inspected.title;
-                    const status = childStatusForScan(target, item, selectable, allowDeleteUnknown);
-                    const eligibility = selectable ? 'Meets age limit (> 24h old)' : humanizeSkippedReason(target, item, allowDeleteUnknown);
-                    const modifiedAge = formatModifiedAge(item.mtimeUnixSecs, item.ageEligible);
+                    const status = childStatusForScan(target, item, selectable, allowDeleteUnknown, effectiveMinAgeHours);
+                    const eligibility = selectable
+                      ? (effectiveMinAgeHours == null ? 'Meets age limit' : effectiveMinAgeHours === 0 ? 'Eligible (no minimum age)' : `Meets age limit (> ${effectiveMinAgeHours}h old)`)
+                      : humanizeSkippedReason(target, item, allowDeleteUnknown, effectiveMinAgeHours);
+                    const modifiedAge = formatModifiedAge(item.mtimeUnixSecs, item.ageEligible, effectiveMinAgeHours);
                     const isVhdx = fullPath.toLowerCase().endsWith('.vhdx');
                     const isCustomUnknownLocked = isCustomPathTargetId(target.targetId) && target.risk === 'Unknown' && !allowDeleteUnknown;
                     const isSkippedByAge = !selectable && !item.ageEligible;
@@ -997,7 +1149,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                           subtitle={display.tag ? display.title : target.targetName}
                           badge={<span className={statusClassForKind(status.kind, status.label)} aria-label={status.label.startsWith('Skipped') || status.kind === 'skipped' ? 'Status Skipped' : `Status ${status.label}`}>{statusDisplayLabel(status.kind, status.label)}</span>}
                         />
-                        <p className="inspector-guidance">{scanGuidance(target, item, selectable, allowDeleteUnknown)}</p>
+                        <p className="inspector-guidance">{scanGuidance(target, item, selectable, allowDeleteUnknown, effectiveMinAgeHours)}</p>
                         <InspectorMetaGrid
                           size={item.size}
                           modifiedAge={modifiedAge}
@@ -1005,7 +1157,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, {
                         />
                         <div className="inspector-policy-footer inspector-rule-safety" aria-label="Rule and safety">
                           <div className="inspector-policy-title">Rule &amp; Safety</div>
-                          <div className="inspector-policy-text"><strong>Policy:</strong> {target.targetName === 'User Temp' ? 'Minimum age > 24h · Auto-recreated by Windows/apps' : `Minimum age > ${settings?.minAgeHours ?? 24}h · Governed by ${target.targetName} safety rules`}</div>
+                          <div className="inspector-policy-text"><strong>Policy:</strong> {target.targetName === 'User Temp' ? `Minimum age ${effectiveMinAgeHours === 0 ? '(none)' : `> ${effectiveMinAgeHours == null ? 'configured' : `${effectiveMinAgeHours}h`}`} · Auto-recreated by Windows/apps` : `Minimum age ${effectiveMinAgeHours === 0 ? '(none)' : `> ${effectiveMinAgeHours == null ? 'configured' : `${effectiveMinAgeHours}h`}`} · Governed by ${target.targetName} safety rules`}</div>
                         </div>
                         {isVhdx && (
                           <div className="notice info" role="note">

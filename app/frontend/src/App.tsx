@@ -16,7 +16,11 @@ export type SettingsDeepLink = { focus: SettingsFocusTarget; prefillCustomPath: 
 
 function readStoredTheme(): Theme {
   if (typeof window === 'undefined') return 'dark';
-  return window.localStorage.getItem('sweeper-theme') === 'light' ? 'light' : 'dark';
+  try {
+    return window.localStorage.getItem('sweeper-theme') === 'light' ? 'light' : 'dark';
+  } catch {
+    return 'dark';
+  }
 }
 
 export function App() {
@@ -35,7 +39,11 @@ export function App() {
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem('sweeper-theme', theme);
+    try {
+      window.localStorage.setItem('sweeper-theme', theme);
+    } catch {
+      // Ignore storage write failures (denied/full) and keep in-memory theme.
+    }
   }, [theme]);
 
   useEffect(() => {
@@ -164,8 +172,12 @@ export function App() {
         <main className="main-content">
           {elevationError && <div className="notice error" role="alert">Elevation status unavailable: {elevationError}</div>}
           {relaunchError && <div className="notice error" role="alert">{relaunchError}</div>}
-          {view === 'scan' && <ScanAndPreviewView ref={scanRef} client={client} settings={settings} settingsVersion={settingsVersion} elevationStatus={elevationStatus} elevationError={null} onOpenLog={openLog} onOpenSettings={(focus, prefillCustomPath) => openSettings(focus ?? null, prefillCustomPath ?? null)} />}
-          {view === 'analyzer' && <AnalyzerView client={client} settings={settings} onOpenLog={openLog} onOpenSettings={(focus, prefillCustomPath) => openSettings(focus ?? null, prefillCustomPath ?? null)} />}
+          <div className="view-panel" hidden={view !== 'scan'} aria-hidden={view !== 'scan'}>
+            <ScanAndPreviewView ref={scanRef} client={client} settings={settings} settingsVersion={settingsVersion} elevationStatus={elevationStatus} elevationError={null} onOpenLog={openLog} onOpenSettings={(focus, prefillCustomPath) => openSettings(focus ?? null, prefillCustomPath ?? null)} />
+          </div>
+          <div className="view-panel" hidden={view !== 'analyzer'} aria-hidden={view !== 'analyzer'}>
+            <AnalyzerView client={client} settings={settings} onOpenLog={openLog} onOpenSettings={(focus, prefillCustomPath) => openSettings(focus ?? null, prefillCustomPath ?? null)} />
+          </div>
           {view === 'settings' && <SettingsView client={client} settings={settings} elevationStatus={elevationStatus} elevationError={null} onSaved={handleSettingsSaved} theme={theme} onThemeChange={setTheme} focusTarget={settingsDeepLink.focus} prefillCustomPath={settingsDeepLink.prefillCustomPath} onFocusConsumed={() => setSettingsDeepLink({ focus: null, prefillCustomPath: null })} />}
           {view === 'logs' && <LogsView client={client} focusLogId={focusLogId} onFocusConsumed={() => setFocusLogId(null)} onScanAgain={scanAgainFromLogs} />}
         </main>

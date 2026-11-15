@@ -5,7 +5,7 @@ import { CheckIcon, LockIcon } from './Icons';
 type Theme = 'dark' | 'light';
 type SettingsFocusTarget = 'allowDeleteUnknown' | 'enableTier3' | null;
 
-const BROWSE_SUGGESTIONS = ['C:\\Users\\Alice\\CustomCleanup', 'C:\\Temp\\Cleanup', 'C:\\Users\\Alice\\Scratch'];
+const CUSTOM_PATH_PRESETS = ['C:\\Temp\\SweeperCleanup', 'C:\\Temp\\OldCache'];
 
 function settingsEqual(a: Settings | null, b: Settings | null): boolean {
   if (a === b) return true;
@@ -170,8 +170,8 @@ export function SettingsView({
     }
   }
 
-  function browseCustomPath() {
-    const suggestion = BROWSE_SUGGESTIONS[browseIndex % BROWSE_SUGGESTIONS.length];
+  function applyCustomPathPreset() {
+    const suggestion = CUSTOM_PATH_PRESETS[browseIndex % CUSTOM_PATH_PRESETS.length];
     setCustomPathInput(suggestion);
     setBrowseIndex((i) => i + 1);
   }
@@ -273,7 +273,7 @@ export function SettingsView({
                     <div className="custom-path-input-row">
                       <label htmlFor="custom-path-input" className="sr-only">Add Custom Path</label>
                       <input id="custom-path-input" type="text" value={customPathInput} onChange={(e) => setCustomPathInput(e.target.value)} placeholder="C:\Path\To\Folder" disabled={saving || validatingPath} />
-                      <button type="button" className="btn" onClick={browseCustomPath} disabled={saving || validatingPath} aria-label="Browse for custom path">Browse...</button>
+                      <button type="button" className="btn" onClick={applyCustomPathPreset} disabled={saving || validatingPath} aria-label="Use example custom path preset">Use Preset</button>
                       <button className="btn" onClick={addCustomPath} disabled={saving || validatingPath || !customPathInput.trim()} aria-label="Add Folder">{validatingPath ? 'Validating…' : 'Add Folder'}</button>
                     </div>
                   </div>
@@ -351,20 +351,13 @@ export function SettingsView({
                     <div className={`settings-list-row settings-dependent-row settings-row--dependent settings-sub-rule ${deepDisabled ? 'is-disabled-row locked' : ''}`}>
                       <div className="settings-row-copy">
                         <h3>Empty Windows Recycle Bin</h3>
-                        <p>Permanently empties the Recycle Bin when Deep Cleanup is enabled.</p>
+                        <p>Included with Deep Cleanup (shared <code>enableTier3</code> setting). When Deep Cleanup is enabled, cleaning can permanently empty the Recycle Bin.</p>
                       </div>
                       <div className="settings-row-control settings-row-control-cluster">
                         <span className={`badge risk-Caution${deepDisabled ? ' badge-muted-locked' : ''}`}>Caution · Permanent</span>
-                        <label className="checkbox tier-toggle">
-                          <input
-                            type="checkbox"
-                            aria-label="Empty Windows Recycle Bin"
-                            checked={draft.enableTier3}
-                            onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })}
-                            disabled={deepDisabled}
-                          />
-                          <span className="tier-switch" aria-hidden="true" />
-                        </label>
+                        <span className="muted small-note" aria-label="Recycle Bin included with Deep Cleanup">
+                          {draft.enableTier3 ? 'Included with Deep Cleanup' : 'Controlled by Deep Cleanup'}
+                        </span>
                       </div>
                     </div>
                   </div>

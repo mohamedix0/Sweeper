@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   formatContractError,
   type AnalyzerProgressEvent,
@@ -102,17 +102,12 @@ function buildFlat(root: AnalyzerNodeDto, expanded: Set<string>, showAllNodes: S
   return rows;
 }
 
-function filterTree(node: AnalyzerNodeDto, query: string, sort: 'size' | 'items' | 'name', statusFilter: AnalyzerStatusFilter, allowDeleteUnknown: boolean): AnalyzerNodeDto | null {
+function filterTree(node: AnalyzerNodeDto, query: string, sort: 'size' | 'items' | 'name', statusFilter: AnalyzerStatusFilter, _allowDeleteUnknown: boolean): AnalyzerNodeDto | null {
   const q = query.trim().toLowerCase();
-  const selectable = isNodeSelectable(node, allowDeleteUnknown);
-  const pill = analyzerStatusPill(node, selectable, allowDeleteUnknown);
-  let statusKey: AnalyzerStatusFilter;
-  if (selectable) statusKey = node.risk === 'Caution' ? 'caution' : 'safe';
-  else if (node.risk === 'Unknown') statusKey = 'unknown';
-  else statusKey = 'locked';
+  const statusKey = analyzerStatusKey(node);
   const statusOk = statusFilter === 'all' || statusFilter === statusKey;
   const textMatch = !q || node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q);
-  let children = (node.children ?? []).map((c) => filterTree(c, query, sort, statusFilter, allowDeleteUnknown)).filter(Boolean) as AnalyzerNodeDto[];
+  let children = (node.children ?? []).map((c) => filterTree(c, query, sort, statusFilter, _allowDeleteUnknown)).filter(Boolean) as AnalyzerNodeDto[];
   children = [...children].sort((a, b) => {
     if (sort === 'name') return a.name.localeCompare(b.name);
     if (sort === 'items') return Number(BigInt(b.itemCount || '0') - BigInt(a.itemCount || '0'));
@@ -151,6 +146,32 @@ function analyzerStatusPill(node: AnalyzerNodeDto, selectable: boolean, allowDel
   if (isCleanableEligible(node, selectable)) return { label: 'Safe', className: 'status-pill status-pill-safe' };
   if (selectable) return { label: 'Safe', className: 'status-pill status-pill-safe' };
   return null;
+}
+
+function analyzerStatusKey(node: AnalyzerNodeDto): AnalyzerStatusFilter {
+  if (isDriveRoot(node)) return 'locked';
+  if (node.risk === 'Protected') return 'locked';
+  if (node.path.toLowerCase().endsWith('.vhdx') || node.isLinkPoint || node.isCloudPlaceholder || node.displayOnly) return 'locked';
+  if (node.risk === 'Unknown') return 'unknown';
+  if (node.risk === 'Caution') return 'caution';
+  if (node.risk === 'Safe') return 'safe';
+  return 'locked';
+}
+
+function normalizedAnalyzerPath(path: string): string {
+  return normalizeDisplayPath(path).replace(/[\\/]+$/, '').toLowerCase();
+}
+
+function isAncestorAnalyzerPath(ancestorPath: string, descendantPath: string): boolean {
+  const a = normalizedAnalyzerPath(ancestorPath);
+  const d = normalizedAnalyzerPath(descendantPath);
+  if (!a || !d || a === d) return false;
+  const prefix = a.endsWith('\\') ? a : `${a}\\`;
+  return d.startsWith(prefix);
+}
+
+function dedupeAnalyzerNodesByCoverage(nodes: AnalyzerNodeDto[]): AnalyzerNodeDto[] {
+  return nodes.filter((node, _, all) => !all.some((other) => other.id !== node.id && isAncestorAnalyzerPath(other.path, node.path)));
 }
 
 function analyzerStatusText(node: AnalyzerNodeDto, selectable: boolean, allowDeleteUnknown: boolean): { text: string; locked: boolean; unknownGated: boolean } {
@@ -252,7 +273,15 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   const [sort, setSort] = useState<'size' | 'items' | 'name'>('size');
   const [statusFilter, setStatusFilter] = useState<AnalyzerStatusFilter>('all');
   const [showAllAnalyzerNodes, setShowAllAnalyzerNodes] = useState<Set<string>>(new Set());
+  const previewRevisionRef = useRef(0);
+  const activePreviewRequestRef = useRef(0);
+  const inspectReqIdRef = useRef(0);
   const allowDeleteUnknown = settings?.allowDeleteUnknown ?? false;
+
+  function invalidatePreviewRequest() {
+    previewRevisionRef.current += 1;
+    activePreviewRequestRef.current += 1;
+  }
 
   const nodesById = useMemo(() => {
     const map = new Map<string, AnalyzerNodeDto>();
@@ -270,36 +299,46 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
     const kids = result.root.children ?? [];
     counts.all = kids.length;
     for (const n of kids) {
-      const selectable = isNodeSelectable(n, allowDeleteUnknown);
-      if (selectable) {
-        if (n.risk === 'Caution') counts.caution += 1;
-        else counts.safe += 1;
-      } else if (n.risk === 'Unknown') {
-        counts.unknown += 1;
-      } else {
-        counts.locked += 1;
-      }
+      const key = analyzerStatusKey(n);
+      if (key === 'safe') counts.safe += 1;
+      else if (key === 'caution') counts.caution += 1;
+      else if (key === 'unknown') counts.unknown += 1;
+      else counts.locked += 1;
     }
     return counts;
-  }, [result, allowDeleteUnknown]);
+  }, [result]);
 
   const selectedNodes = useMemo(() => Array.from(selectedIds).map((id) => nodesById.get(id)).filter(Boolean) as AnalyzerNodeDto[], [selectedIds, nodesById]);
-  const selectedBytes = useMemo(() => selectedNodes.reduce((a, n) => a + BigInt(n.sizeBytes || '0'), 0n).toString(), [selectedNodes]);
-  const requiresConfirmation = useMemo(() => analyzerSelectionNeedsConfirmation(selectedNodes), [selectedNodes]);
+  const dedupedSelectedNodes = useMemo(() => dedupeAnalyzerNodesByCoverage(selectedNodes), [selectedNodes]);
+  const selectedBytes = useMemo(() => dedupedSelectedNodes.reduce((a, n) => a + BigInt(n.sizeBytes || '0'), 0n).toString(), [dedupedSelectedNodes]);
+  const requiresConfirmation = useMemo(() => analyzerSelectionNeedsConfirmation(dedupedSelectedNodes), [dedupedSelectedNodes]);
 
   function resetAnalyzerSession(msg?: string) {
+    invalidatePreviewRequest();
+    inspectReqIdRef.current += 1;
+    setPreviewLoading(false);
     setSessionId(null); setStartedAt(null); setResult(null); setSelectedIds(new Set()); setExpanded(new Set()); setShowAllAnalyzerNodes(new Set());
     setPreview(null); setConfirmText(''); setCleanProgress(null); setInspected(null);
     if (msg) setInfo(msg);
   }
 
   async function inspectNode(itemId: string) {
-    try { setInspected(await client.explainItem(itemId)); } catch { /* ignore */ }
+    const reqId = inspectReqIdRef.current + 1;
+    inspectReqIdRef.current = reqId;
+    try {
+      const result = await client.explainItem(itemId);
+      if (inspectReqIdRef.current === reqId) {
+        setInspected(result);
+      }
+    } catch { /* ignore */ }
   }
 
   async function runAnalyzer(pathOverride?: string) {
     const targetPath = (pathOverride ?? rootPath).trim() || 'C:\\';
     setRootPath(targetPath);
+    invalidatePreviewRequest();
+    inspectReqIdRef.current += 1;
+    setPreviewLoading(false);
     setError(null); setInfo(null); setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds(new Set()); setResult(null); setExpanded(new Set()); setShowAllAnalyzerNodes(new Set()); setAnalyzing(true); setProgress(null); setInspected(null);
     try {
@@ -314,7 +353,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
         const sb = BigInt(b.sizeBytes || '0');
         return sa === sb ? 0 : (sa > sb ? -1 : 1);
       })[0];
-      try { setInspected(await client.explainItem((autoInspectChild ?? res.root).id)); } catch { /* ignore */ }
+      void inspectNode((autoInspectChild ?? res.root).id);
       setInfo(null);
     } catch (e) {
       setError(formatContractError(e));
@@ -328,44 +367,100 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
 
   function toggleSelect(node: AnalyzerNodeDto) {
     if (!isNodeSelectable(node, allowDeleteUnknown)) { void inspectNode(node.id); return; }
+    invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
-    setSelectedIds((prev) => { const next = new Set(prev); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; });
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(node.id)) {
+        next.delete(node.id);
+        return next;
+      }
+      // Avoid overlapping coverage: drop descendants when selecting an ancestor.
+      for (const id of Array.from(next)) {
+        const existing = nodesById.get(id);
+        if (existing && isAncestorAnalyzerPath(node.path, existing.path)) next.delete(id);
+      }
+      // If an ancestor is already selected, keep the ancestor (no double-counting).
+      const hasSelectedAncestor = Array.from(next).some((id) => {
+        const existing = nodesById.get(id);
+        return !!existing && isAncestorAnalyzerPath(existing.path, node.path);
+      });
+      if (!hasSelectedAncestor) next.add(node.id);
+      return next;
+    });
     void inspectNode(node.id);
   }
 
   const safeSelectableNodeIds = useMemo(() => {
-    const ids: string[] = [];
+    const safeNodes: AnalyzerNodeDto[] = [];
     nodesById.forEach((node) => {
       const selectable = isNodeSelectable(node, allowDeleteUnknown);
       if (!selectable) return;
       const pill = analyzerStatusPill(node, selectable, allowDeleteUnknown);
-      if (pill?.label === 'Safe') ids.push(node.id);
+      if (pill?.label === 'Safe') safeNodes.push(node);
     });
-    return ids;
+    return dedupeAnalyzerNodesByCoverage(safeNodes).map((n) => n.id);
   }, [nodesById, allowDeleteUnknown]);
 
   function selectSafeAnalyzer() {
+    invalidatePreviewRequest();
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      for (const id of safeSelectableNodeIds) next.add(id);
-      return next;
+      const currentNodes = Array.from(next).map((id) => nodesById.get(id)).filter(Boolean) as AnalyzerNodeDto[];
+      const additions = safeSelectableNodeIds
+        .map((id) => nodesById.get(id))
+        .filter(Boolean) as AnalyzerNodeDto[];
+      // Keep existing non-overlapping selections and add non-overlapping safe roots.
+      const merged = [...currentNodes];
+      for (const node of additions) {
+        if (merged.some((m) => m.id === node.id || isAncestorAnalyzerPath(m.path, node.path))) continue;
+        // Remove descendants covered by this newly added safe ancestor.
+        for (let i = merged.length - 1; i >= 0; i--) {
+          if (isAncestorAnalyzerPath(node.path, merged[i].path)) merged.splice(i, 1);
+        }
+        merged.push(node);
+      }
+      return new Set(merged.map((n) => n.id));
     });
   }
 
   async function runPreview() {
     if (!sessionId) return;
+    const requestId = activePreviewRequestRef.current + 1;
+    activePreviewRequestRef.current = requestId;
+    const requestRevision = previewRevisionRef.current;
+    const requestSessionId = sessionId;
+    const selectedForPreview = dedupeAnalyzerNodesByCoverage(selectedNodes);
     setError(null); setInfo(null); setPreviewLoading(true); setCleanSummary(null); setCleanProgress(null);
     try {
       const confirmations = requiresConfirmation ? { typedConfirmation: confirmText || null } : null;
-      const res = await client.previewClean(sessionId, Array.from(selectedIds), confirmations);
+      const res = await client.previewClean(requestSessionId, selectedForPreview.map((n) => n.id), confirmations);
+      if (
+        activePreviewRequestRef.current !== requestId ||
+        previewRevisionRef.current !== requestRevision ||
+        sessionId !== requestSessionId
+      ) {
+        return;
+      }
       setPreview({ ...res, issuedAtMs: Date.now() });
     } catch (e) {
+      if (
+        activePreviewRequestRef.current !== requestId ||
+        previewRevisionRef.current !== requestRevision ||
+        sessionId !== requestSessionId
+      ) {
+        return;
+      }
       const ce = e as ContractError | undefined;
       setError(formatContractError(e));
       if (ce?.code === 'sessionInvalid') resetAnalyzerSession('Analyzer session expired or was invalidated. Run Analyze again.');
       else if (ce?.code === 'previewTokenInvalid') setPreview(null);
-    } finally { setPreviewLoading(false); }
+    } finally {
+      if (activePreviewRequestRef.current === requestId) {
+        setPreviewLoading(false);
+      }
+    }
   }
 
   async function runClean() {
@@ -549,7 +644,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
             <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} className="analyzer-root-input" />
             <button type="button" className="btn small analyzer-go-btn" onClick={() => void runAnalyzer()} disabled={analyzing || cleaning || !rootPath.trim()} aria-label="Go">Go</button>
           </div>
-          <button type="button" className="btn browse-btn" onClick={cycleBrowsePath} disabled={analyzing || cleaning} aria-label="Browse root paths"><BrowseIcon /> <span>Browse...</span></button>
+          <button type="button" className="btn browse-btn" onClick={cycleBrowsePath} disabled={analyzing || cleaning} aria-label="Use preset root path"><BrowseIcon /> <span>Use Preset</span></button>
         </div>
         <div className="quick-roots quick-roots-inline" aria-label="Quick root path presets">
           <span className="muted small-note">Quick:</span>
@@ -586,22 +681,70 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
           </div>
           <svg className="alloc-bar" viewBox="0 0 1000 14" preserveAspectRatio="none" role="img" aria-label="Top-level folder allocation">
             {(() => {
-              let x = 0;
               const vbW = 1000;
               const visible = allocSegments.filter((s) => s.pctVisual > 0);
-              return allocSegments.map((s, idx) => {
-                const wRaw = Math.max(0, (s.pctVisual / 100) * vbW);
-                const gap = visible.length > 1 && idx < allocSegments.length - 1 && wRaw > 0 ? 1 : 0;
-                const w = wRaw > 0 ? Math.max(12, wRaw) : 0;
-                const minSegW = s.pct > 0 ? 6 : 0;
-                const rectW = Math.max(0, Math.max(minSegW, w) - gap);
+              const gapUnits = visible.length > 1 ? 1 : 0;
+              const totalGaps = gapUnits * Math.max(0, visible.length - 1);
+              const available = Math.max(0, vbW - totalGaps);
+              let widths = allocSegments.map((s) => (s.pctVisual > 0 ? (s.pctVisual / 100) * vbW : 0));
+              const widthSum = widths.reduce((a, b) => a + b, 0);
+              if (widthSum > 0) {
+                const scale = available / widthSum;
+                widths = widths.map((w) => w * scale);
+              } else {
+                widths = widths.map(() => 0);
+              }
+              const minSegW = 4;
+              const sizeableIdx = widths.map((w, i) => (w > 0 ? i : -1)).filter((i) => i >= 0);
+              let extra = 0;
+              widths = widths.map((w, i) => {
+                if (w <= 0) return 0;
+                const clamped = Math.max(minSegW, w);
+                extra += clamped - w;
+                return clamped;
+              });
+              if (extra > 0 && sizeableIdx.length > 0) {
+                const reducible = sizeableIdx.map((i) => Math.max(0, widths[i] - minSegW));
+                const reducibleTotal = reducible.reduce((a, b) => a + b, 0);
+                if (reducibleTotal > 0) {
+                  let remainingExtra = extra;
+                  sizeableIdx.forEach((idx, j) => {
+                    const room = reducible[j];
+                    const take = Math.min(room, (extra * room) / reducibleTotal);
+                    widths[idx] -= take;
+                    remainingExtra -= take;
+                  });
+                  // Numerical safety: ensure we never exceed budget.
+                  const finalSum = widths.reduce((a, b) => a + b, 0);
+                  if (finalSum > available && finalSum > 0) {
+                    const fixScale = available / finalSum;
+                    widths = widths.map((w) => w * fixScale);
+                  }
+                } else {
+                  const finalSum = widths.reduce((a, b) => a + b, 0);
+                  if (finalSum > available && finalSum > 0) {
+                    const fixScale = available / finalSum;
+                    widths = widths.map((w) => w * fixScale);
+                  }
+                }
+              }
+              // Final guard: cap cumulative width to viewBox budget.
+              let x = 0;
+              let renderedVisible = 0;
+              return allocSegments.map((s) => {
+                const w = Math.max(0, widths[allocSegments.indexOf(s)] ?? 0);
+                if (w <= 0) return null;
+                const isLastVisible = renderedVisible === visible.length - 1;
+                const gap = !isLastVisible && visible.length > 1 ? gapUnits : 0;
+                const maxRectW = Math.max(0, vbW - x - gap);
+                const rectW = Math.min(w, maxRectW);
                 const clickable = !!s.focusNodeId;
                 const rect = (
                   <rect
                     key={s.id}
                     x={x}
                     y={0}
-                    width={rectW}
+                    width={Math.max(0, rectW)}
                     height={14}
                     fill={s.color}
                     className={`alloc-segment hotspot-seg${clickable ? '' : ' alloc-segment-static'}`}
@@ -610,7 +753,8 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                     <title>{`${s.name}: ${formatBytes(s.bytes.toString())} (${formatSharePercent(s.pct)})`}</title>
                   </rect>
                 );
-                x += w;
+                x += rectW + gap;
+                renderedVisible += 1;
                 return rect;
               });
             })()}
@@ -637,8 +781,24 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
       )}
 
       {analyzing && (
-        <div role="status" aria-live="polite" className="notice info scanning-pulse">
-          Analyzing… {progress ? `dirs ${progress.scannedDirs}, files ${progress.scannedFiles}, ${formatBytes(progress.scannedBytes)}${progress.currentPath ? ` — ${normalizeDisplayPath(progress.currentPath)}` : ''}` : 'Starting…'}
+        <div role="status" aria-live="polite" className="notice info scanning-pulse analyzer-progress-notice">
+          <div className="analyzer-progress-row">
+            <span className="analyzer-progress-label">Analyzing…</span>
+            <span className="analyzer-progress-stats num">
+              {progress ? `dirs ${progress.scannedDirs}, files ${progress.scannedFiles}, ${formatBytes(progress.scannedBytes)}` : 'Starting…'}
+            </span>
+          </div>
+          {progress?.currentPath && (
+            <div className="analyzer-progress-path-row">
+              <span className="analyzer-progress-path-prefix muted">Current:</span>
+              <span
+                className="analyzer-progress-path mono"
+                title={normalizeDisplayPath(progress.currentPath)}
+              >
+                {normalizeDisplayPath(progress.currentPath)}
+              </span>
+            </div>
+          )}
           <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
         </div>
       )}
@@ -695,6 +855,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                         onChange={() => {
                           const ids = flatRows.filter((r) => !isMoreRowId(r.node.id) && isNodeSelectable(r.node, allowDeleteUnknown)).map((r) => r.node.id);
                           const allSel = ids.length > 0 && ids.every((id) => selectedIds.has(id));
+                          invalidatePreviewRequest();
                           setPreview(null); setCleanSummary(null); setCleanProgress(null);
                           setSelectedIds((prev) => {
                             const next = new Set(prev);
@@ -769,18 +930,19 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                         className={`analyzer-row ${inspectedMatch ? 'inspected' : ''} ${depth >= 1 ? 'depth-child analyzer-child-row' : ''}`}
                         data-depth={depth}
                         title={hasChildren && depth > 0 ? 'Double-click to inspect folder as root' : undefined}
-                        onClick={() => { void inspectNode(node.id); if (selectable) toggleSelect(node); }}
+                        onClick={() => { void inspectNode(node.id); if (selectable && !cleaning) toggleSelect(node); }}
                         onDoubleClick={(e) => {
-                          if (!node.isDir || !hasChildren || depth <= 0) return;
+                          if (!node.isDir || !hasChildren || depth <= 0 || cleaning) return;
                           e.stopPropagation();
                           setRootPath(node.path);
                           void runAnalyzer(node.path);
                         }}
                         onKeyDown={(e) => {
+                          if (e.target !== e.currentTarget) return;
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
                             void inspectNode(node.id);
-                            if (selectable) toggleSelect(node);
+                            if (selectable && !cleaning) toggleSelect(node);
                           }
                         }}
                       >
@@ -810,9 +972,10 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                                 <button
                                   type="button"
                                   className="analyzer-drill-btn"
-                                  onClick={(e) => { e.stopPropagation(); setRootPath(node.path); void runAnalyzer(node.path); }}
+                                  onClick={(e) => { e.stopPropagation(); if (cleaning) return; setRootPath(node.path); void runAnalyzer(node.path); }}
                                   aria-label={`Drill into ${node.name}`}
                                   title="Drill into folder"
+                                  disabled={cleaning}
                                 >
                                   Drill
                                 </button>
@@ -871,11 +1034,12 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                       {!isDriveRoot(inspectedNode) && <p className="inspector-guidance">{analyzerGuidance(inspectedNode, inspectedSelectable, allowDeleteUnknown)}</p>}
                       {inspectedNode.path.toLowerCase().endsWith('.vhdx') && (() => {
                         const vhdxPath = normalizeDisplayPath(inspectedNode.path);
-                        const cmd = `wsl --shutdown\nOptimize-VHD -Path "${vhdxPath}" -Mode Full`;
+                        const quotedVhdxPath = `'${vhdxPath.replace(/'/g, "''")}'`;
+                        const cmd = `wsl --shutdown\nOptimize-VHD -Path ${quotedVhdxPath} -Mode Full`;
                         return (
                           <div className="notice info analyzer-vhdx-callout" role="note">
                             <div><strong>Compaction (manual):</strong> shut down WSL/VM first, then run in an elevated PowerShell (Hyper-V).</div>
-                            <pre className="analyzer-vhdx-cmd"><code>{`wsl --shutdown\nOptimize-VHD -Path "${vhdxPath}" -Mode Full`}</code></pre>
+                            <pre className="analyzer-vhdx-cmd"><code>{cmd}</code></pre>
                             <button type="button" className="btn small subtle-btn analyzer-copy-cmd-btn" onClick={() => void copyVhdxCommand(cmd)} aria-label="Copy Command">{copiedVhdxCmd ? 'Copied' : 'Copy Command'}</button>
                           </div>
                         );
@@ -911,7 +1075,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
           <div className="scan-bottom-bar" aria-label="Analyzer actions">
             <div className="scan-bottom-bar-left">
               <span className="scan-bottom-bar-summary"><strong className="num">{pluralize(selectedIds.size, 'item', 'items')} selected</strong> · <span className="num">{formatBytes(selectedBytes)}</span></span>
-              {selectedIds.size > 0 && <button type="button" className="btn small subtle-btn" onClick={() => { setSelectedIds(new Set()); setPreview(null); }} disabled={cleaning}>Clear</button>}
+              {selectedIds.size > 0 && <button type="button" className="btn small subtle-btn" onClick={() => { invalidatePreviewRequest(); setSelectedIds(new Set()); setPreview(null); }} disabled={cleaning}>Clear</button>}
               {hasSelectedRisky && <span className="scan-bottom-bar-hint muted">Includes Caution/Unknown items · requires DELETE confirm</span>}
             </div>
             <div className="scan-bottom-bar-right">

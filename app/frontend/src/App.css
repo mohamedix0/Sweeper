@@ -287,6 +287,10 @@ input[type="checkbox"] { accent-color: var(--accent-primary); }
 .progress { height: 6px; background: var(--bg-inset); border: 1px solid var(--border-divider); border-radius: var(--radius-pill); overflow: hidden; margin-top: 8px; }
 .progress-bar { height: 100%; background: var(--accent-primary); width: 100%; transition: width 0.3s ease; }
 .progress-indeterminate { width: 40%; animation: sweep 1.2s infinite linear; }
+.scan-progress-meter { display: block; width: 100%; height: 100%; border: none; background: transparent; color: var(--accent-primary); appearance: none; -webkit-appearance: none; }
+.scan-progress-meter::-webkit-progress-bar { background: transparent; border-radius: var(--radius-pill); }
+.scan-progress-meter::-webkit-progress-value { background: var(--accent-primary); border-radius: var(--radius-pill); transition: width 0.3s ease; }
+.scan-progress-meter::-moz-progress-bar { background: var(--accent-primary); border-radius: var(--radius-pill); transition: width 0.3s ease; }
 @keyframes sweep { 0% { transform: translateX(-120%); } 100% { transform: translateX(320%); } }
 
 /* Logs */
@@ -6502,6 +6506,10 @@ input[type="checkbox"]:indeterminate {
   background: var(--bg-inset-hover) !important;
   color: var(--text-secondary) !important;
 }
+.scan-scope-config-chip:focus-within {
+  box-shadow: var(--focus-ring) !important;
+  outline: none;
+}
 .scan-scope-config-chip .scan-scope-pill-text { font-weight: 500; font-size: 12px; }
 .scan-scope-config-chip.active .scan-scope-pill-text { color: var(--text-secondary) !important; }
 .scan-scope-inline-controls-subtle { gap: 2px; }
@@ -6611,64 +6619,154 @@ input[type="checkbox"]:indeterminate {
 .settings-prereq-banner { width: 100% !important; box-sizing: border-box !important; }
 
 /* v33.1 axis alignment + full unclipped paths in Scan & Analyzer */
-.master-detail,
-.analyzer-layout.master-detail,
-.scan-layout.master-detail {
-  grid-template-columns: minmax(0, 1fr) 296px !important;
-}
-.detail-pane,
-.selection-pane,
-.scan-inspector-pane,
-.master-detail > .detail-pane,
-.master-detail > .selection-pane {
-  width: 296px !important;
-  min-width: 296px !important;
-  max-width: 296px !important;
-}
-.scan-table-header,
-.scan-row {
-  grid-template-columns: minmax(320px, 1.5fr) 86px 64px 146px !important;
-  gap: 8px !important;
-}
-.scan-group-row .scan-col-main { padding-right: 0 !important; }
+@media (min-width: 1101px) {
+  .master-detail,
+  .analyzer-layout.master-detail,
+  .scan-layout.master-detail {
+    grid-template-columns: minmax(0, 1fr) 296px !important;
+  }
+  .detail-pane,
+  .selection-pane,
+  .scan-inspector-pane,
+  .master-detail > .detail-pane,
+  .master-detail > .selection-pane {
+    width: 296px !important;
+    min-width: 296px !important;
+    max-width: 296px !important;
+  }
+  .scan-table-header,
+  .scan-row {
+    grid-template-columns: minmax(320px, 1.5fr) 86px 64px 146px !important;
+    gap: 8px !important;
+  }
+  .scan-group-row .scan-col-main { padding-right: 0 !important; }
 
-.analyzer-col-headers,
-.analyzer-row {
-  grid-template-columns: minmax(0, 1fr) 82px 38px 64px 86px !important;
-  column-gap: 6px !important;
+  .analyzer-col-headers,
+  .analyzer-row {
+    grid-template-columns: minmax(0, 1fr) 82px 38px 64px 86px !important;
+    column-gap: 6px !important;
+  }
+  .analyzer-col-h-items, .analyzer-col-count { width: 38px !important; min-width: 38px !important; }
+  .analyzer-col-h-size, .analyzer-col-sizecell { width: 64px !important; min-width: 64px !important; }
+  .analyzer-col-h-status, .analyzer-col-guard { width: 86px !important; min-width: 86px !important; }
+  .analyzer-col-main.tree-cell-name .analyzer-node-main,
+  .analyzer-col-main.tree-cell-name .analyzer-path.analyzer-node-path,
+  .analyzer-path,
+  .analyzer-node-path,
+  .tree-subpath {
+    padding-right: 0 !important;
+  }
+  .analyzer-col-h-name {
+    padding-left: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+  }
+  .analyzer-row .tree-indent:empty { display: none; }
+  .analyzer-header-master-slot {
+    width: 22px !important;
+    min-width: 22px !important;
+    margin-left: 28px !important;
+    margin-right: 0 !important;
+  }
+  .analyzer-header-master-slot .analyzer-master-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+  }
+  .analyzer-header-master-slot input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+  }
 }
-.analyzer-col-h-items, .analyzer-col-count { width: 38px !important; min-width: 38px !important; }
-.analyzer-col-h-size, .analyzer-col-sizecell { width: 64px !important; min-width: 64px !important; }
-.analyzer-col-h-status, .analyzer-col-guard { width: 86px !important; min-width: 86px !important; }
-.analyzer-col-main.tree-cell-name .analyzer-node-main,
-.analyzer-col-main.tree-cell-name .analyzer-path.analyzer-node-path,
-.analyzer-path,
-.analyzer-node-path,
-.tree-subpath {
-  padding-right: 0 !important;
+
+/* View panels (Bug 4: preserve Scan/Analyzer state across navigation) */
+.view-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
 }
-.analyzer-col-h-name {
-  padding-left: 0 !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  gap: 6px !important;
+[hidden].view-panel,
+.view-panel[hidden] {
+  display: none !important;
 }
-.analyzer-row .tree-indent:empty { display: none; }
-.analyzer-header-master-slot {
-  width: 22px !important;
-  min-width: 22px !important;
-  margin-left: 28px !important;
-  margin-right: 0 !important;
+
+/* Live scan progress (Bug 2) */
+.scan-progress-notice {
+  min-width: 0;
+  max-width: 100%;
 }
-.analyzer-header-master-slot .analyzer-master-check {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
+.scan-progress-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
-.analyzer-header-master-slot input[type="checkbox"] {
-  width: 14px;
-  height: 14px;
-  margin: 0;
+.scan-progress-status {
+  font-weight: 600;
+}
+.scan-progress-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  font-size: var(--text-sm);
+}
+.scan-progress-current,
+.scan-progress-counts,
+.scan-progress-targets {
+  min-width: 0;
+}
+.scan-progress-current-name {
+  font-weight: 500;
+}
+/* determinate scan progress uses native <progress.scan-progress-meter> */
+
+/* Analyzer progress banner overflow + pulse (Bug 3a) */
+.analyzer-progress-notice {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.analyzer-progress-row,
+.analyzer-progress-path-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.analyzer-progress-label,
+.analyzer-progress-stats,
+.analyzer-progress-path-prefix {
+  flex: 0 0 auto;
+}
+.analyzer-progress-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+.scanning-pulse {
+  animation: scanning-pulse-opacity 1.8s ease-in-out infinite;
+  will-change: opacity;
+}
+@keyframes scanning-pulse-opacity {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.82; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scanning-pulse {
+    animation: none !important;
+  }
 }

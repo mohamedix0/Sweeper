@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { ExecuteCleanResponse, RiskDto } from '../api/client';
 import { formatBytes, normalizeDisplayPath, pluralize, relativeAge } from '../utils/format';
 import { CopyIcon, FileIcon, FolderOpenIcon, FolderIcon, InfoIcon } from './Icons';
@@ -34,10 +34,11 @@ export function openContainingFolder(path: string) {
   }
 }
 
-export function formatModifiedAge(mtimeUnixSecs: string | null | undefined, ageEligible: boolean): string {
+export function formatModifiedAge(mtimeUnixSecs: string | null | undefined, ageEligible: boolean, minAgeHours?: number): string {
   const rel = relativeAge(mtimeUnixSecs ?? null);
   if (ageEligible) return rel === '—' ? 'Older than minimum age' : rel;
-  return rel === '—' ? 'Recent (< 24h)' : `${rel} (< 24h)`;
+  if (minAgeHours == null) return rel === '—' ? 'Recent' : rel;
+  return rel === '—' ? `Recent (< ${minAgeHours}h)` : `${rel} (< ${minAgeHours}h)`;
 }
 
 export function PathWell({ path }: { path: string }) {
@@ -178,20 +179,30 @@ export function CleanSummaryBlock({ summary, onOpenLog }: { summary: ExecuteClea
 }
 
 export function InfoTip({ label, children, align = 'left' }: { label: string; children: ReactNode; align?: 'left' | 'right' }) {
-  const [open, setOpen] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const open = pinned || hovered || focused;
+  const tooltipId = useId();
   const rootRef = useRef<HTMLSpanElement | null>(null);
+
+  const close = () => {
+    setPinned(false);
+    setHovered(false);
+    setFocused(false);
+  };
 
   useEffect(() => {
     if (!open) return;
     function onDocPointerDown(e: MouseEvent | PointerEvent) {
       const root = rootRef.current;
       if (!root) return;
-      if (e.target instanceof Node && !root.contains(e.target)) setOpen(false);
+      if (e.target instanceof Node && !root.contains(e.target)) close();
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
-        setOpen(false);
+        close();
       }
     }
     document.addEventListener('pointerdown', onDocPointerDown);
@@ -208,20 +219,19 @@ export function InfoTip({ label, children, align = 'left' }: { label: string; ch
     <span
       ref={rootRef}
       className={`info-tip ${align === 'right' ? 'right' : ''}`}
-      onMouseEnter={() => setOpen(true)}
+      onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => {
-        if (rootRef.current?.contains(document.activeElement)) return;
-        setOpen(false);
+        setHovered(false);
       }}
-      onFocus={() => setOpen(true)}
+      onFocus={() => setFocused(true)}
       onBlur={(e) => {
         if (e.relatedTarget instanceof Node && rootRef.current?.contains(e.relatedTarget)) return;
-        setOpen(false);
+        setFocused(false);
       }}
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
           e.preventDefault();
-          setOpen(false);
+          close();
         }
       }}
     >
@@ -230,12 +240,18 @@ export function InfoTip({ label, children, align = 'left' }: { label: string; ch
         className="info-tip-btn"
         aria-label={label}
         aria-expanded={open}
-        aria-haspopup="dialog"
-        onClick={() => setOpen((v) => !v)}
+        aria-describedby={open ? tooltipId : undefined}
+        onClick={() => {
+          if (pinned) {
+            close();
+          } else {
+            setPinned(true);
+          }
+        }}
       >
         <InfoIcon />
       </button>
-      {open && <span className="info-tip-popover" role="tooltip">{children}</span>}
+      {open && <span id={tooltipId} className="info-tip-popover" role="tooltip">{children}</span>}
     </span>
   );
 }

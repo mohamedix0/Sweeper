@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatUnixSeconds, relativeAge, sumDecimalStrings, toBigInt } from './format';
+import { formatBytes, formatUnixSeconds, middleTruncatePath, normalizeDisplayPath, relativeAge, sumDecimalStrings, toBigInt } from './format';
 
 describe('format utils (BigInt-safe)', () => {
   it('parses decimal strings as BigInt', () => {
@@ -44,6 +44,10 @@ describe('relativeAge (fixed now)', () => {
     expect(relativeAge(secsAgo(12 * 86_400_000), NOW)).toBe('12d ago');
     expect(relativeAge(secsAgo(30 * 86_400_000), NOW)).toBe('1mo ago');
     expect(relativeAge(secsAgo(60 * 86_400_000), NOW)).toBe('2mo ago');
+    expect(relativeAge(secsAgo(359 * 86_400_000), NOW)).toBe('11mo ago');
+    expect(relativeAge(secsAgo(360 * 86_400_000), NOW)).toBe('12mo ago');
+    expect(relativeAge(secsAgo(364 * 86_400_000), NOW)).toBe('12mo ago');
+    expect(relativeAge(secsAgo(365 * 86_400_000), NOW)).toBe('1y ago');
     expect(relativeAge(secsAgo(400 * 86_400_000), NOW)).toBe('1y ago');
   });
 
@@ -53,5 +57,15 @@ describe('relativeAge (fixed now)', () => {
     expect(relativeAge(undefined, NOW)).toBe('—');
     expect(relativeAge('9007199254740993', NOW)).toBe('—');
     expect(relativeAge('not-a-number', NOW)).toBe('—');
+  });
+});
+
+describe('normalizeDisplayPath and middleTruncatePath', () => {
+  it('preserves UNC and extended-length prefixes while collapsing separators elsewhere', () => {
+    expect(normalizeDisplayPath('\\\\server\\share\\a\\\\b\\c')).toBe('\\\\server\\share\\a\\b\\c');
+    expect(normalizeDisplayPath('\\\\?\\C:\\temp\\\\logs\\app.log')).toBe('\\\\?\\C:\\temp\\logs\\app.log');
+    expect(normalizeDisplayPath('\\\\?\\UNC\\server\\share\\\\dir\\file.txt')).toBe('\\\\?\\UNC\\server\\share\\dir\\file.txt');
+    expect(middleTruncatePath('\\\\server\\share\\a\\\\b\\c', 200)).toBe('\\\\server\\share\\a\\b\\c');
+    expect(middleTruncatePath('\\\\?\\C:\\temp\\\\logs\\app.log', 200)).toBe('\\\\?\\C:\\temp\\logs\\app.log');
   });
 });

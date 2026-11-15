@@ -77,10 +77,12 @@ export function relativeAge(secs: string | number | bigint | null | undefined, n
     if (hours < 24) return `${hours}h ago`;
     const days = Math.floor(hours / 24);
     if (days < 30) return `${days}d ago`;
+    if (days >= 365) {
+      const years = Math.floor(days / 365);
+      return `${years}y ago`;
+    }
     const months = Math.floor(days / 30);
-    if (months < 12) return `${months}mo ago`;
-    const years = Math.floor(days / 365);
-    return `${years}y ago`;
+    return `${months}mo ago`;
   } catch {
     return '—';
   }
@@ -91,7 +93,20 @@ export function pluralize(count: number, singular: string, plural = `${singular}
 }
 
 export function normalizeDisplayPath(p: string): string {
-  return p.replace(/\//g, '\\').replace(/\\+/g, '\\');
+  const normalized = p.replace(/\//g, '\\');
+  let prefix = '';
+  let rest = normalized;
+  if (/^\\\\\?\\UNC\\/i.test(normalized)) {
+    prefix = normalized.slice(0, 8);
+    rest = normalized.slice(8);
+  } else if (/^\\\\\?\\/i.test(normalized)) {
+    prefix = normalized.slice(0, 4);
+    rest = normalized.slice(4);
+  } else if (normalized.startsWith('\\\\')) {
+    prefix = '\\\\';
+    rest = normalized.slice(2);
+  }
+  return prefix + rest.replace(/\\+/g, '\\');
 }
 
 export function middleTruncatePath(path: string, maxLen = 38): string {

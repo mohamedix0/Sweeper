@@ -2,7 +2,14 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 
-const storedTheme = typeof window !== 'undefined' ? window.localStorage.getItem('sweeper-theme') : null;
+let storedTheme: string | null = null;
+if (typeof window !== 'undefined') {
+  try {
+    storedTheme = window.localStorage.getItem('sweeper-theme');
+  } catch {
+    storedTheme = null;
+  }
+}
 const initialTheme = storedTheme === 'light' ? 'light' : 'dark';
 document.documentElement.dataset.theme = initialTheme;
 

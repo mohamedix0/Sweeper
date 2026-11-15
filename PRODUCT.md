@@ -22,7 +22,7 @@ Unlike opaque one-click disk cleaners, Sweeper is **deny-by-default**: non-disab
 
 - Desktop utility window (`Sweeper`, WebView2 inside Tauri 2) running on Windows as standard non-elevated user by default, with optional explicit **Run as administrator** relaunch strictly for elevation-gated `Tier` 3 `Target`s.
 - Four primary task surfaces: **Scan & Preview**, **Analyzer**, **Settings**, and **Logs**, plus an **Explain** detail drawer.
-- Strict Content Security Policy (`default-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost`).
+- Strict Content Security Policy (`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'`).
 
 ## Capabilities and Constraints
 
