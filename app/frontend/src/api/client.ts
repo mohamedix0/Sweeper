@@ -34,10 +34,23 @@ export type ExecuteCleanResponse = {
 export type ElevationStatus = { isElevated: boolean };
 export type RelaunchResult = { launched: boolean };
 
-export type ScanProgress =
+export type ScanProgressEvent =
   | { kind: 'started'; session_id: string }
+  | {
+      kind: 'progress';
+      session_id: string;
+      completed_targets: number;
+      total_targets: number;
+      current_target_id: string | null;
+      current_target_name: string | null;
+      scanned_items: string;
+      scanned_bytes: string;
+    }
+  | { kind: 'cancelled'; session_id: string }
   | { kind: 'completed'; session_id: string }
   | { kind: 'failed'; session_id: string; error: ContractError };
+
+export type ScanProgress = ScanProgressEvent;
 
 export type AnalyzerProgressEvent = {
   sessionId: string;
@@ -85,7 +98,7 @@ export type Settings = {
 };
 
 export interface SweeperClient {
-  startScan(tiers: TierDto[] | null, onProgress?: (e: ScanProgress) => void): Promise<{ sessionId: string }>;
+  startScan(tiers: TierDto[] | null, onProgress?: (e: ScanProgressEvent) => void): Promise<{ sessionId: string }>;
   getScanResults(sessionId: string): Promise<ScanResults>;
   previewClean(
     sessionId: string,
@@ -131,7 +144,7 @@ export function createTauriClient(): SweeperClient {
       try {
         if (onProgress) {
           unlisten = await events.scanProgressEvent.listen((event) => {
-            onProgress(event.payload as ScanProgress);
+            onProgress(event.payload as ScanProgressEvent);
           });
         }
         return unwrap(await commands.startScan(tiers));

@@ -597,18 +597,20 @@ fn start_analyzer_on_sandbox_returns_tree_marks_non_selectable_and_populates_ses
 
 #[test]
 fn analyzer_eligible_node_preview_and_execute_clean_in_sentinel_sandbox() {
-    // Custom-path sandbox nodes are Unknown and require allow_delete_unknown to be selectable.
+    // Custom-path sandbox nodes are Unknown. With allow_delete_unknown, eligible Unknown
+    // directories (Custom Path roots, contents-only, typed confirmation) are selectable, but
+    // individual Unknown files are intentionally not selectable.
     let state = state_with_temp_settings(|s| {
         s.allow_delete_unknown = true;
     });
     let canary = CanaryTree::seed_external("gate-f-analyzer-exec").unwrap();
     let sandbox = Sandbox::new().unwrap();
     let root = sandbox.create_dir("CleanMe").unwrap();
+    let stale_cache_dir = sandbox.create_dir("CleanMe\\StaleCache").unwrap();
     let file_path = sandbox
-        .write_file("CleanMe\\old.txt", b"delete-me")
+        .write_file("CleanMe\\StaleCache\\old.txt", b"delete-me")
         .unwrap();
     assert!(file_path.exists());
-
     canary.verify().unwrap();
 
     let resp = commands_impl::start_analyzer::<_, fn(sweeper_contract::AnalyzerProgressEvent)>(
@@ -619,30 +621,52 @@ fn analyzer_eligible_node_preview_and_execute_clean_in_sentinel_sandbox() {
     .unwrap();
 
     let root_node = resp.root.clone();
-    assert!(root_node.selectable || !root_node.selectable);
 
-    // Select the analyzed file node and route it through the standard Preview/Clean flow.
-    let file_node =
-        find_node_by_path_suffix(&root_node, "\\old.txt").expect("old.txt node in analyzer tree");
+    // Regression guard: individual Unknown files are not selectable.
+    let file_node = find_node_by_path_suffix(&root_node, "\\StaleCache\\old.txt")
+        .expect("old.txt node in analyzer tree");
     assert!(
-        file_node.selectable,
-        "old.txt should be selectable: reason={:?}",
+        !file_node.selectable,
+        "old.txt (Unknown file) must not be selectable: reason={:?}",
         file_node.reason
     );
-    assert!(!file_node.display_only);
+    assert_eq!(
+        file_node.reason.as_deref(),
+        Some("Unknown files are not selectable; only eligible directories can be selected"),
+        "unexpected non-selectable reason for Unknown file: {:?}",
+        file_node.reason
+    );
 
-    let confirmations = if file_node.target_id.is_none() || file_node.risk == RiskDto::Unknown {
-        Some(sweeper_contract::PreviewConfirmationsDto {
-            typed_confirmation: Some("DELETE".to_string()),
-        })
-    } else {
-        None
-    };
+    // Select the eligible Unknown directory node and route it through Preview/Clean.
+    let stale_cache_node = find_node_by_path_suffix(&root_node, "\\StaleCache")
+        .expect("StaleCache node in analyzer tree");
+    assert!(
+        stale_cache_node.is_dir,
+        "StaleCache must be a directory node"
+    );
+    assert!(
+        stale_cache_node.selectable,
+        "StaleCache should be selectable as an eligible Unknown directory: reason={:?}",
+        stale_cache_node.reason
+    );
+    assert!(
+        !stale_cache_node.display_only,
+        "StaleCache must not be display_only"
+    );
+    assert!(
+        stale_cache_node.target_id.is_none() || stale_cache_node.risk == RiskDto::Unknown,
+        "StaleCache should be treated as custom-path/Unknown selection: target_id={:?}, risk={:?}",
+        stale_cache_node.target_id,
+        stale_cache_node.risk
+    );
+
     let preview = commands_impl::preview_clean(
         &state,
         resp.session_id.clone(),
-        vec![file_node.id.clone()],
-        confirmations,
+        vec![stale_cache_node.id.clone()],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".to_string()),
+        }),
     )
     .unwrap();
     assert!(preview.total_selected_count.get() >= 1);
@@ -662,7 +686,20 @@ fn analyzer_eligible_node_preview_and_execute_clean_in_sentinel_sandbox() {
         exec
     );
     canary.verify().unwrap();
-    assert!(!sandbox.guarded_path("CleanMe\\old.txt").exists());
+
+    // Contents-only semantics: selected directory root and its ancestors preserved, contents removed.
+    assert!(
+        !sandbox
+            .guarded_path("CleanMe\\StaleCache\\old.txt")
+            .exists(),
+        "eligible contents inside selected directory should be deleted"
+    );
+    assert!(
+        stale_cache_dir.exists(),
+        "selected custom-path directory root must be preserved"
+    );
+    assert!(root.exists(), "analyzer root directory must be preserved");
+
     let log_id = exec.log_id.expect("log id");
     let logs =
         commands_impl::list_logs_in_dir(Some(logs_base.path().join("logs").as_path())).unwrap();
@@ -1497,5 +1534,145 @@ fn relaunch_elevated_success_releases_guard_invokes_launcher_returns_launched_an
     assert!(
         !si.is_held(),
         "single-instance guard should be released from current instance on successful handoff"
+    );
+}
+
+#[test]
+fn start_scan_emits_started_progress_completed_with_expected_session_and_decimal_counters() {
+    let state = make_state();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+        sweeper_contract::ScanProgressEvent,
+    >::new()));
+    let events_cb = events.clone();
+
+    let resp = commands_impl::start_scan(
+        &state,
+        Some(vec![TierDto::Tier1]),
+        Some(move |evt: sweeper_contract::ScanProgressEvent| {
+            events_cb.lock().unwrap().push(evt);
+        }),
+    )
+    .expect("start_scan should succeed");
+
+    let events = events.lock().unwrap().clone();
+    assert!(!events.is_empty(), "expected scan progress events");
+    match &events[0] {
+        sweeper_contract::ScanProgressEvent::Started { session_id } => {
+            assert_eq!(session_id, &resp.session_id);
+        }
+        other => panic!("expected Started as first event, got {other:?}"),
+    }
+    assert!(
+        events.iter().any(|e| matches!(e, sweeper_contract::ScanProgressEvent::Progress { session_id, scanned_items, scanned_bytes, .. }
+            if session_id == &resp.session_id && scanned_items.parse::<u64>().is_ok() && scanned_bytes.parse::<u64>().is_ok())),
+        "expected at least one Progress event with matching session_id and decimal counters, got {events:?}"
+    );
+    match events.last().unwrap() {
+        sweeper_contract::ScanProgressEvent::Completed { session_id } => {
+            assert_eq!(session_id, &resp.session_id);
+        }
+        other => panic!("expected Completed as last event, got {other:?}"),
+    }
+}
+
+#[test]
+fn session_store_lock_not_held_during_inflight_scan_and_execute_clean() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    // Scan: try_lock must succeed from within progress callback while scan is running.
+    let state = Arc::new(make_state());
+    let try_lock_ok = Arc::new(AtomicBool::new(false));
+    let state_cb = Arc::clone(&state);
+    let try_lock_ok_cb = Arc::clone(&try_lock_ok);
+    let resp = commands_impl::start_scan(
+        &state,
+        Some(vec![TierDto::Tier1]),
+        Some(move |_evt: sweeper_contract::ScanProgressEvent| {
+            if state_cb.sessions.try_lock().is_ok() {
+                try_lock_ok_cb.store(true, Ordering::SeqCst);
+            }
+        }),
+    )
+    .expect("start_scan should succeed");
+    assert!(!resp.session_id.is_empty());
+    assert!(
+        try_lock_ok.load(Ordering::SeqCst),
+        "sessions lock must be acquirable during in-flight scan progress callbacks"
+    );
+
+    // Execute clean: try_lock must succeed from within clean progress callback while removal is running.
+    let state = Arc::new(make_state());
+    let sandbox = Sandbox::new().unwrap();
+    let canary = CanaryTree::seed_external("gate-f-lock-clean").unwrap();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let file_path = sandbox
+        .write_file("Temp\\deleteme-lock.tmp", b"hello-sweeper")
+        .unwrap();
+    seed_session(&state, &root, &file_path, 1_700_000_000);
+    let preview = commands_impl::preview_clean(
+        &state,
+        "scan-test".to_string(),
+        vec!["t1::1".to_string()],
+        None,
+    )
+    .unwrap();
+    let logs_base = tempfile::tempdir().unwrap();
+    let try_lock_ok = Arc::new(AtomicBool::new(false));
+    let state_cb = Arc::clone(&state);
+    let try_lock_ok_cb = Arc::clone(&try_lock_ok);
+    let exec = commands_impl::execute_clean(
+        &state,
+        preview.preview_token,
+        Some(logs_base.path().to_path_buf()),
+        move |_evt: sweeper_contract::CleanProgressEvent| {
+            if state_cb.sessions.try_lock().is_ok() {
+                try_lock_ok_cb.store(true, Ordering::SeqCst);
+            }
+            // small pause to widen observation window
+            std::thread::sleep(Duration::from_millis(1));
+        },
+    )
+    .unwrap();
+    assert!(!exec.aborted, "{exec:?}");
+    canary.verify().unwrap();
+    assert!(
+        try_lock_ok.load(Ordering::SeqCst),
+        "sessions lock must be acquirable during in-flight clean progress callbacks"
+    );
+}
+
+#[test]
+fn session_store_lock_not_held_during_inflight_analyzer() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let state = Arc::new(make_state());
+    let sandbox = Sandbox::new().unwrap();
+    let root = sandbox.create_dir("A").unwrap();
+    let _f1 = sandbox.write_file("A\\file1.txt", b"hello").unwrap();
+    let _f2 = sandbox
+        .write_file("A\\sub\\file2.bin", [0u8; 1024])
+        .unwrap();
+
+    let try_lock_ok = Arc::new(AtomicBool::new(false));
+    let state_cb = Arc::clone(&state);
+    let try_lock_ok_cb = Arc::clone(&try_lock_ok);
+    let root_s = root.to_string_lossy().to_string();
+    let resp = commands_impl::start_analyzer(
+        &state,
+        Some(root_s),
+        Some(move |_evt: sweeper_contract::AnalyzerProgressEvent| {
+            if state_cb.sessions.try_lock().is_ok() {
+                try_lock_ok_cb.store(true, Ordering::SeqCst);
+            }
+        }),
+    )
+    .expect("start_analyzer should succeed");
+    assert!(!resp.session_id.is_empty());
+    assert!(
+        try_lock_ok.load(Ordering::SeqCst),
+        "sessions lock must be acquirable during in-flight analyzer progress callbacks"
     );
 }

@@ -458,6 +458,28 @@ pub enum ScanProgressEvent {
         /// Session identifier.
         session_id: String,
     },
+    /// Incremental scan progress.
+    Progress {
+        /// Session identifier.
+        session_id: String,
+        /// Number of targets completed so far.
+        completed_targets: u32,
+        /// Total number of targets in this scan run.
+        total_targets: u32,
+        /// Currently scanning target id, if any.
+        current_target_id: Option<String>,
+        /// Currently scanning target name, if any.
+        current_target_name: Option<String>,
+        /// Aggregate scanned/observed items so far (decimal string).
+        scanned_items: String,
+        /// Aggregate scanned/observed bytes so far (decimal string).
+        scanned_bytes: String,
+    },
+    /// Scan cancelled.
+    Cancelled {
+        /// Session identifier.
+        session_id: String,
+    },
     /// Scan completed.
     Completed {
         /// Session identifier.
@@ -1170,6 +1192,35 @@ mod tests {
         assert_eq!(v["root"]["sizeBytes"], serde_json::json!("10"));
         assert_eq!(v["root"]["itemCount"], serde_json::json!("2"));
         let _roundtrip: StartAnalyzerResponse = serde_json::from_value(v).unwrap();
+    }
+
+    #[test]
+    fn scan_progress_event_progress_roundtrip() {
+        let ev = ScanProgressEvent::Progress {
+            session_id: "s1".to_string(),
+            completed_targets: 1,
+            total_targets: 3,
+            current_target_id: Some("user-temp".to_string()),
+            current_target_name: Some("User Temp".to_string()),
+            scanned_items: "42".to_string(),
+            scanned_bytes: "4096".to_string(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("progress"));
+        assert_eq!(v["session_id"], serde_json::json!("s1"));
+        assert_eq!(v["completed_targets"], serde_json::json!(1));
+        assert_eq!(v["total_targets"], serde_json::json!(3));
+        assert_eq!(v["scanned_items"], serde_json::json!("42"));
+        assert_eq!(v["scanned_bytes"], serde_json::json!("4096"));
+        let back: ScanProgressEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(back, ev);
+
+        let cancelled = ScanProgressEvent::Cancelled {
+            session_id: "s1".to_string(),
+        };
+        let vc = serde_json::to_value(&cancelled).unwrap();
+        assert_eq!(vc["kind"], serde_json::json!("cancelled"));
+        let _: ScanProgressEvent = serde_json::from_value(vc).unwrap();
     }
 
     #[test]

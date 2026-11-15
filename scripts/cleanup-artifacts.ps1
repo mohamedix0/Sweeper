@@ -35,6 +35,64 @@ function Remove-ProjectSubtreeSafe {
     }
 }
 
+function Test-SweeperTempOwnedMarker {
+    param(
+        [System.IO.DirectoryInfo]$Dir,
+        [string]$Kind
+    )
+    switch ($Kind) {
+        "sandbox" {
+            return (Test-Path -LiteralPath (Join-Path $Dir.FullName ".sweeper-sandbox-sentinel") -PathType Leaf)
+        }
+        "canary" {
+            return (
+                (Test-Path -LiteralPath (Join-Path $Dir.FullName "root.txt") -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $Dir.FullName "nested\file.txt") -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $Dir.FullName "nested\data.bin") -PathType Leaf)
+            )
+        }
+        default { return $false }
+    }
+}
+
+function Remove-StaleSweeperTempDirs {
+    param([int]$MinAgeMinutes = 60)
+
+    $tempRoot = ([System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())).TrimEnd('\', '/')
+    if (-not (Test-Path -LiteralPath $tempRoot -PathType Container)) { return }
+    $cutoff = (Get-Date).AddMinutes(-$MinAgeMinutes)
+
+    $prefixes = @(
+        @{ Prefix = "sweeper-sandbox-"; Kind = "sandbox" },
+        @{ Prefix = "sweeper-canary-"; Kind = "canary" }
+    )
+
+    foreach ($spec in $prefixes) {
+        Get-ChildItem -LiteralPath $tempRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name.StartsWith($spec.Prefix, [System.StringComparison]::Ordinal) -and
+            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -and
+            $_.LastWriteTime -lt $cutoff
+        } | ForEach-Object {
+            $dir = $_
+            $full = ([System.IO.Path]::GetFullPath($dir.FullName)).TrimEnd('\', '/')
+
+            # Strict guards: direct child of canonical temp root only.
+            $parent = ([System.IO.Path]::GetFullPath($dir.Parent.FullName)).TrimEnd('\', '/')
+            if ($parent -ne $tempRoot) { return }
+            if (-not $full.StartsWith($tempRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return }
+
+            # Never touch anything outside the Sweeper-owned temp directory itself.
+            if (-not $dir.Name.StartsWith($spec.Prefix, [System.StringComparison]::Ordinal)) { return }
+            if (($dir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return }
+            if ($dir.LastWriteTime -ge $cutoff) { return }
+            if (-not (Test-SweeperTempOwnedMarker -Dir $dir -Kind $spec.Kind)) { return }
+
+            Write-Host "Cleaning stale Sweeper temp $($spec.Kind): $full"
+            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 try {
     $activeRustBuild = @(Get-Process -Name cargo, rustc -ErrorAction SilentlyContinue).Count -gt 0
 
@@ -103,6 +161,10 @@ try {
             Write-Host "Skipping project target/ prune because cargo/rustc is actively running."
         }
     }
+
+    # 5. Prune stale Sweeper-owned sandbox/canary directories in OS temp only (age-gated, strict guards).
+    #    Never touches non-Sweeper entries in %TEMP% or any .t3 paths.
+    Remove-StaleSweeperTempDirs -MinAgeMinutes 60
 }
 finally {
     Pop-Location

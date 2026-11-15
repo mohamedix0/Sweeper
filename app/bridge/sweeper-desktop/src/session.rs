@@ -2,15 +2,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use sweeper_contract::{
     AnalyzerNodeDto, AnalyzerProgressEvent, ContractError, ExecuteCleanResponse,
     PreviewCleanResponse, PreviewConfirmationsDto, PreviewTargetBreakdownDto, RiskDto, ScanItemDto,
-    ScanResultsDto, SkippedReasonDto, StartAnalyzerResponse, StartScanResponse,
+    ScanProgressEvent, ScanResultsDto, SkippedReasonDto, StartAnalyzerResponse, StartScanResponse,
     TargetScanResultDto, TierDto, U64String,
 };
 use sweeper_core::analyzer::{
@@ -18,7 +18,7 @@ use sweeper_core::analyzer::{
 };
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::remover::{self, CleanOptions, CleanProgress, ValidatedItem};
-use sweeper_core::scanner::{self, ScanReport};
+use sweeper_core::scanner::{self, ScanError, ScanProgress, ScanReport};
 use sweeper_core::settings::SweeperSettings;
 use sweeper_core::{Risk, Tier};
 
@@ -123,7 +123,33 @@ pub struct SessionStore {
     sessions: HashMap<String, ScanSession>,
     analyzer_sessions: HashMap<String, AnalyzerSession>,
     preview_tokens: HashMap<String, PreviewTokenState>,
+    active_scans: HashMap<String, Arc<AtomicBool>>,
+    active_analyzers: HashMap<String, Arc<AtomicBool>>,
     counter: u64,
+}
+
+/// Prepared scan registration (returned under short lock; scan runs without holding store).
+#[derive(Debug, Clone)]
+pub struct PreparedScan {
+    /// Pre-allocated session id (used for events and stored session on success).
+    pub session_id: String,
+    /// Effective settings snapshot for this scan run.
+    pub effective_settings: SweeperSettings,
+    /// Settings generation snapshot at scan start.
+    pub settings_generation: u64,
+    /// Cooperative cancellation token for this scan.
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// Prepared analyzer registration (returned under short lock; analysis runs without holding store).
+#[derive(Debug, Clone)]
+pub struct PreparedAnalyzer {
+    /// Pre-allocated session id.
+    pub session_id: String,
+    /// Settings generation snapshot at analyzer start.
+    pub settings_generation: u64,
+    /// Cooperative cancellation token.
+    pub cancel: Arc<AtomicBool>,
 }
 
 impl SessionStore {
@@ -176,6 +202,14 @@ impl SessionStore {
 
     /// Explicitly invalidate all active scan/analyzer sessions and preview tokens.
     pub fn invalidate_all_sessions(&mut self) {
+        for c in self.active_scans.values() {
+            c.store(true, Ordering::Relaxed);
+        }
+        for c in self.active_analyzers.values() {
+            c.store(true, Ordering::Relaxed);
+        }
+        self.active_scans.clear();
+        self.active_analyzers.clear();
         self.sessions.clear();
         self.analyzer_sessions.clear();
         self.preview_tokens.clear();
@@ -227,14 +261,14 @@ impl SessionStore {
         self.analyzer_sessions.insert(session.id.clone(), session);
     }
 
-    /// Create and store a scan session by running a read-only scan.
-    pub fn start_scan<C: Clock>(
+    /// Register and prepare a scan run (short lock). Returns pre-allocated session id and cancel token.
+    pub fn begin_scan<C: Clock>(
         &mut self,
         clock: &C,
         tiers: Option<Vec<TierDto>>,
         settings: &SweeperSettings,
         settings_generation: u64,
-    ) -> Result<StartScanResponse, ContractError> {
+    ) -> Result<PreparedScan, ContractError> {
         self.cleanup(clock);
         let now = clock.now_unix_secs();
 
@@ -246,25 +280,176 @@ impl SessionStore {
             effective.enable_tier3 = effective.enable_tier3 && req_set.contains(&TierDto::Tier3);
         }
 
-        let report = scanner::scan_with_settings_current_elevation(&effective).map_err(|e| {
-            ContractError::Internal {
-                reason: sanitize_reason(&e.to_string()),
-            }
-        })?;
-
         let session_id = self.next_id("scan", now);
-        let (results, items, target_roots) = map_report_to_session(&session_id, report);
-        let session = ScanSession {
-            id: session_id.clone(),
-            created_at: now,
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.active_scans.insert(session_id.clone(), cancel.clone());
+        Ok(PreparedScan {
+            session_id,
+            effective_settings: effective,
             settings_generation,
+            cancel,
+        })
+    }
+
+    /// Commit a completed scan session (short lock). Re-checks settings generation unchanged.
+    ///
+    /// Always clears active scan tracking for `session_id`, even when commit is rejected.
+    pub fn finish_scan<C: Clock>(
+        &mut self,
+        clock: &C,
+        session_id: &str,
+        settings_generation_at_start: u64,
+        current_settings_generation: u64,
+        effective_min_age_hours: u32,
+        report: ScanReport,
+    ) -> Result<(), ContractError> {
+        self.active_scans.remove(session_id);
+        if settings_generation_at_start != current_settings_generation {
+            return Err(ContractError::SessionInvalid {
+                reason: "session invalidated by settings change".to_string(),
+            });
+        }
+        let now = clock.now_unix_secs();
+        let (results, items, target_roots) = map_report_to_session(session_id, report);
+        let session = ScanSession {
+            id: session_id.to_string(),
+            created_at: now,
+            settings_generation: settings_generation_at_start,
             results,
             items,
             target_roots,
-            min_age_hours: effective.min_age_hours,
+            min_age_hours: effective_min_age_hours,
         };
-        self.sessions.insert(session_id.clone(), session);
-        Ok(StartScanResponse { session_id })
+        self.sessions.insert(session_id.to_string(), session);
+        Ok(())
+    }
+
+    /// Mark a scan as no longer active (failure/cancel).
+    pub fn abort_scan(&mut self, session_id: &str) {
+        self.active_scans.remove(session_id);
+    }
+
+    /// Create and store a scan session by running a read-only scan (synchronous, blocking helper).
+    ///
+    /// Used by headless tests and sync callers. Does not split locks by itself; caller should
+    /// prefer `commands_impl::start_scan` which enforces lock-splitting and progress events.
+    pub fn start_scan<C: Clock>(
+        &mut self,
+        clock: &C,
+        tiers: Option<Vec<TierDto>>,
+        settings: &SweeperSettings,
+        settings_generation: u64,
+    ) -> Result<StartScanResponse, ContractError> {
+        self.start_scan_with_progress(
+            clock,
+            tiers,
+            settings,
+            settings_generation,
+            settings_generation,
+            None::<fn(ScanProgressEvent)>,
+        )
+    }
+
+    /// Create and store a scan session with optional progress callback (synchronous, blocking helper).
+    pub fn start_scan_with_progress<C, F>(
+        &mut self,
+        clock: &C,
+        tiers: Option<Vec<TierDto>>,
+        settings: &SweeperSettings,
+        settings_generation_at_start: u64,
+        current_settings_generation: u64,
+        progress_cb: Option<F>,
+    ) -> Result<StartScanResponse, ContractError>
+    where
+        C: Clock,
+        F: FnMut(ScanProgressEvent) + Send + 'static,
+    {
+        let prepared = self.begin_scan(clock, tiers, settings, settings_generation_at_start)?;
+        let session_id = prepared.session_id.clone();
+        let shared_cb: Option<Arc<Mutex<F>>> = progress_cb.map(|cb| Arc::new(Mutex::new(cb)));
+        let emit = |evt: ScanProgressEvent| {
+            if let Some(cb) = &shared_cb {
+                if let Ok(mut g) = cb.lock() {
+                    (*g)(evt);
+                }
+            }
+        };
+        emit(ScanProgressEvent::Started {
+            session_id: session_id.clone(),
+        });
+
+        let scan_result = if let Some(cb) = &shared_cb {
+            let sid = session_id.clone();
+            let cb2 = cb.clone();
+            let wrapped: Arc<dyn Fn(ScanProgress) + Send + Sync> =
+                Arc::new(move |p: ScanProgress| {
+                    if let Ok(mut g) = cb2.lock() {
+                        (*g)(ScanProgressEvent::Progress {
+                            session_id: sid.clone(),
+                            completed_targets: p.completed_targets,
+                            total_targets: p.total_targets,
+                            current_target_id: p.current_target_id,
+                            current_target_name: p.current_target_name,
+                            scanned_items: p.scanned_items.to_string(),
+                            scanned_bytes: p.scanned_bytes.to_string(),
+                        });
+                    }
+                });
+            scanner::scan_with_settings_current_elevation_with_progress(
+                &prepared.effective_settings,
+                prepared.cancel.clone(),
+                Some(wrapped),
+            )
+        } else {
+            scanner::scan_with_settings_current_elevation_with_progress(
+                &prepared.effective_settings,
+                prepared.cancel.clone(),
+                None,
+            )
+        };
+
+        match scan_result {
+            Ok(report) => {
+                if let Err(err) = self.finish_scan(
+                    clock,
+                    &session_id,
+                    prepared.settings_generation,
+                    current_settings_generation,
+                    prepared.effective_settings.min_age_hours,
+                    report,
+                ) {
+                    emit(ScanProgressEvent::Failed {
+                        session_id: session_id.clone(),
+                        error: err.clone(),
+                    });
+                    return Err(err);
+                }
+                emit(ScanProgressEvent::Completed {
+                    session_id: session_id.clone(),
+                });
+                Ok(StartScanResponse { session_id })
+            }
+            Err(ScanError::Cancelled) => {
+                self.abort_scan(&session_id);
+                emit(ScanProgressEvent::Cancelled {
+                    session_id: session_id.clone(),
+                });
+                Err(ContractError::Internal {
+                    reason: "scan cancelled".to_string(),
+                })
+            }
+            Err(e) => {
+                self.abort_scan(&session_id);
+                let mapped = ContractError::Internal {
+                    reason: sanitize_reason(&e.to_string()),
+                };
+                emit(ScanProgressEvent::Failed {
+                    session_id: session_id.clone(),
+                    error: mapped.clone(),
+                });
+                Err(mapped)
+            }
+        }
     }
 
     /// Get scan results for a valid scan session.
@@ -280,7 +465,59 @@ impl SessionStore {
         Ok(session.results.clone())
     }
 
-    /// Start a read-only analyzer session and store it for Preview/Clean routing.
+    /// Register and prepare an analyzer run (short lock).
+    pub fn begin_analyzer<C: Clock>(
+        &mut self,
+        clock: &C,
+        settings_generation: u64,
+    ) -> Result<PreparedAnalyzer, ContractError> {
+        self.cleanup(clock);
+        let now = clock.now_unix_secs();
+        let session_id = self.next_id("analyzer", now);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.active_analyzers
+            .insert(session_id.clone(), cancel.clone());
+        Ok(PreparedAnalyzer {
+            session_id,
+            settings_generation,
+            cancel,
+        })
+    }
+
+    /// Commit a completed analyzer session (short lock). Re-checks settings generation unchanged.
+    pub fn finish_analyzer<C: Clock>(
+        &mut self,
+        clock: &C,
+        session_id: &str,
+        settings_generation_at_start: u64,
+        current_settings_generation: u64,
+        min_age_hours: u32,
+        result: AnalyzerResult,
+    ) -> Result<StartAnalyzerResponse, ContractError> {
+        self.active_analyzers.remove(session_id);
+        if settings_generation_at_start != current_settings_generation {
+            return Err(ContractError::SessionInvalid {
+                reason: "session invalidated by settings change".to_string(),
+            });
+        }
+        let now = clock.now_unix_secs();
+        let dto = map_analyzer_result_to_dto(session_id, &result);
+        self.insert_analyzer_session(AnalyzerSessionInput {
+            id: session_id.to_string(),
+            created_at: now,
+            settings_generation: settings_generation_at_start,
+            result,
+            min_age_hours,
+        });
+        Ok(dto)
+    }
+
+    /// Mark an analyzer run as no longer active.
+    pub fn abort_analyzer(&mut self, session_id: &str) {
+        self.active_analyzers.remove(session_id);
+    }
+
+    /// Start a read-only analyzer session and store it for Preview/Clean routing (synchronous helper).
     pub fn start_analyzer<C, P>(
         &mut self,
         clock: &C,
@@ -293,11 +530,8 @@ impl SessionStore {
         C: Clock,
         P: Fn(AnalyzerProgressEvent) + Send + Sync + 'static,
     {
-        self.cleanup(clock);
-        let now = clock.now_unix_secs();
-        let session_id = self.next_id("analyzer", now);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let sid_for_progress = session_id.clone();
+        let prepared = self.begin_analyzer(clock, settings_generation)?;
+        let sid_for_progress = prepared.session_id.clone();
         let progress = progress_cb.map(|cb| {
             Arc::new(move |p: AnalyzerProgress| {
                 cb(AnalyzerProgressEvent {
@@ -313,17 +547,26 @@ impl SessionStore {
             allow_unknown: settings.allow_delete_unknown,
             ..AnalyzerOptions::default()
         };
-        let result = analyzer::analyze_path(root.as_deref(), cancel, progress, options)
-            .map_err(map_analyzer_error)?;
-        let dto = map_analyzer_result_to_dto(&session_id, &result);
-        self.insert_analyzer_session(AnalyzerSessionInput {
-            id: dto.session_id.clone(),
-            created_at: now,
+        let result = match analyzer::analyze_path(
+            root.as_deref(),
+            prepared.cancel.clone(),
+            progress,
+            options,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                self.abort_analyzer(&prepared.session_id);
+                return Err(map_analyzer_error(e));
+            }
+        };
+        self.finish_analyzer(
+            clock,
+            &prepared.session_id,
+            prepared.settings_generation,
             settings_generation,
+            settings.min_age_hours,
             result,
-            min_age_hours: settings.min_age_hours,
-        });
-        Ok(dto)
+        )
     }
 
     /// Create a preview token for selected item IDs (no clean).
@@ -669,7 +912,9 @@ impl SessionStore {
         Ok((min_age_hours, validated_items, preview_estimated_bytes))
     }
 
-    /// Execute clean for a preview token (consumes token atomically).
+    /// Execute clean for a preview token (consumes token atomically; runs removal while holding `&mut self`).
+    ///
+    /// Prefer `commands_impl::execute_clean` for lock-split execution.
     pub fn execute_clean<C, F>(
         &mut self,
         clock: &C,
@@ -695,7 +940,8 @@ impl SessionStore {
         )
     }
 
-    fn execute_validated_clean_batch<C, F>(
+    /// Run clean removal for an already-validated, token-consumed batch (no SessionStore lock required).
+    pub fn execute_validated_clean_batch<C, F>(
         clock: &C,
         preview_token: &str,
         min_age_hours: u32,
@@ -946,6 +1192,10 @@ fn option_tier_to_dto(t: Option<Tier>) -> Option<TierDto> {
     t.map(tier_to_dto)
 }
 
+pub(crate) fn map_analyzer_error_pub(e: analyzer::AnalyzerError) -> ContractError {
+    map_analyzer_error(e)
+}
+
 fn map_analyzer_error(e: analyzer::AnalyzerError) -> ContractError {
     match e {
         analyzer::AnalyzerError::InvalidRoot(reason) | analyzer::AnalyzerError::Walk(reason) => {
@@ -1100,6 +1350,10 @@ fn find_containing_root(roots: &[String], item_path: &str) -> Option<String> {
     best.map(|(_, r)| r)
 }
 
+pub(crate) fn sanitize_reason_pub(s: &str) -> String {
+    sanitize_reason(s)
+}
+
 fn sanitize_reason(s: &str) -> String {
     let lower = s.to_lowercase();
     if lower.contains("path")
@@ -1165,6 +1419,24 @@ fn detect_new_log_id(log_dir: &std::path::Path, existing: &HashSet<String>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::FixedClock;
+    use std::sync::{Arc, Mutex};
+    use sweeper_core::scanner::ScanReport;
+    use sweeper_core::settings::SweeperSettings;
+
+    impl SessionStore {
+        fn is_scan_active(&self, session_id: &str) -> bool {
+            self.active_scans.contains_key(session_id)
+        }
+    }
+
+    fn empty_scan_report() -> ScanReport {
+        ScanReport {
+            started_unix_secs: 0,
+            min_age_hours: 24,
+            targets: Vec::new(),
+        }
+    }
 
     #[test]
     fn find_root_prefers_longest_match() {
@@ -1174,5 +1446,85 @@ mod tests {
         ];
         let found = find_containing_root(&roots, r"C:\Users\A\AppData\Local\Temp\f.txt");
         assert_eq!(found.as_deref(), Some(r"C:\Users\A\AppData\Local\Temp"));
+    }
+
+    #[test]
+    fn finish_scan_settings_mismatch_clears_active_tracking() {
+        let clock = FixedClock::new(1_800_000_000);
+        let mut store = SessionStore::new();
+        let settings = SweeperSettings::default();
+        let prepared = store.begin_scan(&clock, None, &settings, 1).unwrap();
+        assert!(store.is_scan_active(&prepared.session_id));
+
+        let err = store
+            .finish_scan(
+                &clock,
+                &prepared.session_id,
+                1,
+                2,
+                settings.min_age_hours,
+                empty_scan_report(),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ContractError::SessionInvalid { ref reason } if reason == "session invalidated by settings change"
+        ));
+        assert!(
+            !store.is_scan_active(&prepared.session_id),
+            "active scan tracking must be cleared when finish_scan is rejected"
+        );
+    }
+
+    #[test]
+    fn start_scan_with_progress_emits_failed_terminal_event_on_finish_settings_mismatch() {
+        let clock = FixedClock::new(1_800_000_000);
+        let mut store = SessionStore::new();
+        let settings = SweeperSettings {
+            enable_tier1: false,
+            enable_tier2: false,
+            enable_tier3: false,
+            ..SweeperSettings::default()
+        };
+
+        let events: Arc<Mutex<Vec<ScanProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_cb = events.clone();
+        let err = store
+            .start_scan_with_progress(
+                &clock,
+                None,
+                &settings,
+                1,
+                2,
+                Some(move |evt: ScanProgressEvent| {
+                    events_cb.lock().unwrap().push(evt);
+                }),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ContractError::SessionInvalid { ref reason } if reason == "session invalidated by settings change"
+        ));
+
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(events.first(), Some(ScanProgressEvent::Started { .. })),
+            "expected Started event, got: {events:?}"
+        );
+        match events.last() {
+            Some(ScanProgressEvent::Failed { session_id, error }) => {
+                assert!(!session_id.is_empty());
+                assert_eq!(error, &err);
+            }
+            other => panic!("expected terminal Failed event, got: {other:?} (all: {events:?})"),
+        }
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, ScanProgressEvent::Completed { .. })),
+            "must not emit Completed when finish_scan fails: {events:?}"
+        );
     }
 }

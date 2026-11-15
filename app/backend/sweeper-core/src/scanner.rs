@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -115,12 +117,35 @@ pub struct ScanReport {
     pub targets: Vec<TargetScanResult>,
 }
 
+/// Read-only incremental scan progress snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanProgress {
+    /// Number of targets completed so far.
+    pub completed_targets: u32,
+    /// Total number of targets in this scan run.
+    pub total_targets: u32,
+    /// Currently scanning target id, if any.
+    pub current_target_id: Option<String>,
+    /// Currently scanning target name, if any.
+    pub current_target_name: Option<String>,
+    /// Aggregate scanned/observed items so far.
+    pub scanned_items: u64,
+    /// Aggregate scanned/observed bytes so far.
+    pub scanned_bytes: u64,
+}
+
+/// Cooperative scan progress callback.
+pub type ScanProgressCallback = Arc<dyn Fn(ScanProgress) + Send + Sync>;
+
 /// Scan-time errors that are not per-target disable reasons.
 #[derive(Debug, Error)]
 pub enum ScanError {
     /// Failed to enumerate embedded allowlist.
     #[error("failed to load embedded targets: {0}")]
     Targets(String),
+    /// Scan was cooperatively cancelled.
+    #[error("scan cancelled")]
+    Cancelled,
 }
 
 /// Scan enabled Tier 1 & Tier 2 embedded targets with the given minimum-age override (hours).
@@ -171,6 +196,84 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
     redirected_temp_candidate: Option<&str>,
     elevation_target_root_overrides: &BTreeMap<String, String>,
 ) -> Result<ScanReport, ScanError> {
+    scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
+        targets,
+        min_age_hours,
+        redirected_temp_candidate,
+        elevation_target_root_overrides,
+        Arc::new(AtomicBool::new(false)),
+        None,
+    )
+}
+
+struct ScanProgressRuntime {
+    cancel: Arc<AtomicBool>,
+    cb: Option<ScanProgressCallback>,
+    completed_targets: u32,
+    total_targets: u32,
+    scanned_items: u64,
+    scanned_bytes: u64,
+    last_emit_at: Instant,
+    last_emit_items: u64,
+}
+
+impl ScanProgressRuntime {
+    fn new(total_targets: u32, cancel: Arc<AtomicBool>, cb: Option<ScanProgressCallback>) -> Self {
+        Self {
+            cancel,
+            cb,
+            completed_targets: 0,
+            total_targets,
+            scanned_items: 0,
+            scanned_bytes: 0,
+            last_emit_at: Instant::now(),
+            last_emit_items: 0,
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn emit(&mut self, current_target_id: Option<&str>, current_target_name: Option<&str>) {
+        if let Some(cb) = &self.cb {
+            cb(ScanProgress {
+                completed_targets: self.completed_targets,
+                total_targets: self.total_targets,
+                current_target_id: current_target_id.map(ToOwned::to_owned),
+                current_target_name: current_target_name.map(ToOwned::to_owned),
+                scanned_items: self.scanned_items,
+                scanned_bytes: self.scanned_bytes,
+            });
+            self.last_emit_at = Instant::now();
+            self.last_emit_items = self.scanned_items;
+        }
+    }
+
+    fn maybe_emit_throttled(
+        &mut self,
+        current_target_id: Option<&str>,
+        current_target_name: Option<&str>,
+    ) {
+        if self.cb.is_none() {
+            return;
+        }
+        let items_delta = self.scanned_items.saturating_sub(self.last_emit_items);
+        if items_delta >= 64 || self.last_emit_at.elapsed() >= Duration::from_millis(100) {
+            self.emit(current_target_id, current_target_name);
+        }
+    }
+}
+
+/// Scan a provided set of targets with optional overrides and cooperative cancellation/progress.
+pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
+    targets: Vec<TargetDefinition>,
+    min_age_hours: u32,
+    redirected_temp_candidate: Option<&str>,
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+    cancel: Arc<AtomicBool>,
+    progress_cb: Option<ScanProgressCallback>,
+) -> Result<ScanReport, ScanError> {
     validate_target_definitions(&targets).map_err(ScanError::Targets)?;
     let now = SystemTime::now();
     let started_unix_secs = system_time_to_unix_secs(now);
@@ -187,10 +290,15 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
         kf_roots.insert(kf, resolve_validated_known_folder_root(kf));
     }
 
+    let mut progress = ScanProgressRuntime::new(targets.len() as u32, cancel, progress_cb);
     let mut results = Vec::with_capacity(targets.len());
     let mut all_resolved_roots: Vec<(String, CanonicalPath)> = Vec::new();
 
     for target in targets {
+        if progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        progress.emit(Some(&target.id), Some(&target.name));
         let mut out = TargetScanResult {
             target_id: target.id.clone(),
             target_name: target.name.clone(),
@@ -222,6 +330,9 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                                     validate_target_roots_policy(&roots, &all_resolved_roots)
                                 {
                                     out.status_reason = Some(reason);
+                                    progress.completed_targets =
+                                        progress.completed_targets.saturating_add(1);
+                                    progress.emit(None, None);
                                     results.push(out);
                                     continue;
                                 }
@@ -230,13 +341,26 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                                 }
                                 out.resolved_paths =
                                     roots.iter().map(|(_, p)| p.to_string()).collect();
-                                scan_resolved_roots(&target, &roots, min_age, now, &mut out);
+                                scan_resolved_roots(
+                                    &target,
+                                    &roots,
+                                    min_age,
+                                    now,
+                                    &mut out,
+                                    &mut progress,
+                                )?;
+                                progress.completed_targets =
+                                    progress.completed_targets.saturating_add(1);
+                                progress.emit(None, None);
                                 results.push(out);
                                 continue;
                             }
                             Err(e) => {
                                 out.status_reason =
                                     Some(format!("elevation target root override invalid: {e}"));
+                                progress.completed_targets =
+                                    progress.completed_targets.saturating_add(1);
+                                progress.emit(None, None);
                                 results.push(out);
                                 continue;
                             }
@@ -245,6 +369,8 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                     Err(e) => {
                         out.status_reason =
                             Some(format!("elevation target root override unresolved: {e}"));
+                        progress.completed_targets = progress.completed_targets.saturating_add(1);
+                        progress.emit(None, None);
                         results.push(out);
                         continue;
                     }
@@ -260,6 +386,8 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
             Ok(p) => p,
             Err(e) => {
                 out.status_reason = Some(format!("known folder resolution failed: {e}"));
+                progress.completed_targets = progress.completed_targets.saturating_add(1);
+                progress.emit(None, None);
                 results.push(out);
                 continue;
             }
@@ -275,6 +403,9 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                             out.status_reason = Some(format!(
                                 "redirected-temp disabled: failed to resolve user-temp: {e}"
                             ));
+                            progress.completed_targets =
+                                progress.completed_targets.saturating_add(1);
+                            progress.emit(None, None);
                             results.push(out);
                             continue;
                         }
@@ -292,6 +423,9 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                                 validate_target_roots_policy(&roots, &all_resolved_roots)
                             {
                                 out.status_reason = Some(reason);
+                                progress.completed_targets =
+                                    progress.completed_targets.saturating_add(1);
+                                progress.emit(None, None);
                                 results.push(out);
                                 continue;
                             }
@@ -299,17 +433,32 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                                 all_resolved_roots.push((rid.clone(), r.clone()));
                             }
                             out.resolved_paths = roots.iter().map(|(_, p)| p.to_string()).collect();
-                            scan_resolved_roots(&target, &roots, min_age, now, &mut out);
+                            scan_resolved_roots(
+                                &target,
+                                &roots,
+                                min_age,
+                                now,
+                                &mut out,
+                                &mut progress,
+                            )?;
+                            progress.completed_targets =
+                                progress.completed_targets.saturating_add(1);
+                            progress.emit(None, None);
                             results.push(out);
                         }
                         Err(e) => {
                             out.status_reason = Some(e);
+                            progress.completed_targets =
+                                progress.completed_targets.saturating_add(1);
+                            progress.emit(None, None);
                             results.push(out);
                         }
                     }
                 }
                 TempGuard::Disabled(reason) => {
                     out.status_reason = Some(format!("redirected-temp disabled: {reason}"));
+                    progress.completed_targets = progress.completed_targets.saturating_add(1);
+                    progress.emit(None, None);
                     results.push(out);
                 }
             }
@@ -321,11 +470,15 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                 // Missing/unresolvable concrete roots (e.g. cache folders not present) are not scanned.
                 if roots.is_empty() {
                     out.status_reason = Some("not present".to_string());
+                    progress.completed_targets = progress.completed_targets.saturating_add(1);
+                    progress.emit(None, None);
                     results.push(out);
                     continue;
                 }
                 if let Err(reason) = validate_target_roots_policy(&roots, &all_resolved_roots) {
                     out.status_reason = Some(reason);
+                    progress.completed_targets = progress.completed_targets.saturating_add(1);
+                    progress.emit(None, None);
                     results.push(out);
                     continue;
                 }
@@ -333,11 +486,15 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
                     all_resolved_roots.push((rid.clone(), r.clone()));
                 }
                 out.resolved_paths = roots.iter().map(|(_, p)| p.to_string()).collect();
-                scan_resolved_roots(&target, &roots, min_age, now, &mut out);
+                scan_resolved_roots(&target, &roots, min_age, now, &mut out, &mut progress)?;
+                progress.completed_targets = progress.completed_targets.saturating_add(1);
+                progress.emit(None, None);
                 results.push(out);
             }
             Err(e) => {
                 out.status_reason = Some(e);
+                progress.completed_targets = progress.completed_targets.saturating_add(1);
+                progress.emit(None, None);
                 results.push(out);
             }
         }
@@ -356,12 +513,25 @@ fn scan_resolved_roots(
     min_age: Duration,
     now: SystemTime,
     out: &mut TargetScanResult,
-) {
+    progress: &mut ScanProgressRuntime,
+) -> Result<(), ScanError> {
     out.scanned = true;
     let mut next_item_seq: u64 = 0;
     for (_root_id, root) in roots {
-        scan_one_root_iterative(target, root, min_age, now, out, &mut next_item_seq);
+        if progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        scan_one_root_iterative(
+            target,
+            root,
+            min_age,
+            now,
+            out,
+            &mut next_item_seq,
+            progress,
+        )?;
     }
+    Ok(())
 }
 
 struct ScanWalkCtx<'a> {
@@ -371,6 +541,7 @@ struct ScanWalkCtx<'a> {
     out: &'a mut TargetScanResult,
     stack: &'a mut Vec<PathBuf>,
     next_item_seq: &'a mut u64,
+    progress: &'a mut ScanProgressRuntime,
 }
 
 fn scan_one_root_iterative(
@@ -380,7 +551,8 @@ fn scan_one_root_iterative(
     now: SystemTime,
     out: &mut TargetScanResult,
     next_item_seq: &mut u64,
-) {
+    progress: &mut ScanProgressRuntime,
+) -> Result<(), ScanError> {
     let mut stack: Vec<PathBuf> = vec![PathBuf::from(root.as_str())];
     let mut ctx = ScanWalkCtx {
         target,
@@ -389,8 +561,12 @@ fn scan_one_root_iterative(
         out,
         stack: &mut stack,
         next_item_seq,
+        progress,
     };
     while let Some(dir) = ctx.stack.pop() {
+        if ctx.progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
         let entries = match sweeper_winfs::read_dir_entries(&dir) {
             Ok(v) => v,
             Err(e) => {
@@ -399,13 +575,23 @@ fn scan_one_root_iterative(
                     SkipReason::Unreadable,
                     format!("read_dir_entries {}: {e}", dir.to_string_lossy()),
                 );
+                ctx.progress.maybe_emit_throttled(
+                    Some(ctx.target.id.as_str()),
+                    Some(ctx.target.name.as_str()),
+                );
                 continue;
             }
         };
         for ent in entries {
+            if ctx.progress.cancelled() {
+                return Err(ScanError::Cancelled);
+            }
             process_entry(&mut ctx, &ent);
         }
+        ctx.progress
+            .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
     }
+    Ok(())
 }
 
 fn process_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
@@ -454,6 +640,8 @@ fn record_file_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
     *ctx.next_item_seq += 1;
     let item = build_scan_item(ctx, ent, mtime_secs, old_enough);
     accumulate_file_item(ctx.out, &item);
+    ctx.progress.scanned_items = ctx.progress.scanned_items.saturating_add(1);
+    ctx.progress.scanned_bytes = ctx.progress.scanned_bytes.saturating_add(item.size);
     ctx.out.items.push(item);
 }
 
@@ -949,6 +1137,23 @@ pub fn scan_with_settings_options_and_elevation(
     opts: ScanSettingsOptions,
     elevation: crate::ScanElevationContext,
 ) -> Result<ScanReport, ScanError> {
+    scan_with_settings_options_and_elevation_with_progress(
+        settings,
+        opts,
+        elevation,
+        Arc::new(AtomicBool::new(false)),
+        None,
+    )
+}
+
+/// Scan with explicit elevation context and cooperative cancellation/progress reporting.
+pub fn scan_with_settings_options_and_elevation_with_progress(
+    settings: &crate::settings::SweeperSettings,
+    opts: ScanSettingsOptions,
+    elevation: crate::ScanElevationContext,
+    cancel: Arc<AtomicBool>,
+    progress_cb: Option<ScanProgressCallback>,
+) -> Result<ScanReport, ScanError> {
     let now = opts.now.unwrap_or_else(SystemTime::now);
     let started_unix_secs = system_time_to_unix_secs(now);
     let min_age = Duration::from_secs(u64::from(settings.min_age_hours) * 3600);
@@ -979,11 +1184,13 @@ pub fn scan_with_settings_options_and_elevation(
             targets: Vec::new(),
         }
     } else {
-        scan_targets_with_redirected_temp_and_elevation_overrides(
+        scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
             std::mem::take(&mut targets),
             settings.min_age_hours,
             opts.redirected_temp_candidate.as_deref(),
             &opts.elevation_target_root_overrides,
+            cancel.clone(),
+            progress_cb.clone(),
         )?
     };
     report.started_unix_secs = started_unix_secs;
@@ -993,6 +1200,39 @@ pub fn scan_with_settings_options_and_elevation(
     append_tier3_targets(&mut report, settings, &opts, min_age, now);
 
     Ok(report)
+}
+
+/// Scan using the current process elevation state with cooperative cancellation/progress reporting.
+pub fn scan_with_settings_current_elevation_with_progress(
+    settings: &crate::settings::SweeperSettings,
+    cancel: Arc<AtomicBool>,
+    progress_cb: Option<ScanProgressCallback>,
+) -> Result<ScanReport, ScanError> {
+    scan_with_settings_options_current_elevation_with_progress(
+        settings,
+        ScanSettingsOptions::default(),
+        cancel,
+        progress_cb,
+    )
+}
+
+/// Scan with options using the current process elevation state and cooperative cancellation/progress.
+pub fn scan_with_settings_options_current_elevation_with_progress(
+    settings: &crate::settings::SweeperSettings,
+    opts: ScanSettingsOptions,
+    cancel: Arc<AtomicBool>,
+    progress_cb: Option<ScanProgressCallback>,
+) -> Result<ScanReport, ScanError> {
+    let elevated = sweeper_winfs::is_process_elevated().unwrap_or(false);
+    scan_with_settings_options_and_elevation_with_progress(
+        settings,
+        opts,
+        crate::ScanElevationContext {
+            process_elevated: elevated,
+        },
+        cancel,
+        progress_cb,
+    )
 }
 
 fn scan_custom_path_target(
@@ -1057,12 +1297,14 @@ fn scan_custom_path_target(
         requires_elevation: false,
     };
     out.resolved_paths = vec![canon.to_string()];
-    scan_resolved_roots(
+    let mut progress = ScanProgressRuntime::new(0, Arc::new(AtomicBool::new(false)), None);
+    let _ = scan_resolved_roots(
         &td,
         &[(out.target_id.clone(), canon)],
         min_age,
         now,
         &mut out,
+        &mut progress,
     );
     out
 }
@@ -1194,7 +1436,8 @@ fn scan_tier3_recycle_bin(
             .to_string(),
         requires_elevation: false,
     };
-    scan_resolved_roots(&td, &valid_roots, min_age, now, &mut result);
+    let mut progress = ScanProgressRuntime::new(0, Arc::new(AtomicBool::new(false)), None);
+    let _ = scan_resolved_roots(&td, &valid_roots, min_age, now, &mut result, &mut progress);
     result
 }
 
@@ -1731,5 +1974,58 @@ mod tests {
             }
             TempGuard::Use(p) => panic!("expected disabled, got {p}"),
         }
+    }
+
+    #[test]
+    fn progress_callback_invoked_for_target_lifecycle() {
+        let target = sample_target("missing-target-progress", "SweeperNonExistentProgress\\Sub");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ScanProgress>::new()));
+        let seen_cb = seen.clone();
+        let cb: ScanProgressCallback = std::sync::Arc::new(move |p| {
+            seen_cb.lock().unwrap().push(p);
+        });
+        let report = scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
+            vec![target],
+            24,
+            None,
+            &BTreeMap::new(),
+            std::sync::Arc::new(AtomicBool::new(false)),
+            Some(cb),
+        )
+        .expect("scan should succeed");
+        assert_eq!(report.targets.len(), 1);
+        let events = seen.lock().unwrap();
+        assert!(!events.is_empty(), "expected progress callbacks");
+        assert_eq!(events[0].total_targets, 1);
+        assert_eq!(
+            events[0].current_target_id.as_deref(),
+            Some("missing-target-progress")
+        );
+        let last = events.last().unwrap();
+        assert_eq!(last.completed_targets, 1);
+        assert_eq!(last.total_targets, 1);
+    }
+
+    #[test]
+    fn cooperative_cancel_returns_cancelled_error() {
+        let targets = vec![
+            sample_target("missing-cancel-a", "SweeperNonExistentCancel\\A"),
+            sample_target("missing-cancel-b", "SweeperNonExistentCancel\\B"),
+        ];
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_cb = cancel.clone();
+        let cb: ScanProgressCallback = std::sync::Arc::new(move |_p| {
+            cancel_cb.store(true, Ordering::Relaxed);
+        });
+        let err = scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
+            targets,
+            24,
+            None,
+            &BTreeMap::new(),
+            cancel,
+            Some(cb),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ScanError::Cancelled));
     }
 }

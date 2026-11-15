@@ -8,6 +8,8 @@ pub mod remover;
 pub mod scanner;
 pub mod settings;
 
+pub use scanner::{ScanError, ScanProgress, ScanProgressCallback};
+
 /// Re-exported knowledge API/types for bridge/session layers (avoids direct sweeper-knowledge dependency).
 pub mod knowledge {
     pub use sweeper_knowledge::*;

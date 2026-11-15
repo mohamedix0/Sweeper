@@ -10,12 +10,18 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 use thiserror::Error;
 use walkdir::WalkDir;
 
 /// Sentinel file name required at the root of every deletion/test sandbox.
 pub const SENTINEL_FILE_NAME: &str = ".sweeper-sandbox-sentinel";
+
+/// Directory name prefix for Sweeper-owned test sandboxes.
+pub const SANDBOX_DIR_PREFIX: &str = "sweeper-sandbox-";
+/// Directory name prefix for Sweeper-owned canary trees.
+pub const CANARY_DIR_PREFIX: &str = "sweeper-canary-";
 
 /// Errors returned by the testkit.
 #[derive(Debug, Error)]
@@ -70,6 +76,9 @@ impl Sandbox {
     /// while preserving temp-area semantics required by allowlist-sensitive tests (e.g. Gate F).
     /// Falls back to a cargo-target sandbox base only when canonicalized temp is unavailable or
     /// still contains short-name segments.
+    ///
+    /// Opportunistically cleans up stale, sentinel-marked `sweeper-sandbox-*` directories left in
+    /// the selected base by previously aborted test runs (age-gated, never touching active runs).
     pub fn new() -> Result<Self> {
         Self::new_in(default_sandbox_base())
     }
@@ -78,11 +87,15 @@ impl Sandbox {
     ///
     /// Useful for tests that must satisfy path-policy constraints that reject locations
     /// under protected container roots (e.g. `%TEMP%` inside a user profile on Windows).
+    ///
+    /// Before creating a new sandbox, attempts opportunistic cleanup of stale `sweeper-sandbox-*`
+    /// orphans in `base_dir` (best-effort; failures are ignored so sandbox creation can proceed).
     pub fn new_in(base_dir: impl AsRef<Path>) -> Result<Self> {
         fs::create_dir_all(base_dir.as_ref())?;
+        let _ = cleanup_stale_sandboxes(base_dir.as_ref(), Duration::from_secs(3600));
         let dir = tempfile::Builder::new()
-            .prefix("sweeper-sandbox-")
-            .tempdir_in(base_dir)?;
+            .prefix(SANDBOX_DIR_PREFIX)
+            .tempdir_in(base_dir.as_ref())?;
         let root = dir.path().to_path_buf();
         let sentinel = root.join(SENTINEL_FILE_NAME);
         let mut f = fs::File::create(&sentinel)?;
@@ -138,6 +151,302 @@ impl Sandbox {
     }
 }
 
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        // The sentinel must be present for this to be a Sweeper-owned sandbox root.
+        // Best-effort, extended-length, non-following removal is used so deep/long-path trees
+        // (e.g. > MAX_PATH on Windows) do not leak sandbox directories in %TEMP%.
+        let sentinel = self.root.join(SENTINEL_FILE_NAME);
+        if !sentinel.is_file() {
+            return;
+        }
+        let _ = remove_dir_all_sandbox_root(&self.root);
+    }
+}
+
+/// Removes stale Sweeper-owned `sweeper-sandbox-*` directories under `base`.
+///
+/// Safety guards (all required before removal):
+/// 1. `base` is treated as the canonical temp/base directory; each candidate must be a direct child.
+/// 2. Directory name must start with [`SANDBOX_DIR_PREFIX`].
+/// 3. Candidate must not be a reparse point / symlink / junction.
+/// 4. Candidate must contain [`SENTINEL_FILE_NAME`].
+/// 5. Candidate must be older than `max_age` (based on filesystem modified time) so active
+///    parallel test runs are never disturbed.
+///
+/// Returns the number of directories removed.
+pub fn cleanup_stale_sandboxes(base: &Path, max_age: Duration) -> std::io::Result<usize> {
+    cleanup_stale_owned_dirs(base, max_age, OwnedTempKind::Sandbox)
+}
+
+/// Removes stale Sweeper-owned `sweeper-canary-*` directories under `base`.
+///
+/// Safety guards mirror sandbox cleanup except the marker check: a canary must contain at least
+/// one of the deterministic canary files seeded by [`CanaryTree::seed_external`].
+pub fn cleanup_stale_canaries(base: &Path, max_age: Duration) -> std::io::Result<usize> {
+    cleanup_stale_owned_dirs(base, max_age, OwnedTempKind::Canary)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OwnedTempKind {
+    Sandbox,
+    Canary,
+}
+
+impl OwnedTempKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Sandbox => SANDBOX_DIR_PREFIX,
+            Self::Canary => CANARY_DIR_PREFIX,
+        }
+    }
+
+    fn has_required_marker(self, path: &Path) -> bool {
+        match self {
+            Self::Sandbox => path.join(SENTINEL_FILE_NAME).is_file(),
+            Self::Canary => has_canary_markers(path),
+        }
+    }
+}
+
+fn cleanup_stale_owned_dirs(
+    base: &Path,
+    max_age: Duration,
+    kind: OwnedTempKind,
+) -> std::io::Result<usize> {
+    let base_canon = canonicalize_for_temp_cleanup(base)?;
+    // Never operate on a reparse-point base.
+    let base_meta = fs::symlink_metadata(&base_canon)?;
+    if is_reparse_point(&base_canon, &base_meta) || !base_meta.is_dir() {
+        return Ok(0);
+    }
+
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+
+    for entry in fs::read_dir(&base_canon)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Direct child containment check without following reparse points on the child.
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let parent_ok = path
+            .parent()
+            .is_some_and(|p| strip_extended_prefix(p.to_path_buf()) == base_canon);
+        if !parent_ok {
+            // read_dir yielded unexpected path; require direct child relationship.
+            continue;
+        }
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !name_str.starts_with(kind.prefix()) {
+            continue;
+        }
+
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        // Must not be a reparse point / symlink / junction.
+        if !meta.is_dir() || is_reparse_point(&path, &meta) {
+            continue;
+        }
+        if !kind.has_required_marker(&path) {
+            continue;
+        }
+        if !is_older_than(&meta, now, max_age) {
+            continue;
+        }
+
+        // Final guard: canonicalized child must still be a direct child of canonical base.
+        let child_canon = match fs::canonicalize(&path) {
+            Ok(p) => strip_extended_prefix(p),
+            Err(_) => continue,
+        };
+        if child_canon.parent() != Some(base_canon.as_path()) {
+            continue;
+        }
+
+        if remove_dir_all_sandbox_root(&child_canon).is_ok()
+            || remove_dir_all_sandbox_root(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn has_canary_markers(path: &Path) -> bool {
+    // Markers seeded by CanaryTree::seed_external: root.txt and nested/{file.txt,data.bin}
+    path.join("root.txt").is_file()
+        && path.join("nested").join("file.txt").is_file()
+        && path.join("nested").join("data.bin").is_file()
+}
+
+fn canonicalize_for_temp_cleanup(base: &Path) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(base)?;
+    let c = fs::canonicalize(base)?;
+    Ok(strip_extended_prefix(c))
+}
+
+// (helper removed; direct comparisons use strip_extended_prefix)
+
+fn is_older_than(meta: &fs::Metadata, now: SystemTime, max_age: Duration) -> bool {
+    let mtime = meta.modified().or_else(|_| meta.created()).ok();
+    match mtime {
+        Some(t) => now.duration_since(t).unwrap_or_default() >= max_age,
+        None => false,
+    }
+}
+
+#[cfg(windows)]
+fn is_reparse_point(_path: &Path, meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_path: &Path, meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
+#[allow(clippy::disallowed_methods)]
+fn remove_dir_all_sandbox_root(root: &Path) -> std::io::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let meta = fs::symlink_metadata(root)?;
+    if !meta.is_dir() || is_reparse_point(root, &meta) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sandbox root is not a removable directory or is a reparse point",
+        ));
+    }
+    let target = to_extended_path_for_removal(root);
+    remove_dir_all_no_follow(&target)
+}
+
+#[cfg(windows)]
+fn to_extended_path_for_removal(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s.starts_with(r"\\?\") {
+        path.to_path_buf()
+    } else if let Some(rest) = s.strip_prefix(r"\\") {
+        PathBuf::from(format!(r"\\?\UNC\{}", rest))
+    } else {
+        PathBuf::from(format!(r"\\?\{}", s))
+    }
+}
+
+#[cfg(not(windows))]
+fn to_extended_path_for_removal(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+/// Removes a Sweeper-owned sandbox/canary directory without following reparse points.
+///
+/// Iterative (non-recursive) so very deep trees (> MAX_PATH depth scenarios) do not overflow the
+/// stack during test teardown. This is test-harness cleanup for sentinel/marker-guarded temp
+/// artifacts only; it must never be used on user/system paths.
+#[allow(clippy::disallowed_methods)]
+fn remove_dir_all_no_follow(path: &Path) -> std::io::Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+
+    let ft = meta.file_type();
+    if ft.is_symlink() || is_reparse_point(path, &meta) {
+        // Never traverse reparse points; remove the link/entry itself.
+        return if meta.is_dir() {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        };
+    }
+
+    if ft.is_file() {
+        return fs::remove_file(path);
+    }
+
+    if !meta.is_dir() {
+        return Ok(());
+    }
+
+    // Iterative post-order deletion: collect child directories to remove after their contents.
+    let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
+    let mut dirs_postorder: Vec<PathBuf> = Vec::new();
+
+    while let Some(dir) = stack.pop() {
+        let dir_meta = match fs::symlink_metadata(&dir) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        if dir_meta.file_type().is_symlink()
+            || is_reparse_point(&dir, &dir_meta)
+            || !dir_meta.is_dir()
+        {
+            continue;
+        }
+
+        dirs_postorder.push(dir.clone());
+
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+
+        for entry in entries {
+            let entry = entry?;
+            let child = entry.path();
+            let child_meta = match entry.metadata().or_else(|_| fs::symlink_metadata(&child)) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+
+            if child_meta.file_type().is_symlink() || is_reparse_point(&child, &child_meta) {
+                // Never traverse reparse points/junctions; unlink entry only.
+                if child_meta.is_dir() {
+                    let _ = fs::remove_dir(&child).or_else(|_| fs::remove_file(&child));
+                } else {
+                    let _ = fs::remove_file(&child);
+                }
+                continue;
+            }
+
+            if child_meta.is_dir() {
+                stack.push(child);
+            } else {
+                match fs::remove_file(&child) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    // Remove directories deepest-first.
+    for dir in dirs_postorder.into_iter().rev() {
+        match fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(())
+}
+
 /// External canary tree with SHA-256 manifest for post-run integrity verification.
 #[derive(Debug)]
 pub struct CanaryTree {
@@ -149,8 +458,10 @@ pub struct CanaryTree {
 impl CanaryTree {
     /// Seed an external canary tree (outside any test sandbox) with deterministic files.
     pub fn seed_external(label: &str) -> Result<Self> {
+        // Best-effort cleanup of stale canaries in the OS temp dir (age-gated, safe guards).
+        let _ = cleanup_stale_canaries(&std::env::temp_dir(), Duration::from_secs(3600));
         let dir = tempfile::Builder::new()
-            .prefix(&format!("sweeper-canary-{label}-"))
+            .prefix(&format!("{CANARY_DIR_PREFIX}{label}-"))
             .tempdir()?;
         let root = dir.path().to_path_buf();
 
@@ -237,10 +548,15 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn default_sandbox_base() -> PathBuf {
+/// Selects the default base directory for test sandboxes.
+///
+/// Prefers canonicalized process temp only when it is safe (no short-name/`..` components and
+/// not under protected container roots that would make sandbox contents unselectable by policy).
+/// Falls back to cargo-target sandbox locations when temp is unsafe.
+pub fn default_sandbox_base() -> PathBuf {
     let temp = std::env::temp_dir();
     let canonical_temp = canonicalize_sandbox_base(temp.clone());
-    if !has_short_name_component(&canonical_temp) {
+    if is_safe_sandbox_base(&canonical_temp) {
         return canonical_temp;
     }
 
@@ -256,7 +572,7 @@ fn default_sandbox_base() -> PathBuf {
     }
 
     panic!(
-        "no safe non-short-name sandbox base found (canonical temp '{}' still contains a short-name segment and no safe cargo-target fallback was available)",
+        "no safe sandbox base found (temp '{}' is unsafe for sandboxing; no safe cargo-target fallback was available)",
         canonical_temp.display()
     );
 }
@@ -309,8 +625,48 @@ fn canonicalize_sandbox_base(base: PathBuf) -> PathBuf {
     normalize_sandbox_base_path(base)
 }
 
-fn is_safe_sandbox_base(path: &Path) -> bool {
-    !has_short_name_component(path) && !has_parent_dir_component(path)
+/// Returns true if `path` is safe to use as a Sweeper test sandbox base.
+///
+/// A safe sandbox base must not contain short-name (`~`) or `..` components and must not be
+/// located at or under protected container roots that would cause analyzer/policy to classify
+/// sandbox contents as protected/unselectable (drive roots and `C:\Windows`, `C:\Users`,
+/// `C:\ProgramData`, plus browser `User Data` container roots). Both normal and extended-length
+/// (`\\?\`) canonical Windows path forms are handled, case-insensitively.
+pub fn is_safe_sandbox_base(path: &Path) -> bool {
+    !has_short_name_component(path)
+        && !has_parent_dir_component(path)
+        && !is_under_protected_container_root_for_sandbox(path)
+}
+
+fn is_under_protected_container_root_for_sandbox(path: &Path) -> bool {
+    let normalized = strip_extended_prefix(path.to_path_buf());
+    let parts: Vec<String> = normalized
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(os) => Some(os.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+
+    // Drive root only (e.g. C:\) => no path segments after prefix/root.
+    if parts.is_empty()
+        && normalized
+            .components()
+            .any(|c| matches!(c, std::path::Component::RootDir))
+    {
+        return true;
+    }
+
+    // Match policy.rs protected container roots: exact or descendants of C:\Windows, C:\Users, C:\ProgramData.
+    if !parts.is_empty() {
+        let first = parts[0].to_ascii_uppercase();
+        if matches!(first.as_str(), "WINDOWS" | "USERS" | "PROGRAMDATA") {
+            return true;
+        }
+    }
+
+    // Match policy.rs: paths with "User Data" segment are treated as under protected browser container roots.
+    parts.iter().any(|s| s.eq_ignore_ascii_case("User Data"))
 }
 
 fn has_short_name_component(path: &Path) -> bool {

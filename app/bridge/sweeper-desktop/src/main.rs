@@ -6,123 +6,181 @@
 use sweeper_contract::{
     AnalyzerProgressEvent, CleanProgressEvent, ContractError, ElevationStatusDto,
     ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto, LogReadResponse,
-    PreviewCleanResponse, PreviewConfirmationsDto, RelaunchResultDto, ScanResultsDto, SettingsDto,
-    StartAnalyzerResponse, StartScanResponse, TierDto, ValidateCustomPathResponse,
+    PreviewCleanResponse, PreviewConfirmationsDto, RelaunchResultDto, ScanProgressEvent,
+    ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse, TierDto,
+    ValidateCustomPathResponse,
 };
 use sweeper_desktop::{commands_impl, AppState, SystemClock};
 use tauri::Emitter;
 
 #[tauri::command]
-fn start_scan(
+async fn start_scan(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState<SystemClock>>,
     tiers: Option<Vec<TierDto>>,
 ) -> Result<StartScanResponse, ContractError> {
-    commands_impl::start_scan(&state, tiers)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_for_progress = app.clone();
+        commands_impl::start_scan(
+            &state,
+            tiers,
+            Some(move |evt: ScanProgressEvent| {
+                let _ = app_for_progress.emit("ScanProgressEvent", evt);
+            }),
+        )
+    })
+    .await
+    .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn get_scan_results(
+async fn get_scan_results(
     state: tauri::State<'_, AppState<SystemClock>>,
     session_id: String,
 ) -> Result<ScanResultsDto, ContractError> {
-    commands_impl::get_scan_results(&state, session_id)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        commands_impl::get_scan_results(&state, session_id)
+    })
+    .await
+    .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn preview_clean(
+async fn preview_clean(
     state: tauri::State<'_, AppState<SystemClock>>,
     session_id: String,
     item_ids: Vec<String>,
     confirmations: Option<PreviewConfirmationsDto>,
 ) -> Result<PreviewCleanResponse, ContractError> {
-    commands_impl::preview_clean(&state, session_id, item_ids, confirmations)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        commands_impl::preview_clean(&state, session_id, item_ids, confirmations)
+    })
+    .await
+    .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn execute_clean(
+async fn execute_clean(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState<SystemClock>>,
     preview_token: String,
 ) -> Result<ExecuteCleanResponse, ContractError> {
-    commands_impl::execute_clean(&state, preview_token, None, |evt: CleanProgressEvent| {
-        let _ = app.emit("CleanProgressEvent", evt);
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        commands_impl::execute_clean(&state, preview_token, None, |evt: CleanProgressEvent| {
+            let _ = app.emit("CleanProgressEvent", evt);
+        })
     })
+    .await
+    .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn start_analyzer(
+async fn start_analyzer(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState<SystemClock>>,
     root: Option<String>,
 ) -> Result<StartAnalyzerResponse, ContractError> {
-    let app_for_progress = app.clone();
-    commands_impl::start_analyzer(
-        &state,
-        root,
-        Some(move |evt: AnalyzerProgressEvent| {
-            let _ = app_for_progress.emit("AnalyzerProgressEvent", evt);
-        }),
-    )
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_for_progress = app.clone();
+        commands_impl::start_analyzer(
+            &state,
+            root,
+            Some(move |evt: AnalyzerProgressEvent| {
+                let _ = app_for_progress.emit("AnalyzerProgressEvent", evt);
+            }),
+        )
+    })
+    .await
+    .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn explain_item(
+async fn explain_item(
     state: tauri::State<'_, AppState<SystemClock>>,
     item_id: String,
 ) -> Result<ExplainItemResponse, ContractError> {
-    commands_impl::explain_item(&state, item_id)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::explain_item(&state, item_id))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn get_settings(
+async fn get_settings(
     state: tauri::State<'_, AppState<SystemClock>>,
 ) -> Result<SettingsDto, ContractError> {
-    commands_impl::get_settings(&state)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::get_settings(&state))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn update_settings(
+async fn update_settings(
     state: tauri::State<'_, AppState<SystemClock>>,
     settings: SettingsDto,
 ) -> Result<SettingsDto, ContractError> {
-    commands_impl::update_settings(&state, settings)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::update_settings(&state, settings))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn validate_custom_path(
+async fn validate_custom_path(
     state: tauri::State<'_, AppState<SystemClock>>,
     path: String,
 ) -> Result<ValidateCustomPathResponse, ContractError> {
-    commands_impl::validate_custom_path(&state, path)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::validate_custom_path(&state, path))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn list_logs(
+async fn list_logs(
     state: tauri::State<'_, AppState<SystemClock>>,
 ) -> Result<Vec<LogMetadataDto>, ContractError> {
-    commands_impl::list_logs(&state)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::list_logs(&state))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn read_log(
+async fn read_log(
     state: tauri::State<'_, AppState<SystemClock>>,
     log_id: String,
 ) -> Result<LogReadResponse, ContractError> {
-    commands_impl::read_log(&state, log_id)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::read_log(&state, log_id))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn get_elevation_status(
+async fn get_elevation_status(
     state: tauri::State<'_, AppState<SystemClock>>,
 ) -> Result<ElevationStatusDto, ContractError> {
-    commands_impl::get_elevation_status(&state)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::get_elevation_status(&state))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 #[tauri::command]
-fn relaunch_elevated(
+async fn relaunch_elevated(
     state: tauri::State<'_, AppState<SystemClock>>,
 ) -> Result<RelaunchResultDto, ContractError> {
-    commands_impl::relaunch_elevated(&state)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || commands_impl::relaunch_elevated(&state))
+        .await
+        .map_err(commands_impl::join_error_to_contract_error)?
 }
 
 fn main() {

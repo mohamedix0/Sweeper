@@ -36,10 +36,23 @@ export type ContractError =
   | { code: 'notFound'; details: { reason: string } }
   | { code: 'internal'; details: { reason: string } };
 
-type ScanProgress =
+export type ScanProgressEvent =
   | { kind: 'started'; session_id: string }
+  | {
+      kind: 'progress';
+      session_id: string;
+      completed_targets: number;
+      total_targets: number;
+      current_target_id: string | null;
+      current_target_name: string | null;
+      scanned_items: string;
+      scanned_bytes: string;
+    }
+  | { kind: 'cancelled'; session_id: string }
   | { kind: 'completed'; session_id: string }
   | { kind: 'failed'; session_id: string; error: ContractError };
+
+type ScanProgress = ScanProgressEvent;
 
 export type AnalyzerProgressEvent = {
   sessionId: string;
@@ -337,9 +350,26 @@ function selectionNeedsConfirmation(nodes: AnalyzerNodeDto[], scanItems?: ScanIt
   return nodes.some((n) => n.risk === 'Unknown' || !n.targetId);
 }
 
+function normalizeMockPath(path: string): string {
+  return path.replace(/[\\/]+$/, '').toLowerCase();
+}
+
+function isAncestorMockPath(ancestorPath: string, descendantPath: string): boolean {
+  const a = normalizeMockPath(ancestorPath);
+  const d = normalizeMockPath(descendantPath);
+  if (!a || !d || a === d) return false;
+  const prefix = a.endsWith('\\') ? a : `${a}\\`;
+  return d.startsWith(prefix);
+}
+
+function dedupeAnalyzerNodes(nodes: AnalyzerNodeDto[]): AnalyzerNodeDto[] {
+  return nodes.filter((node, _, all) => !all.some((other) => other.id !== node.id && isAncestorMockPath(other.path, node.path)));
+}
+
 function analyzerBreakdown(selected: AnalyzerNodeDto[]): PreviewTargetBreakdownDto[] {
+  const deduped = dedupeAnalyzerNodes(selected);
   const by = new Map<string, { targetId: string; targetName: string; count: bigint; bytes: bigint }>();
-  for (const n of selected) {
+  for (const n of deduped) {
     const targetId = n.targetId ?? 'custom-path';
     const targetName = targetId === 'custom-path' ? 'Custom Path' : (n.targetId ?? n.name);
     const e = by.get(targetId) ?? { targetId, targetName, count: 0n, bytes: 0n };
@@ -502,6 +532,40 @@ export function createMockController(): MockController {
       };
       sessions.set(sessionId, state);
       onProgress?.({ kind: 'started', session_id: sessionId });
+      const totalTargets = targets.length;
+      let scannedItems = 0n;
+      let scannedBytes = 0n;
+      for (let i = 0; i < targets.length; i++) {
+        const target = targets[i];
+        const targetItems = BigInt(target.fileCount || target.items.length || 0);
+        const targetBytes = BigInt(target.totalBytes || '0');
+        scannedItems += targetItems;
+        scannedBytes += targetBytes;
+        onProgress?.({
+          kind: 'progress',
+          session_id: sessionId,
+          completed_targets: i + 1,
+          total_targets: totalTargets,
+          current_target_id: target.targetId,
+          current_target_name: target.targetName,
+          scanned_items: scannedItems.toString(),
+          scanned_bytes: scannedBytes.toString(),
+        });
+        await Promise.resolve();
+      }
+      if (totalTargets === 0) {
+        onProgress?.({
+          kind: 'progress',
+          session_id: sessionId,
+          completed_targets: 0,
+          total_targets: 0,
+          current_target_id: null,
+          current_target_name: null,
+          scanned_items: '0',
+          scanned_bytes: '0',
+        });
+        await Promise.resolve();
+      }
       onProgress?.({ kind: 'completed', session_id: sessionId });
       return { sessionId };
     },
@@ -599,16 +663,17 @@ export function createMockController(): MockController {
           selected.push(node);
         }
         if (unknownCount > 0) err('unknownItem', String(unknownCount));
-        if (selectionNeedsConfirmation(selected)) {
+        const dedupedSelected = dedupeAnalyzerNodes(selected);
+        if (selectionNeedsConfirmation(dedupedSelected)) {
           const typed = confirmations?.typedConfirmation ?? null;
           if (typed !== 'DELETE') err('invalidInput', 'Typed confirmation required: enter DELETE to continue.');
         }
-        const breakdown = analyzerBreakdown(selected);
-        const totalBytes = selected.reduce((a, n) => a + BigInt(n.sizeBytes), 0n);
+        const breakdown = analyzerBreakdown(dedupedSelected);
+        const totalBytes = dedupedSelected.reduce((a, n) => a + BigInt(n.sizeBytes), 0n);
         previewSeq += 1;
         const token = `mock-preview-${previewSeq}`;
-        previews.set(token, { token, sessionId, createdAtMs: nowMs, used: false, itemIds: [...itemIds], settingsGeneration, previewEstimatedBytes: totalBytes.toString() });
-        return { previewToken: token, breakdown, totalSelectedCount: BigInt(selected.length).toString(), totalSelectedBytes: totalBytes.toString() };
+        previews.set(token, { token, sessionId, createdAtMs: nowMs, used: false, itemIds: dedupedSelected.map((n) => n.id), settingsGeneration, previewEstimatedBytes: totalBytes.toString() });
+        return { previewToken: token, breakdown, totalSelectedCount: BigInt(dedupedSelected.length).toString(), totalSelectedBytes: totalBytes.toString() };
       }
 
       err('sessionInvalid', 'Session not found.');
@@ -627,11 +692,16 @@ export function createMockController(): MockController {
       let deletedCount = 0n;
       let skippedCount = 0n;
       const reasons: Record<string, bigint> = {};
-      const total = BigInt(p.itemIds.length);
-      let completed = 0n;
       const scanSession = sessions.get(p.sessionId);
       const analyzerSession = analyzerSessions.get(p.sessionId);
-      for (const id of p.itemIds) {
+      let effectiveItemIds = [...p.itemIds];
+      if (analyzerSession) {
+        const nodes = p.itemIds.map((id) => analyzerSession.nodesById.get(id)).filter(Boolean) as AnalyzerNodeDto[];
+        effectiveItemIds = dedupeAnalyzerNodes(nodes).map((n) => n.id);
+      }
+      const total = BigInt(effectiveItemIds.length);
+      let completed = 0n;
+      for (const id of effectiveItemIds) {
         let targetId = 'unknown';
         let ok = false;
         let bytes = 0n;
