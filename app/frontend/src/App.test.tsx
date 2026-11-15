@@ -109,8 +109,8 @@ describe('Sweeper frontend', () => {
     await user.click(screen.getByRole('button', { name: 'Scan & Clean' }));
     await user.click(screen.getByRole('button', { name: 'Start Scan' }));
     await screen.findByRole('heading', { name: 'Inspector' });
-    const expandCustomPathBtn = screen.queryByRole('button', { name: /Expand Custom Path/i });
-    if (expandCustomPathBtn) await user.click(expandCustomPathBtn);
+    const expandCustomPathBtn2 = screen.queryByRole('button', { name: /Expand Custom Path/i });
+    if (expandCustomPathBtn2) await user.click(expandCustomPathBtn2);
 
     const unknownCb2 = screen.getByLabelText('Select C:\\Users\\Alice\\CustomCleanup\\old.bin') as HTMLInputElement;
     expect(unknownCb2).toBeEnabled();
@@ -141,7 +141,7 @@ describe('Sweeper frontend', () => {
       'Allow system-wide Windows caches (Admin)',
     ) as HTMLInputElement;
     expect(elevationToggle).toBeDisabled();
-    expect(screen.getByText(/unlock system-wide caches/i)).toBeInTheDocument();
+    expect(screen.getByText(/Deep Cleanup must be enabled first/i)).toBeInTheDocument();
 
     await user.click(screen.getAllByRole('button', { name: 'Run as administrator' })[0]);
     expect((await screen.findAllByRole('alert')).some((el) => /Administrator launch was cancelled/i.test(el.textContent || ''))).toBe(true);

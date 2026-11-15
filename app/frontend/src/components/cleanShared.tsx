@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { RiskDto } from '../contract/bindings';
-import { InfoIcon } from './Icons';
+import type { ExecuteCleanResponse, RiskDto } from '../api/client';
+import { formatBytes, normalizeDisplayPath, pluralize, relativeAge } from '../utils/format';
+import { CopyIcon, FileIcon, FolderOpenIcon, FolderIcon, InfoIcon } from './Icons';
 
 export type ExplainState = { itemId: string; title: string; description: string; risk: RiskDto } | null;
 export type PreviewResult = {
@@ -12,11 +13,168 @@ export type PreviewResult = {
 };
 
 export const SESSION_TTL_MS = 15 * 60 * 1000;
-export const PREVIEW_TTL_MS = 10 * 60 * 1000;
 export const TYPED_CONFIRMATION_PHRASE = 'DELETE';
 
-export function riskClass(risk: RiskDto): string {
-  return `badge risk-${risk}`;
+export async function copyText(text: string) {
+  try {
+    await navigator.clipboard?.writeText(text);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function openContainingFolder(path: string) {
+  const clean = normalizeDisplayPath(path).replace(/[\\/]+$/, '');
+  const idx = clean.lastIndexOf('\\');
+  const folder = idx > 2 ? clean.slice(0, idx) : clean || 'C:\\';
+  try {
+    window.open(`file:///${folder.replace(/\\/g, '/')}`, '_blank', 'noopener,noreferrer');
+  } catch {
+    /* ignore */
+  }
+}
+
+export function formatModifiedAge(mtimeUnixSecs: string | null | undefined, ageEligible: boolean): string {
+  const rel = relativeAge(mtimeUnixSecs ?? null);
+  if (ageEligible) return rel === '—' ? 'Older than minimum age' : rel;
+  return rel === '—' ? 'Recent (< 24h)' : `${rel} (< 24h)`;
+}
+
+export function PathWell({ path }: { path: string }) {
+  const fullPath = normalizeDisplayPath(path) || 'C:\\';
+  const lastSep = Math.max(fullPath.lastIndexOf('\\'), fullPath.lastIndexOf('/'));
+  const dirPart = lastSep > 0 ? `${fullPath.slice(0, lastSep + 1)}` : '';
+  const leafPart = lastSep > 0 ? fullPath.slice(lastSep + 1) : fullPath;
+  return (
+    <div className="path-well path-well-compact" aria-label="Full path" title={fullPath}>
+      <div className="path-well-lines mono">
+        {dirPart ? <div className="path-well-dir path-well-line">{dirPart}</div> : null}
+        <div className="path-well-file path-well-line">{leafPart || fullPath}</div>
+      </div>
+    </div>
+  );
+}
+
+export function PathActions({ path }: { path: string }) {
+  const fullPath = normalizeDisplayPath(path) || 'C:\\';
+  return (
+    <div className="inspector-path-actions" aria-label="Path actions">
+      <button type="button" className="btn small subtle-btn" onClick={() => void copyText(fullPath)} aria-label="Copy path" title="Copy path">
+        <CopyIcon />
+        <span>Copy Path</span>
+      </button>
+      <button type="button" className="btn small subtle-btn" onClick={() => openContainingFolder(fullPath)} aria-label="Reveal in Explorer" title="Reveal in Explorer">
+        <FolderOpenIcon />
+        <span>Reveal in Explorer</span>
+      </button>
+    </div>
+  );
+}
+
+export function InspectorMetaGrid({
+  size,
+  modifiedAge,
+  eligibility,
+  extraLabel,
+  extraValue,
+}: {
+  size: string;
+  modifiedAge?: string | null;
+  safety?: string;
+  eligibility: string;
+  extraLabel?: string;
+  extraValue?: ReactNode;
+}) {
+  const secondLabel = modifiedAge != null ? 'Modified' : (extraLabel ?? 'Details');
+  const secondValue = modifiedAge != null ? modifiedAge : (extraValue ?? '—');
+  return (
+    <dl className="inspector-meta-grid inspector-meta-grid-v19" aria-label="Item metadata">
+      <div><dt>Size</dt><dd className="num">{formatBytes(size)}</dd></div>
+      <div><dt>{secondLabel}</dt><dd>{secondValue}</dd></div>
+      <div className="inspector-meta-eligibility inspector-meta-eligibility-full"><dt>Eligibility</dt><dd>{eligibility}</dd></div>
+    </dl>
+  );
+}
+
+export function InspectorTitleRow({
+  icon,
+  title,
+  subtitle,
+  badge,
+}: {
+  icon: ReactNode;
+  title: string;
+  subtitle?: string | null;
+  badge: ReactNode;
+}) {
+  return (
+    <div className="inspector-header-block">
+      <div className="inspector-title-row">
+        <span className="inspector-leading-icon-wrap" aria-hidden="true">{icon}</span>
+        <div className="inspector-title-copy">
+          <span className="inspector-headline-name" title={title}>{title}</span>
+          {subtitle ? <span className="inspector-subtitle muted">{subtitle}</span> : null}
+        </div>
+        {badge}
+      </div>
+    </div>
+  );
+}
+
+export function PreviewBreakdownBlock({
+  preview,
+  cleaning,
+  cleanProgressLabel,
+}: {
+  preview: PreviewResult;
+  cleaning: boolean;
+  cleanProgressLabel: string | null;
+}) {
+  return (
+    <div aria-live="polite" className="preview-breakdown">
+      <h4 className="preview-breakdown-title">Preview Breakdown</h4>
+      <p className="preview-total"><strong>Total selected:</strong> {pluralize(Number(preview.totalSelectedCount || '0'), 'item', 'items')}, <span className="num">{formatBytes(preview.totalSelectedBytes)}</span></p>
+      <table className="table" aria-label="Preview breakdown by Target">
+        <thead><tr><th>Target</th><th>Count</th><th>Size</th></tr></thead>
+        <tbody>
+          {preview.breakdown.map((b) => (
+            <tr key={b.targetId}><td>{b.targetName}</td><td>{b.selectedCount}</td><td>{formatBytes(b.selectedBytes)}</td></tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="clean-footer" role="alert" aria-live="polite">
+        <div className="clean-footer-warning"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
+      </div>
+      {cleaning && (
+        <div className="notice info" role="status" aria-live="polite">
+          <div>Cleaning in progress…</div>
+          {cleanProgressLabel && <div>{cleanProgressLabel}</div>}
+          <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function CleanSummaryBlock({ summary, onOpenLog }: { summary: ExecuteCleanResponse; onOpenLog: (logId: string) => void }) {
+  return (
+    <div className="clean-summary-section" aria-labelledby="clean-summary-heading" role="status">
+      <h4 id="clean-summary-heading" className="clean-summary-title">Clean Summary</h4>
+      {summary.aborted && <div className="notice error" role="alert"><strong>Clean aborted.</strong> {summary.abortReason || 'The operation was aborted.'}</div>}
+      <dl className="kv">
+        <dt>Bytes freed</dt><dd className="num">{formatBytes(summary.bytesFreed)}</dd>
+        <dt>Deleted count</dt><dd className="num">{summary.deletedCount}</dd>
+        <dt>Skipped count</dt><dd className="num">{summary.skippedCount}</dd>
+      </dl>
+      <div>
+        <strong className="subheading-xs">Skipped reasons</strong>
+        {summary.skippedReasons.length === 0 ? <p className="muted small-note" aria-label="Skipped reasons">None.</p> : (
+          <ul aria-label="Skipped reasons" className="skipped-reasons">{summary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
+        )}
+      </div>
+      {summary.logId && <div className="row row-top"><button className="btn" onClick={() => onOpenLog(summary.logId!)}>View Operation Log</button></div>}
+    </div>
+  );
 }
 
 export function InfoTip({ label, children, align = 'left' }: { label: string; children: ReactNode; align?: 'left' | 'right' }) {
@@ -77,77 +235,7 @@ export function InfoTip({ label, children, align = 'left' }: { label: string; ch
       >
         <InfoIcon />
       </button>
-      {open && (
-        <span className="info-tip-popover" role="tooltip">
-          {children}
-        </span>
-      )}
+      {open && <span className="info-tip-popover" role="tooltip">{children}</span>}
     </span>
-  );
-}
-
-export function TtlIndicator({
-  label,
-  issuedAtMs,
-  ttlMs,
-  tooltip,
-}: {
-  label: string;
-  issuedAtMs: number;
-  ttlMs: number;
-  tooltip?: string;
-}) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((x) => x + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const remaining = Math.max(0, ttlMs - (Date.now() - issuedAtMs));
-  const mins = Math.floor(remaining / 60000);
-  const secs = Math.floor((remaining % 60000) / 1000);
-  return (
-    <span className="meta-chip num">
-      <span>{label}: {mins}:{secs.toString().padStart(2, '0')}</span>
-      {tooltip && (
-        <InfoTip label={`${label} info`} align="right">
-          <p>{tooltip}</p>
-        </InfoTip>
-      )}
-    </span>
-  );
-}
-
-export function ExplainDrawer({ explain, onClose }: { explain: ExplainState; onClose: () => void }) {
-  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (explain) closeBtnRef.current?.focus();
-  }, [explain]);
-  if (!explain) return null;
-  return (
-    <div className="drawer-backdrop" role="presentation" onClick={onClose}>
-      <aside
-        className="drawer"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="explain-title"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose();
-        }}
-      >
-        <div className="row drawer-header">
-          <h3 id="explain-title">Explain: {explain.title}</h3>
-          <div className="spacer" />
-          <button ref={closeBtnRef} className="btn" onClick={onClose} aria-label="Close explanation">Close</button>
-        </div>
-        <p className="drawer-risk"><span className={riskClass(explain.risk)}>Risk: {explain.risk}</span></p>
-        <p className="drawer-description">{explain.description}</p>
-        <div className="drawer-meta-card">
-          <dl className="kv drawer-kv">
-            <dt>Item ID</dt><dd><code>{explain.itemId}</code></dd>
-          </dl>
-        </div>
-      </aside>
-    </div>
   );
 }

@@ -8,59 +8,120 @@ import {
   type StartAnalyzerResult,
   type SweeperClient,
 } from '../api/client';
-import type { AnalyzerNodeDto, ContractError, RiskDto } from '../contract/bindings';
-import { formatBytes, normalizeDisplayPath, pluralize } from '../utils/format';
+import type { AnalyzerNodeDto, ContractError } from '../contract/bindings';
+import { formatBytes, middleTruncatePath, normalizeDisplayPath, pluralize } from '../utils/format';
 import {
+  CleanSummaryBlock,
+  copyText,
+  InspectorMetaGrid,
+  InspectorTitleRow,
+  PathActions,
+  PathWell,
+  PreviewBreakdownBlock,
   TYPED_CONFIRMATION_PHRASE,
-  riskClass,
   type ExplainState,
+  type PreviewResult,
 } from './cleanShared';
 import {
   BrowseIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CloudIcon,
-  CopyIcon,
   DriveIcon,
+  FileIcon,
   FolderIcon,
-  FolderOpenIcon,
   HardDriveIcon,
   LinkIcon,
   RefreshIcon,
-  SettingsLockIcon,
   ShieldIcon,
 } from './Icons';
 
 type FlatAnalyzerRow = { node: AnalyzerNodeDto; depth: number; siblingMax: bigint };
+type AnalyzerStatusFilter = 'all' | 'safe' | 'caution' | 'unknown' | 'locked';
+const ANALYZER_CHILD_CAP = 25;
 
-function buildFlat(root: AnalyzerNodeDto, expanded: Set<string>): FlatAnalyzerRow[] {
+function isMoreRowId(id: string): boolean {
+  return id.startsWith('__more__:');
+}
+function moreRowParentId(id: string): string {
+  return id.slice('__more__:'.length);
+}
+
+function buildFlat(root: AnalyzerNodeDto, expanded: Set<string>, showAllNodes: Set<string>): FlatAnalyzerRow[] {
   const rows: FlatAnalyzerRow[] = [];
-  const walk = (node: AnalyzerNodeDto, depth: number, siblingMax: bigint) => {
-    rows.push({ node, depth, siblingMax });
-    if (node.isDir && expanded.has(node.id) && node.children && node.children.length > 0) {
-      const kids = node.children;
-      let max = 0n;
-      for (const c of kids) { const s = BigInt(c.sizeBytes || '0'); if (s > max) max = s; }
-      if (max === 0n) max = 1n;
-      for (const c of kids) walk(c, depth + 1, max);
+  const renderChildren = (parent: AnalyzerNodeDto, depth: number) => {
+    const allKids = parent.children ?? [];
+    if (allKids.length === 0) return;
+    const showAll = showAllNodes.has(parent.id);
+    let kids = allKids;
+    let hidden = 0;
+    if (!showAll && allKids.length > ANALYZER_CHILD_CAP) {
+      const bySize = [...allKids].sort((a, b) => {
+        const sa = BigInt(a.sizeBytes || '0'), sb = BigInt(b.sizeBytes || '0');
+        return sa === sb ? 0 : (sa > sb ? -1 : 1);
+      }).slice(0, ANALYZER_CHILD_CAP);
+      const keep = new Set(bySize.map((k) => k.id));
+      kids = allKids.filter((k) => keep.has(k.id));
+      hidden = allKids.length - kids.length;
+    }
+    let max = 0n;
+    for (const c of kids) { const s = BigInt(c.sizeBytes || '0'); if (s > max) max = s; }
+    if (max === 0n) max = 1n;
+    for (const c of kids) {
+      rows.push({ node: c, depth, siblingMax: max });
+      if (c.isDir && expanded.has(c.id) && c.children && c.children.length > 0) {
+        renderChildren(c, depth + 1);
+      }
+    }
+    if (hidden > 0) {
+      rows.push({
+        node: {
+          id: `__more__:${parent.id}`,
+          name: `Showing top ${ANALYZER_CHILD_CAP} of ${allKids.length} files · Show more`,
+          path: '',
+          isDir: false,
+          sizeBytes: '0',
+          itemCount: '0',
+          risk: 'Safe',
+          description: '',
+          reason: null,
+          tier: null,
+          targetId: null,
+          isLinkPoint: false,
+          isCloudPlaceholder: false,
+          displayOnly: true,
+          selectable: false,
+          children: [],
+        },
+        depth,
+        siblingMax: 1n,
+      });
     }
   };
-  walk(root, 0, BigInt(root.sizeBytes || '0') || 1n);
+  renderChildren(root, 0);
   return rows;
 }
 
-function filterTree(node: AnalyzerNodeDto, query: string, sort: 'size' | 'items' | 'name'): AnalyzerNodeDto | null {
+function filterTree(node: AnalyzerNodeDto, query: string, sort: 'size' | 'items' | 'name', statusFilter: AnalyzerStatusFilter, allowDeleteUnknown: boolean): AnalyzerNodeDto | null {
   const q = query.trim().toLowerCase();
-  const matches = !q || node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q);
-  let children = (node.children ?? []).map((c) => filterTree(c, query, sort)).filter(Boolean) as AnalyzerNodeDto[];
+  const selectable = isNodeSelectable(node, allowDeleteUnknown);
+  const pill = analyzerStatusPill(node, selectable, allowDeleteUnknown);
+  let statusKey: AnalyzerStatusFilter;
+  if (selectable) statusKey = node.risk === 'Caution' ? 'caution' : 'safe';
+  else if (node.risk === 'Unknown') statusKey = 'unknown';
+  else statusKey = 'locked';
+  const statusOk = statusFilter === 'all' || statusFilter === statusKey;
+  const textMatch = !q || node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q);
+  let children = (node.children ?? []).map((c) => filterTree(c, query, sort, statusFilter, allowDeleteUnknown)).filter(Boolean) as AnalyzerNodeDto[];
   children = [...children].sort((a, b) => {
     if (sort === 'name') return a.name.localeCompare(b.name);
     if (sort === 'items') return Number(BigInt(b.itemCount || '0') - BigInt(a.itemCount || '0'));
     const sa = BigInt(a.sizeBytes || '0'), sb = BigInt(b.sizeBytes || '0');
     return sa === sb ? 0 : (sa > sb ? -1 : 1);
   });
-  if (!matches && children.length === 0) return null;
-  return { ...node, children: matches ? children : children };
+  const selfMatch = textMatch && statusOk;
+  if (!selfMatch && children.length === 0) return null;
+  return { ...node, children };
 }
 
 function analyzerSelectionNeedsConfirmation(nodes: AnalyzerNodeDto[]): boolean {
@@ -82,32 +143,32 @@ function isCleanableEligible(node: AnalyzerNodeDto, selectable: boolean): boolea
 }
 
 function analyzerStatusPill(node: AnalyzerNodeDto, selectable: boolean, allowDeleteUnknown: boolean): { label: string; className: string } | null {
-  if (node.risk === 'Protected') return { label: 'Protected', className: 'badge risk-Protected' };
-  if (node.path.toLowerCase().endsWith('.vhdx') || node.isLinkPoint || node.isCloudPlaceholder || node.displayOnly) return { label: 'Read-Only', className: 'badge status-readonly-pill' };
-  if (node.risk === 'Unknown' && !allowDeleteUnknown) return { label: 'Unknown', className: 'badge risk-Unknown' };
-  if (node.risk === 'Unknown') return { label: 'Unknown', className: 'badge risk-Unknown' };
-  if (node.risk === 'Caution') return { label: 'Caution', className: 'badge risk-Caution' };
-  if (isCleanableEligible(node, selectable)) return { label: 'Cleanable', className: 'badge status-cleanable' };
-  if (selectable) return { label: 'Safe', className: 'badge risk-Safe' };
+  if (isDriveRoot(node)) return { label: 'Drive Root', className: 'status-pill status-pill-readonly' };
+  if (node.risk === 'Protected') return { label: 'Protected', className: 'status-pill status-pill-protected' };
+  if (node.path.toLowerCase().endsWith('.vhdx') || node.isLinkPoint || node.isCloudPlaceholder || node.displayOnly) return { label: 'Read-Only', className: 'status-pill status-pill-readonly' };
+  if (node.risk === 'Unknown') return { label: 'Unknown', className: 'status-pill status-pill-unknown' };
+  if (node.risk === 'Caution') return { label: 'Caution', className: 'status-pill status-pill-caution' };
+  if (isCleanableEligible(node, selectable)) return { label: 'Safe', className: 'status-pill status-pill-safe' };
+  if (selectable) return { label: 'Safe', className: 'status-pill status-pill-safe' };
   return null;
 }
 
 function analyzerStatusText(node: AnalyzerNodeDto, selectable: boolean, allowDeleteUnknown: boolean): { text: string; locked: boolean; unknownGated: boolean } {
   if (selectable) {
-    return { text: (node.risk === 'Unknown' || !node.targetId) ? 'Selectable (typed confirmation required)' : 'Eligible for cleanup', locked: false, unknownGated: false };
+    return { text: (node.risk === 'Unknown' || !node.targetId) ? 'Selectable (typed confirmation required)' : 'Meets age limit (> 24h old)', locked: false, unknownGated: false };
   }
   if (node.risk === 'Protected') return { text: 'Protected. Not selectable.', locked: true, unknownGated: false };
   if (node.risk === 'Unknown' && !allowDeleteUnknown) return { text: 'Unknown gated by Settings (Allow deleting unknown folders).', locked: true, unknownGated: true };
   if (node.isLinkPoint) return { text: 'Link Point. Not selectable.', locked: true, unknownGated: false };
   if (node.isCloudPlaceholder) return { text: 'Cloud placeholder (Skipped). Not selectable.', locked: true, unknownGated: false };
   if (node.path.toLowerCase().endsWith('.vhdx')) return { text: 'Read-only virtual disk. Not selectable.', locked: true, unknownGated: false };
-  if (node.displayOnly) return { text: 'Display-only. Not selectable.', locked: true, unknownGated: false };
+  if (node.displayOnly) return { text: isDriveRoot(node) ? 'Drive roots cannot be cleaned as a whole. Expand to select specific folders.' : 'Display-only. Not selectable.', locked: true, unknownGated: false };
   if (node.reason) return { text: `${node.reason}. Not selectable.`, locked: true, unknownGated: false };
   return { text: 'Not selectable.', locked: true, unknownGated: false };
 }
 
 function analyzerGuidance(node: AnalyzerNodeDto, selectable: boolean, allowDeleteUnknown: boolean): string {
-  if (node.path.toLowerCase().endsWith('.vhdx')) return 'WSL/Hyper-V virtual disk. Read-only in Sweeper. Run `Optimize-VHD` or `wsl --manage` in PowerShell to reclaim unused space.';
+  if (node.path.toLowerCase().endsWith('.vhdx')) return 'Virtual disk (WSL/Hyper-V). Read-only in Sweeper — compaction is manual and safe to do when the VM/WSL is shut down.';
   if (node.risk === 'Protected') return 'Protected system location. Sweeper never removes protected paths.';
   if (node.isCloudPlaceholder) return 'Cloud placeholder file. Read-only in Analyzer; content may be remote and is not removable here.';
   if (node.isLinkPoint) return 'Link point (symlink/junction). Read-only in Analyzer to avoid traversing or removing linked targets.';
@@ -115,6 +176,7 @@ function analyzerGuidance(node: AnalyzerNodeDto, selectable: boolean, allowDelet
   if (node.risk === 'Unknown') return 'Unknown folder. Review carefully; typed DELETE confirmation is required before cleaning.';
   if (selectable && isCleanableEligible(node, selectable)) return 'Eligible cache/build artifact under current settings. Selected items are permanently deleted after review and confirmation.';
   if (selectable) return 'Eligible under current settings. Selected items are permanently deleted after review and confirmation.';
+  if (isDriveRoot(node)) return 'Drive roots cannot be cleaned as a whole. Expand C: to select specific folders.';
   return 'Display-only item. It cannot be selected for cleanup in Analyzer.';
 }
 
@@ -135,33 +197,39 @@ function semanticNodeIcon(node: AnalyzerNodeDto) {
   if (node.isCloudPlaceholder) return <CloudIcon className="row-icon" aria-hidden="true" />;
   if (node.risk === 'Protected') return <ShieldIcon className="row-icon" aria-hidden="true" />;
   if (isDriveRoot(node)) return <DriveIcon className="row-icon" aria-hidden="true" />;
-  return <FolderIcon className="row-icon" aria-hidden="true" />;
+  return node.isDir ? <FolderIcon className="row-icon" aria-hidden="true" /> : <FileIcon className="row-icon" aria-hidden="true" />;
 }
 
 function leadingInspectorIcon(node: AnalyzerNodeDto | null) {
-  if (!node) return <FolderIcon className="inspector-leading-icon" aria-hidden="true" />;
-  if (node.path.toLowerCase().endsWith('.vhdx')) return <HardDriveIcon className="inspector-leading-icon" aria-hidden="true" />;
-  if (node.isLinkPoint) return <LinkIcon className="inspector-leading-icon" aria-hidden="true" />;
-  if (node.isCloudPlaceholder) return <CloudIcon className="inspector-leading-icon" aria-hidden="true" />;
-  if (node.risk === 'Protected') return <ShieldIcon className="inspector-leading-icon" aria-hidden="true" />;
-  if (isDriveRoot(node)) return <DriveIcon className="inspector-leading-icon" aria-hidden="true" />;
-  return <FolderIcon className="inspector-leading-icon" aria-hidden="true" />;
-}
-
-async function copyText(text: string) {
-  try { await navigator.clipboard?.writeText(text); } catch { /* ignore */ }
-}
-function openContainingFolder(path: string) {
-  const clean = normalizeDisplayPath(path).replace(/[\\/]+$/, '');
-  const idx = clean.lastIndexOf('\\');
-  const folder = idx > 2 ? clean.slice(0, idx) : (clean || 'C:\\');
-  try { window.open(`file:///${folder.replace(/\\/g, '/')}`, '_blank', 'noopener,noreferrer'); } catch { /* ignore */ }
+  if (!node) return <FolderIcon className="inspector-leading-icon" />;
+  if (node.path.toLowerCase().endsWith('.vhdx')) return <HardDriveIcon className="inspector-leading-icon" />;
+  if (node.isLinkPoint) return <LinkIcon className="inspector-leading-icon" />;
+  if (node.isCloudPlaceholder) return <CloudIcon className="inspector-leading-icon" />;
+  if (node.risk === 'Protected') return <ShieldIcon className="inspector-leading-icon" />;
+  if (isDriveRoot(node)) return <DriveIcon className="inspector-leading-icon" />;
+  return node.isDir ? <FolderIcon className="inspector-leading-icon" /> : <FileIcon className="inspector-leading-icon" />;
 }
 
 const ALLOC_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#64748b'];
 const BROWSE_PATHS = ['C:\\', 'C:\\Users', 'C:\\Windows\\Temp'];
 
-export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { client: SweeperClient; settings: Settings | null; onOpenLog: (logId: string) => void; onOpenSettings?: () => void }) {
+function shareBarFillPx(nodeBytes: bigint, rootTotalBytes: bigint): number {
+  if (nodeBytes <= 0n || rootTotalBytes <= 0n) return 0;
+  const shareRatio = Number(nodeBytes) / Number(rootTotalBytes);
+  const sharePct = shareRatio * 100;
+  if (sharePct < 0.1) return 0;
+  const width = Math.round(Math.sqrt(Math.max(0, shareRatio)) * 48);
+  return Math.max(2, Math.min(48, width));
+}
+
+function formatSharePercent(share: number): string {
+  if (share <= 0) return '0%';
+  if (share < 0.1) return '<0.1%';
+  const pct1 = Math.floor(share * 10) / 10;
+  return `${pct1.toFixed(1)}%`;
+}
+
+export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { client: SweeperClient; settings: Settings | null; onOpenLog: (logId: string) => void; onOpenSettings?: (focus?: 'allowDeleteUnknown' | 'enableTier3' | null, prefillCustomPath?: string | null) => void }) {
   const [rootPath, setRootPath] = useState('C:\\');
   const [analyzedPath, setAnalyzedPath] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -172,7 +240,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [inspected, setInspected] = useState<ExplainState>(null);
-  const [preview, setPreview] = useState<{ previewToken: string; breakdown: { targetId: string; targetName: string; selectedCount: string; selectedBytes: string }[]; totalSelectedCount: string; totalSelectedBytes: string; issuedAtMs: number } | null>(null);
+  const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [cleaning, setCleaning] = useState(false);
@@ -182,6 +250,8 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   const [info, setInfo] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'size' | 'items' | 'name'>('size');
+  const [statusFilter, setStatusFilter] = useState<AnalyzerStatusFilter>('all');
+  const [showAllAnalyzerNodes, setShowAllAnalyzerNodes] = useState<Set<string>>(new Set());
   const allowDeleteUnknown = settings?.allowDeleteUnknown ?? false;
 
   const nodesById = useMemo(() => {
@@ -191,15 +261,34 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
     return map;
   }, [result]);
 
-  const filteredRoot = useMemo(() => result ? filterTree(result.root, query, sort) : null, [result, query, sort]);
-  const flatRows = useMemo(() => (filteredRoot ? buildFlat(filteredRoot, expanded) : []), [filteredRoot, expanded]);
+  const filteredRoot = useMemo(() => result ? filterTree(result.root, query, sort, statusFilter, allowDeleteUnknown) : null, [result, query, sort, statusFilter, allowDeleteUnknown]);
+  const flatRows = useMemo(() => (filteredRoot ? buildFlat(filteredRoot, expanded, showAllAnalyzerNodes) : []), [filteredRoot, expanded, showAllAnalyzerNodes]);
+
+  const statusCounts = useMemo(() => {
+    const counts = { all: 0, safe: 0, caution: 0, unknown: 0, locked: 0 };
+    if (!result) return counts;
+    const kids = result.root.children ?? [];
+    counts.all = kids.length;
+    for (const n of kids) {
+      const selectable = isNodeSelectable(n, allowDeleteUnknown);
+      if (selectable) {
+        if (n.risk === 'Caution') counts.caution += 1;
+        else counts.safe += 1;
+      } else if (n.risk === 'Unknown') {
+        counts.unknown += 1;
+      } else {
+        counts.locked += 1;
+      }
+    }
+    return counts;
+  }, [result, allowDeleteUnknown]);
 
   const selectedNodes = useMemo(() => Array.from(selectedIds).map((id) => nodesById.get(id)).filter(Boolean) as AnalyzerNodeDto[], [selectedIds, nodesById]);
   const selectedBytes = useMemo(() => selectedNodes.reduce((a, n) => a + BigInt(n.sizeBytes || '0'), 0n).toString(), [selectedNodes]);
   const requiresConfirmation = useMemo(() => analyzerSelectionNeedsConfirmation(selectedNodes), [selectedNodes]);
 
   function resetAnalyzerSession(msg?: string) {
-    setSessionId(null); setStartedAt(null); setResult(null); setSelectedIds(new Set()); setExpanded(new Set());
+    setSessionId(null); setStartedAt(null); setResult(null); setSelectedIds(new Set()); setExpanded(new Set()); setShowAllAnalyzerNodes(new Set());
     setPreview(null); setConfirmText(''); setCleanProgress(null); setInspected(null);
     if (msg) setInfo(msg);
   }
@@ -212,15 +301,20 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
     const targetPath = (pathOverride ?? rootPath).trim() || 'C:\\';
     setRootPath(targetPath);
     setError(null); setInfo(null); setPreview(null); setCleanSummary(null); setCleanProgress(null);
-    setSelectedIds(new Set()); setResult(null); setExpanded(new Set()); setAnalyzing(true); setProgress(null); setInspected(null);
+    setSelectedIds(new Set()); setResult(null); setExpanded(new Set()); setShowAllAnalyzerNodes(new Set()); setAnalyzing(true); setProgress(null); setInspected(null);
     try {
       const res = await client.startAnalyzer(targetPath, (p) => setProgress(p));
       setResult(res);
       setSessionId(res.sessionId);
       setStartedAt(Date.now());
-      setExpanded(new Set([res.root.id]));
+      setExpanded(new Set());
       setAnalyzedPath(res.rootPath || targetPath);
-      try { setInspected(await client.explainItem(res.root.id)); } catch { /* ignore */ }
+      const autoInspectChild = [...(res.root.children ?? [])].sort((a, b) => {
+        const sa = BigInt(a.sizeBytes || '0');
+        const sb = BigInt(b.sizeBytes || '0');
+        return sa === sb ? 0 : (sa > sb ? -1 : 1);
+      })[0];
+      try { setInspected(await client.explainItem((autoInspectChild ?? res.root).id)); } catch { /* ignore */ }
       setInfo(null);
     } catch (e) {
       setError(formatContractError(e));
@@ -237,6 +331,26 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
     setPreview(null); setCleanSummary(null); setCleanProgress(null);
     setSelectedIds((prev) => { const next = new Set(prev); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; });
     void inspectNode(node.id);
+  }
+
+  const safeSelectableNodeIds = useMemo(() => {
+    const ids: string[] = [];
+    nodesById.forEach((node) => {
+      const selectable = isNodeSelectable(node, allowDeleteUnknown);
+      if (!selectable) return;
+      const pill = analyzerStatusPill(node, selectable, allowDeleteUnknown);
+      if (pill?.label === 'Safe') ids.push(node.id);
+    });
+    return ids;
+  }, [nodesById, allowDeleteUnknown]);
+
+  function selectSafeAnalyzer() {
+    setPreview(null); setCleanSummary(null); setCleanProgress(null);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of safeSelectableNodeIds) next.add(id);
+      return next;
+    });
   }
 
   async function runPreview() {
@@ -275,47 +389,60 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   const canPreview = !!sessionId && selectedIds.size > 0 && !analyzing && !previewLoading && !cleaning && (!requiresConfirmation || confirmText === TYPED_CONFIRMATION_PHRASE);
   const canClean = !!preview && !analyzing && !previewLoading && !cleaning;
 
+  const rootTotalBytes = useMemo(() => BigInt(result?.root.sizeBytes || result?.totalBytes || '0') || 1n, [result]);
+
   const allocSegments = useMemo(() => {
-    type AllocSeg = { id: string; name: string; bytes: bigint; pct: number; pctVisual: number; color: string; isOther?: boolean };
+    type AllocSeg = { id: string; name: string; bytes: bigint; pct: number; pctVisual: number; color: string; isOther?: boolean; focusNodeId?: string };
     if (!result) return [] as AllocSeg[];
     const kids = [...(result.root.children ?? [])].sort((a, b) => {
       const sa = BigInt(a.sizeBytes || '0'), sb = BigInt(b.sizeBytes || '0');
       return sa === sb ? 0 : (sa > sb ? -1 : 1);
     });
-    const total = BigInt(result.root.sizeBytes || '0') || 1n;
-    const raw: AllocSeg[] = kids.slice(0, 5).map((k, i) => {
-      const bytes = BigInt(k.sizeBytes || '0');
-      const pct = Number((bytes * 10000n) / total) / 100;
-      return { id: k.id, name: k.name, bytes, pct, pctVisual: pct, color: ALLOC_COLORS[i % ALLOC_COLORS.length] };
-    });
-    const rest = kids.slice(5);
+    const total = rootTotalBytes;
+    const major: AllocSeg[] = [];
     let otherBytes = 0n;
-    for (const k of rest) otherBytes += BigInt(k.sizeBytes || '0');
-    if (otherBytes > 0n) {
-      const pct = Number((otherBytes * 10000n) / total) / 100;
-      raw.push({ id: 'alloc-other', name: 'Other', bytes: otherBytes, pct, pctVisual: pct, color: '#64748b', isOther: true });
-    }
-    // enforce minimum visible width (~6px of 1000 viewbox) for any non-zero segment
-    const minVisual = 0.6;
-    let adjusted = raw.map((s) => ({ ...s, pctVisual: s.pct > 0 ? Math.max(minVisual, s.pct) : 0 }));
-    const sum = adjusted.reduce((a, b) => a + b.pctVisual, 0);
-    if (sum > 100) {
-      const over = sum - 100;
-      const shrinkable = adjusted.filter((s) => s.pctVisual > minVisual);
-      const shrinkSum = shrinkable.reduce((a, b) => a + (b.pctVisual - minVisual), 0);
-      if (shrinkSum > 0) {
-        adjusted = adjusted.map((s) => {
-          if (s.pctVisual <= minVisual) return s;
-          const room = s.pctVisual - minVisual;
-          return { ...s, pctVisual: s.pctVisual - (over * room) / shrinkSum };
-        });
+    kids.forEach((k, i) => {
+      const bytes = BigInt(k.sizeBytes || '0');
+      const pct = total > 0n ? Number((bytes * 10000n) / total) / 100 : 0;
+      if (pct >= 0.1) {
+        major.push({ id: k.id, name: k.name, bytes, pct, pctVisual: 0, color: ALLOC_COLORS[i % ALLOC_COLORS.length], focusNodeId: k.id });
+      } else {
+        otherBytes += bytes;
       }
-    } else if (sum < 100 && adjusted.length > 0) {
+    });
+    const raw = [...major];
+    if (otherBytes > 0n) {
+      const pct = total > 0n ? Number((otherBytes * 10000n) / total) / 100 : 0;
+      raw.push({ id: 'alloc-other', name: 'Other', bytes: otherBytes, pct, pctVisual: 0, color: '#64748b', isOther: true, focusNodeId: undefined });
+    }
+    const gapPct = raw.length > 1 ? 0.2 : 0;
+    const totalGap = gapPct * Math.max(0, raw.filter((s) => s.pct > 0).length - 1);
+    const targetSum = Math.max(0, 100 - totalGap);
+    const minTiny = 0.35;
+    let adjusted = raw.map((s) => ({ ...s, pctVisual: s.pct <= 0 ? 0 : Math.max(minTiny, s.pct) }));
+    let sum = adjusted.reduce((a, b) => a + b.pctVisual, 0);
+    if (sum > targetSum) {
+      const over = sum - targetSum;
+      const reducible = adjusted.filter((s) => s.pctVisual > minTiny);
+      const room = reducible.reduce((a, b) => a + (b.pctVisual - minTiny), 0);
+      if (room > 0) {
+        adjusted = adjusted.map((s) => {
+          if (s.pctVisual <= minTiny) return s;
+          const r = s.pctVisual - minTiny;
+          return { ...s, pctVisual: s.pctVisual - (over * r) / room };
+        });
+      } else if (adjusted.length > 0) {
+        const largest = [...adjusted].sort((a, b) => b.pct - a.pct)[0];
+        adjusted = adjusted.map((s) => s.id === largest.id ? { ...s, pctVisual: Math.max(0, s.pctVisual - over) } : s);
+      }
+      sum = adjusted.reduce((a, b) => a + b.pctVisual, 0);
+    }
+    if (sum < targetSum && adjusted.length > 0) {
       const largest = [...adjusted].sort((a, b) => b.pct - a.pct)[0];
-      adjusted = adjusted.map((s) => s.id === largest.id ? { ...s, pctVisual: s.pctVisual + (100 - sum) } : s);
+      adjusted = adjusted.map((s) => s.id === largest.id ? { ...s, pctVisual: s.pctVisual + (targetSum - sum) } : s);
     }
     return adjusted;
-  }, [result]);
+  }, [result, rootTotalBytes]);
 
   function focusNode(nodeId: string) {
     const node = nodesById.get(nodeId);
@@ -334,33 +461,6 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
     void inspectNode(nodeId);
   }
 
-  const allocRects = (() => {
-    let x = 0;
-    const vbW = 1000;
-    const h = 14;
-    const visible = allocSegments.filter((s) => s.pctVisual > 0);
-    return allocSegments.map((s, idx) => {
-      const w = Math.max(0, (s.pctVisual / 100) * vbW);
-      const gap = visible.length > 1 && idx < allocSegments.length - 1 && w > 4 ? 2 : 0;
-      const rect = (
-        <rect
-          key={s.id}
-          x={x}
-          y={0}
-          width={Math.max(0, w - gap)}
-          height={h}
-          fill={s.color}
-          className="alloc-segment"
-          onClick={() => focusNode(s.id)}
-        >
-          <title>{`${s.name} · ${formatBytes(s.bytes.toString())} · ${s.pct < 0.1 ? '<0.1%' : `${s.pct.toFixed(1)}%`}`}</title>
-        </rect>
-      );
-      x += w;
-      return rect;
-    });
-  })();
-
   function cycleBrowsePath() {
     const idx = BROWSE_PATHS.findIndex((p) => p.toLowerCase() === rootPath.trim().toLowerCase());
     const next = BROWSE_PATHS[(idx + 1 + BROWSE_PATHS.length) % BROWSE_PATHS.length];
@@ -372,6 +472,28 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
   const inspectedStatus = inspectedNode ? analyzerStatusText(inspectedNode, inspectedSelectable, allowDeleteUnknown) : null;
   const inspectedPill = inspectedNode ? analyzerStatusPill(inspectedNode, inspectedSelectable, allowDeleteUnknown) : null;
   const hasResult = !!result;
+  const visibleExpandableIds = useMemo(() => {
+    if (!filteredRoot) return [] as string[];
+    const ids: string[] = [];
+    const walk = (n: AnalyzerNodeDto, isRoot: boolean) => {
+      if (!isRoot && n.isDir && (n.children?.length ?? 0) > 0) ids.push(n.id);
+      for (const c of n.children ?? []) walk(c, false);
+    };
+    for (const c of filteredRoot.children ?? []) walk(c, false);
+    return ids;
+  }, [filteredRoot]);
+  const allVisibleExpanded = visibleExpandableIds.length > 0 && visibleExpandableIds.every((id) => expanded.has(id));
+
+  function toggleExpandCollapseAll() {
+    if (!result) return;
+    if (allVisibleExpanded) {
+      setExpanded(new Set());
+      return;
+    }
+    setExpanded(new Set(visibleExpandableIds));
+  }
+
+  const hasSelectedRisky = selectedNodes.some((n) => n.risk === 'Caution' || n.risk === 'Unknown');
 
   const displayPath = normalizeDisplayPath((analyzedPath || rootPath).trim() || 'C:\\');
   const isAtRoot = /^([A-Za-z]:\\)$/.test(displayPath);
@@ -380,12 +502,29 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
     return p.split('\\').filter(Boolean).map((seg, i, arr) => ({ label: i === 0 ? `${seg}\\` : seg, path: arr.slice(0, i + 1).join('\\') + (i === 0 ? '\\' : '') }));
   }, [displayPath]);
 
+  const [copiedVhdxCmd, setCopiedVhdxCmd] = useState(false);
+  async function copyVhdxCommand(cmd: string) {
+    await copyText(cmd);
+    setCopiedVhdxCmd(true);
+    window.setTimeout(() => setCopiedVhdxCmd(false), 1500);
+  }
+
+  const cleanProgressLabel = cleanProgress
+    ? `Progress: ${cleanProgress.completedItems} / ${cleanProgress.totalItems} items — ${formatBytes(cleanProgress.bytesFreedSoFar)} freed so far (${cleanProgress.status})`
+    : null;
+
   return (
-    <div className="view-stack">
+    <div className="view-stack view-stack-fill">
       <header className="page-header" aria-label="Analyzer header">
-        <div className="page-header-left">
-          <h1 className="page-title" id="analyzer-heading">Analyzer</h1>
-          {result && <span className="hero-metric-badge num" aria-label="Analyzed total">{formatBytes(result.totalBytes)} analyzed · {pluralize(Number(result.totalItems || '0'), 'item', 'items')}</span>}
+        <div className="page-header-left analyzer-header-left">
+          <div className="page-title-row">
+            <h1 className="page-title" id="analyzer-heading">Analyzer</h1>
+            <span className="header-subtitle num" aria-label="Analyzer subtitle">
+              {result
+                ? `${displayPath} · ${formatBytes(result.totalBytes)} across ${pluralize((result.root.children ?? []).length, 'entry', 'entries')} (${Number(result.totalItems || '0')} files total) · All files on disk`
+                : `All files & disk hotspots under ${displayPath}`}
+            </span>
+          </div>
         </div>
         <div className="page-header-right">
           <button
@@ -403,52 +542,96 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
       {error && <div className="notice error" role="alert">{error}</div>}
       {info && <div className="notice info" role="status">{info}</div>}
 
-      <div className="analyzer-toolbar" aria-label="Analyzer controls">
-        <label htmlFor="analyzer-root" className="muted small-note">Root</label>
-        <div className="root-input-wrap">
-          <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} className="analyzer-root-input" />
+      <div className="analyzer-location-bar" aria-label="Analyzer location bar">
+        <div className="analyzer-root-group analyzer-root-group-tight">
+          <label htmlFor="analyzer-root" className="muted small-note">Root</label>
+          <div className="analyzer-root-inline">
+            <input id="analyzer-root" type="text" value={rootPath} onChange={(e) => setRootPath(e.target.value)} aria-label="Analyzer root path" disabled={analyzing || cleaning} className="analyzer-root-input" />
+            <button type="button" className="btn small analyzer-go-btn" onClick={() => void runAnalyzer()} disabled={analyzing || cleaning || !rootPath.trim()} aria-label="Go">Go</button>
+          </div>
           <button type="button" className="btn browse-btn" onClick={cycleBrowsePath} disabled={analyzing || cleaning} aria-label="Browse root paths"><BrowseIcon /> <span>Browse...</span></button>
         </div>
-        <div className="quick-roots" aria-label="Quick root path presets">
-          <span className="quick-roots-label muted">Quick roots:</span>
-          {(['C:\\', 'C:\\Users', 'Temp'] as const).map((label) => {
-            const value = label === 'Temp' ? 'C:\\Windows\\Temp' : label;
-            return <button key={label} type="button" className="pill-btn" onClick={() => { setRootPath(value); if (hasResult) void runAnalyzer(value); }} disabled={analyzing || cleaning}>{label}</button>;
-          })}
+        <div className="quick-roots quick-roots-inline" aria-label="Quick root path presets">
+          <span className="muted small-note">Quick:</span>
+          {(['C:\\', 'C:\\Users', 'Temp'] as const)
+            .filter((label) => {
+              const value = label === 'Temp' ? 'C:\\Windows\\Temp' : label;
+              const norm = (p: string) => p.trim().replace(/[\\/]+$/, '').toLowerCase();
+              return !(label === 'C:\\' && norm(rootPath) === norm('C:\\'));
+            })
+            .map((label) => {
+              const value = label === 'Temp' ? 'C:\\Windows\\Temp' : label;
+              return <button key={label} type="button" className="chip-btn pill-chip small-chip" onClick={() => { setRootPath(value); if (hasResult) void runAnalyzer(value); }} disabled={analyzing || cleaning}>{label}</button>;
+            })}
         </div>
-        <input type="search" className="analyzer-search-input" placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search analyzer folders" disabled={!result} />
-        <label className="toolbar-group">Sort
-          <select value={sort} onChange={(e) => setSort(e.target.value as 'size' | 'items' | 'name')} aria-label="Sort analyzer" disabled={!result}>
-            <option value="size">Size</option>
-            <option value="items">Items</option>
-            <option value="name">Name</option>
-          </select>
-        </label>
       </div>
-      {analyzedPath && !isAtRoot && (
-        <div className="analyzer-breadcrumb" aria-label="Analyzed path">
-          {breadcrumbParts.map((part, i) => (
-            <span key={part.path} className="breadcrumb-seg">
-              {i > 0 && <span className="breadcrumb-sep" aria-hidden="true">\</span>}
-              <button type="button" className="breadcrumb-btn" onClick={() => { setRootPath(part.path); void runAnalyzer(part.path); }} disabled={analyzing || cleaning}>{part.label.replace(/\\$/, '')}</button>
-            </span>
-          ))}
-        </div>
-      )}
 
       {result && allocSegments.length > 0 && (
         <section className="alloc-bar-wrap" aria-label="Analyzer allocation">
+          <div className="alloc-bar-header">
+            <div className="alloc-bar-header-left">
+              <span className="alloc-hotspots-label">Hotspots under {displayPath} · Sorted by size</span>
+              {!isAtRoot && (
+                <nav className="analyzer-breadcrumb analyzer-breadcrumb-trail alloc-breadcrumb-trail" aria-label="Analyzed path breadcrumb">
+                  {breadcrumbParts.map((part, i) => (
+                    <span key={part.path} className="breadcrumb-seg">
+                      {i > 0 && <span className="breadcrumb-sep" aria-hidden="true">&gt;</span>}
+                      <button type="button" className="breadcrumb-btn" onClick={() => { setRootPath(part.path); void runAnalyzer(part.path); }} disabled={analyzing || cleaning}>{part.label.replace(/\\$/, '')}</button>
+                    </span>
+                  ))}
+                </nav>
+              )}
+            </div>
+            <span className="alloc-bar-header-meta muted num">{formatBytes(result.totalBytes)} · Top consumers</span>
+          </div>
           <svg className="alloc-bar" viewBox="0 0 1000 14" preserveAspectRatio="none" role="img" aria-label="Top-level folder allocation">
-            {allocRects}
+            {(() => {
+              let x = 0;
+              const vbW = 1000;
+              const visible = allocSegments.filter((s) => s.pctVisual > 0);
+              return allocSegments.map((s, idx) => {
+                const wRaw = Math.max(0, (s.pctVisual / 100) * vbW);
+                const gap = visible.length > 1 && idx < allocSegments.length - 1 && wRaw > 0 ? 1 : 0;
+                const w = wRaw > 0 ? Math.max(12, wRaw) : 0;
+                const minSegW = s.pct > 0 ? 6 : 0;
+                const rectW = Math.max(0, Math.max(minSegW, w) - gap);
+                const clickable = !!s.focusNodeId;
+                const rect = (
+                  <rect
+                    key={s.id}
+                    x={x}
+                    y={0}
+                    width={rectW}
+                    height={14}
+                    fill={s.color}
+                    className={`alloc-segment hotspot-seg${clickable ? '' : ' alloc-segment-static'}`}
+                    onClick={clickable ? () => focusNode(s.focusNodeId!) : undefined}
+                  >
+                    <title>{`${s.name}: ${formatBytes(s.bytes.toString())} (${formatSharePercent(s.pct)})`}</title>
+                  </rect>
+                );
+                x += w;
+                return rect;
+              });
+            })()}
           </svg>
           <div className="alloc-legend">
-            {allocSegments.map((s) => (
-              <button key={s.id} type="button" className="alloc-legend-item alloc-legend-btn" onClick={() => focusNode(s.id)} title={`Inspect ${s.name}`}>
-                <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><rect x="0" y="0" width="8" height="8" fill={s.color} rx="2" /></svg>
-                <span>{s.name}</span>
-                <span className="muted num">{formatBytes(s.bytes.toString())} · {s.pct < 0.1 ? '<0.1%' : `${s.pct.toFixed(1)}%`}</span>
-              </button>
-            ))}
+            {allocSegments.map((s) => {
+              const labelPct = s.name === 'Other' && s.pct < 0.1 ? '<0.1%' : formatSharePercent(s.pct);
+              const clickable = !!s.focusNodeId;
+              const body = (
+                <>
+                  <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><rect x="0" y="0" width="8" height="8" fill={s.color} rx="2" /></svg>
+                  <span>{s.name}</span>
+                  <span className="muted num">{formatBytes(s.bytes.toString())} · {labelPct}</span>
+                </>
+              );
+              return clickable ? (
+                <button key={s.id} type="button" className="alloc-legend-item alloc-legend-btn" onClick={() => focusNode(s.focusNodeId!)} title={`Inspect ${s.name}`}>{body}</button>
+              ) : (
+                <span key={s.id} className="alloc-legend-item alloc-legend-static" aria-label={`${s.name} ${labelPct}`}>{body}</span>
+              );
+            })}
           </div>
         </section>
       )}
@@ -464,15 +647,92 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
         <>
           <section className="master-detail analyzer-layout scan-layout-with-bar" aria-label="Analyzer results">
             <div className="master-pane">
-              <div className="pane-header">
-                <div className="pane-header-left">
-                  <h2 id="analyzer-tree-heading">Analyzer Tree</h2>
-                  <span className="pane-meta-pill num">{formatBytes(result.totalBytes)} · {pluralize(Number(result.totalItems || '0'), 'item', 'items')}</span>
+              <h2 id="analyzer-tree-heading" className="sr-only">Analyzer Tree</h2>
+              <div className="analyzer-table-toolbar analyzer-table-toolbar-compact analyzer-toolbar" aria-label="Analyzer table filters">
+                <div className="analyzer-toolbar-row analyzer-toolbar-row-top">
+                  <div className="segmented-toggle scan-status-segmented analyzer-status-segmented analyzer-status-segmented-compact" role="group" aria-label="Analyzer status filters">
+                    <button type="button" className={`seg-btn ${statusFilter === 'all' ? 'active' : ''}`} aria-pressed={statusFilter === 'all'} onClick={() => setStatusFilter('all')}>All ({statusCounts.all})</button>
+                    <button type="button" className={`seg-btn ${statusFilter === 'safe' ? 'active' : ''}`} aria-pressed={statusFilter === 'safe'} onClick={() => setStatusFilter('safe')}>Safe ({statusCounts.safe})</button>
+                    <button type="button" className={`seg-btn ${statusFilter === 'caution' ? 'active' : ''}`} aria-pressed={statusFilter === 'caution'} onClick={() => setStatusFilter('caution')}>Caution ({statusCounts.caution})</button>
+                    <button type="button" className={`seg-btn ${statusFilter === 'unknown' ? 'active' : ''}`} aria-pressed={statusFilter === 'unknown'} onClick={() => setStatusFilter('unknown')}>Unknown ({statusCounts.unknown})</button>
+                    <button type="button" className={`seg-btn ${statusFilter === 'locked' ? 'active' : ''}`} aria-pressed={statusFilter === 'locked'} onClick={() => setStatusFilter('locked')}>Protected &amp; Read-Only ({statusCounts.locked})</button>
+                  </div>
                 </div>
+                <div className="analyzer-toolbar-row analyzer-toolbar-row-actions">
+                  <input type="search" className="analyzer-search-input analyzer-search-compact" placeholder="Search folders..." value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search analyzer folders" disabled={!result} />
+                  <div className="analyzer-table-toolbar-actions">
+                    <label className="toolbar-group analyzer-sort-group">Sort
+                      <select value={sort} onChange={(e) => setSort(e.target.value as 'size' | 'items' | 'name')} aria-label="Sort analyzer" disabled={!result}>
+                        <option value="size">Size</option>
+                        <option value="items">Items</option>
+                        <option value="name">Name</option>
+                      </select>
+                    </label>
+                    <button type="button" className="btn small" onClick={selectSafeAnalyzer} disabled={!result || analyzing || cleaning} aria-label="Select Safe">Select Safe</button>
+                    <button type="button" className="btn small subtle-btn" onClick={toggleExpandCollapseAll} disabled={analyzing || cleaning || !result}>{allVisibleExpanded ? 'Collapse All' : 'Expand All'}</button>
+                  </div>
+                </div>
+              </div>
+              <div className="analyzer-col-headers" aria-hidden="true">
+                <span className="analyzer-col-h-name">
+                  <span className="analyzer-header-master-slot">
+                    <label className="checkbox analyzer-master-check" aria-label={(() => {
+                      const selectableVisible = flatRows.filter((r) => !isMoreRowId(r.node.id) && isNodeSelectable(r.node, allowDeleteUnknown));
+                      const ids = selectableVisible.map((r) => r.node.id);
+                      const allSel = ids.length > 0 && ids.every((id) => selectedIds.has(id));
+                      return allSel ? 'Deselect all visible selectable nodes' : 'Select all visible selectable nodes';
+                    })()}>
+                      <input
+                        type="checkbox"
+                        checked={(() => { const ids = flatRows.filter((r) => !isMoreRowId(r.node.id) && isNodeSelectable(r.node, allowDeleteUnknown)).map((r) => r.node.id); return ids.length > 0 && ids.every((id) => selectedIds.has(id)); })()}
+                        ref={(el) => {
+                          if (!el) return;
+                          const ids = flatRows.filter((r) => !isMoreRowId(r.node.id) && isNodeSelectable(r.node, allowDeleteUnknown)).map((r) => r.node.id);
+                          const selCount = ids.filter((id) => selectedIds.has(id)).length;
+                          el.indeterminate = selCount > 0 && selCount < ids.length;
+                        }}
+                        disabled={analyzing || cleaning || flatRows.filter((r) => !isMoreRowId(r.node.id) && isNodeSelectable(r.node, allowDeleteUnknown)).length === 0}
+                        onChange={() => {
+                          const ids = flatRows.filter((r) => !isMoreRowId(r.node.id) && isNodeSelectable(r.node, allowDeleteUnknown)).map((r) => r.node.id);
+                          const allSel = ids.length > 0 && ids.every((id) => selectedIds.has(id));
+                          setPreview(null); setCleanSummary(null); setCleanProgress(null);
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev);
+                            if (allSel) ids.forEach((id) => next.delete(id)); else ids.forEach((id) => next.add(id));
+                            return next;
+                          });
+                        }}
+                      />
+                    </label>
+                  </span>
+                  <span>Name</span>
+                </span>
+                <span className="analyzer-col-h-share">Share</span>
+                <span className="analyzer-col-h-items">Files</span>
+                <span className="analyzer-col-h-size">Size</span>
+                <span className="analyzer-col-h-status">Status</span>
               </div>
               <div className="pane-body flush">
                 <div className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" tabIndex={0}>
-                  {flatRows.map(({ node, depth, siblingMax }) => {
+                  {flatRows.map(({ node, depth }) => {
+                    if (isMoreRowId(node.id)) {
+                      const parentId = moreRowParentId(node.id);
+                      return (
+                        <div key={node.id} className="analyzer-row analyzer-more-row" role="treeitem" aria-level={depth + 1} aria-selected={false} tabIndex={0}>
+                          <div className="analyzer-col-main tree-cell-name">
+                            <span className={`tree-indent${depth >= 1 ? ' has-guide' : ''}`} aria-hidden="true">
+                              {depth >= 1 && <span className="tree-guide-line" />}
+                              {Array.from({ length: depth }).map((_, i) => <span key={i} className="indent-step" />)}
+                            </span>
+                            <button type="button" className="btn small subtle-btn analyzer-show-more-btn" onClick={() => setShowAllAnalyzerNodes((prev) => new Set([...prev, parentId]))}>{node.name}</button>
+                          </div>
+                          <div className="analyzer-col-share tree-cell-share" />
+                          <div className="analyzer-col-count muted num" />
+                          <div className="analyzer-col-sizecell num" />
+                          <div className="analyzer-col-guard" />
+                        </div>
+                      );
+                    }
                     const selectable = isNodeSelectable(node, allowDeleteUnknown);
                     const checked = selectedIds.has(node.id);
                     const hasChildren = node.isDir && (node.children?.length ?? 0) > 0;
@@ -481,11 +741,23 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                     const pill = analyzerStatusPill(node, selectable, allowDeleteUnknown);
                     const typeTag = nodeTypeTag(node);
                     const nodeSize = BigInt(node.sizeBytes || '0');
-                    const share = siblingMax > 0n ? Number((nodeSize * 10000n) / siblingMax) / 100 : 0;
-                    const shareLabel = share < 0.1 ? '<0.1%' : `${share.toFixed(1)}%`;
+                    const shareRatio = rootTotalBytes > 0n ? Number(nodeSize) / Number(rootTotalBytes) : 0;
+                    const share = shareRatio * 100;
+                    const shareLabel = formatSharePercent(share);
+                    const shareFillWidthPx = shareBarFillPx(nodeSize, rootTotalBytes);
                     const pathDisplay = normalizeDisplayPath(node.path);
+                    const pathDisplayShort = middleTruncatePath(pathDisplay, 64);
                     const inspectedMatch = inspected?.itemId === node.id;
-                    const lockedIcon = (node.risk === 'Unknown' && !allowDeleteUnknown) ? <SettingsLockIcon className="analyzer-lock-only" aria-hidden="true" /> : <ShieldIcon className="analyzer-lock-only" aria-hidden="true" />;
+                    const selectionSlot = selectable ? (
+                      <label className="checkbox analyzer-checkbox" title="Select for Review & Clean">
+                        <input type="checkbox" aria-label={`Select analyzer node ${node.path}`} checked={checked} disabled={cleaning} onChange={() => toggleSelect(node)} />
+                      </label>
+                    ) : (
+                      <span className="analyzer-selection-fixed-slot analyzer-disabled-slot" title={status.text}>
+                        <span className="scan-disabled-checkbox-outline analyzer-disabled-checkbox-outline" aria-hidden="true" />
+                        <input className="sr-only" type="checkbox" aria-label={`Select analyzer node ${node.path}`} checked={checked} disabled readOnly tabIndex={-1} />
+                      </span>
+                    );
                     return (
                       <div
                         key={node.id}
@@ -494,8 +766,16 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                         aria-selected={checked}
                         aria-level={depth + 1}
                         tabIndex={0}
-                        className={`analyzer-row ${inspectedMatch ? 'inspected' : ''}`}
+                        className={`analyzer-row ${inspectedMatch ? 'inspected' : ''} ${depth >= 1 ? 'depth-child analyzer-child-row' : ''}`}
+                        data-depth={depth}
+                        title={hasChildren && depth > 0 ? 'Double-click to inspect folder as root' : undefined}
                         onClick={() => { void inspectNode(node.id); if (selectable) toggleSelect(node); }}
+                        onDoubleClick={(e) => {
+                          if (!node.isDir || !hasChildren || depth <= 0) return;
+                          e.stopPropagation();
+                          setRootPath(node.path);
+                          void runAnalyzer(node.path);
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
@@ -504,45 +784,59 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                           }
                         }}
                       >
-                        <div className="analyzer-col-main">
-                          <span className="tree-indent" aria-hidden="true">
-                            {Array.from({ length: depth }).map((_, i) => <span key={i} className="indent-step" />)}
+                        <div className="analyzer-col-main tree-cell-name">
+                          <span className={`tree-indent depth-${depth}${depth >= 1 ? ' has-guide' : ''}`} aria-hidden="true">
+                            {depth >= 1 && <span className="tree-guide-line" />}
+                            {Array.from({ length: depth }).map((_, i) => <span key={i} className={`indent-step indent-step-d${depth}-${i}`} />)}
                           </span>
-                          {hasChildren ? (
-                            <button type="button" className="tree-toggle" onClick={(e) => { e.stopPropagation(); toggleExpand(node); }} aria-label={isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`}>
-                              {isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
-                            </button>
-                          ) : (
-                            <span className="tree-toggle-spacer" aria-hidden="true" />
-                          )}
-                          <span className={`analyzer-select-wrap ${status.locked ? 'locked' : ''}`} onClick={(e) => e.stopPropagation()}>
-                            {status.locked ? (
-                              <label className="checkbox analyzer-checkbox analyzer-checkbox-locked" title="Not selectable">
-                                {lockedIcon}
-                                <input type="checkbox" aria-label={`Select analyzer node ${node.path}`} checked={checked} disabled readOnly />
-                              </label>
+                          <span className="tree-slot tree-slot-chevron">
+                            {hasChildren ? (
+                              <button type="button" className="tree-toggle" onClick={(e) => { e.stopPropagation(); toggleExpand(node); }} aria-label={isExpanded ? `Collapse ${node.name}` : `Expand ${node.name}`}>
+                                {isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
+                              </button>
                             ) : (
-                              <label className="checkbox analyzer-checkbox" title={selectable ? 'Select for Review & Clean' : 'Not selectable'}>
-                                <input type="checkbox" aria-label={`Select analyzer node ${node.path}`} checked={checked} disabled={!selectable || cleaning} onChange={() => toggleSelect(node)} />
-                              </label>
+                              <span className="tree-toggle-spacer" aria-hidden="true" />
                             )}
                           </span>
-                          {semanticNodeIcon(node)}
+                          <span className={`tree-slot tree-slot-selection ${selectable ? '' : 'locked'}`} onClick={(e) => e.stopPropagation()}>
+                            {selectionSlot}
+                          </span>
+                          <span className="tree-slot tree-slot-icon analyzer-type-slot" aria-hidden="true">{semanticNodeIcon(node)}</span>
                           <div className="analyzer-node-main">
                             <div className="analyzer-name-line">
                               <span className="analyzer-name" title={node.name}>{node.name}</span>
                               {typeTag && <span className="inline-type-tag muted">· {typeTag}</span>}
+                              {node.isDir && (
+                                <button
+                                  type="button"
+                                  className="analyzer-drill-btn"
+                                  onClick={(e) => { e.stopPropagation(); setRootPath(node.path); void runAnalyzer(node.path); }}
+                                  aria-label={`Drill into ${node.name}`}
+                                  title="Drill into folder"
+                                >
+                                  Drill
+                                </button>
+                              )}
                             </div>
-                            <div className="analyzer-path" title={pathDisplay}>{pathDisplay}</div>
+                            <div className="analyzer-path analyzer-node-path" title={pathDisplay}>{pathDisplayShort}</div>
                             <span className="sr-only">{status.text}</span>
                           </div>
                         </div>
-                        <div className="analyzer-col-share">
-                          <progress className="analyzer-size-bar" value={Math.min(100, Math.max(0, share))} max={100} aria-label={`Share ${shareLabel}`} />
-                          <span className="analyzer-share-num num">{shareLabel}</span>
-                          <span className="item-size num">{formatBytes(node.sizeBytes)}</span>
+                        <div className="analyzer-col-share tree-cell-share">
+                          <div className="analyzer-share-cell">
+                            {shareFillWidthPx <= 0 ? (
+                              <span className="analyzer-share-empty muted" aria-hidden="true">—</span>
+                            ) : (
+                              <svg className="analyzer-share-svg" viewBox="0 0 48 6" preserveAspectRatio="none" role="presentation" aria-hidden="true">
+                                <rect className="analyzer-share-bg" x={0} y={0} width={48} height={6} rx={3} />
+                                <rect className="analyzer-share-fill" x={0} y={0} width={shareFillWidthPx} height={6} rx={3} />
+                              </svg>
+                            )}
+                            <span className="analyzer-share-num num">{shareLabel}</span>
+                          </div>
                         </div>
                         <div className="analyzer-col-count muted num">{node.itemCount}</div>
+                        <div className="analyzer-col-sizecell num">{formatBytes(node.sizeBytes)}</div>
                         <div className="analyzer-col-guard">
                           {pill ? <span className={pill.className}>{pill.label}</span> : <span className="status-muted-inline" />}
                         </div>
@@ -562,31 +856,37 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                 <div className="inspector-section" aria-label="Analyzer inspector">
                   {inspected && inspectedNode ? (
                     <>
-                      <div className="inspector-header-block">
-                        <div className="inspector-title-row">
-                          {leadingInspectorIcon(inspectedNode)}
-                          <div className="inspector-title-copy">
-                            <span className="inspector-headline-name" title={normalizeDisplayPath(inspectedNode.path)}>{inspected.title || inspectedNode.name}</span>
-                            <span className="inspector-subtitle muted">{nodeTypeTag(inspectedNode) ?? (isDriveRoot(inspectedNode) ? 'Drive' : 'Folder')}</span>
+                      <InspectorTitleRow
+                        icon={leadingInspectorIcon(inspectedNode)}
+                        title={inspected.title || inspectedNode.name}
+                        subtitle={nodeTypeTag(inspectedNode) ?? (isDriveRoot(inspectedNode) ? 'Drive' : 'Folder')}
+                        badge={inspectedPill ? <span className={inspectedPill.className}>{inspectedPill.label}</span> : <span className="status-pill">{inspectedNode.risk}</span>}
+                      />
+                      <InspectorMetaGrid
+                        size={inspectedNode.sizeBytes}
+                        extraLabel="Items"
+                        extraValue={<span className="num">{inspectedNode.itemCount}</span>}
+                        eligibility={isDriveRoot(inspectedNode) ? 'Drive root — expand C: below to inspect and select specific folders.' : (inspectedStatus ? (inspectedSelectable ? 'Meets age limit (> 24h old)' : inspectedStatus.text) : '—')}
+                      />
+                      {!isDriveRoot(inspectedNode) && <p className="inspector-guidance">{analyzerGuidance(inspectedNode, inspectedSelectable, allowDeleteUnknown)}</p>}
+                      {inspectedNode.path.toLowerCase().endsWith('.vhdx') && (() => {
+                        const vhdxPath = normalizeDisplayPath(inspectedNode.path);
+                        const cmd = `wsl --shutdown\nOptimize-VHD -Path "${vhdxPath}" -Mode Full`;
+                        return (
+                          <div className="notice info analyzer-vhdx-callout" role="note">
+                            <div><strong>Compaction (manual):</strong> shut down WSL/VM first, then run in an elevated PowerShell (Hyper-V).</div>
+                            <pre className="analyzer-vhdx-cmd"><code>{`wsl --shutdown\nOptimize-VHD -Path "${vhdxPath}" -Mode Full`}</code></pre>
+                            <button type="button" className="btn small subtle-btn analyzer-copy-cmd-btn" onClick={() => void copyVhdxCommand(cmd)} aria-label="Copy Command">{copiedVhdxCmd ? 'Copied' : 'Copy Command'}</button>
                           </div>
-                          {inspectedPill ? <span className={inspectedPill.className}>{inspectedPill.label}</span> : <span className={riskClass(inspected.risk)}>{inspected.risk}</span>}
-                        </div>
-                      </div>
-                      <dl className="inspector-meta-grid" aria-label="Node metadata">
-                        <div><dt>Size</dt><dd className="num">{formatBytes(inspectedNode.sizeBytes)}</dd></div>
-                        <div><dt>Items</dt><dd className="num">{inspectedNode.itemCount}</dd></div>
-                        <div><dt>Safety</dt><dd>{inspectedNode.risk === 'Protected' ? 'Protected' : (inspectedNode.path.toLowerCase().endsWith('.vhdx') || inspectedNode.isLinkPoint || inspectedNode.isCloudPlaceholder || inspectedNode.displayOnly ? 'Read-Only' : inspectedNode.risk)}</dd></div>
-                        <div><dt>Eligibility</dt><dd>{inspectedStatus ? (inspectedSelectable ? 'Eligible' : inspectedStatus.text) : '—'}</dd></div>
-                      </dl>
-                      <p className="inspector-guidance">{analyzerGuidance(inspectedNode, inspectedSelectable, allowDeleteUnknown)}</p>
+                        );
+                      })()}
                       {inspectedStatus?.unknownGated && onOpenSettings && (
-                        <button type="button" className="btn small inspector-inline-link" onClick={onOpenSettings}>Unlock in Settings →</button>
+                        <div className="inspector-policy-links" aria-label="Inspector actions">
+                          <button type="button" className="btn small inspector-inline-link" onClick={() => onOpenSettings('allowDeleteUnknown')}>Allow unknown folders in Settings →</button>
+                        </div>
                       )}
-                      <div className="path-strip" aria-label="Full path">
-                        <span className="mono path-strip-text" title={normalizeDisplayPath(inspectedNode.path)}>{normalizeDisplayPath(inspectedNode.path) || 'C:\\'}</span>
-                        <button type="button" className="icon-only-btn subtle path-strip-btn" onClick={() => void copyText(normalizeDisplayPath(inspectedNode.path))} aria-label="Copy path" title="Copy path"><CopyIcon /></button>
-                        <button type="button" className="icon-only-btn subtle path-strip-btn" onClick={() => openContainingFolder(normalizeDisplayPath(inspectedNode.path))} aria-label="Open Folder" title="Open Folder"><FolderOpenIcon /></button>
-                      </div>
+                      <PathWell path={normalizeDisplayPath(inspectedNode.path)} />
+                      <PathActions path={normalizeDisplayPath(inspectedNode.path)} />
                     </>
                   ) : (
                     <p className="inspector-empty">Select a node to see its purpose, risk, full path, and eligibility.</p>
@@ -603,49 +903,8 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
                   </div>
                 )}
 
-                {preview && (
-                  <div aria-live="polite" className="preview-breakdown">
-                    <h4 className="preview-breakdown-title">Preview Breakdown</h4>
-                    <p className="preview-total"><strong>Total selected:</strong> {pluralize(Number(preview.totalSelectedCount || '0'), 'item', 'items')}, <span className="num">{formatBytes(preview.totalSelectedBytes)}</span></p>
-                    <table className="table" aria-label="Preview breakdown by Target">
-                      <thead><tr><th>Target</th><th>Count</th><th>Size</th></tr></thead>
-                      <tbody>
-                        {preview.breakdown.map((b) => (
-                          <tr key={b.targetId}><td>{b.targetName}</td><td>{b.selectedCount}</td><td>{formatBytes(b.selectedBytes)}</td></tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    <div className="clean-footer" role="alert" aria-live="polite">
-                      <div className="clean-footer-warning"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
-                    </div>
-                    {cleaning && (
-                      <div className="notice info" role="status" aria-live="polite">
-                        <div>Cleaning in progress…</div>
-                        {cleanProgress && <div>Progress: {cleanProgress.completedItems} / {cleanProgress.totalItems} items — {formatBytes(cleanProgress.bytesFreedSoFar)} freed so far ({cleanProgress.status})</div>}
-                        <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {cleanSummary && (
-                  <div className="clean-summary-section" aria-labelledby="analyzer-clean-summary-heading" role="status">
-                    <h4 id="analyzer-clean-summary-heading" className="clean-summary-title">Clean Summary</h4>
-                    {cleanSummary.aborted && <div className="notice error" role="alert"><strong>Clean aborted.</strong> {cleanSummary.abortReason || 'The operation was aborted.'}</div>}
-                    <dl className="kv">
-                      <dt>Bytes freed</dt><dd className="num">{formatBytes(cleanSummary.bytesFreed)}</dd>
-                      <dt>Deleted count</dt><dd className="num">{cleanSummary.deletedCount}</dd>
-                      <dt>Skipped count</dt><dd className="num">{cleanSummary.skippedCount}</dd>
-                    </dl>
-                    <div>
-                      <strong className="subheading-xs">Skipped reasons</strong>
-                      {cleanSummary.skippedReasons.length === 0 ? <p className="muted small-note" aria-label="Skipped reasons">None.</p> : (
-                        <ul aria-label="Skipped reasons" className="skipped-reasons">{cleanSummary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
-                      )}
-                    </div>
-                    {cleanSummary.logId && <div className="row row-top"><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button></div>}
-                  </div>
-                )}
+                {preview && <PreviewBreakdownBlock preview={preview} cleaning={cleaning} cleanProgressLabel={cleanProgressLabel} />}
+                {cleanSummary && <CleanSummaryBlock summary={cleanSummary} onOpenLog={onOpenLog} />}
               </div>
             </aside>
           </section>
@@ -653,6 +912,7 @@ export function AnalyzerView({ client, settings, onOpenLog, onOpenSettings }: { 
             <div className="scan-bottom-bar-left">
               <span className="scan-bottom-bar-summary"><strong className="num">{pluralize(selectedIds.size, 'item', 'items')} selected</strong> · <span className="num">{formatBytes(selectedBytes)}</span></span>
               {selectedIds.size > 0 && <button type="button" className="btn small subtle-btn" onClick={() => { setSelectedIds(new Set()); setPreview(null); }} disabled={cleaning}>Clear</button>}
+              {hasSelectedRisky && <span className="scan-bottom-bar-hint muted">Includes Caution/Unknown items · requires DELETE confirm</span>}
             </div>
             <div className="scan-bottom-bar-right">
               {!preview ? (

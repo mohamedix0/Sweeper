@@ -377,22 +377,26 @@ export function createMockController(): MockController {
     {
       id: 'log-1',
       name: '2026-11-13-scan.jsonl',
-      modifiedUnixSecs: '1794528000',
-      sizeBytes: '2048',
+      modifiedUnixSecs: String(Math.floor(Date.now() / 1000) - 3 * 24 * 60 * 60),
+      sizeBytes: '3072',
       content:
-        '{"timestamp":"2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp","size":"1048576","status":"Eligible"}\n' +
-        '{"timestamp":"2:00 AM","action":"Crash Dumps & WER","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps","size":"5242880","status":"Eligible"}\n' +
-        '{"timestamp":"2:00 AM","action":"npm Package Cache","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache","size":"7340032","status":"Eligible"}\n' +
+        '{"timestamp":"2:00 AM","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp","size":"1048576","status":"Eligible","kind":"Category"}\n' +
+        '{"timestamp":"2:00 AM","category":"Crash Dumps & WER","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps","size":"5242880","status":"Eligible","kind":"Category"}\n' +
+        '{"timestamp":"2:00 AM","category":"npm Package Cache","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache","size":"7340032","status":"Eligible","kind":"Category"}\n' +
+        '{"timestamp":"2:00 AM","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\recent.log","size":"2048","status":"Skipped · < 24h","kind":"File"}\n' +
+        '{"timestamp":"2:00 AM","category":"Custom Path (Unknown)","path":"C:\\\\Users\\\\Alice\\\\CustomCleanup\\\\old.bin","size":"8192","status":"Skipped · Unverified","kind":"File"}\n' +
         '{"record":"outcome","status":"completed","event":"scan","categoriesCount":4,"items":5,"totalBytes":"13639680","timestamp":"2:00 AM"}',
     },
     {
       id: 'log-2',
       name: '2026-11-12-clean.jsonl',
-      modifiedUnixSecs: '1794441600',
-      sizeBytes: '512',
+      modifiedUnixSecs: String(Math.floor(Date.now() / 1000) - 4 * 24 * 60 * 60),
+      sizeBytes: '1024',
       content:
-        '{"record":"item","event":"clean","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned","timestamp":"1794441600"}\n' +
-        '{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}',
+        '{"timestamp":"Yesterday, 2:00 AM","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned"}\n' +
+        '{"timestamp":"Yesterday, 2:00 AM","category":"Crash Dumps & WER","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps\\\\app.dmp","size":"5242880","status":"Cleaned"}\n' +
+        '{"timestamp":"Yesterday, 2:00 AM","category":"npm Package Cache","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache\\\\index-v5","size":"7340032","status":"Cleaned"}\n' +
+        '{"record":"outcome","status":"completed","event":"clean","deletedCount":"3","bytesFreed":"13631488","skippedCount":"0","category":"User Temp"}',
     },
   ];
 
@@ -742,23 +746,26 @@ export function createMockController(): MockController {
         {
           id: 'log-1',
           name: '2026-11-13-scan.jsonl',
-          modifiedUnixSecs: '1794528000',
-          sizeBytes: '2048',
+          modifiedUnixSecs: String(Math.floor(Date.now() / 1000) - 3 * 24 * 60 * 60),
+          sizeBytes: '3072',
           content:
-            '{"timestamp":"2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp","size":"1048576","status":"Eligible"}\n' +
-            '{"timestamp":"2:00 AM","action":"Crash Dumps & WER","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps","size":"5242880","status":"Eligible"}\n' +
-            '{"timestamp":"2:00 AM","action":"npm Package Cache","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache","size":"7340032","status":"Eligible"}\n' +
-            '{"timestamp":"2:00 AM","action":"Custom Path","details":"C:\\\\Users\\\\Alice\\\\CustomCleanup","size":"8192","status":"Skipped · < 24h"}\n' +
-            '{"record":"outcome","status":"completed","event":"scan","categoriesCount":4,"items":5,"totalBytes":"13639680","timestamp":"2:00 AM","action":"Scan completed","details":"4 categories · 13 MB reclaimable"}',
+            '{"timestamp":"2:00 AM","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp","size":"1048576","status":"Eligible","kind":"Category"}\n' +
+            '{"timestamp":"2:00 AM","category":"Crash Dumps & WER","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps","size":"5242880","status":"Eligible","kind":"Category"}\n' +
+            '{"timestamp":"2:00 AM","category":"npm Package Cache","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache","size":"7340032","status":"Eligible","kind":"Category"}\n' +
+            '{"timestamp":"2:00 AM","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\recent.log","size":"2048","status":"Skipped · < 24h","kind":"File"}\n' +
+            '{"timestamp":"2:00 AM","category":"Custom Path (Unknown)","path":"C:\\\\Users\\\\Alice\\\\CustomCleanup\\\\old.bin","size":"8192","status":"Skipped · Unverified","kind":"File"}\n' +
+            '{"record":"outcome","status":"completed","event":"scan","categoriesCount":4,"items":5,"totalBytes":"13639680","timestamp":"2:00 AM"}',
         },
         {
           id: 'log-2',
           name: '2026-11-12-clean.jsonl',
-          modifiedUnixSecs: '1794441600',
-          sizeBytes: '512',
+          modifiedUnixSecs: String(Math.floor(Date.now() / 1000) - 4 * 24 * 60 * 60),
+          sizeBytes: '1024',
           content:
-            '{"timestamp":"Yesterday, 2:00 AM","action":"User Temp","details":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned"}\n' +
-            '{"record":"outcome","status":"completed","event":"clean","deletedCount":"1","bytesFreed":"1048576","skippedCount":"0","category":"User Temp"}',
+            '{"timestamp":"Yesterday, 2:00 AM","category":"User Temp","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\Temp\\\\a.tmp","size":"1048576","status":"Cleaned"}\n' +
+            '{"timestamp":"Yesterday, 2:00 AM","category":"Crash Dumps & WER","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\CrashDumps\\\\app.dmp","size":"5242880","status":"Cleaned"}\n' +
+            '{"timestamp":"Yesterday, 2:00 AM","category":"npm Package Cache","path":"C:\\\\Users\\\\Alice\\\\AppData\\\\Local\\\\npm-cache\\\\index-v5","size":"7340032","status":"Cleaned"}\n' +
+            '{"record":"outcome","status":"completed","event":"clean","deletedCount":"3","bytesFreed":"13631488","skippedCount":"0","category":"User Temp"}',
         },
       );
     },

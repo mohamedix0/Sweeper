@@ -44,6 +44,14 @@ export function DotIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function CheckIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
+      <path d="M3 8.5 6.5 12 13 4.5" />
+    </svg>
+  );
+}
+
 export function ScanIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg {...navBase} {...props}>
@@ -93,8 +101,8 @@ export function InfoIcon(props: SVGProps<SVGSVGElement>) {
 
 export function LockIcon(props: SVGProps<SVGSVGElement>) {
   return (
-    <svg {...base} width={14} height={14} viewBox="0 0 16 16" strokeWidth={1.5} {...props}>
-      <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
+    <svg {...base} width={12} height={12} viewBox="0 0 16 16" {...props}>
+      <rect x="3.25" y="7" width="9.5" height="6.75" rx="1.5" />
       <path d="M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7" />
     </svg>
   );

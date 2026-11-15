@@ -62,8 +62,8 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
     await tier3.check();
     await expect(staleDays).toBeEnabled();
     await staleDays.fill('45');
-    await expect(page.getByText(/Highlight inactive Rust\/Node build caches/i).first()).toBeVisible();
-    await expect(page.getByText(/Recycle Bin/i).first()).toBeVisible();
+    await expect(page.getByText(/Highlight inactive Rust build caches/i).first()).toBeVisible();
+    await expect(page.getByText(/Empty Windows Recycle Bin/i).first()).toBeVisible();
 
     await page.getByLabel('Add Custom Path').fill('C:\\Windows\\Temp\\bad');
     await page.getByRole('button', { name: 'Add Folder' }).click();
@@ -72,10 +72,10 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
     await page.getByLabel('Add Custom Path').fill('C:\\Users\\Alice\\CustomCleanup');
     await page.getByRole('button', { name: 'Add Folder' }).click();
     await expect(page.getByText(/Settings saved/i)).toBeVisible();
-    await expect(page.getByRole('table', { name: 'Custom Paths' })).toContainText('C:\\Users\\Alice\\CustomCleanup');
+    await expect(page.getByText('C:\\Users\\Alice\\CustomCleanup')).toBeVisible();
 
     await page.getByRole('button', { name: 'Remove' }).click();
-    await expect(page.getByRole('table', { name: 'Custom Paths' })).toHaveCount(0);
+    await expect(page.getByText('C:\\Users\\Alice\\CustomCleanup')).toHaveCount(0);
   });
 
   test('Analyzer Unknown gating and typed confirmation end-to-end', async ({ page }) => {
@@ -116,8 +116,14 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
     await page.getByRole('button', { name: 'Scan & Clean' }).click();
     await page.getByRole('button', { name: 'Start Scan' }).click();
     await expect(page.getByRole('heading', { name: 'Inspector' })).toBeVisible();
-
-    await page.getByLabel('Select C:\\Users\\Alice\\CustomCleanup\\old.bin').check();
+    const customGroup = page.getByRole('article').filter({ hasText: 'Custom Path (Unknown)' }).first();
+    await expect(customGroup).toBeVisible();
+    const expandToggle = customGroup.getByRole('button', { name: 'Expand Custom Path (Unknown)' });
+    await expandToggle.click();
+    await expect(customGroup.getByRole('button', { name: 'Collapse Custom Path (Unknown)' })).toBeVisible();
+    const customItemCheckbox = customGroup.getByLabel('Select C:\\Users\\Alice\\CustomCleanup\\old.bin');
+    await expect(customItemCheckbox).toBeEnabled({ timeout: 15000 });
+    await customItemCheckbox.check();
     await expect(page.getByLabel('Typed confirmation')).toBeVisible();
     await page.getByLabel('Typed confirmation').fill('DELETE');
     await page.getByRole('button', { name: 'Review & Clean' }).click();

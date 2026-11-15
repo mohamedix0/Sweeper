@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatUnixSeconds, sumDecimalStrings, toBigInt } from './format';
+import { formatBytes, formatUnixSeconds, relativeAge, sumDecimalStrings, toBigInt } from './format';
 
 describe('format utils (BigInt-safe)', () => {
   it('parses decimal strings as BigInt', () => {
@@ -29,5 +29,29 @@ describe('format utils (BigInt-safe)', () => {
     expect(formatUnixSeconds(null)).toBe('—');
     expect(formatUnixSeconds('0')).toBe(new Date(0).toLocaleString());
     expect(formatUnixSeconds('9007199254740993')).toBe('9007199254740993');
+  });
+});
+
+describe('relativeAge (fixed now)', () => {
+  const NOW = Date.parse('2026-11-15T12:00:00Z');
+  const secsAgo = (ms: number) => String(Math.floor((NOW - ms) / 1000));
+
+  it('renders human relative ages from unix seconds', () => {
+    expect(relativeAge(secsAgo(0), NOW)).toBe('just now');
+    expect(relativeAge(secsAgo(90_000), NOW)).toBe('just now');
+    expect(relativeAge(secsAgo(4 * 3_600_000), NOW)).toBe('4h ago');
+    expect(relativeAge(secsAgo(4 * 86_400_000), NOW)).toBe('4d ago');
+    expect(relativeAge(secsAgo(12 * 86_400_000), NOW)).toBe('12d ago');
+    expect(relativeAge(secsAgo(30 * 86_400_000), NOW)).toBe('1mo ago');
+    expect(relativeAge(secsAgo(60 * 86_400_000), NOW)).toBe('2mo ago');
+    expect(relativeAge(secsAgo(400 * 86_400_000), NOW)).toBe('1y ago');
+  });
+
+  it('treats future timestamps as just now and unsafe values as em dash', () => {
+    expect(relativeAge(String(Math.floor(NOW / 1000) + 60), NOW)).toBe('just now');
+    expect(relativeAge(null, NOW)).toBe('—');
+    expect(relativeAge(undefined, NOW)).toBe('—');
+    expect(relativeAge('9007199254740993', NOW)).toBe('—');
+    expect(relativeAge('not-a-number', NOW)).toBe('—');
   });
 });
