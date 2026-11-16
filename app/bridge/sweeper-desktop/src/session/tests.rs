@@ -326,7 +326,12 @@ fn canon_test_path(path: &std::path::Path) -> String {
     s
 }
 
-fn seed_multi_preview_session(store: &mut SessionStore, root: &str, valid_path: &str) {
+fn seed_multi_preview_session(
+    store: &mut SessionStore,
+    root: &str,
+    valid_path: &str,
+    invalid_path: &str,
+) {
     use std::collections::HashMap;
     use sweeper_contract::{
         RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
@@ -340,7 +345,7 @@ fn seed_multi_preview_session(store: &mut SessionStore, root: &str, valid_path: 
         age_eligible: true,
     };
     let valid = mk("t1::valid", valid_path, 123);
-    let invalid = mk("t1::invalid", r"C:\__sweeper_missing_invalid__.tmp", 999);
+    let invalid = mk("t1::invalid", invalid_path, 999);
     let target = TargetScanResultDto {
         target_id: "user-temp".to_string(),
         target_name: "User Temp".to_string(),
@@ -394,9 +399,17 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
     let tmp = tempfile::tempdir().unwrap();
     let valid = tmp.path().join("valid.tmp");
     std::fs::write(&valid, b"abc").unwrap();
+    // Seed a second item inside the same resolved target root, then drop its
+    // nested tempdir after the scan so preview must skip an item that vanished
+    // in place (tempfile's RAII cleanup keeps test code free of deletion APIs).
+    let vanished_dir = tempfile::tempdir_in(tmp.path()).unwrap();
+    let vanished = vanished_dir.path().join("vanished.tmp");
+    std::fs::write(&vanished, b"xyz").unwrap();
     let root = canon_test_path(tmp.path());
     let valid_path = canon_test_path(&valid);
-    seed_multi_preview_session(&mut store, &root, &valid_path);
+    let vanished_path = canon_test_path(&vanished);
+    seed_multi_preview_session(&mut store, &root, &valid_path, &vanished_path);
+    drop(vanished_dir);
     let preview = store
         .preview_clean(
             &clock,
@@ -412,5 +425,11 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
     assert_eq!(preview.total_selected_count, U64String(1));
     assert_eq!(preview.breakdown[0].selected_count, U64String(1));
     assert_eq!(preview.skipped_count, U64String(1));
-    assert!(!preview.skipped_reasons.is_empty());
+    assert!(
+        preview
+            .skipped_reasons
+            .iter()
+            .any(|r| r == "selected item no longer exists"),
+        "expected an in-root vanished item to be skipped with an accurate reason"
+    );
 }

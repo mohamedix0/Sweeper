@@ -252,10 +252,20 @@ impl SessionStore {
         session: &ScanSession,
         item: &StoredItem,
     ) -> Result<ValidatedItem, ContractError> {
-        if std::fs::symlink_metadata(&item.dto.path).is_err() {
-            return Err(ContractError::InvalidInput {
-                reason: "selected item no longer exists".to_string(),
-            });
+        // Symlink-aware so a scanned link entry is checked as a link, not its target.
+        // Distinguish a vanished item from an access error so the skip reason is accurate.
+        match std::fs::symlink_metadata(&item.dto.path) {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ContractError::InvalidInput {
+                    reason: "selected item no longer exists".to_string(),
+                });
+            }
+            Err(_) => {
+                return Err(ContractError::InvalidInput {
+                    reason: "selected item is inaccessible".to_string(),
+                });
+            }
         }
         let roots = Self::scan_item_roots(session, &item.target_id);
         if let Some(target_root) = Self::find_same_scan_root(&roots, &item.dto.path) {

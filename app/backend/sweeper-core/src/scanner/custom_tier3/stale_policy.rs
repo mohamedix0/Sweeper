@@ -64,6 +64,18 @@ fn is_plain_child_dir(entry: &std::fs::DirEntry) -> bool {
     (meta.file_attributes() & 0x0400) == 0
 }
 
+/// A probed container must itself be an ordinary directory: `Path::is_dir()`
+/// follows junctions/symlinks, which would make discovery traverse a Link Point.
+fn is_plain_directory_at(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return false;
+    }
+    (meta.file_attributes() & 0x0400) == 0
+}
+
 fn append_profile_children(profile_dir: &Path, roots: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(profile_dir) else {
         return;
@@ -106,8 +118,10 @@ pub(super) fn default_tier3_project_search_roots() -> Vec<String> {
     }
     for letter in ['C', 'D', 'E', 'F', 'G'] {
         let base = format!("{letter}:\\Users");
-        if Path::new(&base).is_dir() {
-            append_user_profile_roots(Path::new(&base), &mut out);
+        let base = Path::new(&base);
+        // Never enumerate a reparse-point container: `is_dir()` would follow it.
+        if is_plain_directory_at(base) {
+            append_user_profile_roots(base, &mut out);
         }
     }
     out
@@ -309,6 +323,18 @@ mod tests {
             ".git",
             Path::new(r"C:\Users\Test\.git")
         ));
+    }
+
+    #[test]
+    fn plain_directory_probe_rejects_files_and_missing_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plain");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = tmp.path().join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(is_plain_directory_at(&dir));
+        assert!(!is_plain_directory_at(&file));
+        assert!(!is_plain_directory_at(&tmp.path().join("missing")));
     }
 
     #[test]
