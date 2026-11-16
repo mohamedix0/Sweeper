@@ -271,42 +271,68 @@ function Try-StartRustRawString([hashtable]$state) {
   $state.RawHashes = $hashes; $state.Index = $end + 1; return $true
 }
 
-function Step-RustRawString([hashtable]$state) {
+function Test-RustRawCloseAt([hashtable]$state) {
   $i = $state.Index
-  $quote = ($state.Out[$i] -eq '"')
-  $ok = $quote
-  if ($ok) {
-    for ($k = 0; $k -lt $state.RawHashes; $k++) {
-      $j = $i + 1 + $k
-      $ok = (($ok) -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '#'))
-    }
+  if ($state.Out[$i] -ne '"') { return $false }
+  for ($k = 0; $k -lt $state.RawHashes; $k++) {
+    $j = $i + 1 + $k
+    $inBounds = ($j -lt $state.Len)
+    if (-not $inBounds) { return $false }
+    if ($state.Out[$j] -ne '#') { return $false }
   }
+  return $true
+}
+
+function Complete-RustRawClose([hashtable]$state) {
+  $i = $state.Index
+  $end = $i + $state.RawHashes
+  for ($k = $i + 1; $k -le $end; $k++) { $state.Out[$k] = ' ' }
+  $state.RawHashes = -1
+  $state.Index = $end + 1
+}
+
+function Step-RustRawString([hashtable]$state) {
+  $isClose = Test-RustRawCloseAt $state
+  $i = $state.Index
   if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
-  if ($ok) {
-    $end = $i + $state.RawHashes
-    for ($k = $i + 1; $k -le $end; $k++) { $state.Out[$k] = ' ' }
-    $state.RawHashes = -1; $state.Index = $end + 1; return
-  }
+  if ($isClose) { Complete-RustRawClose $state; return }
   $state.Index = $i + 1
 }
 
-function Step-RustNormal([hashtable]$state) {
-  $started = Try-StartRustRawString $state
-  if ($started) { return }
+function Try-StartRustLineComment([hashtable]$state) {
   $i = $state.Index
   $j = $i + 1
-  $line = (($state.Out[$i] -eq '/') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '/'))
-  if ($line) {
-    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.InLine = $true; $state.Index = $i + 2; return
-  }
-  $block = (($state.Out[$i] -eq '/') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '*'))
-  if ($block) {
-    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth = 1; $state.Index = $i + 2; return
-  }
-  if ($state.Out[$i] -eq '"') {
-    $state.Out[$i] = ' '; $state.InString = $true; $state.Index = $i + 1; return
-  }
+  $isLine = (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq '/'))
+  if (-not $isLine) { return $false }
+  $state.Out[$i] = ' '; $state.Out[$j] = ' '
+  $state.InLine = $true; $state.Index = $i + 2
+  return $true
+}
+
+function Try-StartRustBlockComment([hashtable]$state) {
+  $i = $state.Index
+  $j = $i + 1
+  $isBlock = (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq '*'))
+  if (-not $isBlock) { return $false }
+  $state.Out[$i] = ' '; $state.Out[$j] = ' '
+  $state.Depth = 1; $state.Index = $i + 2
+  return $true
+}
+
+function Try-StartRustQuoteString([hashtable]$state) {
+  $i = $state.Index
+  if ($state.Out[$i] -ne '"') { return $false }
+  $state.Out[$i] = ' '; $state.InString = $true
   $state.Index = $i + 1
+  return $true
+}
+
+function Step-RustNormal([hashtable]$state) {
+  if (Try-StartRustRawString $state) { return }
+  if (Try-StartRustLineComment $state) { return }
+  if (Try-StartRustBlockComment $state) { return }
+  if (Try-StartRustQuoteString $state) { return }
+  $state.Index = $state.Index + 1
 }
 
 function Step-RustScan([hashtable]$state) {
