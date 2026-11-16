@@ -72,6 +72,8 @@ export type PreviewCleanResult = {
   breakdown: { targetId: string; targetName: string; selectedCount: string; selectedBytes: string }[];
   totalSelectedCount: string;
   totalSelectedBytes: string;
+  skippedCount?: string;
+  skippedReasons?: string[];
 };
 
 export type StartAnalyzerResult = {

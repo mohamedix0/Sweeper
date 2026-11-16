@@ -708,6 +708,89 @@ fn tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
 }
 
 #[test]
+fn tier3_artifact_promoted_to_search_root_is_classified_and_pruned() {
+    let sb = Sandbox::new();
+    // Mirrors a user profile that directly contains `node_modules` beside an old
+    // `package-lock.json`. Tier 3 root discovery promotes the artifact itself to a search
+    // root; the walker must classify that root and prune its dependency tree.
+    let profile = sb.create_dir("profile").unwrap();
+    write_file(&profile.join("package-lock.json"), b"{}");
+    set_mtime_days_ago(&profile.join("package-lock.json"), 45);
+
+    let node_modules = profile.join("node_modules");
+    fs::create_dir_all(node_modules.join("pkg")).unwrap();
+    write_file(
+        &node_modules.join("pkg").join("index.js"),
+        b"console.log('x')",
+    );
+    set_old(&node_modules.join("pkg").join("index.js"));
+
+    // A nested `target/` with an old sibling `Cargo.toml` inside the dependency tree. If the
+    // walker enumerated the tree instead of pruning it, this would be reported as a separate
+    // stale rust target - its absence proves the dependency tree was pruned.
+    let nested_foo = node_modules.join("foo");
+    fs::create_dir_all(nested_foo.join("target")).unwrap();
+    write_file(
+        &nested_foo.join("Cargo.toml"),
+        b"[package]\nname='nested'\nversion='0.0.0'\n",
+    );
+    write_file(&nested_foo.join("target").join("artifact.bin"), b"12345");
+    set_mtime_days_ago(&nested_foo.join("Cargo.toml"), 45);
+
+    let settings = SweeperSettings {
+        enable_tier1: false,
+        enable_tier2: false,
+        enable_tier3: true,
+        stale_project_days: 30,
+        min_age_hours: 0,
+        ..SweeperSettings::default()
+    };
+    let opts = ScanSettingsOptions {
+        // Discovery promotes `profile/node_modules` itself to a search root.
+        tier3_project_search_roots: vec![node_modules.to_string_lossy().to_string()],
+        ..Default::default()
+    };
+    let report = scanner::scan_with_settings_options(&settings, opts).unwrap();
+
+    let stale_nm = report
+        .targets
+        .iter()
+        .find(|t| t.target_id == "stale-node-modules")
+        .expect("stale node_modules result");
+    assert!(
+        stale_nm.scanned,
+        "the promoted artifact root must be classified: {:?}",
+        stale_nm.status_reason
+    );
+    assert_eq!(
+        stale_nm.items.len(),
+        1,
+        "the promoted node_modules root must be one stale artifact item: {:?}",
+        stale_nm.items.iter().map(|i| &i.path).collect::<Vec<_>>()
+    );
+    assert!(
+        stale_nm.items[0]
+            .path
+            .to_ascii_lowercase()
+            .ends_with("\\node_modules"),
+        "classified item must be the node_modules artifact: {:?}",
+        stale_nm.items[0].path
+    );
+
+    let stale_rust = report
+        .targets
+        .iter()
+        .find(|t| t.target_id == "stale-rust-target")
+        .expect("stale rust target result");
+    assert_eq!(
+        stale_rust.items.len(),
+        0,
+        "the nested target inside the pruned dependency tree must not be enumerated: {:?}",
+        stale_rust.items.iter().map(|i| &i.path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn tier3_recycle_bin_scan_reports_contents_in_sandbox() {
     let sb = Sandbox::new();
     let (search_root, _, _, _, _, _, _, recycle, _, _) = setup_tier3_scan_fixture(&sb);

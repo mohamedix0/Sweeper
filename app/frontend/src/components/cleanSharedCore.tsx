@@ -6,6 +6,8 @@ export type PreviewResult = {
   breakdown: { targetId: string; targetName: string; selectedCount: string; selectedBytes: string }[];
   totalSelectedCount: string;
   totalSelectedBytes: string;
+  skippedCount?: string;
+  skippedReasons?: string[];
   issuedAtMs: number;
 };
 
