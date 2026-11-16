@@ -515,41 +515,33 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn lint_rejects_globstar() {
-        let toml = r#"
+    fn single_target_allowlist_toml(relative_subpath: &str) -> String {
+        format!(
+            r#"
 [[targets]]
 id="x"
 name="X"
 tier="Tier1"
 risk="Safe"
 known_folder="LocalAppData"
-relative_subpath="Foo\\**\\Bar"
+relative_subpath="{relative_subpath}"
 scope="contents"
 min_age_hours=24
 requires_elevation=false
 description="x"
-"#;
-        let err = lint_allowlist_toml(toml).unwrap_err();
+"#
+        )
+    }
+
+    #[test]
+    fn lint_rejects_globstar() {
+        let err = lint_allowlist_toml(&single_target_allowlist_toml(r"Foo\\**\\Bar")).unwrap_err();
         assert!(err.to_string().contains("**"), "{err}");
     }
 
     #[test]
     fn lint_rejects_wildcard_in_final_segment() {
-        let toml = r#"
-[[targets]]
-id="x"
-name="X"
-tier="Tier1"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath="Foo\\*"
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="x"
-"#;
-        let err = lint_allowlist_toml(toml).unwrap_err();
+        let err = lint_allowlist_toml(&single_target_allowlist_toml(r"Foo\\*")).unwrap_err();
         assert!(err.to_string().contains("final path segment"), "{err}");
     }
 
