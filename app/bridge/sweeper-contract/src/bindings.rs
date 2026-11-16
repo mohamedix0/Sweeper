@@ -31,7 +31,8 @@ pub fn export_ts_bindings_to(path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub(crate) fn render_bindings() -> Result<String, Box<dyn Error>> {
+/// Render deterministic TypeScript bindings content (for tests and export).
+pub fn render_bindings() -> Result<String, Box<dyn Error>> {
     use specta_typescript as ts;
 
     let ts_cfg = ts::Typescript::default();

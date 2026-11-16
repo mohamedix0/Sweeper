@@ -134,7 +134,68 @@ if (@($desktopInternalDeps).Count -ne $allowedDesktopInternal.Count -or (@(Compa
   Fail "app/bridge/sweeper-desktop/Cargo.toml internal workspace deps must be exactly: $($allowedDesktopInternal -join ', '). Found: $($desktopInternalDeps -join ', ')"
 }
 
-# 5) Privacy / scrub checks on tracked files (permanent Gate A guard).
+# 5) Enforce #![forbid(unsafe_code)] in required crates (except sweeper-winfs).
+$forbidFiles = @()
+$backendLibs = Get-ChildItem -Path (Join-Path $repoRoot 'app\backend') -Recurse -Filter 'lib.rs' -File -ErrorAction SilentlyContinue
+foreach ($f in $backendLibs) {
+  if ($f.FullName -match '([/\\])app([/\\])backend([/\\])sweeper-winfs([/\\])src([/\\])lib\.rs$') { continue }
+  $forbidFiles += $f.FullName
+}
+$bridgeLibs = Get-ChildItem -Path (Join-Path $repoRoot 'app\bridge') -Recurse -Filter 'lib.rs' -File -ErrorAction SilentlyContinue
+foreach ($f in $bridgeLibs) {
+  $forbidFiles += $f.FullName
+}
+$desktopMain = Join-Path $repoRoot 'app\bridge\sweeper-desktop\src\main.rs'
+if (Test-Path -LiteralPath $desktopMain) { $forbidFiles += $desktopMain }
+foreach ($fp in $forbidFiles) {
+  $txt = Get-Content -LiteralPath $fp -Raw -ErrorAction SilentlyContinue
+  if ($null -eq $txt -or $txt -notmatch '#!\s*\[forbid\(unsafe_code\)\]') {
+    Fail "Missing #![forbid(unsafe_code)] in $fp"
+  }
+}
+
+# 6) Enforce // SAFETY: comment near above every unsafe block/fn in sweeper-winfs/src.
+$winfsSrc = Join-Path $repoRoot 'app\backend\sweeper-winfs\src'
+if (Test-Path -LiteralPath $winfsSrc) {
+  $rsFiles = Get-ChildItem -Path $winfsSrc -Recurse -Filter '*.rs' -File -ErrorAction SilentlyContinue
+  foreach ($rf in $rsFiles) {
+    $lines = Get-Content -LiteralPath $rf.FullName -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+      $line = $lines[$i]
+      if ($line -match '\bunsafe\s+fn\b' -or $line -match '\bunsafe\s*\{') {
+        $prevIdx = $i - 1
+        $checked = 0
+        $hasSafety = $false
+        while ($prevIdx -ge 0 -and $checked -lt 15) {
+          $prev = $lines[$prevIdx]
+          if ($prev -match '//\s*SAFETY:') { $hasSafety = $true; break }
+          $prevIdx--
+          $checked++
+        }
+        if (-not $hasSafety) {
+          Fail "Missing // SAFETY: comment above unsafe at $($rf.FullName):$($i+1)"
+        }
+      }
+    }
+  }
+}
+
+# 7) cargo geiger (optional): run if installed, do not fail if absent.
+$geiger = Get-Command cargo-geiger -ErrorAction SilentlyContinue
+if ($null -eq $geiger) {
+  Write-Host "GATE-A: cargo-geiger not found in PATH; skipping cargo geiger check (static checks still enforced)." -ForegroundColor Yellow
+} else {
+  Write-Host "GATE-A: running cargo geiger..."
+  Push-Location (Join-Path $repoRoot 'app')
+  try {
+    & cargo geiger --locked 2>&1 | Write-Host
+    if ($LASTEXITCODE -ne 0) { Fail "cargo geiger reported issues (exit code $LASTEXITCODE)." }
+  } finally {
+    Pop-Location
+  }
+}
+
+# 8) Privacy / scrub checks on tracked files (permanent Gate A guard).
 $tracked = git -C $repoRoot ls-files
 $personalEmailPattern = '(?i)(@' + 'gmail\.com\b|@' + 'outlook\.com\b|@' + 'hotmail\.com\b|@' + 'yahoo\.com\b|@' + 'icloud\.com\b|@' + 'proton\.me\b|@' + 'protonmail\.com\b)'
 $userNameFrag = 'pub' + '22'
@@ -158,7 +219,6 @@ foreach ($rel in $tracked) {
   try { $text = Get-Content -LiteralPath $full -Raw -ErrorAction Stop } catch { continue }
   if ($null -eq $text) { continue }
 
-  # Personal email domains (forbid), except allowed noreply/example domains.
   foreach ($m in [regex]::Matches($text, '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')) {
     $addr = $m.Value
     if ($addr -match $personalEmailPattern) {
@@ -176,10 +236,6 @@ foreach ($rel in $tracked) {
   foreach ($tp in $tokenPatterns) {
     if ($text -match $tp) { $privacyHits += "${rel}: private token/key material pattern detected" }
   }
-
-  # Also forbid any C:\\Users\\<real-user> absolute paths generally (beyond specific username), but allow safe placeholders in docs.
-  # The explicit regex above already covers non-placeholder usernames; additionally catch D:\ absolute drive paths? task says "real local Windows usernames or absolute machine paths (D:\..., C:\Users\<real-user>)"
-  # Detect absolute D:\ paths except none expected; be careful not to over-match. We only fail on concrete local-project/user fragments above plus C:\Users\<real> already.
 }
 
 if ($privacyHits.Count -gt 0) {

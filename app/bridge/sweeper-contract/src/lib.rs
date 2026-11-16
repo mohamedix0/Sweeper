@@ -13,6 +13,6 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use bindings::{export_ts_bindings, export_ts_bindings_to};
+pub use bindings::{export_ts_bindings, export_ts_bindings_to, render_bindings};
 pub use fuzz::fuzz_contract_payload_bytes;
 pub use types::*;
