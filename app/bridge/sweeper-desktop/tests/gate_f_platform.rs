@@ -158,26 +158,37 @@ fn tier3_default_off_and_opt_in_reflected_in_settings() {
     assert!(updated.enable_tier3, "Tier 3 opt-in must persist");
 }
 
-#[test]
-fn get_elevation_status_reports_provider_state() {
+#[derive(Clone, Copy)]
+struct ElevationStatusCase {
+    elevated: bool,
+    expected_calls: usize,
+}
+
+fn assert_elevation_status(case: ElevationStatusCase) {
     let ctx = common::make_elevation_test_state(
-        false,
+        case.elevated,
         Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
     );
     let got = commands_impl::get_elevation_status(&ctx.state).unwrap();
-    assert!(!got.is_elevated);
+    assert_eq!(got.is_elevated, case.elevated);
     assert_eq!(
         ctx.provider
             .status_calls
             .load(std::sync::atomic::Ordering::SeqCst),
-        1
+        case.expected_calls
     );
-    let ctx2 = common::make_elevation_test_state(
-        true,
-        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
-    );
-    let got2 = commands_impl::get_elevation_status(&ctx2.state).unwrap();
-    assert!(got2.is_elevated);
+}
+
+#[test]
+fn get_elevation_status_reports_provider_state() {
+    assert_elevation_status(ElevationStatusCase {
+        elevated: false,
+        expected_calls: 1,
+    });
+    assert_elevation_status(ElevationStatusCase {
+        elevated: true,
+        expected_calls: 1,
+    });
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -203,52 +214,73 @@ fn assert_relaunch_state(ctx: &common::ElevationTestState, expected: RelaunchExp
     assert_eq!(ctx.si.is_held(), expected.held);
 }
 
+#[derive(Clone, Copy)]
+enum RelaunchCase {
+    AlreadyElevated,
+    Cancelled,
+    Launched,
+}
+
+fn run_relaunch_case(case: RelaunchCase) {
+    match case {
+        RelaunchCase::AlreadyElevated => {
+            let ctx = common::make_elevation_test_state(
+                true,
+                Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+            );
+            let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
+            assert!(!res.launched);
+            assert_relaunch_state(
+                &ctx,
+                RelaunchExpectation {
+                    calls: 0,
+                    exited: false,
+                    exit_code: None,
+                    held: true,
+                },
+            );
+        }
+        RelaunchCase::Cancelled => {
+            let ctx = common::make_elevation_test_state(
+                false,
+                Ok(sweeper_core::elevation::RelaunchOutcome::CancelledByUser),
+            );
+            let err = commands_impl::relaunch_elevated(&ctx.state).unwrap_err();
+            common::assert_relaunch_cancel_preserved(&ctx, err);
+        }
+        RelaunchCase::Launched => {
+            let ctx = common::make_elevation_test_state(
+                false,
+                Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+            );
+            let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
+            assert!(res.launched);
+            assert_relaunch_state(
+                &ctx,
+                RelaunchExpectation {
+                    calls: 1,
+                    exited: true,
+                    exit_code: Some(0),
+                    held: false,
+                },
+            );
+        }
+    }
+}
+
 #[test]
 fn relaunch_elevated_when_already_elevated_returns_not_launched_without_side_effects() {
-    let ctx = common::make_elevation_test_state(
-        true,
-        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
-    );
-    let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
-    assert!(!res.launched);
-    assert_relaunch_state(
-        &ctx,
-        RelaunchExpectation {
-            calls: 0,
-            exited: false,
-            exit_code: None,
-            held: true,
-        },
-    );
+    run_relaunch_case(RelaunchCase::AlreadyElevated);
 }
 
 #[test]
 fn relaunch_elevated_uac_cancel_returns_error_preserves_guard_and_does_not_exit() {
-    let ctx = common::make_elevation_test_state(
-        false,
-        Ok(sweeper_core::elevation::RelaunchOutcome::CancelledByUser),
-    );
-    let err = commands_impl::relaunch_elevated(&ctx.state).unwrap_err();
-    common::assert_relaunch_cancel_preserved(&ctx, err);
+    run_relaunch_case(RelaunchCase::Cancelled);
 }
 
 #[test]
 fn relaunch_elevated_success_releases_guard_invokes_launcher_returns_launched_and_triggers_exit() {
-    let ctx = common::make_elevation_test_state(
-        false,
-        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
-    );
-    let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
-    assert!(res.launched);
-    assert_relaunch_state(
-        &ctx,
-        RelaunchExpectation {
-            calls: 1,
-            exited: true,
-            exit_code: Some(0),
-            held: false,
-        },
-    );
+    run_relaunch_case(RelaunchCase::Launched);
 }
 
 #[test]

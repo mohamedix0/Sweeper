@@ -1,40 +1,53 @@
-use super::CustomScanCtx;
+use super::Tier3RunCtx;
 use super::*;
+
+#[derive(Clone, Copy)]
+struct CustomPathSpec<'a> {
+    idx: usize,
+    raw: &'a str,
+}
+
+struct ScanRejection {
+    status_reason: String,
+    diagnostic: String,
+}
 
 pub(super) fn append_custom_path_targets(
     report: &mut ScanReport,
-    settings: &crate::settings::SweeperSettings,
-    ctx: &mut CustomScanCtx<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> Result<(), ScanError> {
-    for (idx, raw) in settings.custom_paths.iter().enumerate() {
+    for (idx, raw) in ctx.settings.custom_paths.iter().enumerate() {
         if ctx.progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        report.targets.push(scan_custom_path_target(idx, raw, ctx)?);
+        let spec = CustomPathSpec { idx, raw };
+        report.targets.push(scan_custom_path_target(spec, ctx)?);
     }
     Ok(())
 }
 
-pub(super) fn scan_custom_path_target(
-    idx: usize,
-    raw_path: &str,
-    ctx: &mut CustomScanCtx<'_>,
+fn scan_custom_path_target(
+    spec: CustomPathSpec<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> Result<TargetScanResult, ScanError> {
-    let mut out = empty_custom_path_result(idx);
+    let mut out = empty_custom_path_result(spec.idx);
     emit_target_start(ctx, &out)?;
-    if let Err((reason, diag)) = validate_custom_path_for_scan(raw_path) {
-        return Ok(finalize_custom_target(out, ctx, reason, diag));
+    if let Err(rejection) = validate_custom_path_for_scan(spec) {
+        return Ok(finalize_custom_target(out, ctx, rejection));
     }
-    let canon = match resolve_custom_path_for_scan(raw_path) {
+    let canon = match resolve_custom_path_for_scan(spec) {
         Ok(c) => c,
-        Err((reason, diag)) => return Ok(finalize_custom_target(out, ctx, reason, diag)),
+        Err(rejection) => return Ok(finalize_custom_target(out, ctx, rejection)),
     };
     scan_custom_canonical_target(&mut out, canon, ctx)?;
     complete_target(ctx);
     Ok(out)
 }
 
-fn emit_target_start(ctx: &mut CustomScanCtx<'_>, out: &TargetScanResult) -> Result<(), ScanError> {
+fn emit_target_start(
+    ctx: &mut Tier3RunCtx<'_, '_>,
+    out: &TargetScanResult,
+) -> Result<(), ScanError> {
     if ctx.progress.cancelled() {
         return Err(ScanError::Cancelled);
     }
@@ -55,53 +68,52 @@ fn empty_custom_path_result(idx: usize) -> TargetScanResult {
     })
 }
 
-fn validate_custom_path_for_scan(raw_path: &str) -> Result<(), (String, String)> {
-    let verdict = policy::validate_custom_path(raw_path);
+fn validate_custom_path_for_scan(spec: CustomPathSpec<'_>) -> Result<(), ScanRejection> {
+    let verdict = policy::validate_custom_path(spec.raw);
     if verdict.allowed {
         return Ok(());
     }
-    Err(custom_path_invalid_reason(raw_path, &verdict.reason))
+    Err(custom_path_invalid_reason(spec, &verdict.reason))
 }
 
-fn custom_path_invalid_reason(raw_path: &str, reason: &str) -> (String, String) {
-    (
-        format!("custom path invalid/missing (no fallback): {reason}"),
-        format!("custom path rejected: {raw_path} ({reason})"),
-    )
+fn custom_path_invalid_reason(spec: CustomPathSpec<'_>, reason: &str) -> ScanRejection {
+    ScanRejection {
+        status_reason: format!("custom path invalid/missing (no fallback): {reason}"),
+        diagnostic: format!("custom path rejected: {} ({reason})", spec.raw),
+    }
 }
 
-fn resolve_custom_path_for_scan(raw_path: &str) -> Result<CanonicalPath, (String, String)> {
-    let canon = CanonicalPath::from_existing_path(raw_path)
+fn resolve_custom_path_for_scan(spec: CustomPathSpec<'_>) -> Result<CanonicalPath, ScanRejection> {
+    let canon = CanonicalPath::from_existing_path(spec.raw)
         .map(|v| v.into_canonical())
-        .map_err(|e| custom_path_unresolved_reason(raw_path, &e.to_string()))?;
+        .map_err(|e| custom_path_unresolved_reason(spec, &e.to_string()))?;
     allowlist::validate_resolved_canonical_root(&canon)
         .map_err(|e| custom_path_scan_time_reason(&e))?;
     Ok(canon)
 }
 
-fn custom_path_unresolved_reason(raw_path: &str, err: &str) -> (String, String) {
-    (
-        format!("custom path missing/unresolvable (no fallback): {err}"),
-        format!("custom path unresolved: {raw_path} ({err})"),
-    )
+fn custom_path_unresolved_reason(spec: CustomPathSpec<'_>, err: &str) -> ScanRejection {
+    ScanRejection {
+        status_reason: format!("custom path missing/unresolvable (no fallback): {err}"),
+        diagnostic: format!("custom path unresolved: {} ({err})", spec.raw),
+    }
 }
 
-fn custom_path_scan_time_reason(err: &str) -> (String, String) {
-    (
-        format!("custom path not allowed at scan time: {err}"),
-        format!("custom path rejected at scan time: {err}"),
-    )
+fn custom_path_scan_time_reason(err: &str) -> ScanRejection {
+    ScanRejection {
+        status_reason: format!("custom path not allowed at scan time: {err}"),
+        diagnostic: format!("custom path rejected at scan time: {err}"),
+    }
 }
 
 fn finalize_custom_target(
     mut out: TargetScanResult,
-    ctx: &mut CustomScanCtx<'_>,
-    status_reason: String,
-    diagnostic: String,
+    ctx: &mut Tier3RunCtx<'_, '_>,
+    rejection: ScanRejection,
 ) -> TargetScanResult {
     out.scanned = false;
-    out.status_reason = Some(status_reason);
-    out.skipped_diagnostics.push(diagnostic);
+    out.status_reason = Some(rejection.status_reason);
+    out.skipped_diagnostics.push(rejection.diagnostic);
     complete_target(ctx);
     out
 }
@@ -109,9 +121,9 @@ fn finalize_custom_target(
 fn scan_custom_canonical_target(
     out: &mut TargetScanResult,
     canon: CanonicalPath,
-    ctx: &mut CustomScanCtx<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> Result<(), ScanError> {
-    let td = custom_path_target_definition(&out.target_id, &out.target_name, ctx.min_age);
+    let td = custom_path_target_definition(out, ctx.min_age);
     out.resolved_paths = vec![canon.to_string()];
     let roots = [(out.target_id.clone(), canon)];
     let mut scan_ctx = allowlist::ResolvedRootsScanCtx {
@@ -124,19 +136,15 @@ fn scan_custom_canonical_target(
     allowlist::scan_resolved_roots(&mut scan_ctx, out)
 }
 
-fn complete_target(ctx: &mut CustomScanCtx<'_>) {
+fn complete_target(ctx: &mut Tier3RunCtx<'_, '_>) {
     ctx.progress.completed_targets = ctx.progress.completed_targets.saturating_add(1);
     ctx.progress.emit(None, None);
 }
 
-fn custom_path_target_definition(
-    target_id: &str,
-    target_name: &str,
-    min_age: Duration,
-) -> TargetDefinition {
+fn custom_path_target_definition(out: &TargetScanResult, min_age: Duration) -> TargetDefinition {
     TargetDefinition {
-        id: target_id.to_string(),
-        name: target_name.to_string(),
+        id: out.target_id.clone(),
+        name: out.target_name.clone(),
         tier: Tier::Tier2,
         risk: Risk::Caution,
         known_folder: KnownFolder::LocalAppData,

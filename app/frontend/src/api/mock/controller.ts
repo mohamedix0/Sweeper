@@ -1,7 +1,8 @@
 ﻿import type { ContractError, SweeperClient } from '../client';
 import { defaultSeedLogs } from './data';
 import { buildScanAnalyzerApi } from './scanAnalyzerOps';
-import { buildCleanApi } from './previewCleanOps';
+import { buildPreviewApi } from './previewOps';
+import { buildCleanApi } from './cleanOps';
 import { buildConfigApi, defaultSettings } from './configOps';
 import { buildTestApi } from './testOps';
 import type { AnalyzerSessionState, LogEntry, PreviewState, ScanSessionState } from './types';
@@ -43,5 +44,5 @@ export function createMockController(): SweeperClient & {
       state.settingsGeneration += 1;
     },
   };
-  return { ...buildScanAnalyzerApi(ctx), ...buildCleanApi(ctx), ...buildConfigApi(ctx), ...buildTestApi(ctx) };
+  return { ...buildScanAnalyzerApi(ctx), ...buildPreviewApi(ctx), ...buildCleanApi(ctx), ...buildConfigApi(ctx), ...buildTestApi(ctx) };
 }

@@ -9,56 +9,18 @@ use sweeper_core::scanner::ScanReport;
 use sweeper_core::{Risk, Tier};
 
 use super::support::sanitize_reason;
-use super::{AnalyzerSession, ScanSession, StoredItem};
+use super::StoredItem;
 
-#[derive(Clone, Copy)]
-struct SessionValidityInput {
+pub(crate) fn session_fields_valid_at(
     created_at: u64,
     settings_generation: u64,
     now: u64,
     current: u64,
-}
-
-fn session_valid_at(input: SessionValidityInput) -> bool {
-    if input.settings_generation != input.current {
+) -> bool {
+    if settings_generation != current {
         return false;
     }
-    input.now.saturating_sub(input.created_at) <= super::SCAN_SESSION_TTL_SECS
-}
-
-fn validity_input(created_at: u64, settings_generation: u64, now: u64, current: u64) -> bool {
-    session_valid_at(SessionValidityInput {
-        created_at,
-        settings_generation,
-        now,
-        current,
-    })
-}
-
-pub(crate) fn scan_session_valid_at(
-    session: &ScanSession,
-    now: u64,
-    current_settings_generation: u64,
-) -> bool {
-    validity_input(
-        session.created_at,
-        session.settings_generation,
-        now,
-        current_settings_generation,
-    )
-}
-
-pub(crate) fn analyzer_session_valid_at(
-    session: &AnalyzerSession,
-    now: u64,
-    current_settings_generation: u64,
-) -> bool {
-    validity_input(
-        session.created_at,
-        session.settings_generation,
-        now,
-        current_settings_generation,
-    )
+    now.saturating_sub(created_at) <= super::SCAN_SESSION_TTL_SECS
 }
 
 fn is_custom_path_scan_target(target_id: &str) -> bool {

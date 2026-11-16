@@ -314,13 +314,10 @@ pub fn scan_with_settings_options_current_elevation(
     settings: &crate::settings::SweeperSettings,
     opts: ScanSettingsOptions,
 ) -> Result<ScanReport, ScanError> {
-    let elevated = sweeper_winfs::is_process_elevated().unwrap_or(false);
-    scan_with_settings_options_and_elevation(
+    scan_with_settings_options_current_elevation_with_progress(
         settings,
         opts,
-        crate::ScanElevationContext {
-            process_elevated: elevated,
-        },
+        ScanRunControl::default(),
     )
 }
 
@@ -410,8 +407,15 @@ pub fn scan_with_settings_options_and_elevation_with_progress(
     report.started_unix_secs = started_unix_secs;
     report.min_age_hours = settings.min_age_hours;
 
-    custom_tier3::append_custom_path_targets(&mut report, settings, min_age, now, &mut progress)?;
-    custom_tier3::append_tier3_targets(&mut report, settings, &opts, min_age, now, &mut progress)?;
+    let mut tier3_ctx = custom_tier3::Tier3RunCtx {
+        settings,
+        opts: &opts,
+        min_age,
+        now,
+        progress: &mut progress,
+    };
+    custom_tier3::append_custom_path_targets(&mut report, &mut tier3_ctx)?;
+    custom_tier3::append_tier3_targets(&mut report, &mut tier3_ctx)?;
 
     Ok(report)
 }

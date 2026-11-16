@@ -1,191 +1,230 @@
 use super::stale_policy;
-use super::CustomScanCtx;
+use super::Tier3RunCtx;
 use super::*;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub(super) type StaleDirInfo = (String, u64, u64, u64, u64, u64);
+type StaleDirInfo = (String, u64, u64, u64, u64, u64);
 
-struct StaleScanCtx<'a, 'p> {
-    stale_threshold: Duration,
-    now: SystemTime,
-    progress: &'p mut ScanProgressRuntime,
-    _marker: std::marker::PhantomData<&'a ()>,
+#[derive(Clone, Copy)]
+enum StaleKind {
+    RustTarget,
+    NodeModules,
 }
 
-struct StaleDirs {
+impl StaleKind {
+    const fn spec(self) -> StaleKindSpec {
+        match self {
+            Self::RustTarget => StaleKindSpec {
+                kind: self,
+                target_id: "stale-rust-target",
+                target_name: "Stale Rust target/",
+            },
+            Self::NodeModules => StaleKindSpec {
+                kind: self,
+                target_id: "stale-node-modules",
+                target_name: "Stale node_modules/",
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StaleKindSpec {
+    kind: StaleKind,
+    target_id: &'static str,
+    target_name: &'static str,
+}
+
+struct StaleScanState<'c, 'a, 'p> {
+    ctx: &'c mut Tier3RunCtx<'a, 'p>,
+    stale_threshold: Duration,
     rust_dirs: Vec<StaleDirInfo>,
     node_dirs: Vec<StaleDirInfo>,
 }
 
-struct StaleWalkState {
+struct StaleWalk<'a> {
     stack: Vec<PathBuf>,
-    seen: std::collections::HashSet<String>,
+    seen: &'a mut HashSet<String>,
 }
 
 pub(super) fn scan_tier3_stale_project_dirs(
-    settings: &crate::settings::SweeperSettings,
-    opts: &ScanSettingsOptions,
-    ctx: &mut CustomScanCtx<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> Result<Vec<TargetScanResult>, ScanError> {
-    let search_roots = stale_policy::resolve_stale_search_roots(opts);
-    let mut dirs = StaleDirs {
+    let search_roots = stale_policy::resolve_stale_search_roots(ctx.opts);
+    let stale_threshold =
+        Duration::from_secs(u64::from(ctx.settings.stale_project_days) * 24 * 3600);
+    let mut state = StaleScanState {
+        stale_threshold,
         rust_dirs: Vec::new(),
         node_dirs: Vec::new(),
-    };
-    let mut stale_ctx = StaleScanCtx {
-        stale_threshold: Duration::from_secs(u64::from(settings.stale_project_days) * 24 * 3600),
-        now: ctx.now,
-        progress: ctx.progress,
-        _marker: std::marker::PhantomData,
+        ctx,
     };
     for root in search_roots {
-        if stale_ctx.progress.cancelled() {
+        if state.ctx.progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        discover_stale_project_dirs(&root, &mut stale_ctx, &mut dirs)?;
+        discover_stale_project_dirs(&root, &mut state)?;
     }
-    build_stale_target_results(dirs, stale_ctx.progress)
+    build_stale_target_results(state)
 }
 
 fn build_stale_target_results(
-    dirs: StaleDirs,
-    progress: &mut ScanProgressRuntime,
+    mut state: StaleScanState<'_, '_, '_>,
 ) -> Result<Vec<TargetScanResult>, ScanError> {
+    finalize_stale_dir_lists(&mut state.rust_dirs, &mut state.node_dirs);
+    let rust = state.rust_dirs;
+    let node = state.node_dirs;
     Ok(vec![
-        emit_stale_target(
-            "stale-rust-target",
-            "Stale Rust target/",
-            dirs.rust_dirs,
-            progress,
-        )?,
-        emit_stale_target(
-            "stale-node-modules",
-            "Stale node_modules/",
-            dirs.node_dirs,
-            progress,
-        )?,
+        emit_stale_target(StaleKind::RustTarget.spec(), rust, state.ctx)?,
+        emit_stale_target(StaleKind::NodeModules.spec(), node, state.ctx)?,
     ])
 }
 
 fn emit_stale_target(
-    target_id: &str,
-    target_name: &str,
+    spec: StaleKindSpec,
     dirs: Vec<StaleDirInfo>,
-    progress: &mut ScanProgressRuntime,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> Result<TargetScanResult, ScanError> {
-    if progress.cancelled() {
+    if ctx.progress.cancelled() {
         return Err(ScanError::Cancelled);
     }
-    progress.emit(Some(target_id), Some(target_name));
-    let result = build_stale_project_target_result(target_id, target_name, dirs);
-    progress.completed_targets = progress.completed_targets.saturating_add(1);
-    progress.emit(None, None);
+    ctx.progress
+        .emit(Some(spec.target_id), Some(spec.target_name));
+    let result = build_stale_project_target_result(spec, dirs);
+    ctx.progress.completed_targets = ctx.progress.completed_targets.saturating_add(1);
+    ctx.progress.emit(None, None);
     Ok(result)
 }
 
 fn discover_stale_project_dirs(
     search_root: &str,
-    ctx: &mut StaleScanCtx<'_, '_>,
-    dirs: &mut StaleDirs,
+    state: &mut StaleScanState<'_, '_, '_>,
 ) -> Result<(), ScanError> {
     let Some(root) = stale_policy::normalize_stale_search_root(search_root) else {
         return Ok(());
     };
-    walk_stale_search_root(root, ctx, dirs)?;
-    finalize_stale_dir_lists(&mut dirs.rust_dirs, &mut dirs.node_dirs);
-    Ok(())
-}
-
-fn walk_stale_search_root(
-    root: PathBuf,
-    ctx: &mut StaleScanCtx<'_, '_>,
-    dirs: &mut StaleDirs,
-) -> Result<(), ScanError> {
-    let mut state = StaleWalkState {
+    let mut seen = HashSet::new();
+    let mut walk = StaleWalk {
         stack: vec![root],
-        seen: std::collections::HashSet::new(),
+        seen: &mut seen,
     };
-    while let Some(dir) = state.stack.pop() {
-        if ctx.progress.cancelled() {
+    while let Some(dir) = walk.stack.pop() {
+        if state.ctx.progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        process_stale_search_dir(&dir, ctx, dirs, &mut state)?;
+        process_stale_search_dir(&dir, state, &mut walk)?;
     }
     Ok(())
 }
 
 fn process_stale_search_dir(
     dir: &Path,
-    ctx: &mut StaleScanCtx<'_, '_>,
-    dirs: &mut StaleDirs,
-    state: &mut StaleWalkState,
+    state: &mut StaleScanState<'_, '_, '_>,
+    walk: &mut StaleWalk<'_>,
 ) -> Result<(), ScanError> {
-    if !mark_stale_dir_seen(dir, &mut state.seen) {
-        return Ok(());
-    }
-    if stale_policy::is_disallowed_tier3_scan_path(dir) {
+    let key = dir.to_string_lossy().to_ascii_uppercase();
+    if !walk.seen.insert(key) || stale_policy::is_disallowed_tier3_scan_path(dir) {
         return Ok(());
     }
     let Ok(entries) = sweeper_winfs::read_dir_entries(dir) else {
         return Ok(());
     };
-    collect_stale_artifacts(&entries, ctx, dirs)?;
-    push_stale_traversal_children(entries, &mut state.stack);
-    Ok(())
-}
-
-fn mark_stale_dir_seen(dir: &Path, seen: &mut std::collections::HashSet<String>) -> bool {
-    let key = dir.to_string_lossy().to_ascii_uppercase();
-    seen.insert(key)
-}
-
-fn collect_stale_artifacts(
-    entries: &[sweeper_winfs::DirEntry],
-    ctx: &mut StaleScanCtx<'_, '_>,
-    dirs: &mut StaleDirs,
-) -> Result<(), ScanError> {
-    for ent in entries {
-        if ctx.progress.cancelled() {
+    for ent in &entries {
+        if state.ctx.progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        record_stale_artifact_if_eligible(ent, ctx, dirs)?;
+        collect_stale_artifact(ent, state)?;
+    }
+    for ent in entries {
+        if stale_policy::should_traverse_stale_child(&ent) {
+            walk.stack.push(ent.path);
+        }
     }
     Ok(())
 }
 
-fn record_stale_artifact_if_eligible(
+fn collect_stale_artifact(
     ent: &sweeper_winfs::DirEntry,
-    ctx: &mut StaleScanCtx<'_, '_>,
-    dirs: &mut StaleDirs,
+    state: &mut StaleScanState<'_, '_, '_>,
 ) -> Result<(), ScanError> {
     if !stale_policy::is_plain_directory_entry(ent) {
         return Ok(());
     }
     let name = ent.name.to_string_lossy();
     if name.eq_ignore_ascii_case("target") {
-        let info = stale_rust_target_info(&ent.path, ctx)?;
-        append_stale_dir_info(info, &mut dirs.rust_dirs);
-        return Ok(());
-    }
-    if name.eq_ignore_ascii_case("node_modules") {
-        let info = stale_node_modules_info(&ent.path, ctx)?;
-        append_stale_dir_info(info, &mut dirs.node_dirs);
+        record_stale_dir(StaleKind::RustTarget.spec(), &ent.path, state)?;
+    } else if name.eq_ignore_ascii_case("node_modules") {
+        record_stale_dir(StaleKind::NodeModules.spec(), &ent.path, state)?;
     }
     Ok(())
 }
 
-fn append_stale_dir_info(info: Option<StaleDirInfo>, out: &mut Vec<StaleDirInfo>) {
-    if let Some(v) = info {
-        out.push(v);
-    }
-}
-
-fn push_stale_traversal_children(entries: Vec<sweeper_winfs::DirEntry>, stack: &mut Vec<PathBuf>) {
-    for ent in entries {
-        if stale_policy::should_traverse_stale_child(&ent) {
-            stack.push(ent.path);
+fn record_stale_dir(
+    spec: StaleKindSpec,
+    dir: &Path,
+    state: &mut StaleScanState<'_, '_, '_>,
+) -> Result<(), ScanError> {
+    if let Some(info) = stale_dir_info(spec, dir, state)? {
+        match spec.kind {
+            StaleKind::RustTarget => state.rust_dirs.push(info),
+            StaleKind::NodeModules => state.node_dirs.push(info),
         }
     }
+    Ok(())
+}
+
+fn stale_dir_info(
+    spec: StaleKindSpec,
+    dir: &Path,
+    state: &mut StaleScanState<'_, '_, '_>,
+) -> Result<Option<StaleDirInfo>, ScanError> {
+    let Some(parent) = dir.parent() else {
+        return Ok(None);
+    };
+    let stale = match spec.kind {
+        StaleKind::RustTarget => stale_policy::is_stale_rust_target_dir(
+            dir,
+            parent,
+            state.stale_threshold,
+            state.ctx.now,
+        ),
+        StaleKind::NodeModules => {
+            stale_policy::is_stale_node_modules_dir(parent, state.stale_threshold, state.ctx.now)
+        }
+    };
+    if !stale {
+        return Ok(None);
+    }
+    stale_dir_item_info(spec, dir, state.ctx)
+}
+
+fn stale_dir_item_info(
+    spec: StaleKindSpec,
+    dir: &Path,
+    ctx: &mut Tier3RunCtx<'_, '_>,
+) -> Result<Option<StaleDirInfo>, ScanError> {
+    let Ok(v) = CanonicalPath::from_existing_path(&dir.to_string_lossy()) else {
+        return Ok(None);
+    };
+    let canon = v.into_canonical();
+    if !policy::validate_tier3_target_root(canon.as_str()).allowed {
+        return Ok(None);
+    }
+    let s = super::dir_summary::summarize_directory_for_scan(
+        dir,
+        ctx.progress,
+        Some(spec.target_id),
+        Some(spec.target_name),
+    )?;
+    Ok(Some((
+        canon.to_string(),
+        s.total,
+        s.eligible,
+        s.count,
+        s.eligible_count,
+        s.max_mtime,
+    )))
 }
 
 fn finalize_stale_dir_lists(rust_dirs: &mut Vec<StaleDirInfo>, node_dirs: &mut Vec<StaleDirInfo>) {
@@ -198,82 +237,13 @@ fn sort_dedupe_stale_dirs(dirs: &mut Vec<StaleDirInfo>) {
     dirs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
 }
 
-fn stale_rust_target_info(
-    target_dir: &Path,
-    ctx: &mut StaleScanCtx<'_, '_>,
-) -> Result<Option<StaleDirInfo>, ScanError> {
-    let Some(parent) = target_dir.parent() else {
-        return Ok(None);
-    };
-    let stale =
-        stale_policy::is_stale_rust_target_dir(target_dir, parent, ctx.stale_threshold, ctx.now);
-    if !stale {
-        return Ok(None);
-    }
-    stale_dir_item_info(
-        target_dir,
-        ctx.progress,
-        "stale-rust-target",
-        "Stale Rust target/",
-    )
-}
-
-fn stale_node_modules_info(
-    node_modules_dir: &Path,
-    ctx: &mut StaleScanCtx<'_, '_>,
-) -> Result<Option<StaleDirInfo>, ScanError> {
-    let Some(parent) = node_modules_dir.parent() else {
-        return Ok(None);
-    };
-    let stale = stale_policy::is_stale_node_modules_dir(parent, ctx.stale_threshold, ctx.now);
-    if !stale {
-        return Ok(None);
-    }
-    stale_dir_item_info(
-        node_modules_dir,
-        ctx.progress,
-        "stale-node-modules",
-        "Stale node_modules/",
-    )
-}
-
-fn stale_dir_item_info(
-    dir: &Path,
-    progress: &mut ScanProgressRuntime,
-    target_id: &str,
-    target_name: &str,
-) -> Result<Option<StaleDirInfo>, ScanError> {
-    let Ok(v) = CanonicalPath::from_existing_path(&dir.to_string_lossy()) else {
-        return Ok(None);
-    };
-    let canon = v.into_canonical();
-    if !policy::validate_tier3_target_root(canon.as_str()).allowed {
-        return Ok(None);
-    }
-    let s = super::dir_summary::summarize_directory_for_scan(
-        dir,
-        progress,
-        Some(target_id),
-        Some(target_name),
-    )?;
-    Ok(Some((
-        canon.to_string(),
-        s.total,
-        s.eligible,
-        s.count,
-        s.eligible_count,
-        s.max_mtime,
-    )))
-}
-
 fn build_stale_project_target_result(
-    target_id: &str,
-    target_name: &str,
+    spec: StaleKindSpec,
     dirs: Vec<StaleDirInfo>,
 ) -> TargetScanResult {
     let mut result = super::super::empty_target_result(super::super::TargetResultMeta {
-        target_id: target_id.to_string(),
-        target_name: target_name.to_string(),
+        target_id: spec.target_id.to_string(),
+        target_name: spec.target_name.to_string(),
         tier: Tier::Tier3,
         risk: Risk::Caution,
     });
@@ -283,43 +253,22 @@ fn build_stale_project_target_result(
         return result;
     }
     result.scanned = true;
-    append_stale_dir_items(&mut result, target_id, dirs);
-    result
-}
-
-struct StaleScanItemInput {
-    target_id: String,
-    idx: usize,
-    path: String,
-    total: u64,
-    mtime: u64,
-}
-
-fn append_stale_dir_items(result: &mut TargetScanResult, target_id: &str, dirs: Vec<StaleDirInfo>) {
-    for (i, (path, total, eligible, count, eligible_count, mtime)) in dirs.into_iter().enumerate() {
+    for (idx, (path, total, eligible, count, eligible_count, mtime)) in dirs.into_iter().enumerate()
+    {
         result.resolved_paths.push(path.clone());
         result.total_bytes = result.total_bytes.saturating_add(total);
         result.eligible_bytes = result.eligible_bytes.saturating_add(eligible);
         result.file_count = result.file_count.saturating_add(count);
         result.eligible_count = result.eligible_count.saturating_add(eligible_count);
-        result.items.push(stale_scan_item(StaleScanItemInput {
-            target_id: target_id.to_string(),
-            idx: i + 1,
+        result.items.push(ScanItem {
+            id: format!("{}::{}", spec.target_id, idx + 1),
+            target_id: spec.target_id.to_string(),
             path,
-            total,
-            mtime,
-        }));
+            file_identity: None,
+            size: total,
+            mtime_unix_secs: mtime,
+            age_eligible: true,
+        });
     }
-}
-
-fn stale_scan_item(input: StaleScanItemInput) -> ScanItem {
-    ScanItem {
-        id: format!("{}::{}", input.target_id, input.idx),
-        target_id: input.target_id,
-        path: input.path,
-        file_identity: None,
-        size: input.total,
-        mtime_unix_secs: input.mtime,
-        age_eligible: true,
-    }
+    result
 }

@@ -107,7 +107,20 @@ fn render_commands(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn Error>> {
-    let commands = [
+    let mut commands = scan_and_clean_commands(cfg, type_map)?;
+    commands.extend(analyzer_and_settings_commands(cfg, type_map)?);
+    commands.extend(logs_and_elevation_commands(cfg, type_map)?);
+    Ok(format!(
+        "export const commands = {{\n{}\n}}",
+        commands.join(",\n")
+    ))
+}
+
+fn scan_and_clean_commands(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(vec![
         cmd_one::<StartScanResponse, Option<Vec<TierDto>>>(
             cfg,
             type_map,
@@ -139,6 +152,14 @@ fn render_commands(
                 ("preview_token", Some(ArgTy::Str)),
             ),
         )?,
+    ])
+}
+
+fn analyzer_and_settings_commands(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(vec![
         cmd_one::<StartAnalyzerResponse, Option<String>>(
             cfg,
             type_map,
@@ -180,6 +201,14 @@ fn render_commands(
                 ("path", Some(ArgTy::Str)),
             ),
         )?,
+    ])
+}
+
+fn logs_and_elevation_commands(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(vec![
         cmd_noarg::<Vec<LogMetadataDto>>(cfg, type_map, "listLogs", "list_logs")?,
         cmd_one::<LogReadResponse, String>(
             cfg,
@@ -198,11 +227,7 @@ fn render_commands(
             "get_elevation_status",
         )?,
         cmd_noarg::<RelaunchResultDto>(cfg, type_map, "relaunchElevated", "relaunch_elevated")?,
-    ];
-    Ok(format!(
-        "export const commands = {{\n{}\n}}",
-        commands.join(",\n")
-    ))
+    ])
 }
 
 #[derive(Clone, Copy)]

@@ -125,7 +125,7 @@ fn valid_scan_preview_execute_clean_in_sentinel_sandbox_writes_log_and_preserves
     let logs = commands_impl::list_logs_in_dir(Some(logs_dir.as_path())).unwrap();
     assert!(logs.iter().any(|l| l.id == log_id), "logs={logs:?}");
     let log = commands_impl::read_log_in_dir(Some(logs_dir.as_path()), &log_id).unwrap();
-    common::assert_clean_log_contains_intent_and_outcome(&log.content);
+    common::assert_clean_log_contains_intent_and_outcome(&log);
 }
 
 struct CustomScanCtx {
@@ -212,18 +212,21 @@ fn seed_custom_path_scan() -> CustomScanCtx {
 #[test]
 fn typed_confirmation_rejected_for_custom_path_scan_target() {
     let ctx = seed_custom_path_scan();
-    common::preview_rejects_missing_and_wrong_confirmation(
-        &ctx.state,
-        "scan-custom",
-        "custom-path-1::1",
-    );
+    let selection = common::SessionItem {
+        session_id: "scan-custom",
+        item_id: "custom-path-1::1",
+    };
+    common::preview_rejects_missing_and_wrong_confirmation(&ctx.state, selection);
 }
 
 #[test]
 fn typed_confirmation_accepted_for_custom_path_scan_target() {
     let ctx = seed_custom_path_scan();
-    let token =
-        common::preview_accepts_delete_confirmation(&ctx.state, "scan-custom", "custom-path-1::1");
+    let selection = common::SessionItem {
+        session_id: "scan-custom",
+        item_id: "custom-path-1::1",
+    };
+    let token = common::preview_accepts_delete_confirmation(&ctx.state, selection);
     assert!(!token.is_empty());
 }
 

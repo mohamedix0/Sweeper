@@ -166,7 +166,12 @@ fn typed_confirmation_rejected_for_unknown_analyzer_items() {
 fn typed_confirmation_accepted_for_unknown_analyzer_items() {
     let state = common::state_with_temp_settings(|s| s.allow_delete_unknown = true);
     let node_id = seed_unknown_selectable_analyzer_session(&state);
-    let token =
-        common::preview_accepts_delete_confirmation(&state, "analyzer-unknown-ok", &node_id);
+    let token = common::preview_accepts_delete_confirmation(
+        &state,
+        common::SessionItem {
+            session_id: "analyzer-unknown-ok",
+            item_id: &node_id,
+        },
+    );
     assert!(!token.is_empty());
 }

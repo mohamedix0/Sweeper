@@ -1,5 +1,6 @@
 import type { AnalyzerNodeDto, PreviewTargetBreakdownDto, RiskDto, ScanItemDto, SkippedReasonDto, TargetScanResultDto, TierDto } from '../../contract/bindings';
 import type { ContractError, Settings } from '../client';
+import type { ScanItemInfo } from './data';
 
 export function err(input: { code: 'unknownItem'; count: string } | { code: Exclude<ContractError['code'], 'unknownItem'>; reason: string }): never {
   if (input.code === 'unknownItem') throw { code: input.code, details: { count: input.count } } satisfies ContractError;
@@ -64,4 +65,9 @@ export function toSkippedReasons(reasons: Record<string, bigint>): SkippedReason
 
 export function sumNodeBytes(nodes: AnalyzerNodeDto[]): string {
   return nodes.reduce((a, n) => a + BigInt(n.sizeBytes), 0n).toString();
+}
+
+export function isUnknownBlocked(input: { risk: ScanItemInfo['risk'] | undefined; allowDeleteUnknown: boolean }): boolean {
+  if (input.risk !== 'Unknown') return false;
+  return !input.allowDeleteUnknown;
 }

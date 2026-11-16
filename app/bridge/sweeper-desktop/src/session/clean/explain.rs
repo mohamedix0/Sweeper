@@ -1,7 +1,7 @@
 use sweeper_contract::ContractError;
 use sweeper_core::analyzer;
 
-use super::super::mapping::{analyzer_session_valid_at, risk_to_dto, scan_session_valid_at};
+use super::super::mapping::{risk_to_dto, session_fields_valid_at};
 use super::super::{AnalyzerSession, ScanSession, SessionStore};
 use crate::clock::Clock;
 
@@ -30,7 +30,9 @@ impl SessionStore {
         settings_gen: u64,
     ) -> Option<sweeper_contract::ExplainItemResponse> {
         for s in self.sessions.values() {
-            if !scan_session_valid_at(s, now, settings_gen) {
+            let valid =
+                session_fields_valid_at(s.created_at, s.settings_generation, now, settings_gen);
+            if !valid {
                 continue;
             }
             if let Some(resp) = Self::explain_scan_hit(s, item_id) {
@@ -75,7 +77,9 @@ impl SessionStore {
     ) -> Option<sweeper_contract::ExplainItemResponse> {
         self.analyzer_sessions
             .values()
-            .filter(|s| analyzer_session_valid_at(s, now, settings_gen))
+            .filter(|s| {
+                session_fields_valid_at(s.created_at, s.settings_generation, now, settings_gen)
+            })
             .find_map(|s| Self::explain_analyzer_hit(s, item_id))
     }
 

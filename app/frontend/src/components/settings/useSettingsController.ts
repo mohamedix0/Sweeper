@@ -122,25 +122,45 @@ function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typ
   }, [client, refs, setDraft, setError, setLoading, settings]);
 }
 
-function useFocusAndPrefill(args: ControllerArgs, refs: ReturnType<typeof useControllerRefs>, setCustomPathInput: (v: string) => void, allowUnknownRowRef: React.RefObject<HTMLDivElement>, setHighlight: (v: boolean) => void) {
-  const { prefillCustomPath, focusTarget } = args;
+type FocusPrefillOptions = {
+  args: ControllerArgs;
+  refs: ReturnType<typeof useControllerRefs>;
+  setCustomPathInput: (value: string) => void;
+  allowUnknownRowRef: React.RefObject<HTMLDivElement>;
+  setHighlight: (value: boolean) => void;
+};
+
+function applyPrefill(options: FocusPrefillOptions) {
+  const path = options.args.prefillCustomPath;
+  if (!hasPrefill(path)) return;
+  options.setCustomPathInput(path);
+  if (options.args.focusTarget === 'allowDeleteUnknown') return;
+  options.refs.onFocusConsumedRef.current?.();
+}
+
+function focusAllowUnknownRow(options: FocusPrefillOptions): (() => void) | undefined {
+  if (options.args.focusTarget !== 'allowDeleteUnknown') return undefined;
+  const row = options.allowUnknownRowRef.current;
+  if (!row) {
+    options.refs.onFocusConsumedRef.current?.();
+    return undefined;
+  }
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  const focusable = row.querySelector('input, button, [tabindex]') as HTMLElement | null;
+  focusable?.focus();
+  options.setHighlight(true);
+  const timer = window.setTimeout(() => options.setHighlight(false), 1800);
+  options.refs.onFocusConsumedRef.current?.();
+  return () => window.clearTimeout(timer);
+}
+
+function useFocusAndPrefill(options: FocusPrefillOptions) {
+  const prefillPath = options.args.prefillCustomPath;
+  const focusTarget = options.args.focusTarget;
   useEffect(() => {
-    if (!hasPrefill(prefillCustomPath)) return;
-    setCustomPathInput(prefillCustomPath);
-    if (focusTarget !== 'allowDeleteUnknown') refs.onFocusConsumedRef.current?.();
-  }, [focusTarget, prefillCustomPath, refs, setCustomPathInput]);
-  useEffect(() => {
-    if (focusTarget !== 'allowDeleteUnknown') return;
-    const row = allowUnknownRowRef.current;
-    if (!row) { refs.onFocusConsumedRef.current?.(); return; }
-    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    const focusable = row.querySelector('input, button, [tabindex]') as HTMLElement | null;
-    focusable?.focus();
-    setHighlight(true);
-    const t = window.setTimeout(() => setHighlight(false), 1800);
-    refs.onFocusConsumedRef.current?.();
-    return () => window.clearTimeout(t);
-  }, [allowUnknownRowRef, focusTarget, refs, setHighlight]);
+    applyPrefill(options);
+  }, [focusTarget, options, prefillPath]);
+  useEffect(() => focusAllowUnknownRow(options), [focusTarget, options]);
 }
 
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
@@ -238,7 +258,13 @@ export function useSettingsController(args: ControllerArgs) {
   useSettingsSync(args, ui, refs);
   const save = useSaveHandler(args.client, ui, refs);
   const paths = useCustomPathActions({ client: args.client, ui, refs, save });
-  useFocusAndPrefill(args, refs, paths.setCustomPathInput, allowUnknownRowRef, setHighlightAllowUnknown);
+  useFocusAndPrefill({
+    args,
+    refs,
+    setCustomPathInput: paths.setCustomPathInput,
+    allowUnknownRowRef,
+    setHighlight: setHighlightAllowUnknown,
+  });
   const relaunch = useRelaunchAction(args.client);
   const isDirty = useMemo(() => !settingsEqual(ui.draft, args.settings), [ui.draft, args.settings]);
   const deepDisabled = !!ui.draft && !ui.draft.enableTier3;

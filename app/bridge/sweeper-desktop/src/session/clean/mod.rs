@@ -80,72 +80,48 @@ impl<'a> SessionLookup<'a> {
     }
 }
 
-struct SessionAccess<'a, C, M, V> {
-    clock: &'a C,
-    lookup: SessionLookup<'a>,
-    map: M,
-    valid_at: V,
-}
-
-struct SessionMetaSpec<'a, M, V> {
-    now: u64,
-    lookup: SessionLookup<'a>,
-    map: M,
-    valid_at: V,
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SessionKind {
+    Scan,
+    Analyzer,
 }
 
 impl SessionStore {
-    pub(super) fn get_valid_scan_session<C: Clock>(
-        &self,
-        clock: &C,
-        lookup: SessionLookup<'_>,
-    ) -> Result<&super::ScanSession, ContractError> {
-        self.get_valid_session(SessionAccess {
-            clock,
-            lookup,
-            map: Self::scan_sessions,
-            valid_at: super::mapping::scan_session_valid_at,
-        })
-    }
-
-    pub(super) fn get_valid_analyzer_session<C: Clock>(
-        &self,
-        clock: &C,
-        lookup: SessionLookup<'_>,
-    ) -> Result<&super::AnalyzerSession, ContractError> {
-        self.get_valid_session(SessionAccess {
-            clock,
-            lookup,
-            map: Self::analyzer_sessions_map,
-            valid_at: super::mapping::analyzer_session_valid_at,
-        })
-    }
-
-    fn scan_sessions(&self) -> &std::collections::HashMap<String, super::ScanSession> {
+    pub(super) fn scan_sessions(&self) -> &std::collections::HashMap<String, super::ScanSession> {
         &self.sessions
     }
 
-    fn analyzer_sessions_map(&self) -> &std::collections::HashMap<String, super::AnalyzerSession> {
+    pub(super) fn analyzer_sessions(
+        &self,
+    ) -> &std::collections::HashMap<String, super::AnalyzerSession> {
         &self.analyzer_sessions
     }
 
-    fn get_valid_session<'a, C, T, M, V>(
-        &'a self,
-        access: SessionAccess<'_, C, M, V>,
-    ) -> Result<&'a T, ContractError>
+    pub(super) fn get_valid_session<C, T, M>(
+        &self,
+        clock: &C,
+        lookup: SessionLookup<'_>,
+        map: M,
+    ) -> Result<&T, ContractError>
     where
         C: Clock,
-        T: 'a,
-        M: FnOnce(&'a Self) -> &'a std::collections::HashMap<String, T>,
-        V: Fn(&T, u64, u64) -> bool,
+        T: SessionMeta,
+        M: FnOnce(&Self) -> &std::collections::HashMap<String, T>,
     {
-        let now = access.clock.now_unix_secs();
-        let session = (access.map)(self)
-            .get(access.lookup.session_id)
-            .ok_or_else(|| ContractError::SessionInvalid {
-                reason: "session not found".to_string(),
-            })?;
-        if (access.valid_at)(session, now, access.lookup.current_settings_generation) {
+        let now = clock.now_unix_secs();
+        let session =
+            map(self)
+                .get(lookup.session_id)
+                .ok_or_else(|| ContractError::SessionInvalid {
+                    reason: "session not found".to_string(),
+                })?;
+        let valid = super::mapping::session_fields_valid_at(
+            session.created_at(),
+            session.settings_generation(),
+            now,
+            lookup.current_settings_generation,
+        );
+        if valid {
             Ok(session)
         } else {
             Err(ContractError::SessionInvalid {
@@ -160,36 +136,38 @@ impl SessionStore {
         lookup: SessionLookup<'_>,
     ) -> Result<(u64, u32), ContractError> {
         let now = clock.now_unix_secs();
-        self.session_meta(SessionMetaSpec {
-            now,
-            lookup,
-            map: Self::scan_sessions,
-            valid_at: super::mapping::scan_session_valid_at,
-        })
-        .or_else(|| {
-            self.session_meta(SessionMetaSpec {
-                now,
-                lookup,
-                map: Self::analyzer_sessions_map,
-                valid_at: super::mapping::analyzer_session_valid_at,
-            })
-        })
-        .ok_or_else(|| ContractError::SessionInvalid {
-            reason: "session not found".to_string(),
-        })?
+        self.session_meta(now, lookup, SessionKind::Scan)
+            .or_else(|| self.session_meta(now, lookup, SessionKind::Analyzer))
+            .ok_or_else(|| ContractError::SessionInvalid {
+                reason: "session not found".to_string(),
+            })?
     }
 
-    fn session_meta<'a, T, M, V>(
-        &'a self,
-        spec: SessionMetaSpec<'_, M, V>,
-    ) -> Option<Result<(u64, u32), ContractError>>
-    where
-        T: SessionMeta + 'a,
-        M: FnOnce(&'a Self) -> &'a std::collections::HashMap<String, T>,
-        V: Fn(&T, u64, u64) -> bool,
-    {
-        let s = (spec.map)(self).get(spec.lookup.session_id)?;
-        let valid = (spec.valid_at)(s, spec.now, spec.lookup.current_settings_generation);
+    fn session_meta(
+        &self,
+        now: u64,
+        lookup: SessionLookup<'_>,
+        kind: SessionKind,
+    ) -> Option<Result<(u64, u32), ContractError>> {
+        match kind {
+            SessionKind::Scan => self.meta_from(self.scan_sessions(), now, lookup),
+            SessionKind::Analyzer => self.meta_from(self.analyzer_sessions(), now, lookup),
+        }
+    }
+
+    fn meta_from<T: SessionMeta>(
+        &self,
+        map: &std::collections::HashMap<String, T>,
+        now: u64,
+        lookup: SessionLookup<'_>,
+    ) -> Option<Result<(u64, u32), ContractError>> {
+        let s = map.get(lookup.session_id)?;
+        let valid = super::mapping::session_fields_valid_at(
+            s.created_at(),
+            s.settings_generation(),
+            now,
+            lookup.current_settings_generation,
+        );
         Some(Self::meta_if_valid(
             valid,
             s.created_at(),
@@ -212,9 +190,10 @@ impl SessionStore {
     }
 }
 
-trait SessionMeta {
+pub(super) trait SessionMeta {
     fn created_at(&self) -> u64;
     fn min_age_hours(&self) -> u32;
+    fn settings_generation(&self) -> u64;
 }
 
 impl SessionMeta for super::ScanSession {
@@ -224,6 +203,9 @@ impl SessionMeta for super::ScanSession {
     fn min_age_hours(&self) -> u32 {
         self.min_age_hours
     }
+    fn settings_generation(&self) -> u64 {
+        self.settings_generation
+    }
 }
 
 impl SessionMeta for super::AnalyzerSession {
@@ -232,5 +214,8 @@ impl SessionMeta for super::AnalyzerSession {
     }
     fn min_age_hours(&self) -> u32 {
         self.min_age_hours
+    }
+    fn settings_generation(&self) -> u64 {
+        self.settings_generation
     }
 }

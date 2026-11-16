@@ -89,7 +89,7 @@ fn start_scan_emits_started_progress_completed_with_expected_session_and_decimal
     )
     .expect("start_scan should succeed");
     let events = events.lock().unwrap().clone();
-    common::assert_scan_progress_events(&events, &resp.session_id);
+    common::assert_scan_progress_events(&events, &resp);
     let results = commands_impl::get_scan_results(&state, resp.session_id.clone()).unwrap();
     common::assert_scan_counters_decimal_strings(&results);
 }

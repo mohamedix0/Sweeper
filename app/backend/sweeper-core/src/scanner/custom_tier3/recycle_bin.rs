@@ -1,33 +1,28 @@
-use super::CustomScanCtx;
+use super::Tier3RunCtx;
 use super::*;
 
 pub(super) fn append_tier3_targets(
     report: &mut ScanReport,
-    settings: &crate::settings::SweeperSettings,
-    opts: &ScanSettingsOptions,
-    ctx: &mut CustomScanCtx<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> Result<(), ScanError> {
-    if !settings.enable_tier3 {
+    if !ctx.settings.enable_tier3 {
         return Ok(());
     }
-    report.targets.push(scan_tier3_recycle_bin(opts, ctx)?);
-    let stale = stale_projects::scan_tier3_stale_project_dirs(settings, opts, ctx)?;
+    report.targets.push(scan_tier3_recycle_bin(ctx)?);
+    let stale = stale_projects::scan_tier3_stale_project_dirs(ctx)?;
     report.targets.extend(stale);
     Ok(())
 }
 
-pub(super) fn scan_tier3_recycle_bin(
-    opts: &ScanSettingsOptions,
-    ctx: &mut CustomScanCtx<'_>,
-) -> Result<TargetScanResult, ScanError> {
+fn scan_tier3_recycle_bin(ctx: &mut Tier3RunCtx<'_, '_>) -> Result<TargetScanResult, ScanError> {
     let mut result = empty_recycle_bin_result();
     emit_recycle_bin_start(ctx, &result)?;
-    let valid_roots = collect_recycle_bin_items(opts, &mut result, ctx.progress)?;
+    let valid_roots = collect_recycle_bin_items(ctx, &mut result)?;
     finalize_recycle_bin_scan(&mut result, valid_roots, ctx)
 }
 
 fn emit_recycle_bin_start(
-    ctx: &mut CustomScanCtx<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
     result: &TargetScanResult,
 ) -> Result<(), ScanError> {
     if ctx.progress.cancelled() {
@@ -56,24 +51,23 @@ struct RecycleBinCollectCtx<'a> {
     diagnostics: &'a mut Vec<String>,
 }
 
-pub(super) fn collect_recycle_bin_items(
-    opts: &ScanSettingsOptions,
+fn collect_recycle_bin_items(
+    ctx: &Tier3RunCtx<'_, '_>,
     result: &mut TargetScanResult,
-    progress: &ScanProgressRuntime,
 ) -> Result<Vec<(String, CanonicalPath)>, ScanError> {
-    let roots = resolve_recycle_bin_roots(opts);
+    let roots = resolve_recycle_bin_roots(ctx.opts);
     let mut valid_roots = Vec::new();
     let target_id = result.target_id.clone();
-    let mut ctx = RecycleBinCollectCtx {
+    let mut collect = RecycleBinCollectCtx {
         target_id: &target_id,
         valid_roots: &mut valid_roots,
         diagnostics: &mut result.skipped_diagnostics,
     };
     for r in roots {
-        if progress.cancelled() {
+        if ctx.progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        collect_recycle_bin_root(r, &mut ctx);
+        collect_recycle_bin_root(r, &mut collect);
     }
     Ok(valid_roots)
 }
@@ -115,10 +109,10 @@ fn record_recycle_bin_root(canon: CanonicalPath, ctx: &mut RecycleBinCollectCtx<
     }
 }
 
-pub(super) fn finalize_recycle_bin_scan(
+fn finalize_recycle_bin_scan(
     result: &mut TargetScanResult,
     mut valid_roots: Vec<(String, CanonicalPath)>,
-    ctx: &mut CustomScanCtx<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> Result<TargetScanResult, ScanError> {
     if valid_roots.is_empty() {
         return Ok(finalize_empty_recycle_bin(result, ctx));
@@ -140,7 +134,7 @@ pub(super) fn finalize_recycle_bin_scan(
 
 fn finalize_empty_recycle_bin(
     result: &mut TargetScanResult,
-    ctx: &mut CustomScanCtx<'_>,
+    ctx: &mut Tier3RunCtx<'_, '_>,
 ) -> TargetScanResult {
     result.scanned = false;
     result.status_reason = Some("no accessible user recycle-bin root found".to_string());
@@ -153,7 +147,7 @@ fn dedupe_recycle_bin_roots(valid_roots: &mut Vec<(String, CanonicalPath)>) {
     valid_roots.dedup_by(|a, b| a.1.is_same_path(&b.1));
 }
 
-fn complete_recycle_bin(ctx: &mut CustomScanCtx<'_>) {
+fn complete_recycle_bin(ctx: &mut Tier3RunCtx<'_, '_>) {
     ctx.progress.completed_targets = ctx.progress.completed_targets.saturating_add(1);
     ctx.progress.emit(None, None);
 }
@@ -185,7 +179,7 @@ fn validate_recycle_bin_root(canon: &CanonicalPath) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn discover_recycle_bin_roots() -> Vec<String> {
+fn discover_recycle_bin_roots() -> Vec<String> {
     let Some(base) = recycle_bin_base_dir() else {
         return Vec::new();
     };

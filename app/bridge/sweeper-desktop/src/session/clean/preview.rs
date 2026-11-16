@@ -24,6 +24,18 @@ struct TokenIssueRequest {
     total_bytes: u64,
     breakdown: Vec<PreviewTargetBreakdownDto>,
 }
+
+#[derive(Debug)]
+struct PreviewBuild {
+    total_bytes: u64,
+    validated_items: Vec<ValidatedItem>,
+    breakdown: Vec<PreviewTargetBreakdownDto>,
+}
+
+struct PreviewTarget<M, B> {
+    map: M,
+    build: B,
+}
 use crate::clock::Clock;
 
 impl SessionStore {
@@ -54,41 +66,68 @@ impl SessionStore {
             });
         }
         if self.sessions.contains_key(&req.session_id) {
-            return self.preview_scan(clock, req);
+            return self.preview_for(
+                clock,
+                req,
+                PreviewTarget {
+                    map: Self::scan_sessions,
+                    build: Self::build_scan_preview,
+                },
+            );
         }
         if self.analyzer_sessions.contains_key(&req.session_id) {
-            return self.preview_analyzer(clock, req);
+            return self.preview_for(
+                clock,
+                req,
+                PreviewTarget {
+                    map: Self::analyzer_sessions,
+                    build: Self::build_analyzer_preview,
+                },
+            );
         }
         Err(ContractError::SessionInvalid {
             reason: "session not found".to_string(),
         })
     }
 
-    fn preview_scan<C: Clock>(
+    fn preview_for<C, S, M, B>(
         &mut self,
         clock: &C,
         req: PreviewRequest,
-    ) -> Result<PreviewCleanResponse, ContractError> {
+        target: PreviewTarget<M, B>,
+    ) -> Result<PreviewCleanResponse, ContractError>
+    where
+        C: Clock,
+        S: super::SessionMeta + Clone,
+        M: FnOnce(&Self) -> &std::collections::HashMap<String, S>,
+        B: FnOnce(&S, &PreviewRequest) -> Result<PreviewBuild, ContractError>,
+    {
         let now = clock.now_unix_secs();
         let lookup = super::SessionLookup::new(&req.session_id, req.settings_generation);
-        let session = self.get_valid_scan_session(clock, lookup)?.clone();
-        let build = Self::build_scan_preview(&session, &req)?;
+        let session = self.get_valid_session(clock, lookup, target.map)?.clone();
+        let built = (target.build)(&session, &req)?;
         self.issue_token_from(TokenIssueRequest {
             now,
             req,
-            validated_items: build.validated_items,
-            total_bytes: build.total_bytes,
-            breakdown: build.breakdown,
+            validated_items: built.validated_items,
+            total_bytes: built.total_bytes,
+            breakdown: built.breakdown,
         })
     }
 
     fn build_scan_preview(
         session: &ScanSession,
         req: &PreviewRequest,
-    ) -> Result<ScanPreviewBuild, ContractError> {
+    ) -> Result<PreviewBuild, ContractError> {
         let selected = Self::collect_scan_items(session, &req.item_ids)?;
-        Self::require_confirmation(selected.iter().copied(), &req.confirmations)?;
-        Self::assemble_scan_items(session, &selected)
+        let needed = selected.iter().any(|i| i.requires_typed_confirmation);
+        Self::require_typed_confirmation(needed, &req.confirmations)?;
+        let built = Self::assemble_scan_items(session, &selected)?;
+        Ok(PreviewBuild {
+            total_bytes: built.total_bytes,
+            validated_items: built.validated_items,
+            breakdown: built.breakdown,
+        })
     }
 
     fn collect_scan_items<'a>(
@@ -111,14 +150,10 @@ impl SessionStore {
         Ok(selected)
     }
 
-    fn require_confirmation<'a, I>(
-        items: I,
+    fn require_typed_confirmation(
+        needed: bool,
         confirmations: &Option<PreviewConfirmationsDto>,
-    ) -> Result<(), ContractError>
-    where
-        I: Iterator<Item = &'a StoredItem>,
-    {
-        let needed = items.into_iter().any(|i| i.requires_typed_confirmation);
+    ) -> Result<(), ContractError> {
         if !needed {
             return Ok(());
         }
@@ -273,24 +308,6 @@ impl SessionStore {
             .collect()
     }
 
-    fn preview_analyzer<C: Clock>(
-        &mut self,
-        clock: &C,
-        req: PreviewRequest,
-    ) -> Result<PreviewCleanResponse, ContractError> {
-        let now = clock.now_unix_secs();
-        let lookup = super::SessionLookup::new(&req.session_id, req.settings_generation);
-        let session = self.get_valid_analyzer_session(clock, lookup)?.clone();
-        let build = Self::build_analyzer_preview(&session, &req)?;
-        self.issue_token_from(TokenIssueRequest {
-            now,
-            req,
-            validated_items: build.validated_items,
-            total_bytes: build.total_bytes,
-            breakdown: build.breakdown,
-        })
-    }
-
     fn issue_token_from(
         &mut self,
         spec: TokenIssueRequest,
@@ -308,12 +325,18 @@ impl SessionStore {
     fn build_analyzer_preview(
         session: &AnalyzerSession,
         req: &PreviewRequest,
-    ) -> Result<AnalyzerPreviewBuild, ContractError> {
+    ) -> Result<PreviewBuild, ContractError> {
         Self::ensure_analyzer_nodes_exist(session, &req.item_ids)?;
         let preview_items = analyzer::build_analyzer_preview_items(&session.result, &req.item_ids)
             .map_err(|msg| sanitize_analyzer_build_msg(&msg))?;
-        Self::require_analyzer_confirmation(&preview_items, &req.confirmations)?;
-        Ok(Self::assemble_analyzer_items(preview_items))
+        let needed = preview_items.iter().any(|i| i.requires_typed_confirmation);
+        Self::require_typed_confirmation(needed, &req.confirmations)?;
+        let built = Self::assemble_analyzer_items(preview_items);
+        Ok(PreviewBuild {
+            total_bytes: built.total_bytes,
+            validated_items: built.validated_items,
+            breakdown: built.breakdown,
+        })
     }
 
     fn ensure_analyzer_nodes_exist(
@@ -332,27 +355,6 @@ impl SessionStore {
             });
         }
         Ok(())
-    }
-
-    fn require_analyzer_confirmation(
-        items: &[analyzer::AnalyzerPreviewItem],
-        confirmations: &Option<PreviewConfirmationsDto>,
-    ) -> Result<(), ContractError> {
-        let needed = items.iter().any(|i| i.requires_typed_confirmation);
-        if !needed {
-            return Ok(());
-        }
-        let ok = confirmations
-            .as_ref()
-            .and_then(|c| c.typed_confirmation.as_deref())
-            == Some(TYPED_CONFIRMATION_PHRASE);
-        if ok {
-            Ok(())
-        } else {
-            Err(ContractError::InvalidInput {
-                reason: "typed confirmation required".to_string(),
-            })
-        }
     }
 
     fn assemble_analyzer_items(items: Vec<analyzer::AnalyzerPreviewItem>) -> AnalyzerPreviewBuild {

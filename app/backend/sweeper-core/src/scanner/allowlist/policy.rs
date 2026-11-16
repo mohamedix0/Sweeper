@@ -144,6 +144,15 @@ pub(super) fn segment_pattern_matches(name: &str, pattern: &str) -> bool {
     wildcard_segment_matches(name, parts[0], parts[1])
 }
 
+struct WildcardEdgeCheck<'a> {
+    name: &'a str,
+    name_len: usize,
+    prefix: &'a str,
+    pre_len: usize,
+    suffix: &'a str,
+    suf_len: usize,
+}
+
 fn wildcard_segment_matches(name: &str, prefix: &str, suffix: &str) -> bool {
     let name_len = name.len();
     let pre_len = prefix.len();
@@ -151,17 +160,17 @@ fn wildcard_segment_matches(name: &str, prefix: &str, suffix: &str) -> bool {
     if name_len < pre_len + suf_len {
         return false;
     }
-    has_matching_wildcard_edges(name, name_len, prefix, pre_len, suffix, suf_len)
+    has_matching_wildcard_edges(&WildcardEdgeCheck {
+        name,
+        name_len,
+        prefix,
+        pre_len,
+        suffix,
+        suf_len,
+    })
 }
 
-fn has_matching_wildcard_edges(
-    name: &str,
-    name_len: usize,
-    prefix: &str,
-    pre_len: usize,
-    suffix: &str,
-    suf_len: usize,
-) -> bool {
-    name[..pre_len].eq_ignore_ascii_case(prefix)
-        && name[name_len - suf_len..].eq_ignore_ascii_case(suffix)
+fn has_matching_wildcard_edges(check: &WildcardEdgeCheck<'_>) -> bool {
+    check.name[..check.pre_len].eq_ignore_ascii_case(check.prefix)
+        && check.name[check.name_len - check.suf_len..].eq_ignore_ascii_case(check.suffix)
 }
