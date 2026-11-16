@@ -31,8 +31,8 @@ describe('Sweeper frontend', () => {
 
     render(<LogsView client={client} />);
     expect(await screen.findByRole('heading', { name: 'Activity History' })).toBeInTheDocument();
-    await screen.findByRole('button', { name: /System Scan/i });
-    await user.click(screen.getByRole('button', { name: /System Scan/i }));
+    await screen.findByRole('button', { name: /Scan Completed/i });
+    await user.click(screen.getByRole('button', { name: /Scan Completed/i }));
     await screen.findByLabelText('Structured log summary');
     await user.click(screen.getByRole('button', { name: 'Raw JSONL' }));
     expect(await screen.findByLabelText('Log content')).toHaveTextContent(/"record":"intent"/);

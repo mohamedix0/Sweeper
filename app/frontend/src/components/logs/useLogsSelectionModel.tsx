@@ -69,10 +69,14 @@ function useLogData(client: SweeperClient) {
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef<LogRequest>({ seq: 0, id: '' });
   const refresh = useCallback(() => refreshLogs({ client, cancelled: () => false, setLogs, setContentById, setError }), [client]);
+  const clearSelected = useCallback(() => {
+    requestRef.current = { seq: requestRef.current.seq + 1, id: '' };
+    setSelected(null);
+  }, []);
   const openLog = useCallback(async (id: string) => {
     await readOwnedLog({ client, id, requestRef, setError, setSelected, setContentById });
   }, [client]);
-  return { logs, contentById, selected, error, setError, setLogs, setContentById, setSelected, requestRef, refresh, openLog };
+  return { logs, contentById, selected, error, setError, setLogs, setContentById, setSelected, clearSelected, requestRef, refresh, openLog };
 }
 
 function canAutoOpen(args: { focusLogId?: string | null; selected: SelectedLog | null; next: LogMeta[] }) {
@@ -137,15 +141,40 @@ function useLogActions(args: { data: ReturnType<typeof useLogData>; selectedMeta
   return { copyLog, exportLog, toggleSkippedGroup };
 }
 
+function useFilterSelectionSync(args: {
+  filteredLogs: LogMeta[];
+  selectedId: string | null;
+  openLog: (id: string) => Promise<void>;
+  clearSelected: () => void;
+  focusLogId?: string | null;
+}) {
+  const { filteredLogs, selectedId, openLog, clearSelected, focusLogId } = args;
+  useEffect(() => {
+    if (focusLogId) return;
+    if (filteredLogs.length === 0) {
+      if (selectedId) clearSelected();
+      return;
+    }
+    const inFilter = selectedId ? filteredLogs.some((l) => l.id === selectedId) : false;
+    if (!inFilter) {
+      void openLog(filteredLogs[0].id);
+    }
+  }, [clearSelected, filteredLogs, focusLogId, openLog, selectedId]);
+}
+
 export function useLogsSelectionModel(args: { client: SweeperClient; focusLogId?: string | null; onFocusConsumed?: () => void }) {
   const { client, focusLogId, onFocusConsumed } = args;
   const data = useLogData(client);
   useAutoOpen({ client, focusLogId, data });
   useFocusOpen({ client, focusLogId, onFocusConsumed, data });
+  const q = data.logs.length >= 0 ? '' : ''; // keep hook order stable if needed
   const ui = useLogsUiState(data.selected?.id);
-  const derived = useLogsDerived({ logs: data.logs, selected: data.selected, outcomeFilter: ui.outcomeFilter });
-  const q = ui.query.trim().toLowerCase();
-  const filteredLogs = useMemo(() => data.logs.filter((l) => matchesLogFilter({ meta: l, content: contentForLog({ meta: l, selected: data.selected, contentById: data.contentById }), filter: ui.filter, query: q })), [data.logs, data.contentById, data.selected, ui.filter, q]);
+  const query = ui.query.trim().toLowerCase();
+  const filteredLogs = useMemo(() => data.logs.filter((l) => matchesLogFilter({ meta: l, content: contentForLog({ meta: l, selected: data.selected, contentById: data.contentById }), filter: ui.filter, query })), [data.logs, data.contentById, data.selected, ui.filter, query]);
+  useFilterSelectionSync({ filteredLogs, selectedId: data.selected?.id ?? null, openLog: data.openLog, clearSelected: data.clearSelected, focusLogId });
+  const effectiveSelected = data.selected && filteredLogs.some((l) => l.id === data.selected?.id) ? data.selected : null;
+  const derived = useLogsDerived({ logs: data.logs, selected: effectiveSelected, outcomeFilter: ui.outcomeFilter });
   const actions = useLogActions({ data, selectedMetaName: derived.selectedMeta?.name, setCopied: ui.setCopied, setExpandedSkippedGroups: ui.setExpandedSkippedGroups });
-  return { logs: data.logs, selected: data.selected, mode: ui.mode, setMode: ui.setMode, error: data.error, copied: ui.copied, filter: ui.filter, setFilter: ui.setFilter, outcomeFilter: ui.outcomeFilter, setOutcomeFilter: ui.setOutcomeFilter, query: ui.query, setQuery: ui.setQuery, selectedMeta: derived.selectedMeta, auditRows: derived.auditRows, visibleAuditRows: derived.visibleAuditRows, selectedSummary: derived.selectedSummary, activitySummary: derived.activitySummary, filteredLogs, contentById: data.contentById, expandedSkippedGroups: ui.expandedSkippedGroups, openLog: data.openLog, copyLog: actions.copyLog, exportLog: actions.exportLog, toggleSkippedGroup: actions.toggleSkippedGroup };
+  void q;
+  return { logs: data.logs, selected: effectiveSelected, mode: ui.mode, setMode: ui.setMode, error: data.error, copied: ui.copied, filter: ui.filter, setFilter: ui.setFilter, outcomeFilter: ui.outcomeFilter, setOutcomeFilter: ui.setOutcomeFilter, query: ui.query, setQuery: ui.setQuery, selectedMeta: derived.selectedMeta, auditRows: derived.auditRows, visibleAuditRows: derived.visibleAuditRows, selectedSummary: derived.selectedSummary, activitySummary: derived.activitySummary, filteredLogs, contentById: data.contentById, expandedSkippedGroups: ui.expandedSkippedGroups, openLog: data.openLog, copyLog: actions.copyLog, exportLog: actions.exportLog, toggleSkippedGroup: actions.toggleSkippedGroup };
 }

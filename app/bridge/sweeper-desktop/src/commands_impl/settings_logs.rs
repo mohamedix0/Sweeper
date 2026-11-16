@@ -1,4 +1,5 @@
-﻿use std::fs;
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
@@ -74,11 +75,95 @@ fn default_logs_dir() -> Option<PathBuf> {
 
 /// `list_logs` implementation.
 pub fn list_logs<C: Clock>(_state: &AppState<C>) -> Result<Vec<LogMetadataDto>, ContractError> {
-    list_logs_in_dir(default_logs_dir().as_deref())
+    list_logs_in_dir_impl(default_logs_dir().as_deref(), true)
 }
 
-/// `list_logs` in a specific directory (testable).
-pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, ContractError> {
+fn is_sandbox_log_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("sweeper-sandbox")
+        || lower.contains(".sweeper-sentinel")
+        || lower.contains("sweeper-testkit")
+        || lower.contains("\\appdata\\local\\temp\\")
+        || lower.contains("/appdata/local/temp/")
+}
+
+fn clean_log_phantom_reasons(path: &Path) -> (bool, bool) {
+    let Ok(file) = fs::File::open(path) else {
+        return (true, false);
+    };
+    let reader = BufReader::new(file);
+    let mut saw_outcome = false;
+    let mut saw_path = false;
+    let mut all_sandbox = true;
+
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let kind = value.get("kind").and_then(|v| v.as_str()).or_else(|| {
+            value
+                .get("record")
+                .and_then(|v| v.as_str())
+                .and_then(|r| match r {
+                    "outcome" => Some("outcome"),
+                    "intent" => Some("intent"),
+                    _ => None,
+                })
+        });
+        if kind == Some("outcome") {
+            saw_outcome = true;
+        }
+        if let Some(p) = value.get("path").and_then(|v| v.as_str()) {
+            saw_path = true;
+            if !is_sandbox_log_path(p) {
+                all_sandbox = false;
+            }
+        }
+        if let Some(target) = value.get("target_path").and_then(|v| v.as_str()) {
+            saw_path = true;
+            if !is_sandbox_log_path(target) {
+                all_sandbox = false;
+            }
+        }
+    }
+
+    let no_outcome = !saw_outcome;
+    let sandbox_only = saw_path && all_sandbox;
+    (no_outcome, sandbox_only)
+}
+
+fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let is_clean = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            s.to_ascii_lowercase().starts_with("clean-")
+                && s.to_ascii_lowercase().ends_with(".jsonl")
+        })
+        .unwrap_or(false);
+    if is_clean {
+        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(path);
+        if no_outcome {
+            return false;
+        }
+        if filter_sandbox_phantoms && sandbox_only {
+            return false;
+        }
+    }
+    true
+}
+
+fn list_logs_in_dir_impl(
+    dir: Option<&Path>,
+    filter_sandbox_phantoms: bool,
+) -> Result<Vec<LogMetadataDto>, ContractError> {
     let Some(dir) = dir else {
         return Ok(vec![]);
     };
@@ -109,6 +194,10 @@ pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, Contr
             .unwrap_or_default()
             .to_string();
         let meta = entry.metadata().ok();
+        let size_u64 = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        if !should_include_log_file(&path, size_u64, filter_sandbox_phantoms) {
+            continue;
+        }
         let (modified, size) = meta
             .map(|m| {
                 let modified = m
@@ -129,6 +218,11 @@ pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, Contr
     }
     out.sort_by(|a, b| b.id.cmp(&a.id));
     Ok(out)
+}
+
+/// `list_logs` in a specific directory (testable, does not filter sandbox-only clean logs).
+pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, ContractError> {
+    list_logs_in_dir_impl(dir, false)
 }
 
 /// `read_log` implementation.

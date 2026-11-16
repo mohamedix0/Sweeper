@@ -1,4 +1,5 @@
-﻿use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use sweeper_contract::{
     ContractError, ExplainItemResponse, PreviewCleanResponse, PreviewConfirmationsDto,
@@ -56,6 +57,87 @@ fn commit_scan_outcome<C: Clock>(
             },
         ),
     )
+}
+
+fn is_sandbox_path_hint(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("sweeper-sandbox")
+        || lower.contains(".sweeper-sentinel")
+        || lower.contains("sweeper-testkit")
+        || lower.contains("\\appdata\\local\\temp\\")
+        || lower.contains("/appdata/local/temp/")
+}
+
+fn is_sandbox_scan(
+    settings: &sweeper_core::settings::SweeperSettings,
+    report: &scanner::ScanReport,
+) -> bool {
+    if settings.enable_tier1 || settings.enable_tier2 || settings.enable_tier3 {
+        return false;
+    }
+    if settings.custom_paths.is_empty() {
+        return false;
+    }
+    if !settings
+        .custom_paths
+        .iter()
+        .all(|p| is_sandbox_path_hint(p))
+    {
+        return false;
+    }
+    report.targets.iter().all(|t| {
+        t.resolved_paths.iter().all(|p| is_sandbox_path_hint(p))
+            && t.target_id.starts_with("custom-path")
+    })
+}
+
+fn scan_logs_base_dir() -> PathBuf {
+    std::env::var_os("SWEEPER_LOGS_BASE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(sweeper_core::journal::default_logs_base_dir)
+}
+
+fn write_scan_activity_log(
+    settings: &sweeper_core::settings::SweeperSettings,
+    report: &scanner::ScanReport,
+) {
+    if is_sandbox_scan(settings, report) {
+        return;
+    }
+    let total_reclaimable_bytes: u64 = report.targets.iter().map(|t| t.eligible_bytes).sum();
+    let total_eligible_files: u64 = report.targets.iter().map(|t| t.eligible_count).sum();
+    let total_skipped_files: u64 = report.targets.iter().map(|t| t.skipped_count).sum();
+    let categories: Vec<serde_json::Value> = report
+        .targets
+        .iter()
+        .filter(|t| t.eligible_count > 0 || t.file_count > 0)
+        .map(|t| {
+            serde_json::json!({
+                "target_id": t.target_id,
+                "target_name": t.target_name,
+                "tier": format!("{:?}", t.tier),
+                "risk": format!("{:?}", t.risk),
+                "eligible_bytes": t.eligible_bytes.to_string(),
+                "total_bytes": t.total_bytes.to_string(),
+                "eligible_count": t.eligible_count.to_string(),
+                "file_count": t.file_count.to_string(),
+                "skipped_count": t.skipped_count.to_string(),
+            })
+        })
+        .collect();
+    let record = serde_json::json!({
+        "kind": "scan",
+        "record": "outcome",
+        "event": "scan",
+        "timestamp_unix_secs": report.started_unix_secs,
+        "total_reclaimable_bytes": total_reclaimable_bytes.to_string(),
+        "eligible_bytes": total_reclaimable_bytes.to_string(),
+        "total_eligible_files": total_eligible_files.to_string(),
+        "total_skipped_files": total_skipped_files.to_string(),
+        "categories_count": categories.len(),
+        "targets": categories,
+    });
+    let _ = sweeper_core::journal::write_scan_log(&scan_logs_base_dir(), &record);
 }
 
 enum ScanTerminal {
@@ -159,9 +241,11 @@ where
 {
     match scan_result {
         Ok(report) => {
+            let log_report = report.clone();
             if let Err(err) = commit_scan_outcome(state, ctx.session_id, ctx.prepared, report) {
                 return Err(handle_scan_terminal(state, ctx, ScanTerminal::Failed(err)));
             }
+            write_scan_activity_log(&ctx.prepared.effective_settings, &log_report);
             emit_scan_event(
                 ctx.shared_cb,
                 ScanProgressEvent::Completed {

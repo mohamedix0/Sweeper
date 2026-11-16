@@ -31,6 +31,8 @@ export function LogsDetailsPane(props: {
   visibleRows: AuditRow[];
   outcomeFilter: OutcomeFilter;
   expanded: Set<string>;
+  hasLogs: boolean;
+  hasFilteredLogs: boolean;
   onMode: (m: 'structured' | 'raw') => void;
   onCopy: () => void;
   onExport: () => void;
@@ -39,6 +41,7 @@ export function LogsDetailsPane(props: {
   onScanAgain?: () => void;
 }) {
   const showScanAgain = props.summary?.kind === 'scan' && !!props.onScanAgain;
+  const emptyText = !props.hasFilteredLogs && props.hasLogs ? 'No matching activity for this filter' : 'No activity selected';
   return (
     <div className="logs-pane logs-pane-right">
       <div className="logs-pane-header log-content-header">
@@ -57,7 +60,7 @@ export function LogsDetailsPane(props: {
               <AuditTable auditRows={props.auditRows} visibleRows={props.visibleRows} outcomeFilter={props.outcomeFilter} onOutcome={props.onOutcome} expanded={props.expanded} onToggle={props.onToggle} primaryLabel={props.activity.primaryLabel} kind={props.summary?.kind} />
             ) : <pre className="log" aria-label="Log content">{props.selected.content}</pre>}
           </>
-        ) : <p className="muted pad-md">Select an activity entry to inspect details.</p>}
+        ) : <p className="muted pad-md">{emptyText}</p>}
       </div>
     </div>
   );
