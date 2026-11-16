@@ -403,18 +403,6 @@ pub fn scan_with_settings_options_and_elevation_with_progress(
     Ok(report)
 }
 
-/// Scan using the current process elevation state with cooperative cancellation/progress reporting.
-pub fn scan_with_settings_current_elevation_with_progress(
-    settings: &crate::settings::SweeperSettings,
-    control: ScanRunControl,
-) -> Result<ScanReport, ScanError> {
-    scan_with_settings_options_current_elevation_with_progress(
-        settings,
-        ScanSettingsOptions::default(),
-        control,
-    )
-}
-
 /// Scan with options using the current process elevation state and cooperative cancellation/progress.
 pub fn scan_with_settings_options_current_elevation_with_progress(
     settings: &crate::settings::SweeperSettings,

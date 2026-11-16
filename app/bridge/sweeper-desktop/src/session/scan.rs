@@ -184,8 +184,9 @@ impl SessionStore {
             },
         );
         let core_cb = build_store_scan_cb(SessionIdRef(&ctx.session_id), &shared_cb);
-        let scan_result = scanner::scan_with_settings_current_elevation_with_progress(
+        let scan_result = scanner::scan_with_settings_options_current_elevation_with_progress(
             &ctx.prepared.effective_settings,
+            scanner::ScanSettingsOptions::default(),
             scanner::ScanRunControl {
                 cancel: ctx.prepared.cancel.clone(),
                 progress_cb: core_cb,

@@ -73,13 +73,17 @@ function outcomeBytes(input: { ok: boolean; size?: string | null }): bigint {
   return BigInt(input.size ?? '0');
 }
 
+function outcomeTargetId(input: { item?: ScanItemInfo; node?: AnalyzerNodeDto }): string {
+  return input.item?.targetId ?? input.node?.targetId ?? 'custom-path';
+}
+
 function resolveOutcome(input: { scan?: ScanSessionState; analyzer?: AnalyzerSessionState; itemId: string; allowDeleteUnknown: boolean }): CleanOutcome {
   const item = input.scan?.itemsById.get(input.itemId);
   const node = input.analyzer?.nodesById.get(input.itemId);
   const ok = entryCleanable({ item, node, allowDeleteUnknown: input.allowDeleteUnknown });
   if (ok && input.scan) removeScanItem({ session: input.scan, itemId: input.itemId });
   return {
-    targetId: item ? item.targetId : (node?.targetId ?? 'custom-path'),
+    targetId: outcomeTargetId({ item, node }),
     ok,
     bytes: outcomeBytes({ ok, size: item?.size ?? node?.sizeBytes }),
   };

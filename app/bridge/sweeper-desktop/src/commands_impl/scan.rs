@@ -132,8 +132,9 @@ where
         },
     );
     let core_cb = build_scan_progress_cb(&session_id, &shared_cb);
-    let scan_result = scanner::scan_with_settings_current_elevation_with_progress(
+    let scan_result = scanner::scan_with_settings_options_current_elevation_with_progress(
         &prepared.effective_settings,
+        scanner::ScanSettingsOptions::default(),
         scanner::ScanRunControl {
             cancel: prepared.cancel.clone(),
             progress_cb: core_cb,
