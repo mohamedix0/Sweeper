@@ -203,15 +203,21 @@ fn seed_custom_path_session(store: &mut SessionStore, seed: CustomSessionSeed) {
     });
 }
 
-fn stale_seed(session_id: &str, item_id: &str, root: &str) -> CustomSessionSeed {
+fn stale_seed(session_id: &str, item_id: &str, root: &std::path::Path) -> CustomSessionSeed {
     use sweeper_contract::{RiskDto, TierDto};
+    let mut root_str = root.to_string_lossy().to_string();
+    if let Some(stripped) = root_str.strip_prefix(r"\\?\UNC\") {
+        root_str = format!(r"\\{stripped}");
+    } else if let Some(stripped) = root_str.strip_prefix(r"\\?\") {
+        root_str = stripped.to_string();
+    }
     CustomSessionSeed {
         session_id: session_id.to_string(),
         item_id: item_id.to_string(),
         target_id: "stale-rust-target".to_string(),
         target_name: "Stale Rust target/".to_string(),
-        path: root.to_string(),
-        resolved_paths: vec![root.to_string()],
+        path: root_str.clone(),
+        resolved_paths: vec![root_str],
         tier: TierDto::Tier3,
         risk: RiskDto::Caution,
         core_tier: sweeper_core::Tier::Tier3,
@@ -243,13 +249,10 @@ fn check_preview_and_clean_stale_directory_item_equal_root() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("junk.bin"), b"abc").unwrap();
     let root_canon = std::fs::canonicalize(&root).unwrap();
-    let mut root_str = root_canon.to_string_lossy().to_string();
-    if let Some(stripped) = root_str.strip_prefix(r"\\?\UNC\") {
-        root_str = format!(r"\\{stripped}");
-    } else if let Some(stripped) = root_str.strip_prefix(r"\\?\") {
-        root_str = stripped.to_string();
-    }
-    seed_custom_path_session(&mut store, stale_seed("scan-stale", "stale::1", &root_str));
+    seed_custom_path_session(
+        &mut store,
+        stale_seed("scan-stale", "stale::1", &root_canon),
+    );
     let preview = store
         .preview_clean(
             &clock,
@@ -328,18 +331,18 @@ fn canon_test_path(path: &std::path::Path) -> String {
 
 fn seed_multi_preview_session(
     store: &mut SessionStore,
-    root: &str,
-    valid_path: &str,
-    invalid_path: &str,
+    root: &std::path::Path,
+    valid_path: &std::path::Path,
+    invalid_path: &std::path::Path,
 ) {
     use std::collections::HashMap;
     use sweeper_contract::{
         RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
     };
-    let mk = |id: &str, path: &str, size: u64| ScanItemDto {
+    let mk = |id: &str, path: &std::path::Path, size: u64| ScanItemDto {
         id: id.to_string(),
         target_id: "user-temp".to_string(),
-        path: path.to_string(),
+        path: path.to_string_lossy().to_string(),
         size: U64String(size),
         mtime_unix_secs: U64String(1_700_000_000),
         age_eligible: true,
@@ -351,7 +354,7 @@ fn seed_multi_preview_session(
         target_name: "User Temp".to_string(),
         tier: TierDto::Tier1,
         risk: RiskDto::Safe,
-        resolved_paths: vec![root.to_string()],
+        resolved_paths: vec![root.to_string_lossy().to_string()],
         scanned: true,
         status_reason: None,
         total_bytes: U64String(1122),
@@ -408,7 +411,12 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
     let root = canon_test_path(tmp.path());
     let valid_path = canon_test_path(&valid);
     let vanished_path = canon_test_path(&vanished);
-    seed_multi_preview_session(&mut store, &root, &valid_path, &vanished_path);
+    seed_multi_preview_session(
+        &mut store,
+        std::path::Path::new(&root),
+        std::path::Path::new(&valid_path),
+        std::path::Path::new(&vanished_path),
+    );
     drop(vanished_dir);
     let preview = store
         .preview_clean(
