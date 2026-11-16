@@ -17,6 +17,11 @@ pub fn assert_tauri_csp_and_security(conf: &serde_json::Value) {
     assert!(csp.contains("default-src 'self'"), "csp: {csp}");
     assert!(!csp.contains("unsafe-eval"), "csp: {csp}");
     assert!(!csp.contains("unsafe-inline"), "csp: {csp}");
+    assert_eq!(
+        conf["app"]["withGlobalTauri"],
+        serde_json::json!(false),
+        "withGlobalTauri must be false"
+    );
 }
 
 pub fn assert_tauri_no_fs_shell(conf: &serde_json::Value, cap: &serde_json::Value) {
