@@ -135,65 +135,69 @@ if (@($desktopInternalDeps).Count -ne $allowedDesktopInternal.Count -or (@(Compa
 }
 
 # 5) Enforce #![forbid(unsafe_code)] in required crates (except sweeper-winfs).
-$forbidFiles = @()
-$backendLibs = Get-ChildItem -Path (Join-Path $repoRoot 'app\backend') -Recurse -Filter 'lib.rs' -File -ErrorAction SilentlyContinue
-foreach ($f in $backendLibs) {
-  if ($f.FullName -match '([/\\])app([/\\])backend([/\\])sweeper-winfs([/\\])src([/\\])lib\.rs$') { continue }
-  $forbidFiles += $f.FullName
+function Get-ForbidUnsafeTargets([string]$root) {
+  $targets = @()
+  Get-ChildItem -Path (Join-Path $root 'app\backend') -Recurse -Filter 'lib.rs' -File -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.FullName -notmatch '([/\\])sweeper-winfs([/\\])src([/\\])lib\.rs$') { $targets += $_.FullName }
+  }
+  Get-ChildItem -Path (Join-Path $root 'app\bridge') -Recurse -Filter 'lib.rs' -File -ErrorAction SilentlyContinue | ForEach-Object { $targets += $_.FullName }
+  $main = Join-Path $root 'app\bridge\sweeper-desktop\src\main.rs'
+  if (Test-Path -LiteralPath $main) { $targets += $main }
+  return $targets
 }
-$bridgeLibs = Get-ChildItem -Path (Join-Path $repoRoot 'app\bridge') -Recurse -Filter 'lib.rs' -File -ErrorAction SilentlyContinue
-foreach ($f in $bridgeLibs) {
-  $forbidFiles += $f.FullName
-}
-$desktopMain = Join-Path $repoRoot 'app\bridge\sweeper-desktop\src\main.rs'
-if (Test-Path -LiteralPath $desktopMain) { $forbidFiles += $desktopMain }
-foreach ($fp in $forbidFiles) {
-  $txt = Get-Content -LiteralPath $fp -Raw -ErrorAction SilentlyContinue
-  if ($null -eq $txt -or $txt -notmatch '#!\s*\[forbid\(unsafe_code\)\]') {
-    Fail "Missing #![forbid(unsafe_code)] in $fp"
+
+function Test-ForbidUnsafeCode([string]$root) {
+  foreach ($fp in (Get-ForbidUnsafeTargets $root)) {
+    $txt = Get-Content -LiteralPath $fp -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $txt -or $txt -notmatch '#!\s*\[forbid\(unsafe_code\)\]') {
+      Fail "Missing #![forbid(unsafe_code)] in $fp"
+    }
   }
 }
 
 # 6) Enforce // SAFETY: comment near above every unsafe block/fn in sweeper-winfs/src.
-$winfsSrc = Join-Path $repoRoot 'app\backend\sweeper-winfs\src'
-if (Test-Path -LiteralPath $winfsSrc) {
-  $rsFiles = Get-ChildItem -Path $winfsSrc -Recurse -Filter '*.rs' -File -ErrorAction SilentlyContinue
-  foreach ($rf in $rsFiles) {
-    $lines = Get-Content -LiteralPath $rf.FullName -ErrorAction SilentlyContinue
+function Test-LineHasSafetyComment([string[]]$lines, [int]$idx) {
+  $prev = $idx - 1
+  for ($checked = 0; $prev -ge 0 -and $checked -lt 15; $checked++) {
+    if ($lines[$prev] -match '//\s*SAFETY:') { return $true }
+    $prev--
+  }
+  return $false
+}
+
+function Test-WinfsSafetyComments([string]$root) {
+  $winfsSrc = Join-Path $root 'app\backend\sweeper-winfs\src'
+  if (-not (Test-Path -LiteralPath $winfsSrc)) { return }
+  Get-ChildItem -Path $winfsSrc -Recurse -Filter '*.rs' -File -ErrorAction SilentlyContinue | ForEach-Object {
+    $lines = Get-Content -LiteralPath $_.FullName -ErrorAction SilentlyContinue
     for ($i = 0; $i -lt $lines.Count; $i++) {
       $line = $lines[$i]
-      if ($line -match '\bunsafe\s+fn\b' -or $line -match '\bunsafe\s*\{') {
-        $prevIdx = $i - 1
-        $checked = 0
-        $hasSafety = $false
-        while ($prevIdx -ge 0 -and $checked -lt 15) {
-          $prev = $lines[$prevIdx]
-          if ($prev -match '//\s*SAFETY:') { $hasSafety = $true; break }
-          $prevIdx--
-          $checked++
-        }
-        if (-not $hasSafety) {
-          Fail "Missing // SAFETY: comment above unsafe at $($rf.FullName):$($i+1)"
-        }
+      $isUnsafe = ($line -match '\bunsafe\s+fn\b' -or $line -match '\bunsafe\s*\{')
+      if ($isUnsafe -and -not (Test-LineHasSafetyComment $lines $i)) {
+        Fail "Missing // SAFETY: comment above unsafe at $($_.FullName):$($i + 1)"
       }
     }
   }
 }
 
 # 7) cargo geiger (optional): run if installed, do not fail if absent.
-$geiger = Get-Command cargo-geiger -ErrorAction SilentlyContinue
-if ($null -eq $geiger) {
-  Write-Host "GATE-A: cargo-geiger not found in PATH; skipping cargo geiger check (static checks still enforced)." -ForegroundColor Yellow
-} else {
+function Invoke-OptionalCargoGeiger([string]$root) {
+  $geiger = Get-Command cargo-geiger -ErrorAction SilentlyContinue
+  if ($null -eq $geiger) {
+    Write-Host "GATE-A: cargo-geiger not found in PATH; skipping cargo geiger check (static checks still enforced)." -ForegroundColor Yellow
+    return
+  }
   Write-Host "GATE-A: running cargo geiger..."
-  Push-Location (Join-Path $repoRoot 'app')
+  Push-Location (Join-Path $root 'app')
   try {
     & cargo geiger --locked 2>&1 | Write-Host
     if ($LASTEXITCODE -ne 0) { Fail "cargo geiger reported issues (exit code $LASTEXITCODE)." }
-  } finally {
-    Pop-Location
-  }
+  } finally { Pop-Location }
 }
+
+Test-ForbidUnsafeCode $repoRoot
+Test-WinfsSafetyComments $repoRoot
+Invoke-OptionalCargoGeiger $repoRoot
 
 # 8) Privacy / scrub checks on tracked files (permanent Gate A guard).
 $tracked = git -C $repoRoot ls-files

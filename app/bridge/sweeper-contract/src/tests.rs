@@ -227,46 +227,16 @@ fn export_ts_bindings_matches_committed_file() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     bindings::export_ts_bindings_to(tmp.path()).expect("export bindings");
     let generated = fs::read_to_string(tmp.path()).unwrap();
-    assert!(
-        !generated.contains('\u{feff}'),
-        "generated bindings must not contain UTF-8 BOM"
-    );
-    let existing = fs::read_to_string(&committed)
-        .unwrap_or_else(|_| panic!("missing committed bindings at {}", committed.display()));
-    assert!(
-        !existing.contains('\u{feff}'),
-        "committed bindings must not contain UTF-8 BOM"
-    );
-    let existing_normalized = existing.replace("\r\n", "\n");
-    assert_eq!(
-        generated, existing_normalized,
-        "TypeScript bindings drift detected; re-export frontend/src/contract/bindings.ts"
-    );
-}
-
-#[test]
-fn contract_bindings_match_committed_file() {
-    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("frontend")
-        .join("src")
-        .join("contract")
-        .join("bindings.ts");
     let rendered = crate::render_bindings().expect("render bindings");
-    assert!(
-        !rendered.contains('\u{feff}'),
-        "rendered bindings must not contain UTF-8 BOM"
-    );
     let existing = fs::read_to_string(&committed)
         .unwrap_or_else(|_| panic!("missing committed bindings at {}", committed.display()));
+    let existing_norm = existing.replace("\r\n", "\n");
     assert!(
-        !existing.contains('\u{feff}'),
-        "committed bindings must not contain UTF-8 BOM"
-    );
-    let existing_normalized = existing.replace("\r\n", "\n");
-    assert_eq!(
-        rendered, existing_normalized,
-        "TypeScript bindings drift detected (sweeper_contract::render_bindings() != committed frontend/src/contract/bindings.ts); re-export frontend/src/contract/bindings.ts"
+        !generated.contains('\u{feff}')
+            && !rendered.contains('\u{feff}')
+            && !existing_norm.contains('\u{feff}')
+            && generated == existing_norm
+            && rendered == existing_norm,
+        "bindings drift/BOM: re-export frontend/src/contract/bindings.ts"
     );
 }
