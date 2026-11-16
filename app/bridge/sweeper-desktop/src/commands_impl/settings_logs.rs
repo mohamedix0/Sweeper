@@ -292,3 +292,22 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
         reason: "log not found".into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::clean_log_phantom_reasons;
+
+    #[test]
+    fn real_path_with_sweeper_test_substring_is_not_sandbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("clean-test.jsonl");
+        let content = concat!(
+            "{\"kind\":\"intent\",\"path\":\"C:\\\\Users\\\\Public\\\\Documents\\\\sweeper-test-results\\\\report.json\"}\n",
+            "{\"kind\":\"outcome\",\"status\":\"deleted\",\"path\":\"C:\\\\Users\\\\Public\\\\Documents\\\\sweeper-test-results\\\\report.json\"}\n"
+        );
+        std::fs::write(&path, content).expect("write log");
+        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(&path);
+        assert!(!no_outcome);
+        assert!(!sandbox_only);
+    }
+}

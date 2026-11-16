@@ -71,10 +71,18 @@ fn sandbox_path_hint_preserves_real_tmp_paths() {
 
 #[test]
 fn sandbox_path_hint_matches_verified_sandbox_markers() {
-    let named = r"C:\Users\Public\AppData\Local\Temp\sweeper-sandbox\Temp\a.tmp";
-    assert!(is_sandbox_path_hint(named));
-    let sentinel = r"C:\Users\Public\AppData\Local\Temp\.sweeper_sandbox_sentinel\cache";
-    assert!(is_sandbox_path_hint(sentinel));
-    let test_marker = r"C:\Users\Public\AppData\Local\Temp\sweeper-test\cache";
-    assert!(is_sandbox_path_hint(test_marker));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sentinel = ".sweeper_sandbox_sentinel";
+    std::fs::write(dir.path().join(sentinel), "").expect("write sentinel");
+    let inside = dir.path().join("cache").join("a.tmp");
+    assert!(is_sandbox_path_hint(&inside.to_string_lossy()));
+
+    let by_component = dir.path().join(sentinel).join("cache");
+    assert!(is_sandbox_path_hint(&by_component.to_string_lossy()));
+}
+
+#[test]
+fn real_path_with_sweeper_test_substring_is_not_sandbox() {
+    let path = r"C:\Users\Public\Documents\sweeper-test-results\report.json";
+    assert!(!is_sandbox_path_hint(path));
 }

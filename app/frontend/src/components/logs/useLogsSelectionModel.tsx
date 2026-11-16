@@ -79,14 +79,14 @@ function useLogData(client: SweeperClient) {
   return { logs, contentById, selected, error, setError, setLogs, setContentById, setSelected, clearSelected, requestRef, refresh, openLog };
 }
 
-function canAutoOpen(args: { focusLogId?: string | null; selected: SelectedLog | null; next: LogMeta[]; suppress?: boolean }) {
+function canAutoOpen(args: { focusLogId?: string | null; selected: SelectedLog | null; next: LogMeta[]; suppress: boolean }) {
   if (args.focusLogId) return false;
   if (args.selected) return false;
   if (args.suppress) return false;
   return args.next.length > 0;
 }
 
-function useAutoOpen(args: { client: SweeperClient; focusLogId?: string | null; data: ReturnType<typeof useLogData>; suppress?: boolean }) {
+function useAutoOpen(args: { client: SweeperClient; focusLogId?: string | null; data: ReturnType<typeof useLogData>; suppress: boolean }) {
   const { client, focusLogId, data, suppress } = args;
   const { selected, setLogs, setContentById, setError, requestRef, setSelected } = data;
   useEffect(() => {
@@ -168,18 +168,6 @@ function isSelectedInFilter(selectedId: string | undefined, filteredLogs: LogMet
   return filteredLogs.some((l) => l.id === selectedId);
 }
 
-function shouldSuppressAutoOpen(args: {
-  focusLogId?: string | null;
-  selected: SelectedLog | null;
-  filteredLogs: LogMeta[];
-  logs: LogMeta[];
-}) {
-  if (args.focusLogId) return false;
-  if (args.selected) return false;
-  if (args.filteredLogs.length !== 0) return false;
-  return args.logs.length > 0;
-}
-
 function resolveEffectiveSelected(selected: SelectedLog | null, filteredLogs: LogMeta[]) {
   if (!isSelectedInFilter(selected?.id, filteredLogs)) return null;
   return selected;
@@ -223,12 +211,7 @@ export function useLogsSelectionModel(args: {
     filter: ui.filter,
     query,
   });
-  const suppress = shouldSuppressAutoOpen({
-    focusLogId,
-    selected: data.selected,
-    filteredLogs,
-    logs: data.logs,
-  });
+  const suppress = !focusLogId && !data.selected && filteredLogs.length === 0 && data.logs.length > 0;
 
   useAutoOpen({ client, focusLogId, data, suppress });
   useFocusOpen({ client, focusLogId, onFocusConsumed, data });

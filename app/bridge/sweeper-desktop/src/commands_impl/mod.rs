@@ -9,15 +9,29 @@ mod shared;
 #[cfg(test)]
 mod tests;
 
+const SWEEPER_SANDBOX_SENTINEL: &str = ".sweeper_sandbox_sentinel";
+
 pub(crate) fn is_sandbox_path_hint(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    const MARKERS: [&str; 4] = [
-        "sweeper-sandbox",
-        ".sweeper_sandbox_sentinel",
-        ".sweeper-sentinel",
-        "sweeper-test",
-    ];
-    MARKERS.iter().any(|marker| lower.contains(marker))
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let p = std::path::Path::new(trimmed);
+    has_sentinel_component(p) || has_ancestor_sentinel_file(p)
+}
+
+fn has_sentinel_component(path: &std::path::Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(SWEEPER_SANDBOX_SENTINEL)
+    })
+}
+
+fn has_ancestor_sentinel_file(path: &std::path::Path) -> bool {
+    path.ancestors()
+        .take(8)
+        .any(|ancestor| ancestor.join(SWEEPER_SANDBOX_SENTINEL).exists())
 }
 
 pub use analyzer::{cancel_analyzer, start_analyzer};
