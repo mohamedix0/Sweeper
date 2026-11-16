@@ -13,8 +13,10 @@ use thiserror::Error;
 
 /// Maximum retained journal/log files.
 pub const MAX_RETAINED_LOGS: usize = 30;
-/// Log file prefix.
+/// Clean log file prefix.
 const LOG_PREFIX: &str = "clean-";
+/// Scan log file prefix.
+const SCAN_LOG_PREFIX: &str = "scan-";
 /// Log file extension.
 const LOG_EXT: &str = "jsonl";
 
@@ -81,7 +83,7 @@ impl JournalWriter {
     pub fn open_in(base_dir: &Path) -> Result<Self, JournalError> {
         let log_dir = resolve_log_dir(base_dir);
         fs::create_dir_all(&log_dir)?;
-        rotate_logs(&log_dir, MAX_RETAINED_LOGS)?;
+        rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
         let ts = unix_now_secs();
         let pid = std::process::id();
         let nanos = SystemTime::now()
@@ -162,7 +164,8 @@ fn parse_records_from_reader<R: BufRead>(reader: R) -> Result<Vec<JournalRecord>
     Ok(records)
 }
 
-/// Rotate log files in `log_dir`, retaining only the newest `max_files` matching journal logs.
+/// Rotate activity log files in `log_dir`, retaining only the newest `max_files`
+/// matching clean/scan JSONL logs.
 pub fn rotate_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError> {
     if max_files == 0 {
         return Ok(());
@@ -173,6 +176,15 @@ pub fn rotate_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError>
     enforce_max_logs(log_dir, max_files.saturating_sub(1).max(1))?;
     enforce_max_logs(log_dir, max_files)?;
     Ok(())
+}
+
+/// Rotate logs before writing a new activity log file, leaving room for it.
+pub fn rotate_logs_for_new_file(log_dir: &Path, max_files: usize) -> Result<(), JournalError> {
+    if max_files == 0 || !log_dir.exists() {
+        return Ok(());
+    }
+    let keep = max_files.saturating_sub(1).max(1);
+    enforce_max_logs(log_dir, keep)
 }
 
 /// Resolve the directory where journal log files are stored.
@@ -237,7 +249,7 @@ fn enforce_max_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !is_journal_log_file(&path) {
+        if !is_activity_log_file(&path) {
             continue;
         }
         let modified = entry
@@ -259,12 +271,39 @@ fn enforce_max_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError
     Ok(())
 }
 
-fn is_journal_log_file(path: &Path) -> bool {
+fn is_activity_log_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;
     };
     let lower = name.to_ascii_lowercase();
-    lower.starts_with(LOG_PREFIX) && lower.ends_with(&format!(".{LOG_EXT}"))
+    let ext_ok = lower.ends_with(&format!(".{LOG_EXT}"));
+    ext_ok && (lower.starts_with(LOG_PREFIX) || lower.starts_with(SCAN_LOG_PREFIX))
+}
+
+/// Build a timestamped scan log filename.
+pub fn scan_log_filename(ts_secs: u64, pid: u32, nanos: u32) -> String {
+    format!("{SCAN_LOG_PREFIX}{ts_secs}-{pid}-{nanos}.{LOG_EXT}")
+}
+
+/// Write a completed scan summary log (`scan-*.jsonl`) and rotate activity logs.
+pub fn write_scan_log(
+    base_dir: &Path,
+    record: &serde_json::Value,
+) -> Result<PathBuf, JournalError> {
+    let log_dir = resolve_log_dir(base_dir);
+    fs::create_dir_all(&log_dir)?;
+    rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
+    let ts = unix_now_secs();
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let path = log_dir.join(scan_log_filename(ts, pid, nanos));
+    let mut line = serde_json::to_string(record)?;
+    line.push('\n');
+    fs::write(&path, line)?;
+    Ok(path)
 }
 
 fn unix_now_secs() -> u64 {
@@ -310,7 +349,7 @@ mod tests {
         let count = fs::read_dir(&log_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| is_journal_log_file(&e.path()))
+            .filter(|e| is_activity_log_file(&e.path()))
             .count();
         assert!(count <= 30, "count={count}");
     }

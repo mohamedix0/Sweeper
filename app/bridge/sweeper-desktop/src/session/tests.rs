@@ -254,13 +254,14 @@ fn preview_and_clean_stale_directory_item_equal_root() {
             },
         )
         .unwrap();
+    let journal_dir = tempfile::tempdir().unwrap();
     let exec = store
         .execute_clean(
             &clock,
             super::clean::ExecuteCleanRequest {
                 preview_token: preview.preview_token,
                 current_settings_generation: 1,
-                journal_base_dir: None,
+                journal_base_dir: Some(journal_dir.path().to_path_buf()),
             },
             |_| {},
         )

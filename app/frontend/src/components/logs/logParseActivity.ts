@@ -1,68 +1,114 @@
 import type { ActivitySummary, AuditRow, Flags } from './logParseTypes';
-import { detectCleanScan, modeFor, outcomeBytes, parseLogObjects } from './logParseUtils';
+import { bytesToString, cleanOutcomeRecords, detectCleanScan, formatMaybeBytes, isScanSummaryRecord, modeFor, parseLogObjects } from './logParseUtils';
 import { parseAuditRows } from './logParseRows';
 
-function primaryMetric(flags: Flags, outcome: Record<string, unknown> | undefined): Pick<ActivitySummary, 'primaryLabel' | 'primaryValue'> {
-  if (flags.isClean) return { primaryLabel: 'Space Reclaimed', primaryValue: outcomeBytes(outcome, 'bytesFreed') };
-  if (flags.isScan) return { primaryLabel: 'Space Found', primaryValue: outcomeBytes(outcome, 'totalBytes') };
-  return { primaryLabel: 'Space Reclaimed', primaryValue: '—' };
+function pluralize(args: { n: number; one: string; many: string }): string {
+  let word = args.many;
+  if (args.n === 1) word = args.one;
+  return `${args.n} ${word}`;
+}
+function emptyActivity(): ActivitySummary {
+  return { primaryLabel: 'Space Reclaimed', primaryValue: '—', eligible: '—', skipped: '—', outcome: '—', mode: null };
 }
 function rowParentLabel(r: AuditRow): string { if (r.sublabel) return r.sublabel; if (r.category) return r.category; return ''; }
-function countCategories(skippedFileRows: AuditRow[]): number {
+function countSkippedCategories(skippedFileRows: AuditRow[]): number {
   const parents = skippedFileRows.map((r) => rowParentLabel(r).split('·')[0].trim()).filter(Boolean);
   const unique = new Set(parents).size;
   if (unique > 0) return unique;
   return skippedFileRows.length;
 }
-function cleanedCategoryCount(rows: AuditRow[]): number { return rows.filter((r) => r.kind === 'Category').filter((r) => r.outcomeTone === 'cleaned').length; }
-function eligibleCategoryCount(rows: AuditRow[]): number { return rows.filter((r) => r.kind === 'Category').filter((r) => r.outcomeTone === 'eligible').length; }
-function pickCount(flags: Flags, rows: AuditRow[]): number { if (flags.isClean) return cleanedCategoryCount(rows); return eligibleCategoryCount(rows); }
-function fallbackCategoryCount(outcome?: Record<string, unknown>, intent?: Record<string, unknown> | null): number {
-  if (outcome?.categoriesCount != null) return Number(outcome.categoriesCount);
-  if (intent?.categoriesCount != null) return Number(intent.categoriesCount);
-  return 0;
+
+function cleanActivity(objs: Record<string, unknown>[]): ActivitySummary {
+  const outcomes = cleanOutcomeRecords(objs);
+  let freed = 0n;
+  let deletedCount = 0;
+  let skippedCount = 0;
+  const cleanedCats = new Set<string>();
+  const skippedCats = new Set<string>();
+  for (const o of outcomes) {
+    const status = String(o.status ?? '').toLowerCase();
+    const target = String(o.target_id ?? '');
+    if (status === 'deleted') {
+      deletedCount += 1;
+      if (target) cleanedCats.add(target);
+      const b = bytesToString(o.bytes ?? 0) ?? '0';
+      try { freed += BigInt(b); } catch { /* ignore */ }
+    } else if (status === 'skipped' || status === 'aborted') {
+      skippedCount += 1;
+      if (target) skippedCats.add(target);
+    }
+  }
+  const rows = parseAuditRowsFromObjs(objs);
+  const skippedRows = rows.filter((r) => r.kind === 'File' && r.outcomeTone === 'skipped');
+  const skippedCatsCount = skippedCats.size || countSkippedCategories(skippedRows);
+  return {
+    primaryLabel: 'Space Reclaimed',
+    primaryValue: formatMaybeBytes(freed.toString()),
+    eligible: `${pluralize({ n: deletedCount, one: 'file', many: 'files' })} · ${pluralize({ n: cleanedCats.size, one: 'category', many: 'categories' })}`,
+    skipped: `${pluralize({ n: skippedCount, one: 'file', many: 'files' })} · ${pluralize({ n: skippedCatsCount, one: 'category', many: 'categories' })}`,
+    outcome: 'Completed',
+    mode: 'Permanent Delete',
+  };
 }
-function eligibleCategories(args: { flags: Flags; rows: AuditRow[]; outcome?: Record<string, unknown>; intent?: Record<string, unknown> | null }): number {
-  const count = pickCount(args.flags, args.rows);
-  if (count) return count;
-  return fallbackCategoryCount(args.outcome, args.intent);
+
+function parseAuditRowsFromObjs(objs: Record<string, unknown>[]): AuditRow[] {
+  const content = objs.map((o) => JSON.stringify(o)).join('\n');
+  return parseAuditRows(content);
 }
-function cleanedFileCount(rows: AuditRow[]): number { return rows.filter((r) => r.kind === 'File').filter((r) => r.outcomeTone === 'cleaned').length; }
-function eligibleFileRows(rows: AuditRow[]): number { return rows.filter((r) => r.kind === 'File').filter((r) => r.outcomeTone === 'eligible').length; }
-function skippedFileRowsCount(rows: AuditRow[]): number { return rows.filter((r) => r.kind === 'File').filter((r) => r.outcomeTone === 'skipped').length; }
-function outcomeItems(outcome?: Record<string, unknown>): number { if (outcome?.items == null) return 0; return Number(outcome.items); }
-function scanEligibleFiles(rows: AuditRow[], outcome?: Record<string, unknown>): number {
-  const eligible = eligibleFileRows(rows);
-  if (eligible) return eligible;
-  const value = outcomeItems(outcome) - skippedFileRowsCount(rows);
-  return Math.max(0, value);
+
+function scanActivity(objs: Record<string, unknown>[]): ActivitySummary {
+  const rev = [...objs].reverse();
+  const scan = rev.find(isScanSummaryRecord)
+    ?? rev.find((o) => String(o.record ?? '') === 'outcome')
+    ?? {};
+  const reclaim = scan.total_reclaimable_bytes ?? scan.eligible_bytes ?? scan.totalBytes ?? '0';
+  const filesRaw = scan.total_eligible_files ?? scan.eligible_count ?? '0';
+  const skippedRaw = scan.total_skipped_files ?? '0';
+  const catsRaw = scan.categories_count ?? scan.categoriesCount ?? (Array.isArray(scan.targets) ? scan.targets.length : 0);
+  const files = Number(bytesToString(filesRaw) ?? '0') || 0;
+  const skipped = Number(bytesToString(skippedRaw) ?? '0') || 0;
+  const cats = Number(bytesToString(catsRaw) ?? String(catsRaw ?? 0)) || 0;
+  return {
+    primaryLabel: 'Space Found',
+    primaryValue: formatMaybeBytes(reclaim),
+    eligible: `${pluralize({ n: files, one: 'file', many: 'files' })} · ${pluralize({ n: cats, one: 'category', many: 'categories' })}`,
+    skipped: `${pluralize({ n: skipped, one: 'file', many: 'files' })} · 0 categories`,
+    outcome: 'Completed',
+    mode: null,
+  };
 }
-function cleanEligibleFiles(rows: AuditRow[], outcome?: Record<string, unknown>): number {
-  if (outcome?.deletedCount != null) return Number(outcome.deletedCount);
-  return cleanedFileCount(rows);
+
+function legacyActivity(objs: Record<string, unknown>[], flags: Flags): ActivitySummary {
+  const outcome = [...objs].reverse().find((o) => String(o.record ?? '') === 'outcome') ?? undefined;
+  if (flags.isScan) {
+    return {
+      primaryLabel: 'Space Found',
+      primaryValue: formatMaybeBytes(outcome?.totalBytes),
+      eligible: '—',
+      skipped: '—',
+      outcome: 'Completed',
+      mode: null,
+    };
+  }
+  return {
+    primaryLabel: 'Space Reclaimed',
+    primaryValue: formatMaybeBytes(outcome?.bytesFreed),
+    eligible: '—',
+    skipped: '—',
+    outcome: 'Completed',
+    mode: flags.isClean ? 'Permanent Delete' : null,
+  };
 }
-function eligibleFiles(flags: Flags, rows: AuditRow[], outcome?: Record<string, unknown>): number {
-  if (flags.isClean) return cleanEligibleFiles(rows, outcome);
-  return scanEligibleFiles(rows, outcome);
-}
-function pluralize(args: { n: number; one: string; many: string }): string { let word = args.many; if (args.n === 1) word = args.one; return `${args.n} ${word}`; }
-function summaryCounts(args: { flags: Flags; rows: AuditRow[]; outcome?: Record<string, unknown>; intent?: Record<string, unknown> | null }) {
-  const files = eligibleFiles(args.flags, args.rows, args.outcome);
-  const cats = eligibleCategories(args);
-  const skippedRows = args.rows.filter((r) => r.kind === 'File').filter((r) => r.outcomeTone === 'skipped');
-  return { eligible: `${pluralize({ n: files, one: 'file', many: 'files' })} · ${pluralize({ n: cats, one: 'category', many: 'categories' })}`, skipped: `${pluralize({ n: skippedRows.length, one: 'file', many: 'files' })} · ${pluralize({ n: countCategories(skippedRows), one: 'category', many: 'categories' })}` };
-}
-function emptyActivity(): ActivitySummary { return { primaryLabel: 'Space Reclaimed', primaryValue: '—', eligible: '—', skipped: '—', outcome: '—', mode: null }; }
-function statusOutcomeText(status: unknown): string { if (status === 'completed') return 'Completed'; return String(status); }
+
 function buildActivity(content: string): ActivitySummary {
   const objs = parseLogObjects(content);
   const flags = detectCleanScan(objs);
-  const primary = primaryMetric(flags, flags.outcome ?? undefined);
-  const rows = parseAuditRows(content);
-  const counts = summaryCounts({ flags, rows, outcome: flags.outcome ?? undefined, intent: flags.intent });
-  let status: unknown = 'completed';
-  if (flags.outcome) status = flags.outcome.status ?? 'completed';
-  return { ...primary, ...counts, outcome: statusOutcomeText(status), mode: modeFor(flags) };
+  if (flags.isScan || objs.some(isScanSummaryRecord)) return scanActivity(objs);
+  if (flags.isClean) {
+    if (cleanOutcomeRecords(objs).length > 0) return cleanActivity(objs);
+    return legacyActivity(objs, flags);
+  }
+  return emptyActivity();
 }
 export function deriveActivitySummary(content: string | null): ActivitySummary {
   if (!content) return emptyActivity();

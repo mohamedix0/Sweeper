@@ -1,87 +1,121 @@
 import type { BaseSummary, LogMeta, LogSummary } from './logParseTypes';
-import { baseSummary } from './logParseUtils';
+import { baseSummary, bytesToString, cleanOutcomeRecords, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
 import { formatBytes } from '../../utils/format';
 
-function deletedText(outcome: Record<string, unknown>): string | null {
-  const deleted = outcome.deletedCount ?? outcome.deleted;
-  if (deleted == null) return null;
+function deletedText(count: number): string {
   let suffix = 's';
-  if (String(deleted) === '1') suffix = '';
-  return `${String(deleted)} item${suffix}`;
+  if (count === 1) suffix = '';
+  return `${count} item${suffix}`;
 }
-function freedText(outcome: Record<string, unknown>): string | null {
-  const value = outcome.bytesFreed;
-  if (typeof value === 'string') return formatBytes({ bytes: value });
-  if (typeof value === 'number') return formatBytes({ bytes: String(value) });
-  return null;
-}
-function cleanTitleWithFreed(args: { freed: string; deletedStr: string | null }): string {
-  if (args.deletedStr) return `Cleaned ${args.freed} \u00b7 ${args.deletedStr}`;
-  return `Cleaned ${args.freed}`;
-}
-function cleanTitle(outcome: Record<string, unknown>): string {
-  const deletedStr = deletedText(outcome);
-  const freed = freedText(outcome);
-  if (freed) return cleanTitleWithFreed({ freed, deletedStr });
-  if (deletedStr) return `Cleaned ${deletedStr}`;
+function formatBytesString(value: string): string { return formatBytes({ bytes: value }); }
+function cleanTitle(args: { freed: string | null; count: number }): string {
+  if (args.freed) {
+    if (args.count > 0) return `Cleaned ${args.freed} \u00b7 ${deletedText(args.count)}`;
+    return `Cleaned ${args.freed}`;
+  }
+  if (args.count > 0) return `Cleaned ${deletedText(args.count)}`;
   return 'Clean Operation';
 }
-function summarizeCleanOutcome(outcome: Record<string, unknown>, base: BaseSummary): LogSummary { return { title: cleanTitle(outcome), subtitle: 'Completed', ...base, kind: 'clean' }; }
-function scanDetail(raw: unknown): string {
-  if (raw == null) return '';
-  const count = Number(raw);
-  if (count <= 0) return '';
-  let word = 'categories';
-  if (count === 1) word = 'category';
-  return ` · ${count} ${word}`;
+function summarizeClean(objs: Record<string, unknown>[], base: BaseSummary): LogSummary {
+  const outcomes = cleanOutcomeRecords(objs);
+  let freedNum = 0n;
+  let deletedCount = 0;
+  for (const o of outcomes) {
+    const status = String(o.status ?? '').toLowerCase();
+    if (status !== 'deleted') continue;
+    deletedCount += 1;
+    const b = bytesToString(o.bytes ?? o.size ?? 0) ?? '0';
+    try { freedNum += BigInt(b); } catch { /* ignore */ }
+  }
+  const freed = deletedCount > 0 || freedNum > 0n ? formatBytesString(freedNum.toString()) : null;
+  return { title: cleanTitle({ freed, count: deletedCount }), subtitle: 'Completed', ...base, kind: 'clean' };
 }
-function scanTitle(outcome: Record<string, unknown>): string { return `System Scan${scanDetail(outcome.categoriesCount)}`; }
-function summarizeScanOutcome(outcome: Record<string, unknown>, base: BaseSummary): LogSummary { return { title: scanTitle(outcome), subtitle: 'Completed', ...base, kind: 'scan' }; }
-function isScanSummaryEventRecord(outcome: Record<string, unknown>): boolean { if (String(outcome.event) === 'scan') return true; return outcome.action === 'scan'; }
-function isCleanOutcome(outcome: Record<string, unknown>): boolean {
-  if (isScanSummaryEventRecord(outcome)) return false;
-  if (outcome.deletedCount != null) return true;
-  if (outcome.bytesFreed != null) return true;
-  if (String(outcome.record) !== 'outcome') return false;
-  if (outcome.event === 'clean') return true;
-  return outcome.action === 'clean';
+
+function scanReclaimable(o: Record<string, unknown>): string | null {
+  const v = o.total_reclaimable_bytes ?? o.eligible_bytes ?? o.totalBytes;
+  const s = bytesToString(v);
+  if (s == null) return null;
+  return formatBytesString(s);
 }
-function hasScanOutcomeData(outcome: Record<string, unknown>): boolean { if (outcome.categoriesCount != null) return true; return outcome.totalBytes != null; }
-function isScanOutcome(outcome: Record<string, unknown>): boolean {
-  if (String(outcome.event) === 'scan') return true;
-  if (outcome.action === 'scan') return true;
-  if (String(outcome.record) !== 'outcome') return false;
-  if (!hasScanOutcomeData(outcome)) return false;
-  return outcome.deletedCount == null;
+function scanFilesCount(o: Record<string, unknown>): number | null {
+  const v = o.total_eligible_files ?? o.eligible_count;
+  const s = bytesToString(v);
+  if (s == null) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  return n;
 }
-function isSummaryRecord(o: Record<string, unknown>): boolean {
-  if (o.record === 'outcome') return true;
-  if (o.event === 'clean') return true;
-  if (o.event === 'scan') return true;
-  if (o.action === 'scan') return true;
-  return o.action === 'clean';
+function scanFilesWord(files: number): string {
+  if (files === 1) return 'file';
+  return 'files';
 }
-function findSummaryOutcome(lines: Record<string, unknown>[]) { return [...lines].reverse().find((o) => isSummaryRecord(o)); }
-function summaryFromOutcome(outcome: Record<string, unknown> | undefined, base: BaseSummary): LogSummary | null {
-  if (!outcome) return null;
-  if (isCleanOutcome(outcome)) return summarizeCleanOutcome(outcome, base);
-  if (isScanOutcome(outcome)) return summarizeScanOutcome(outcome, base);
+
+function scanCategoryWord(n: number): string {
+  if (n === 1) return 'category';
+  return 'categories';
+}
+
+function positiveCategoryCount(o: Record<string, unknown>): number | null {
+  const cats = o.categories_count ?? o.categoriesCount;
+  if (cats == null) return null;
+  const n = Number(cats);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function scanTitleWithCounts(reclaim: string | null, files: number | null): string | null {
+  if (reclaim && files != null) {
+    return `Scan Completed \u00b7 ${reclaim} \u00b7 ${files} ${scanFilesWord(files)}`;
+  }
+  if (reclaim) return `Scan Completed \u00b7 ${reclaim}`;
   return null;
 }
-function parseLines(content: string): Record<string, unknown>[] { return content.split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>); }
-function summarizeFromContent(content: string | null, base: BaseSummary): LogSummary | null {
-  if (!content) return null;
-  try { return summaryFromOutcome(findSummaryOutcome(parseLines(content)), base); } catch { return null; }
+
+function scanTitle(o: Record<string, unknown>): string {
+  const files = scanFilesCount(o);
+  const reclaim = scanReclaimable(o);
+  const withCounts = scanTitleWithCounts(reclaim, files);
+  if (withCounts) return withCounts;
+  const n = positiveCategoryCount(o);
+  if (n != null) return `Scan Completed \u00b7 ${n} ${scanCategoryWord(n)}`;
+  return 'Scan Completed';
 }
+function summarizeScan(objs: Record<string, unknown>[], base: BaseSummary): LogSummary {
+  const scan = [...objs].reverse().find(isScanSummaryRecord) ?? objs[objs.length - 1] ?? {};
+  return { title: scanTitle(scan), subtitle: 'Completed', ...base, kind: 'scan' };
+}
+
+function isLegacyCleanSummary(o: Record<string, unknown>): boolean {
+  if (isScanSummaryRecord(o)) return false;
+  if (o.deletedCount != null) return true;
+  return o.bytesFreed != null;
+}
+function legacyCleanTitle(outcome: Record<string, unknown>): string {
+  const deleted = outcome.deletedCount ?? outcome.deleted;
+  const freed = bytesToString(outcome.bytesFreed);
+  const deletedCount = deleted == null ? 0 : Number(deleted);
+  const freedStr = freed ? formatBytesString(freed) : null;
+  return cleanTitle({ freed: freedStr, count: Number.isFinite(deletedCount) ? deletedCount : 0 });
+}
+
 function fallbackSummary(meta: LogMeta, base: BaseSummary): LogSummary {
   const lower = meta.name.toLowerCase();
+  if (lower.includes('scan')) return { title: 'Scan Completed', subtitle: 'Completed', ...base, kind: 'scan' };
   if (lower.includes('clean')) return { title: 'Clean Operation', subtitle: 'Completed', ...base, kind: 'clean' };
-  if (lower.includes('scan')) return { title: 'System Scan', subtitle: 'Completed', ...base, kind: 'scan' };
   return { title: meta.name.replace(/\.jsonl$/i, ''), subtitle: 'Completed', ...base, kind: 'all' };
 }
+
 export function summarizeLog(meta: LogMeta, content: string | null): LogSummary {
   const base = baseSummary(meta);
-  const summary = summarizeFromContent(content, base);
-  if (summary) return summary;
-  return fallbackSummary(meta, base);
+  if (!content) return fallbackSummary(meta, base);
+  try {
+    const objs = parseLogObjects(content);
+    if (objs.some(isScanSummaryRecord) || meta.name.toLowerCase().startsWith('scan-')) return summarizeScan(objs, base);
+    if (cleanOutcomeRecords(objs).length > 0) return summarizeClean(objs, base);
+    const legacy = [...objs].reverse().find(isLegacyCleanSummary);
+    if (legacy) return { title: legacyCleanTitle(legacy), subtitle: 'Completed', ...base, kind: 'clean' };
+    return fallbackSummary(meta, base);
+  } catch {
+    return fallbackSummary(meta, base);
+  }
 }

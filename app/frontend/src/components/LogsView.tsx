@@ -41,6 +41,8 @@ export function LogsView(props: LogsViewProps) {
           visibleRows={w.visibleAuditRows}
           outcomeFilter={w.outcomeFilter}
           expanded={w.expandedSkippedGroups}
+          hasLogs={w.logs.length > 0}
+          hasFilteredLogs={w.filteredLogs.length > 0}
           onMode={w.setMode}
           onCopy={() => void w.copyLog()}
           onExport={w.exportLog}

@@ -1,4 +1,5 @@
-﻿use std::fs;
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
@@ -74,11 +75,107 @@ fn default_logs_dir() -> Option<PathBuf> {
 
 /// `list_logs` implementation.
 pub fn list_logs<C: Clock>(_state: &AppState<C>) -> Result<Vec<LogMetadataDto>, ContractError> {
-    list_logs_in_dir(default_logs_dir().as_deref())
+    list_logs_in_dir_impl(default_logs_dir().as_deref(), true)
 }
 
-/// `list_logs` in a specific directory (testable).
-pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, ContractError> {
+#[derive(Default)]
+struct CleanLogScanState {
+    saw_outcome: bool,
+    saw_path: bool,
+    all_sandbox: bool,
+}
+
+fn json_record_kind(value: &serde_json::Value) -> Option<&str> {
+    if let Some(kind) = value.get("kind").and_then(|v| v.as_str()) {
+        return Some(kind);
+    }
+    let record = value.get("record").and_then(|v| v.as_str())?;
+    match record {
+        "outcome" => Some("outcome"),
+        "intent" => Some("intent"),
+        _ => None,
+    }
+}
+
+fn note_path_hint(state: &mut CleanLogScanState, path: &str) {
+    state.saw_path = true;
+    if !super::is_sandbox_path_hint(path) {
+        state.all_sandbox = false;
+    }
+}
+
+fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Value) {
+    if json_record_kind(value) == Some("outcome") {
+        state.saw_outcome = true;
+    }
+    if let Some(p) = value.get("path").and_then(|v| v.as_str()) {
+        note_path_hint(state, p);
+    }
+    if let Some(target) = value.get("target_path").and_then(|v| v.as_str()) {
+        note_path_hint(state, target);
+    }
+}
+
+fn inspect_clean_log_line(state: &mut CleanLogScanState, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return;
+    };
+    inspect_clean_log_value(state, &value);
+}
+
+fn accumulate_clean_log_state(reader: BufReader<fs::File>) -> CleanLogScanState {
+    let mut state = CleanLogScanState {
+        all_sandbox: true,
+        ..CleanLogScanState::default()
+    };
+    for line in reader.lines().map_while(Result::ok) {
+        inspect_clean_log_line(&mut state, &line);
+    }
+    state
+}
+
+fn clean_log_phantom_reasons(path: &Path) -> (bool, bool) {
+    let Ok(file) = fs::File::open(path) else {
+        return (true, false);
+    };
+    let state = accumulate_clean_log_state(BufReader::new(file));
+    let no_outcome = !state.saw_outcome;
+    let sandbox_only = state.saw_path && state.all_sandbox;
+    (no_outcome, sandbox_only)
+}
+
+fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool) -> bool {
+    if size == 0 {
+        return false;
+    }
+    let is_clean = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            s.to_ascii_lowercase().starts_with("clean-")
+                && s.to_ascii_lowercase().ends_with(".jsonl")
+        })
+        .unwrap_or(false);
+    if is_clean {
+        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(path);
+        if no_outcome {
+            return false;
+        }
+        if filter_sandbox_phantoms && sandbox_only {
+            return false;
+        }
+    }
+    true
+}
+
+fn list_logs_in_dir_impl(
+    dir: Option<&Path>,
+    filter_sandbox_phantoms: bool,
+) -> Result<Vec<LogMetadataDto>, ContractError> {
     let Some(dir) = dir else {
         return Ok(vec![]);
     };
@@ -109,6 +206,10 @@ pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, Contr
             .unwrap_or_default()
             .to_string();
         let meta = entry.metadata().ok();
+        let size_u64 = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        if !should_include_log_file(&path, size_u64, filter_sandbox_phantoms) {
+            continue;
+        }
         let (modified, size) = meta
             .map(|m| {
                 let modified = m
@@ -127,8 +228,17 @@ pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, Contr
             size_bytes: size,
         });
     }
-    out.sort_by(|a, b| b.id.cmp(&a.id));
+    out.sort_by(|a, b| {
+        let ta = a.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
+        let tb = b.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
+        tb.cmp(&ta).then_with(|| a.id.cmp(&b.id))
+    });
     Ok(out)
+}
+
+/// `list_logs` in a specific directory (testable, does not filter sandbox-only clean logs).
+pub fn list_logs_in_dir(dir: Option<&Path>) -> Result<Vec<LogMetadataDto>, ContractError> {
+    list_logs_in_dir_impl(dir, false)
 }
 
 /// `read_log` implementation.
@@ -181,4 +291,23 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
     Err(ContractError::NotFound {
         reason: "log not found".into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_log_phantom_reasons;
+
+    #[test]
+    fn real_path_with_sweeper_test_substring_is_not_sandbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("clean-test.jsonl");
+        let content = concat!(
+            "{\"kind\":\"intent\",\"path\":\"C:\\\\Users\\\\Public\\\\Documents\\\\sweeper-test-results\\\\report.json\"}\n",
+            "{\"kind\":\"outcome\",\"status\":\"deleted\",\"path\":\"C:\\\\Users\\\\Public\\\\Documents\\\\sweeper-test-results\\\\report.json\"}\n"
+        );
+        std::fs::write(&path, content).expect("write log");
+        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(&path);
+        assert!(!no_outcome);
+        assert!(!sandbox_only);
+    }
 }
