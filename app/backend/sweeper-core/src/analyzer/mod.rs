@@ -28,6 +28,12 @@ pub struct AnalyzerOptions {
     pub progress_interval: Duration,
     /// If `true`, allow `Unknown` items to be selectable in the conversion seam (Phase 5 policy seam; default false).
     pub allow_unknown: bool,
+    /// Maximum file entries retained per directory for tree display (totals remain exact). `0` uses default.
+    pub max_files_per_dir: usize,
+    /// Maximum child nodes emitted per directory in the returned tree (totals remain exact). `0` uses default.
+    pub max_children_per_dir: usize,
+    /// Maximum directory depth emitted in the returned tree. `0` uses default.
+    pub max_tree_depth: usize,
 }
 
 impl Default for AnalyzerOptions {
@@ -36,6 +42,9 @@ impl Default for AnalyzerOptions {
             worker_threads: 0,
             progress_interval: Duration::from_millis(100),
             allow_unknown: false,
+            max_files_per_dir: 64,
+            max_children_per_dir: 50,
+            max_tree_depth: 4096,
         }
     }
 }
@@ -198,7 +207,15 @@ pub fn analyze_validated_root(
     };
 
     let workers = walker::effective_worker_count(options.worker_threads);
-    let state = Arc::new(walker::WalkState::new(root.as_str().to_string()));
+    let max_files_per_dir = if options.max_files_per_dir == 0 {
+        64
+    } else {
+        options.max_files_per_dir
+    };
+    let state = Arc::new(walker::WalkState::new(
+        root.as_str().to_string(),
+        max_files_per_dir,
+    ));
     state.enqueue_initial(root.as_str().to_string());
 
     let progress_state = Arc::new(walker::ProgressState::new(
@@ -230,8 +247,27 @@ pub fn analyze_validated_root(
     let final_progress = progress_state.snapshot(&state);
     let records = state.into_records();
     let root_key = annotate::canonical_key(root.as_str());
-    let tree = annotate::build_tree(&records, &root_key, &ctx, &settings)
-        .ok_or_else(|| AnalyzerError::Walk("failed to build analyzer tree".to_string()))?;
+    let max_children_per_dir = if options.max_children_per_dir == 0 {
+        50
+    } else {
+        options.max_children_per_dir
+    };
+    let max_tree_depth = if options.max_tree_depth == 0 {
+        4096
+    } else {
+        options.max_tree_depth
+    };
+    let tree = annotate::build_tree(
+        &records,
+        &root_key,
+        &ctx,
+        &settings,
+        annotate::TreeBuildLimits {
+            max_children_per_dir,
+            max_tree_depth,
+        },
+    )
+    .ok_or_else(|| AnalyzerError::Walk("failed to build analyzer tree".to_string()))?;
 
     Ok(AnalyzerResult {
         root: tree,

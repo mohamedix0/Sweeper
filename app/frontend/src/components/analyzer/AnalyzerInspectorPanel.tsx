@@ -40,7 +40,8 @@ function nodeSubtitle(node: AnalyzerNodeDto): string {
   const tag = nodeTypeTag({ node });
   if (tag) return tag;
   if (isDriveRoot({ node })) return 'Drive';
-  return 'Folder';
+  if (node.isDir) return 'Folder';
+  return 'File';
 }
 
 function badgeFor(pill: ReturnType<typeof analyzerStatusPill>, node: AnalyzerNodeDto) {

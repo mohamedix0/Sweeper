@@ -102,5 +102,8 @@ export function buildScanAnalyzerApi(ctx: MockCtx) {
       ctx.analyzerSessions.set(sessionId, { id: sessionId, createdAtMs: ctx.state.nowMs, rootPath, result, nodesById, settingsGeneration: ctx.state.settingsGeneration });
       return result;
     },
+    async cancelAnalyzer(_sessionId: string) {
+      return;
+    },
   };
 }

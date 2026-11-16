@@ -19,9 +19,9 @@ function maybeAllocBar(input: { showAlloc: boolean; w: ReturnType<typeof useAnal
   return <AllocBar segments={input.vm.allocSegments} result={input.w.result} displayPath={input.vm.displayPath} analyzing={input.w.analyzing} cleaning={input.w.cleaning} onRun={(args) => void input.w.runAnalyzer({ path: args.path })} onFocus={(args) => input.w.focusNode(args)} />;
 }
 
-function maybeProgress(input: { analyzing: boolean; scannedDirs?: string; scannedFiles?: string; scannedBytes?: string; currentPath?: string | null }) {
+function maybeProgress(input: { analyzing: boolean; scannedDirs?: string; scannedFiles?: string; scannedBytes?: string; currentPath?: string | null; onStop: () => void }) {
   if (!input.analyzing) return null;
-  return <AnalyzerProgressNotice scannedDirs={input.scannedDirs} scannedFiles={input.scannedFiles} scannedBytes={input.scannedBytes} currentPath={input.currentPath} />;
+  return <AnalyzerProgressNotice scannedDirs={input.scannedDirs} scannedFiles={input.scannedFiles} scannedBytes={input.scannedBytes} currentPath={input.currentPath} onStop={input.onStop} />;
 }
 
 function maybeResults(input: { hasResult: boolean; props: ReturnType<typeof buildAnalyzerResultsProps> }) {
@@ -51,12 +51,12 @@ export function AnalyzerView(props: ViewProps) {
   const showAlloc = showAllocOf({ hasResult: Boolean(w.result), segmentCount: vm.allocSegments.length });
   return (
     <div className="view-stack view-stack-fill">
-      <AnalyzerHeader hasResult={vm.hasResult} displayPath={vm.displayPath} totalBytes={w.result?.totalBytes} entryCount={entryCount} totalItems={w.result?.totalItems} analyzing={w.analyzing} cleaning={w.cleaning} canAnalyze={canAnalyze} onRun={() => void w.runAnalyzer()} />
+      <AnalyzerHeader hasResult={vm.hasResult} displayPath={vm.displayPath} totalBytes={w.result?.totalBytes} entryCount={entryCount} totalItems={w.result?.totalItems} analyzing={w.analyzing} cleaning={w.cleaning} canAnalyze={canAnalyze} onRun={() => void w.runAnalyzer()} onStop={() => void w.stopAnalyzer()} />
       {maybeNotice({ text: w.error, kind: 'error' })}
       {maybeNotice({ text: w.info, kind: 'info' })}
       <AnalyzerLocationBar rootPath={w.rootPath} hasResult={vm.hasResult} analyzing={w.analyzing} cleaning={w.cleaning} onRootPath={w.setRootPath} onRun={(path) => void w.runAnalyzer({ path })} onCycleBrowse={w.cycleBrowsePath} />
       {maybeAllocBar({ showAlloc, w, vm })}
-      {maybeProgress({ analyzing: w.analyzing, scannedDirs: w.progress?.scannedDirs, scannedFiles: w.progress?.scannedFiles, scannedBytes: w.progress?.scannedBytes, currentPath: vm.progressPath })}
+      {maybeProgress({ analyzing: w.analyzing, scannedDirs: w.progress?.scannedDirs, scannedFiles: w.progress?.scannedFiles, scannedBytes: w.progress?.scannedBytes, currentPath: vm.progressPath, onStop: () => void w.stopAnalyzer() })}
       {maybeResults({ hasResult: Boolean(w.result), props: resultsProps })}
     </div>
   );

@@ -13,6 +13,7 @@ type HeaderProps = {
   cleaning: boolean;
   canAnalyze: boolean;
   onRun: () => void;
+  onStop: () => void;
 };
 
 function headerSubtitle(props: HeaderProps): string {
@@ -46,6 +47,21 @@ function headerDisabled(props: HeaderProps): boolean {
 }
 
 export function AnalyzerHeader(props: HeaderProps) {
+  if (props.analyzing) {
+    return (
+      <header className="page-header" aria-label="Analyzer header">
+        <div className="page-header-left analyzer-header-left">
+          <div className="page-title-row">
+            <h1 className="page-title" id="analyzer-heading">Analyzer</h1>
+            <span className="header-subtitle num" aria-label="Analyzer subtitle">Analyzing {props.displayPath}…</span>
+          </div>
+        </div>
+        <div className="page-header-right">
+          <button type="button" className="btn danger" onClick={props.onStop} aria-label="Stop analysis">Stop</button>
+        </div>
+      </header>
+    );
+  }
   const disabled = headerDisabled(props);
   return (
     <header className="page-header" aria-label="Analyzer header">
@@ -129,7 +145,7 @@ export function AnalyzerLocationBar(props: LocationProps) {
   );
 }
 
-type ProgressProps = { scannedDirs?: string; scannedFiles?: string; scannedBytes?: string; currentPath?: string | null };
+type ProgressProps = { scannedDirs?: string; scannedFiles?: string; scannedBytes?: string; currentPath?: string | null; onStop: () => void };
 
 function progressStats(props: ProgressProps): string {
   if (props.scannedDirs == null) return 'Starting…';
@@ -139,7 +155,11 @@ function progressStats(props: ProgressProps): string {
 export function AnalyzerProgressNotice(props: ProgressProps) {
   return (
     <div role="status" aria-live="polite" className="notice info scanning-pulse analyzer-progress-notice">
-      <div className="analyzer-progress-row"><span className="analyzer-progress-label">Analyzing…</span><span className="analyzer-progress-stats num">{progressStats(props)}</span></div>
+      <div className="analyzer-progress-row">
+        <span className="analyzer-progress-label">Analyzing…</span>
+        <span className="analyzer-progress-stats num">{progressStats(props)}</span>
+        <button type="button" className="btn small danger analyzer-stop-btn" onClick={props.onStop} aria-label="Stop analysis">Stop</button>
+      </div>
       {props.currentPath && <div className="analyzer-progress-path-row"><span className="analyzer-progress-path-prefix muted">Current:</span><span className="analyzer-progress-path mono" title={props.currentPath}>{props.currentPath}</span></div>}
       <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
     </div>

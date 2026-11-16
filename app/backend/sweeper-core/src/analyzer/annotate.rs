@@ -53,11 +53,18 @@ pub(super) struct Annotation {
     selection_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TreeBuildLimits {
+    pub(super) max_children_per_dir: usize,
+    pub(super) max_tree_depth: usize,
+}
+
 pub(super) fn build_tree(
     records: &HashMap<String, DirRecord>,
     root_key: &str,
     ctx: &AnnotationContext,
     settings: &EligibilitySettings,
+    limits: TreeBuildLimits,
 ) -> Option<AnalyzerNode> {
     if !records.contains_key(root_key) {
         return None;
@@ -73,13 +80,8 @@ pub(super) fn build_tree(
             let mut size: u64 = 0;
             let mut count: u64 = 0;
             if let Some(rec) = records.get(&key) {
-                for f in &rec.files {
-                    if f.name.is_empty() {
-                        continue;
-                    }
-                    size = size.saturating_add(f.size);
-                    count = count.saturating_add(1);
-                }
+                size = size.saturating_add(rec.own_bytes);
+                count = count.saturating_add(rec.own_file_count);
                 let mut seen_child = HashSet::new();
                 for child_path in &rec.children_dirs {
                     let ck = canonical_key(child_path);
@@ -121,10 +123,12 @@ pub(super) fn build_tree(
 
     // Iterative post-order tree construction so children nodes exist before parents.
     let mut built: HashMap<String, AnalyzerNode> = HashMap::new();
-    let mut stack2: Vec<(String, bool)> = vec![(root_key.to_string(), false)];
+    let mut stack2: Vec<(String, bool, usize)> = vec![(root_key.to_string(), false, 0)];
     let mut visited_build: HashSet<String> = HashSet::new();
+    let max_children = limits.max_children_per_dir.max(1);
+    let max_depth = limits.max_tree_depth;
 
-    while let Some((key, expanded)) = stack2.pop() {
+    while let Some((key, expanded, depth)) = stack2.pop() {
         if expanded {
             let Some(rec) = records.get(&key) else {
                 continue;
@@ -133,55 +137,60 @@ pub(super) fn build_tree(
             let ann = annotate_path(&rec.path, true, None, ctx, settings, Some(rec));
 
             let mut children: Vec<AnalyzerNode> = Vec::new();
-            let mut seen_child = HashSet::new();
-            for child_path in &rec.children_dirs {
-                let ck = canonical_key(child_path);
-                if !seen_child.insert(ck.clone()) {
-                    continue;
+            if depth < max_depth {
+                let mut seen_child = HashSet::new();
+                for child_path in &rec.children_dirs {
+                    let ck = canonical_key(child_path);
+                    if !seen_child.insert(ck.clone()) {
+                        continue;
+                    }
+                    if let Some(child_node) = built.remove(&ck) {
+                        children.push(child_node);
+                    }
                 }
-                if let Some(child_node) = built.remove(&ck) {
-                    children.push(child_node);
+                for f in &rec.files {
+                    if f.name.is_empty() {
+                        continue;
+                    }
+                    let file_ann = annotate_path(&f.path, false, Some(f), ctx, settings, None);
+                    children.push(AnalyzerNode {
+                        id: stable_node_id(&f.path),
+                        path: f.path.clone(),
+                        name: f.name.clone(),
+                        is_dir: false,
+                        size_bytes: f.size,
+                        item_count: 1,
+                        risk: file_ann.risk,
+                        description: file_ann.description,
+                        tier: file_ann.tier,
+                        target_id: file_ann.target_id,
+                        is_link_point: file_ann.is_link_point,
+                        is_cloud_placeholder: file_ann.is_cloud_placeholder,
+                        display_only: file_ann.display_only,
+                        selectable: file_ann.selectable,
+                        selection_reason: file_ann.selection_reason,
+                        children: Vec::new(),
+                    });
                 }
-            }
-            for f in &rec.files {
-                if f.name.is_empty() {
-                    continue;
-                }
-                let file_ann = annotate_path(&f.path, false, Some(f), ctx, settings, None);
-                children.push(AnalyzerNode {
-                    id: stable_node_id(&f.path),
-                    path: f.path.clone(),
-                    name: f.name.clone(),
-                    is_dir: false,
-                    size_bytes: f.size,
-                    item_count: 1,
-                    risk: file_ann.risk,
-                    description: file_ann.description,
-                    tier: file_ann.tier,
-                    target_id: file_ann.target_id,
-                    is_link_point: file_ann.is_link_point,
-                    is_cloud_placeholder: file_ann.is_cloud_placeholder,
-                    display_only: file_ann.display_only,
-                    selectable: file_ann.selectable,
-                    selection_reason: file_ann.selection_reason,
-                    children: Vec::new(),
-                });
-            }
 
-            children.sort_by(|a, b| {
-                b.size_bytes
-                    .cmp(&a.size_bytes)
-                    .then_with(|| {
-                        a.name
-                            .to_ascii_lowercase()
-                            .cmp(&b.name.to_ascii_lowercase())
-                    })
-                    .then_with(|| {
-                        a.path
-                            .to_ascii_lowercase()
-                            .cmp(&b.path.to_ascii_lowercase())
-                    })
-            });
+                children.sort_by(|a, b| {
+                    b.size_bytes
+                        .cmp(&a.size_bytes)
+                        .then_with(|| {
+                            a.name
+                                .to_ascii_lowercase()
+                                .cmp(&b.name.to_ascii_lowercase())
+                        })
+                        .then_with(|| {
+                            a.path
+                                .to_ascii_lowercase()
+                                .cmp(&b.path.to_ascii_lowercase())
+                        })
+                });
+                if children.len() > max_children {
+                    children.truncate(max_children);
+                }
+            }
 
             let node = AnalyzerNode {
                 id: stable_node_id(&rec.path),
@@ -215,16 +224,18 @@ pub(super) fn build_tree(
         if !visited_build.insert(key.clone()) {
             continue;
         }
-        stack2.push((key.clone(), true));
-        if let Some(rec) = records.get(&key) {
-            let mut seen_child = HashSet::new();
-            for child_path in &rec.children_dirs {
-                let ck = canonical_key(child_path);
-                if !seen_child.insert(ck.clone()) {
-                    continue;
-                }
-                if records.contains_key(&ck) && !built.contains_key(&ck) {
-                    stack2.push((ck, false));
+        stack2.push((key.clone(), true, depth));
+        if depth < max_depth {
+            if let Some(rec) = records.get(&key) {
+                let mut seen_child = HashSet::new();
+                for child_path in &rec.children_dirs {
+                    let ck = canonical_key(child_path);
+                    if !seen_child.insert(ck.clone()) {
+                        continue;
+                    }
+                    if records.contains_key(&ck) && !built.contains_key(&ck) {
+                        stack2.push((ck, false, depth + 1));
+                    }
                 }
             }
         }

@@ -9,6 +9,7 @@ export function useAnalyzerSession(args: { client: SweeperClient }) {
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState<AnalyzerProgressEvent | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [runningSessionId, setRunningSessionId] = useState<string | null>(null);
   const [, setStartedAt] = useState<number | null>(null);
   const [result, setResult] = useState<StartAnalyzerResult | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -36,7 +37,7 @@ export function useAnalyzerSession(args: { client: SweeperClient }) {
   }
 
   return {
-    rootPath, setRootPath, analyzedPath, setAnalyzedPath, analyzing, setAnalyzing, progress, setProgress, sessionId, setSessionId, setStartedAt,
+    rootPath, setRootPath, analyzedPath, setAnalyzedPath, analyzing, setAnalyzing, progress, setProgress, sessionId, setSessionId, runningSessionId, setRunningSessionId, setStartedAt,
     result, setResult, expanded, setExpanded, selectedIds, setSelectedIds, inspected, setInspected,
     showAllAnalyzerNodes, setShowAllAnalyzerNodes, inspectReqIdRef, inspectNode, resetInspection,
   };

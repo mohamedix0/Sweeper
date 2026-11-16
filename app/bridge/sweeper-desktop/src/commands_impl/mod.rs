@@ -9,7 +9,7 @@ mod shared;
 #[cfg(test)]
 mod tests;
 
-pub use analyzer::start_analyzer;
+pub use analyzer::{cancel_analyzer, start_analyzer};
 pub use clean::{execute_clean, execute_clean_default};
 pub use elevation::{get_elevation_status, relaunch_elevated};
 pub use scan::{explain_item, get_scan_results, preview_clean, start_scan};

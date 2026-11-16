@@ -23,7 +23,12 @@ pub(super) struct DirRecord {
     pub(super) name: String,
     pub(super) parent: Option<String>,
     pub(super) children_dirs: Vec<String>,
+    /// Retained file entries for tree display (capped to top-N largest per directory).
     pub(super) files: Vec<FileInfo>,
+    /// Exact count of all direct file entries observed in this directory (including retained and omitted).
+    pub(super) own_file_count: u64,
+    /// Exact logical bytes of all direct file entries observed in this directory.
+    pub(super) own_bytes: u64,
     pub(super) scanned: bool,
 }
 
@@ -35,6 +40,8 @@ impl DirRecord {
             parent,
             children_dirs: Vec::new(),
             files: Vec::new(),
+            own_file_count: 0,
+            own_bytes: 0,
             scanned: false,
         }
     }
@@ -59,6 +66,7 @@ pub(super) struct WalkState {
     scanned_files: AtomicU64,
     scanned_bytes: AtomicU64,
     current_path: Mutex<Option<String>>,
+    max_files_per_dir: usize,
 }
 
 #[derive(Debug, Default)]
@@ -88,7 +96,7 @@ struct ScanDirOutput {
 }
 
 impl WalkState {
-    pub(super) fn new(root_path: String) -> Self {
+    pub(super) fn new(root_path: String, max_files_per_dir: usize) -> Self {
         let mut records = HashMap::new();
         let root_key = annotate::canonical_key(&root_path);
         let root_name = annotate::display_name(&root_path);
@@ -102,6 +110,7 @@ impl WalkState {
             scanned_files: AtomicU64::new(0),
             scanned_bytes: AtomicU64::new(0),
             current_path: Mutex::new(None),
+            max_files_per_dir: max_files_per_dir.max(1),
         }
     }
     pub(super) fn enqueue_initial(&self, dir_path: String) {
@@ -180,6 +189,8 @@ impl WalkState {
                     match child.kind {
                         ChildDirKind::Traverse => traverse_children.push(child.path),
                         ChildDirKind::Special(marker) => {
+                            r.own_file_count = 0;
+                            r.own_bytes = 0;
                             r.files = vec![marker];
                             r.children_dirs.clear();
                             r.scanned = true;
@@ -190,6 +201,8 @@ impl WalkState {
             if let Some(rec) = records.get_mut(&dir_key) {
                 rec.children_dirs.extend(new_children);
                 rec.files = files;
+                rec.own_file_count = file_count;
+                rec.own_bytes = byte_count;
                 rec.scanned = true;
                 if rec.name.is_empty() {
                     rec.name = annotate::display_name(dir_path);
@@ -232,6 +245,8 @@ impl Clone for DirRecord {
             parent: self.parent.clone(),
             children_dirs: self.children_dirs.clone(),
             files: self.files.clone(),
+            own_file_count: self.own_file_count,
+            own_bytes: self.own_bytes,
             scanned: self.scanned,
         }
     }
@@ -293,7 +308,7 @@ pub(super) fn worker_loop(
         let Some(dir_path) = state.wait_for_work(&cancel) else {
             return;
         };
-        match scan_directory(&dir_path, &cancel) {
+        match scan_directory(&dir_path, &cancel, state.max_files_per_dir) {
             Ok(out) => {
                 state.commit_directory_scan(
                     &dir_path,
@@ -317,7 +332,25 @@ pub(super) fn worker_loop(
     }
 }
 
-fn scan_directory(dir_path: &str, cancel: &AtomicBool) -> Result<ScanDirOutput, String> {
+fn retain_top_files(files: &mut Vec<FileInfo>, max_files: usize) {
+    if files.len() <= max_files {
+        return;
+    }
+    files.sort_by(|a, b| {
+        b.size.cmp(&a.size).then_with(|| {
+            a.path
+                .to_ascii_lowercase()
+                .cmp(&b.path.to_ascii_lowercase())
+        })
+    });
+    files.truncate(max_files);
+}
+
+fn scan_directory(
+    dir_path: &str,
+    cancel: &AtomicBool,
+    max_files_per_dir: usize,
+) -> Result<ScanDirOutput, String> {
     if cancel.load(AtomicOrdering::Relaxed) {
         return Ok(ScanDirOutput {
             files: Vec::new(),
@@ -448,6 +481,7 @@ fn scan_directory(dir_path: &str, cancel: &AtomicBool) -> Result<ScanDirOutput, 
             byte_count = byte_count.saturating_add(ent.size);
         }
     }
+    retain_top_files(&mut files, max_files_per_dir);
     Ok(ScanDirOutput {
         files,
         child_dirs,

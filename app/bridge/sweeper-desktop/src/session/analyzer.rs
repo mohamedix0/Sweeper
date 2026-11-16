@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use sweeper_contract::{AnalyzerProgressEvent, ContractError, StartAnalyzerResponse, U64String};
@@ -28,6 +28,7 @@ impl SessionStore {
         settings_generation: u64,
     ) -> Result<PreparedAnalyzer, ContractError> {
         self.cleanup(clock);
+        self.cancel_all_active_analyzers();
         let now = clock.now_unix_secs();
         let session_id = self.next_id("analyzer", now);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -38,6 +39,22 @@ impl SessionStore {
             settings_generation,
             cancel,
         })
+    }
+
+    /// Request cancellation for an active analyzer session.
+    pub fn cancel_analyzer(&mut self, session_id: &str) -> bool {
+        if let Some(flag) = self.active_analyzers.get(session_id) {
+            flag.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    /// Cancel all active analyzer runs (used when starting a new run).
+    pub fn cancel_all_active_analyzers(&mut self) {
+        for flag in self.active_analyzers.values() {
+            flag.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Commit a completed analyzer session (short lock).

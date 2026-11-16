@@ -107,6 +107,7 @@ export interface SweeperClient {
   ): Promise<PreviewCleanResult>;
   executeClean(previewToken: string, onProgress?: (e: CleanProgressEvent) => void): Promise<ExecuteCleanResponse>;
   startAnalyzer(root: string | null, onProgress?: (e: AnalyzerProgressEvent) => void): Promise<StartAnalyzerResult>;
+  cancelAnalyzer(sessionId: string): Promise<void>;
   explainItem(itemId: string): Promise<{ itemId: string; title: string; description: string; risk: RiskDto }>;
   getSettings(): Promise<Settings>;
   updateSettings(settings: Settings): Promise<Settings>;
@@ -168,6 +169,7 @@ export function createTauriClient(): SweeperClient {
     previewClean: async (sessionId, itemIds, confirmations) => unwrap(await commands.previewClean(sessionId, itemIds, confirmations)),
     executeClean: (previewToken, onProgress) => withCleanProgress(previewToken, onProgress, () => commands.executeClean(previewToken)),
     startAnalyzer: (root, onProgress) => withAnalyzerProgress(onProgress, () => commands.startAnalyzer(root)),
+    cancelAnalyzer: async (sessionId) => { unwrap(await commands.cancelAnalyzer(sessionId)); },
     explainItem: async (itemId) => unwrap(await commands.explainItem(itemId)),
     getSettings: async () => normalizeSettings(unwrap(await commands.getSettings()) as Settings & { enableElevationTargets?: boolean }),
     updateSettings: async (settings) => normalizeSettings(unwrap(await commands.updateSettings(settings)) as Settings & { enableElevationTargets?: boolean }),
