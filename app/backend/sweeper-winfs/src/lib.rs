@@ -5,9 +5,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod drives;
 pub mod elevation;
 pub mod elevation_relaunch;
 
+pub use drives::fixed_drive_letters;
 pub use elevation::is_process_elevated;
 pub use elevation_relaunch::{
     acquire_single_instance, relaunch_current_exe_elevated, RelaunchOutcome, SingleInstanceGuard,

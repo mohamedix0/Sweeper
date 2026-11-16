@@ -41,6 +41,21 @@ fn is_ignored_child_name(name: &str) -> bool {
     )
 }
 
+/// Well-known development-root folder names that can live at a fixed drive's root,
+/// outside any user profile container. Only these exact names are considered; system and
+/// protected names (for example `Windows`, `Program Files`, `Users`) are deliberately excluded.
+const DEV_ROOT_CANDIDATE_NAMES: [&str; 8] = [
+    "dev", "projects", "repos", "work", "hermes", "source", "src", "code",
+];
+
+fn dev_root_candidate_paths(drive: char) -> Vec<PathBuf> {
+    let base = PathBuf::from(format!("{drive}:\\"));
+    DEV_ROOT_CANDIDATE_NAMES
+        .iter()
+        .map(|name| base.join(name))
+        .collect()
+}
+
 fn is_policy_protected_path(path: &Path) -> bool {
     let s = path.to_string_lossy();
     let Ok(cp) = CanonicalPath::parse_lexical(&s) else {
@@ -116,12 +131,29 @@ pub(super) fn default_tier3_project_search_roots() -> Vec<String> {
     if let Some(canon) = user_profile_search_root() {
         append_profile_children(Path::new(canon.as_str()), &mut out);
     }
-    for letter in ['C', 'D', 'E', 'F', 'G'] {
-        let base = format!("{letter}:\\Users");
-        let base = Path::new(&base);
-        // Never enumerate a reparse-point container: `is_dir()` would follow it.
-        if is_plain_directory_at(base) {
-            append_user_profile_roots(base, &mut out);
+    // Enumerate every local fixed drive instead of assuming C-G. The winfs primitive is a
+    // read-only query (no handles, no reparse traversal); all path-level safety stays here.
+    for drive in sweeper_winfs::fixed_drive_letters() {
+        let drive_root = PathBuf::from(format!("{drive}:\\"));
+
+        // Profile discovery on this drive. A `Users` container that is a Link Point is
+        // rejected before enumeration because `is_dir()` would follow it.
+        let users = drive_root.join("Users");
+        if is_plain_directory_at(&users) {
+            append_user_profile_roots(&users, &mut out);
+        }
+
+        // Development-root discovery outside profile containers. A candidate must be a plain
+        // directory (the gate rejects files, symlinks and reparse points), must resolve through
+        // a handle that rejects Link Points, and must survive the shared Protected Path /
+        // container-root policy gate in `push_unique_search_root`.
+        for candidate in dev_root_candidate_paths(drive) {
+            if !is_plain_directory_at(&candidate) {
+                continue;
+            }
+            if let Ok(canon) = CanonicalPath::from_existing_path(&candidate.to_string_lossy()) {
+                push_unique_search_root(&mut out, &canon.into_canonical());
+            }
         }
     }
     out
@@ -346,5 +378,54 @@ mod tests {
             );
         }
         assert!(!is_ignored_profile_name("Example"));
+    }
+
+    #[test]
+    fn dev_root_candidates_cover_common_dev_dirs_and_exclude_system_names() {
+        let paths = dev_root_candidate_paths('C');
+        let names: Vec<String> = paths
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("dev")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("Projects")));
+
+        // System / protected container names must never be dev-root candidates.
+        for name in [
+            "Windows",
+            "Program Files",
+            "Users",
+            ".git",
+            "System Volume Information",
+        ] {
+            assert!(
+                !DEV_ROOT_CANDIDATE_NAMES
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name)),
+                "{name} must never be a dev-root candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_root_policy_gate_rejects_protected_paths() {
+        let protected = CanonicalPath::parse_lexical(r"C:\Users\Test\Documents").unwrap();
+        assert!(is_disallowed_stale_search_root(&protected));
+        let dev = CanonicalPath::parse_lexical(r"C:\Dev").unwrap();
+        assert!(!is_disallowed_stale_search_root(&dev));
+    }
+
+    #[test]
+    fn dev_root_plain_directory_gate_rejects_non_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = tmp.path().join("Dev");
+        std::fs::create_dir_all(&dev).unwrap();
+        // A file using a dev-root candidate name must not be treated as a search root. The
+        // same reparse-attribute check rejects Link Points (junctions / symlinks).
+        let file = tmp.path().join("Projects");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(is_plain_directory_at(&dev));
+        assert!(!is_plain_directory_at(&file));
+        assert!(!is_plain_directory_at(&tmp.path().join("missing")));
     }
 }
