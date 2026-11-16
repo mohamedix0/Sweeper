@@ -1,4 +1,7 @@
-#!/usr/bin/env pwsh
+param(
+  [switch]$SelfTest
+)
+
 # Static Gate A checks (CI-enforced).
 # - Bans std::fs::remove_* and raw deletion primitives in production code outside allowed modules.
 # - Bans sweeper-winfs dependency from sweeper-desktop.
@@ -189,13 +192,36 @@ function Get-ForbidUnsafeTargets([string]$root) {
   return @($targets)
 }
 
+function Remove-RustBlockComments([string]$text) {
+  return [regex]::Replace($text, '(?s)/\*.*?\*/', { param($m) $m.Value -replace '[^\r\n]', ' ' })
+}
+
+function Remove-RustDoubleQuotedStrings([string]$text) {
+  return [regex]::Replace($text, '"(?:\\.|[^"\\])*"', { param($m) $m.Value -replace '[^\r\n]', ' ' })
+}
+
+function Remove-RustLineComments([string]$text) {
+  return [regex]::Replace($text, '(?m)//[^\r\n]*', { param($m) ' ' * $m.Value.Length })
+}
+
+function Get-RustScanText([string]$text) {
+  $t = Remove-RustBlockComments $text
+  $t = Remove-RustDoubleQuotedStrings $t
+  return (Remove-RustLineComments $t)
+}
+
+function Test-HasActiveForbidUnsafe([string]$text) {
+  $scan = Get-RustScanText $text
+  return ($scan -match '(?m)^\s*#!\[forbid\(unsafe_code\)\]')
+}
+
 function Assert-FileHasForbidUnsafe([string]$fp) {
   $txt = Get-Content -LiteralPath $fp -Raw -ErrorAction SilentlyContinue
   if ($null -eq $txt) {
     Fail "Missing #![forbid(unsafe_code)] in $fp"
     return
   }
-  if ($txt -match '#!\s*\[forbid\(unsafe_code\)\]') { return }
+  if (Test-HasActiveForbidUnsafe $txt) { return }
   Fail "Missing #![forbid(unsafe_code)] in $fp"
 }
 
@@ -204,11 +230,29 @@ function Test-ForbidUnsafeCode([string]$root) {
   foreach ($fp in $targets) { Assert-FileHasForbidUnsafe $fp }
 }
 
-function Test-LineHasSafetyComment([string[]]$lines, [int]$idx) {
+function Get-UnsafeStartIndices([string]$text) {
+  $detect = Get-RustScanText $text
+  $matches = [regex]::Matches($detect, '(?s)\bunsafe\b\s*(?:\{|fn\b)')
+  $indices = @()
+  foreach ($m in $matches) {
+    $lineNum = ($detect.Substring(0, $m.Index) -split "`n").Count
+    $indices += ($lineNum - 1)
+  }
+  return @($indices | Sort-Object -Unique)
+}
+
+function New-UnsafeIndexSet([int[]]$indices) {
+  $set = @{}
+  foreach ($i in $indices) { $set[$i] = $true }
+  return $set
+}
+
+function Test-HasSafetyBeforeUnsafe([string[]]$lines, [hashtable]$unsafeSet, [int]$idx) {
   $prev = $idx - 1
   $checked = 0
   while ($prev -ge 0) {
     if ($checked -ge 15) { return $false }
+    if ($unsafeSet.ContainsKey($prev)) { return $false }
     if ($lines[$prev] -match '//\s*SAFETY:') { return $true }
     $prev--
     $checked++
@@ -216,23 +260,24 @@ function Test-LineHasSafetyComment([string[]]$lines, [int]$idx) {
   return $false
 }
 
-function Test-IsUnsafeLine([string]$line) {
-  if ($line -match '\bunsafe\s+fn\b') { return $true }
-  return ($line -match '\bunsafe\s*\{')
-}
-
-function Assert-UnsafeLineHasSafety([string]$path, [string[]]$lines, [int]$i) {
-  $isUnsafe = Test-IsUnsafeLine $lines[$i]
-  if (-not $isUnsafe) { return }
-  $hasSafety = Test-LineHasSafetyComment $lines $i
-  if ($hasSafety) { return }
-  Fail "Missing // SAFETY: comment above unsafe at ${path}:$($i + 1)"
-}
-
-function Assert-UnsafeLinesHaveSafety([string]$path, [string[]]$lines) {
-  for ($i = 0; $i -lt $lines.Count; $i++) {
-    Assert-UnsafeLineHasSafety $path $lines $i
+function Get-WinfsUnsafeIssues([string]$path, [string]$text, [string[]]$lines) {
+  $indices = @(Get-UnsafeStartIndices $text)
+  $set = New-UnsafeIndexSet $indices
+  $issues = @()
+  foreach ($idx in $indices) {
+    $ok = Test-HasSafetyBeforeUnsafe $lines $set $idx
+    if ($ok) { continue }
+    $issues += "Missing // SAFETY: comment above unsafe at ${path}:$($idx + 1)"
   }
+  return @($issues)
+}
+
+function Assert-WinfsFileSafety([string]$path) {
+  $text = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
+  $lines = @(Get-Content -LiteralPath $path -ErrorAction SilentlyContinue)
+  if ($null -eq $text) { return }
+  $issues = @(Get-WinfsUnsafeIssues $path $text $lines)
+  foreach ($issue in $issues) { Fail $issue }
 }
 
 function Test-WinfsSafetyComments([string]$root) {
@@ -240,10 +285,7 @@ function Test-WinfsSafetyComments([string]$root) {
   $exists = Test-Path -LiteralPath $winfsSrc
   if (-not $exists) { return }
   $files = @(Get-ChildItem -Path $winfsSrc -Recurse -Filter '*.rs' -File -ErrorAction SilentlyContinue)
-  foreach ($f in $files) {
-    $lines = @(Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue)
-    Assert-UnsafeLinesHaveSafety $f.FullName $lines
-  }
+  foreach ($f in $files) { Assert-WinfsFileSafety $f.FullName }
 }
 
 function Invoke-CargoGeiger([string]$root) {
@@ -371,6 +413,82 @@ function Invoke-GateAChecks {
   Invoke-PrivacyScrubChecks
   if ($failed) { exit 1 }
   Write-Host "GATE-A checks passed." -ForegroundColor Green
+}
+
+function New-SelfTestTempFile([string]$name, [string]$content) {
+  $dir = Join-Path $env:TEMP 'sweeper-gate-a-selftest'
+  New-Item -ItemType Directory -Path $dir -Force | Out-Null
+  $path = Join-Path $dir $name
+  Set-Content -LiteralPath $path -Value $content -NoNewline
+  return $path
+}
+
+function Assert-SelfTest([bool]$condition, [string]$name, [ref]$ok) {
+  if ($condition) {
+    Write-Host "SELFTEST PASS: $name"
+    return
+  }
+  Write-Host "SELFTEST FAIL: $name" -ForegroundColor Red
+  $ok.Value = $false
+}
+
+function Test-SelfTestForbidUnsafe([ref]$ok) {
+  $commented = "// #![forbid(unsafe_code)]`nfn main() {}"
+  $inString = "const X: &str = `"#![forbid(unsafe_code)]`";`nfn main() {}"
+  $active = "#![forbid(unsafe_code)]`nfn main() {}"
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $commented)) "forbid-unsafe commented out must fail" $ok
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $inString)) "forbid-unsafe in string literal must fail" $ok
+  Assert-SelfTest (Test-HasActiveForbidUnsafe $active) "forbid-unsafe active attribute must pass" $ok
+}
+
+function Get-UnsafeIssueCount([string]$path, [string]$content) {
+  $lines = @($content -split "`r?`n")
+  $issues = @(Get-WinfsUnsafeIssues $path $content $lines)
+  return $issues.Count
+}
+
+function Test-SelfTestSharedSafety([ref]$ok) {
+  $path = New-SelfTestTempFile 'shared_safety.rs' "// SAFETY: first block only`nunsafe { first(); }`nunsafe { second(); }`n"
+  $content = Get-Content -LiteralPath $path -Raw
+  $count = Get-UnsafeIssueCount $path $content
+  Assert-SelfTest ($count -eq 1) "second unsafe block without its own SAFETY must be reported" $ok
+}
+
+function Test-SelfTestUnsafeBlockComment([ref]$ok) {
+  $bad = "unsafe /* FFI */ { GetLastError() }`n"
+  $good = "// SAFETY: ffi call`nunsafe /* FFI */ { GetLastError() }`n"
+  $badCount = Get-UnsafeIssueCount 'inline_block_comment.rs' $bad
+  $goodCount = Get-UnsafeIssueCount 'inline_block_comment_ok.rs' $good
+  Assert-SelfTest ($badCount -eq 1) "unsafe with block comment and no SAFETY must fail" $ok
+  Assert-SelfTest ($goodCount -eq 0) "unsafe with block comment and SAFETY must pass" $ok
+}
+
+function Test-SelfTestUnsafeMultiline([ref]$ok) {
+  $bad = "unsafe`n{`n  GetLastError()`n}`n"
+  $good = "// SAFETY: multiline block`nunsafe`n{`n  GetLastError()`n}`n"
+  $badCount = Get-UnsafeIssueCount 'multiline_unsafe.rs' $bad
+  $goodCount = Get-UnsafeIssueCount 'multiline_unsafe_ok.rs' $good
+  Assert-SelfTest ($badCount -eq 1) "multiline unsafe without SAFETY must fail" $ok
+  Assert-SelfTest ($goodCount -eq 0) "multiline unsafe with SAFETY must pass" $ok
+}
+
+function Invoke-GateASelfTests {
+  $ok = $true
+  $okRef = [ref]$ok
+  Test-SelfTestForbidUnsafe $okRef
+  Test-SelfTestSharedSafety $okRef
+  Test-SelfTestUnsafeBlockComment $okRef
+  Test-SelfTestUnsafeMultiline $okRef
+  if ($ok) {
+    Write-Host "GATE-A self-tests passed." -ForegroundColor Green
+    exit 0
+  }
+  Write-Host "GATE-A self-tests failed." -ForegroundColor Red
+  exit 1
+}
+
+if ($SelfTest) {
+  Invoke-GateASelfTests
 }
 
 Invoke-GateAChecks
