@@ -104,6 +104,14 @@ fn discover_stale_project_dirs(
     let Some(root) = stale_policy::normalize_stale_search_root(search_root) else {
         return Ok(());
     };
+    // Tier 3 root discovery promotes each eligible profile child to a search root, so a
+    // profile that directly contains `node_modules` beside an old `package-lock.json` yields
+    // the artifact itself as a root. The walker below classifies only entries *beneath* a
+    // root, so handle artifact roots first: classify the artifact (when stale) and prune its
+    // tree instead of enumerating the dependency tree.
+    if classify_artifact_search_root(&root, state)? {
+        return Ok(());
+    }
     let mut seen = HashSet::new();
     let mut walk = StaleWalk {
         stack: vec![root],
@@ -163,6 +171,57 @@ fn enqueue_stale_child_dirs(entries: Vec<sweeper_winfs::DirEntry>, walk: &mut St
     }
 }
 
+fn stale_kind_for_name(name: &str) -> Option<StaleKindSpec> {
+    if name.eq_ignore_ascii_case("target") {
+        Some(StaleKind::RustTarget.spec())
+    } else if name.eq_ignore_ascii_case("node_modules") {
+        Some(StaleKind::NodeModules.spec())
+    } else {
+        None
+    }
+}
+
+/// Classify a search root that is itself an artifact directory (and prune its tree).
+///
+/// Returns `true` when the root is a `target` / `node_modules` artifact and was handled, so the
+/// caller skips walking its contents. Staleness, Protected Path validation, canonical Link Point
+/// rejection and size summarization all go through the same `record_stale_dir` path used for
+/// artifact entries discovered beneath a root.
+fn classify_artifact_search_root(
+    root: &Path,
+    state: &mut StaleScanState<'_, '_, '_>,
+) -> Result<bool, ScanError> {
+    let Some(name) = root.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return Ok(false);
+    };
+    let Some(spec) = stale_kind_for_name(&name) else {
+        return Ok(false);
+    };
+    // Only ordinary directories are artifacts. Canonicalization already rejected Link Points;
+    // this guard keeps a file with an artifact name from reaching the directory summarizer.
+    if !std::fs::symlink_metadata(root)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    // A root merely named `target` can be an ordinary project container. Only prune it as a
+    // Rust build artifact when its parent has the Cargo.toml that the staleness check itself
+    // requires; otherwise keep walking it so nested stale artifacts are still discovered.
+    if matches!(spec.kind, StaleKind::RustTarget) && !has_rust_build_evidence(root) {
+        return Ok(false);
+    }
+    record_stale_dir(spec, root, state)?;
+    Ok(true)
+}
+
+fn has_rust_build_evidence(target_root: &Path) -> bool {
+    target_root
+        .parent()
+        .map(|parent| parent.join("Cargo.toml").is_file())
+        .unwrap_or(false)
+}
+
 fn collect_stale_artifact(
     ent: &sweeper_winfs::DirEntry,
     state: &mut StaleScanState<'_, '_, '_>,
@@ -171,10 +230,8 @@ fn collect_stale_artifact(
         return Ok(());
     }
     let name = ent.name.to_string_lossy();
-    if name.eq_ignore_ascii_case("target") {
-        record_stale_dir(StaleKind::RustTarget.spec(), &ent.path, state)?;
-    } else if name.eq_ignore_ascii_case("node_modules") {
-        record_stale_dir(StaleKind::NodeModules.spec(), &ent.path, state)?;
+    if let Some(spec) = stale_kind_for_name(&name) {
+        record_stale_dir(spec, &ent.path, state)?;
     }
     Ok(())
 }

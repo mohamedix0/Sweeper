@@ -15,6 +15,35 @@ function PreviewTable(props: { breakdown: PreviewResult['breakdown'] }) {
   );
 }
 
+function SkippedCountLine(props: { count: PreviewResult['skippedCount'] }) {
+  if (props.count == null) return null;
+  return <p className="muted small-note"><strong>Skipped:</strong> <span className="num">{props.count}</span></p>;
+}
+
+function SkippedReasonsList(props: { reasons: string[] }) {
+  if (props.reasons.length === 0) return null;
+  return (
+    <ul className="skipped-reasons">
+      {props.reasons.map((reason, idx) => <li key={`${reason}-${idx}`}>{reason}</li>)}
+    </ul>
+  );
+}
+
+function PreviewSkippedNotice(props: Pick<PreviewResult, 'skippedCount' | 'skippedReasons'>) {
+  const { skippedCount, skippedReasons } = props;
+  const reasons = skippedReasons ?? [];
+  if (skippedCount == null) {
+    if (reasons.length === 0) return null;
+  }
+  return (
+    <div className="preview-skipped" role="status" aria-label="Preview skipped items">
+      <strong className="subheading-xs">Skipped during preview</strong>
+      <SkippedCountLine count={skippedCount} />
+      <SkippedReasonsList reasons={reasons} />
+    </div>
+  );
+}
+
 function CleaningLabel(props: { label: string | null }) {
   if (!props.label) return null;
   return <div>{props.label}</div>;
@@ -42,6 +71,7 @@ export function PreviewBreakdownBlock(props: { preview: PreviewResult; cleaning:
       <h4 className="preview-breakdown-title">Preview Breakdown</h4>
       <p className="preview-total"><strong>Total selected:</strong> {pluralize({ count, singular: 'item', plural: 'items' })}, <span className="num">{formatBytes({ bytes: props.preview.totalSelectedBytes })}</span></p>
       <PreviewTable breakdown={props.preview.breakdown} />
+      <PreviewSkippedNotice skippedCount={props.preview.skippedCount} skippedReasons={props.preview.skippedReasons} />
       <div className="clean-footer" role="alert" aria-live="polite"><div className="clean-footer-warning"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div></div>
       <CleaningBlock cleaning={props.cleaning} label={props.cleanProgressLabel} />
     </div>

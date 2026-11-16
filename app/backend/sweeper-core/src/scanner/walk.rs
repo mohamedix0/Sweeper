@@ -1,4 +1,5 @@
 use super::*;
+use crate::paths::CanonicalPath;
 
 pub(super) struct ScanWalkCtx<'a> {
     target: &'a TargetDefinition,
@@ -8,6 +9,39 @@ pub(super) struct ScanWalkCtx<'a> {
     stack: &'a mut Vec<PathBuf>,
     next_item_seq: &'a mut u64,
     progress: &'a mut ScanProgressRuntime,
+}
+
+fn is_policy_protected_path(path: &str) -> bool {
+    if let Ok(cp) = CanonicalPath::parse_lexical(path) {
+        if crate::policy::is_subtree_protected(&cp) {
+            return true;
+        }
+        if crate::policy::is_ancestor_of_subtree_protected(&cp) {
+            return true;
+        }
+        if crate::policy::is_protected_container_root(&cp) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_policy_excluded_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".vhdx") || lower.ends_with(".vhd") {
+        return true;
+    }
+    if CanonicalPath::parse_lexical(path).is_err() {
+        return true;
+    }
+    is_policy_protected_path(path)
+}
+
+fn is_excluded_scan_dir(path: &str, name_lower: &str) -> bool {
+    if name_lower == "node_modules" {
+        return true;
+    }
+    is_policy_protected_path(path)
 }
 
 pub(super) struct RootWalk<'a> {
@@ -114,6 +148,14 @@ pub(super) fn skip_reason_for_reparse(reparse: ReparseTagClass) -> Option<SkipRe
 }
 
 pub(super) fn handle_directory_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
+    let path_str = ent.path.to_string_lossy().to_string();
+    let name_lower = ent.name.to_string_lossy().to_ascii_lowercase();
+    if is_excluded_scan_dir(&path_str, &name_lower) {
+        bump_skip_with_context(ctx.out, SkipReason::PolicyExcluded, path_str);
+        ctx.progress
+            .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
+        return;
+    }
     match inspect_directory_reparse(ent) {
         Ok(None) => ctx.stack.push(ent.path.clone()),
         Ok(Some(reason)) => bump_skip(ctx.out, reason),
@@ -128,7 +170,25 @@ pub(super) fn inspect_directory_reparse(ent: &DirEntry) -> Result<Option<SkipRea
     Ok(skip_reason_for_reparse(class))
 }
 
+fn record_skipped_file(
+    ctx: &mut ScanWalkCtx<'_>,
+    size: u64,
+    reason: SkipReason,
+    current_path: &str,
+) {
+    bump_skip_with_context(ctx.out, reason, current_path.to_string());
+    ctx.progress.scanned_items = ctx.progress.scanned_items.saturating_add(1);
+    ctx.progress.scanned_bytes = ctx.progress.scanned_bytes.saturating_add(size);
+    ctx.progress
+        .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
+}
+
 pub(super) fn record_file_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
+    let path_str = ent.path.to_string_lossy().to_string();
+    if is_policy_excluded_file(&path_str) {
+        record_skipped_file(ctx, ent.size, SkipReason::PolicyExcluded, &path_str);
+        return;
+    }
     let mtime_secs = super::allowlist::filetime_to_unix_secs(ent.last_write_time);
     let old_enough = is_file_age_eligible(mtime_secs, ctx.now, ctx.min_age);
     *ctx.next_item_seq += 1;

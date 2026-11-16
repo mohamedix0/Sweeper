@@ -39,6 +39,8 @@ pub enum SkipReason {
     OtherReparse,
     /// Unreadable/inaccessible entry or metadata.
     Unreadable,
+    /// Policy-excluded file or path (e.g. virtual disk files, protected subtree segments).
+    PolicyExcluded,
 }
 
 impl SkipReason {
@@ -48,6 +50,7 @@ impl SkipReason {
             Self::CloudPlaceholder => "CloudPlaceholder",
             Self::OtherReparse => "OtherReparse",
             Self::Unreadable => "Unreadable",
+            Self::PolicyExcluded => "PolicyExcluded",
         }
     }
 }

@@ -69,10 +69,10 @@ function ScanTableHeader(props: { allEligibleSelected: boolean; masterIndetermin
   const label = masterLabel(props.allEligibleSelected);
   return (
     <div className="scan-table-header">
-      <span className="scan-th-item"><MasterCheck checked={props.allEligibleSelected} indeterminate={props.masterIndeterminate} disabled={props.disabled} onChange={props.onToggle} label={label} /><span>Item</span></span>
-      <span className="scan-th-items num">Items</span>
-      <span className="scan-th-size num">Size</span>
-      <span className="scan-th-status">Status</span>
+      <span className="scan-th-item"><MasterCheck checked={props.allEligibleSelected} indeterminate={props.masterIndeterminate} disabled={props.disabled} onChange={props.onToggle} label={label} /><span>ITEM</span></span>
+      <span className="scan-th-items num">ITEMS</span>
+      <span className="scan-th-size num">SIZE</span>
+      <span className="scan-th-status">STATUS</span>
     </div>
   );
 }

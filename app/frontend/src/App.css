@@ -193,6 +193,7 @@ input[type="checkbox"] { accent-color: var(--accent-primary); }
 .scan-select-slot { width: 16px; height: 16px; flex: 0 0 16px; display: inline-flex; align-items: center; justify-content: center; }
 .scan-select-slot .checkbox { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; }
 .scan-select-slot input[type="checkbox"] { margin: 0; width: 14px; height: 14px; }
+.scan-select-slot input[type="checkbox"]:disabled { cursor: default; }
 .lock-slot { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
 .status-muted { color: var(--text-muted); font-size: 11px; font-weight: 500; }
 .scan-item-empty { padding: 8px 14px 8px 48px; color: var(--text-muted); font-size: var(--text-sm); border-top: 1px solid var(--border-divider); }
@@ -3303,7 +3304,6 @@ input:disabled, select:disabled, textarea:disabled, button:disabled,
 .scan-col-status .status-pill, .scan-group-status-col .status-pill, .scan-group-meta-summary { align-self: flex-start; justify-self: start; }
 .scan-group-meta-summary { text-align: left !important; justify-content: flex-start !important; }
 .scan-group-status-col { padding-top: 2px; justify-self: start !important; }
-.scan-row, .scan-group-row, .scan-item-row, .scan-table-header { grid-template-columns: minmax(0, 1fr) minmax(170px, 230px) 84px !important; }
 /* v22 Scan tree guide and child row hierarchy */
 .items { position: relative; }
 .scan-items-guide { display: block !important; position: absolute; left: 54px; top: 0; bottom: 0; width: 1px; background: var(--border-subtle); opacity: 0.9; pointer-events: none; z-index: 0; }
@@ -4719,9 +4719,11 @@ input:disabled, select:disabled, textarea:disabled, button:disabled,
   letter-spacing: 0.03em;
 }
 .scan-th-item { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
-.scan-th-items, .scan-col-items { text-align: left; color: var(--text-secondary); font-size: var(--text-xs); white-space: nowrap; }
-.scan-th-status, .scan-col-status { text-align: left; justify-content: flex-start; }
-.scan-th-size, .scan-col-size { text-align: right; width: 84px; justify-self: end; }
+.scan-th-items, .scan-col-items { color: var(--text-secondary); font-size: var(--text-xs); white-space: nowrap; }
+.scan-th-items { justify-self: end !important; text-align: right; }
+.scan-col-items { text-align: right; justify-self: end; }
+.scan-th-size, .scan-col-size { text-align: right; width: auto; justify-self: end; white-space: nowrap; }
+.scan-th-status, .scan-col-status { text-align: right; justify-content: flex-end; justify-self: end; white-space: nowrap; }
 .scan-group-row { min-height: 40px; }
 .scan-item-row, .scan-child-row { min-height: 36px !important; height: auto !important; }
 .scan-row .row-icon { margin-right: 2px; }
@@ -5409,20 +5411,16 @@ svg.alloc-bar .alloc-segment.hotspot-seg { stroke: transparent; }
 .scan-layout.scan-layout-with-bar .master-pane { height: 100%; }
 .scan-bottom-bar { flex: 0 0 auto; }
 /* v29 scan grid/layout fixes */
-.scan-table-header, .scan-row, .scan-group-row, .scan-item-row { grid-template-columns: minmax(0, 1fr) 132px 84px 128px !important; }
 .scan-col-items { text-align: right; justify-self: end; white-space: nowrap; }
-.scan-col-status { justify-self: start; min-width: 0; }
-.scan-col-size { width: auto !important; min-width: 72px; }
-.scan-group-row .scan-col-size { width: auto !important; }
+.scan-col-size { text-align: right; justify-self: end; white-space: nowrap; min-width: 72px; width: auto !important; }
+.scan-group-row .scan-col-size { width: auto !important; text-align: right; justify-self: end; }
+.scan-col-status { justify-self: end; text-align: right; min-width: 0; }
 .scan-main-text, .scan-group-main-text { flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .scan-group-subpath { flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .scan-group-path-text { overflow: hidden; text-overflow: ellipsis; }
 .scan-title-line { min-width: 0; }
 .scan-item-row .scan-main-text { flex: 1 1 auto; min-width: 0; }
 .scan-inline-settings-link-right { margin-left: 8px; }
-@media (max-width: 1100px) {
-  .scan-table-header, .scan-row, .scan-group-row, .scan-item-row { grid-template-columns: minmax(0, 1fr) 96px 72px 112px !important; }
-}
 /* v29 analyzer share/hotspot polish */
 .analyzer-share-track { display: inline-flex; align-items: center; height: 4px; min-width: 0; background: var(--bg-inset); border-radius: 999px; overflow: hidden; vertical-align: middle; margin-right: 6px; }
 .analyzer-share-fill-bar { display: block; height: 100%; border-radius: 999px; background: var(--accent-primary, #3b82f6); }
@@ -5432,7 +5430,6 @@ svg.alloc-bar .alloc-segment.hotspot-seg { stroke: transparent; }
 .scan-group-subpath { display: flex !important; align-items: center; gap: 8px; min-width: 0; }
 .scan-group-subpath .scan-group-path-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .scan-group-subpath .scan-inline-settings-link-right { margin-left: auto; flex: 0 0 auto; }
-.scan-table-header, .scan-row, .scan-group-row, .scan-item-row { grid-template-columns: minmax(0, 1fr) 108px 76px 118px !important; }
 .scan-col-main { gap: 6px; }
 .scan-group-subpath { position: relative !important; display: block !important; padding-right: 140px; }
 .scan-group-subpath .scan-group-path-text { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -5722,20 +5719,6 @@ svg.alloc-bar .alloc-segment.hotspot-seg { stroke: transparent; }
 [data-theme="dark"] .is-disabled-row .settings-row-copy h3 { color: #CBD5E1; }
 [data-theme="dark"] .is-disabled-row .settings-row-copy p { color: #94A3B8; }
 /* v30.1 scan status width & overflow fixes */
-.scan-table-header,
-.scan-row,
-.scan-group-row,
-.scan-item-row {
-  grid-template-columns: minmax(0, 1fr) 108px 76px 164px !important;
-}
-@media (max-width: 1100px) {
-  .scan-table-header,
-  .scan-row,
-  .scan-group-row,
-  .scan-item-row {
-    grid-template-columns: minmax(0, 1fr) 96px 72px 148px !important;
-  }
-}
 .scan-col-status,
 .scan-group-status-col,
 .scan-th-status {
@@ -6071,12 +6054,12 @@ svg.alloc-bar .alloc-segment.hotspot-seg { stroke: transparent; }
 
 /* ===== v31 scan/analyzer/settings polish ===== */
 
-/* Scan table: widen SIZE column to 92px and keep consistent grid */
+/* Scan table: unified responsive grid */
 .scan-table-header,
 .scan-row,
 .scan-group-row,
 .scan-item-row {
-  grid-template-columns: minmax(0, 1fr) 108px 92px 164px !important;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, max-content) minmax(120px, max-content) 150px !important;
   gap: 8px 10px;
 }
 @media (max-width: 1100px) {
@@ -6084,7 +6067,7 @@ svg.alloc-bar .alloc-segment.hotspot-seg { stroke: transparent; }
   .scan-row,
   .scan-group-row,
   .scan-item-row {
-    grid-template-columns: minmax(0, 1fr) 96px 92px 148px !important;
+    grid-template-columns: minmax(0, 1fr) minmax(120px, max-content) minmax(120px, max-content) 140px !important;
   }
 }
 .scan-th-size,
@@ -6286,8 +6269,10 @@ input[type="checkbox"]:indeterminate {
 
 /* Scan table layout: wider paths, clean child items column */
 .scan-table-header,
-.scan-row {
-  grid-template-columns: minmax(280px, 1.5fr) 92px 86px 158px !important;
+.scan-row,
+.scan-group-row,
+.scan-item-row {
+  grid-template-columns: minmax(280px, 1.5fr) minmax(120px, max-content) minmax(120px, max-content) 160px !important;
   gap: 10px;
 }
 .scan-th-items, .scan-col-items { width: auto !important; min-width: 0; text-align: right; }
@@ -6635,8 +6620,13 @@ input[type="checkbox"]:indeterminate {
     max-width: 296px !important;
   }
   .scan-table-header,
-  .scan-row {
-    grid-template-columns: minmax(320px, 1.5fr) 86px 64px 146px !important;
+  .scan-row,
+  .scan-group-row,
+  .scan-item-row {
+    /* Fit the narrowest desktop scan pane (~589px at a 1101px viewport: 216px sidebar +
+       296px inspector). Keep ITEMS/SIZE readable via max-content, but let the flexible
+       ITEM track absorb the remaining width instead of forcing horizontal scroll. */
+    grid-template-columns: minmax(0, 1.5fr) minmax(88px, max-content) minmax(80px, max-content) minmax(96px, max-content) !important;
     gap: 8px !important;
   }
   .scan-group-row .scan-col-main { padding-right: 0 !important; }

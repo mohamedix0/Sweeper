@@ -50,6 +50,8 @@ pub(super) struct ScanPreviewBuild {
     pub(super) total_bytes: u64,
     pub(super) validated_items: Vec<ValidatedItem>,
     pub(super) breakdown: Vec<PreviewTargetBreakdownDto>,
+    pub(super) skipped_count: usize,
+    pub(super) skipped_reasons: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -57,6 +59,8 @@ pub(super) struct AnalyzerPreviewBuild {
     pub(super) total_bytes: u64,
     pub(super) validated_items: Vec<ValidatedItem>,
     pub(super) breakdown: Vec<PreviewTargetBreakdownDto>,
+    pub(super) skipped_count: usize,
+    pub(super) skipped_reasons: Vec<String>,
 }
 
 pub(super) struct ScanAssembly<'a> {
