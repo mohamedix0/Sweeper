@@ -1,4 +1,4 @@
-﻿//! Command implementations (headless-testable).
+//! Command implementations (headless-testable).
 
 mod analyzer;
 mod clean;
@@ -11,11 +11,14 @@ mod tests;
 
 pub(crate) fn is_sandbox_path_hint(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    lower.contains("sweeper-sandbox")
+    if lower.contains("sweeper-sandbox")
+        || lower.contains(".sweeper_sandbox_sentinel")
         || lower.contains(".sweeper-sentinel")
-        || lower.contains("sweeper-testkit")
-        || lower.contains("\\appdata\\local\\temp\\")
-        || lower.contains("/appdata/local/temp/")
+        || lower.contains("sweeper-test")
+    {
+        return true;
+    }
+    lower.contains("\\appdata\\local\\temp\\.tmp") || lower.contains("/appdata/local/temp/.tmp")
 }
 
 pub use analyzer::{cancel_analyzer, start_analyzer};

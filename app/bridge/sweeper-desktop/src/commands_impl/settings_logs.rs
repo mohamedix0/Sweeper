@@ -228,7 +228,11 @@ fn list_logs_in_dir_impl(
             size_bytes: size,
         });
     }
-    out.sort_by(|a, b| b.id.cmp(&a.id));
+    out.sort_by(|a, b| {
+        let ta = a.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
+        let tb = b.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
+        tb.cmp(&ta).then_with(|| b.id.cmp(&a.id))
+    });
     Ok(out)
 }
 

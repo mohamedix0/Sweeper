@@ -79,25 +79,26 @@ function useLogData(client: SweeperClient) {
   return { logs, contentById, selected, error, setError, setLogs, setContentById, setSelected, clearSelected, requestRef, refresh, openLog };
 }
 
-function canAutoOpen(args: { focusLogId?: string | null; selected: SelectedLog | null; next: LogMeta[] }) {
+function canAutoOpen(args: { focusLogId?: string | null; selected: SelectedLog | null; next: LogMeta[]; suppress?: boolean }) {
   if (args.focusLogId) return false;
   if (args.selected) return false;
+  if (args.suppress) return false;
   return args.next.length > 0;
 }
 
-function useAutoOpen(args: { client: SweeperClient; focusLogId?: string | null; data: ReturnType<typeof useLogData> }) {
-  const { client, focusLogId, data } = args;
+function useAutoOpen(args: { client: SweeperClient; focusLogId?: string | null; data: ReturnType<typeof useLogData>; suppress?: boolean }) {
+  const { client, focusLogId, data, suppress } = args;
   const { selected, setLogs, setContentById, setError, requestRef, setSelected } = data;
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       const next = await refreshLogs({ client, cancelled: () => cancelled, setLogs, setContentById, setError });
       if (cancelled) return;
-      if (!canAutoOpen({ focusLogId, selected, next })) return;
+      if (!canAutoOpen({ focusLogId, selected, next, suppress })) return;
       await readOwnedLog({ client, id: next[0].id, requestRef, setError, setSelected, setContentById });
     })();
     return () => { cancelled = true; };
-  }, [client, focusLogId, requestRef, selected, setContentById, setError, setLogs, setSelected]);
+  }, [client, focusLogId, requestRef, selected, setContentById, setError, setLogs, setSelected, suppress]);
 }
 
 function useFocusOpen(args: { client: SweeperClient; focusLogId?: string | null; onFocusConsumed?: () => void; data: ReturnType<typeof useLogData> }) {
@@ -165,11 +166,12 @@ function useFilterSelectionSync(args: {
 export function useLogsSelectionModel(args: { client: SweeperClient; focusLogId?: string | null; onFocusConsumed?: () => void }) {
   const { client, focusLogId, onFocusConsumed } = args;
   const data = useLogData(client);
-  useAutoOpen({ client, focusLogId, data });
-  useFocusOpen({ client, focusLogId, onFocusConsumed, data });
   const ui = useLogsUiState(data.selected?.id);
   const query = ui.query.trim().toLowerCase();
   const filteredLogs = useMemo(() => data.logs.filter((l) => matchesLogFilter({ meta: l, content: contentForLog({ meta: l, selected: data.selected, contentById: data.contentById }), filter: ui.filter, query })), [data.logs, data.contentById, data.selected, ui.filter, query]);
+  const suppressAutoOpen = !focusLogId && !data.selected && filteredLogs.length === 0 && data.logs.length > 0;
+  useAutoOpen({ client, focusLogId, data, suppress: suppressAutoOpen });
+  useFocusOpen({ client, focusLogId, onFocusConsumed, data });
   useFilterSelectionSync({ filteredLogs, selectedId: data.selected?.id ?? null, openLog: data.openLog, clearSelected: data.clearSelected, focusLogId });
   const effectiveSelected = data.selected && filteredLogs.some((l) => l.id === data.selected?.id) ? data.selected : null;
   const derived = useLogsDerived({ logs: data.logs, selected: effectiveSelected, outcomeFilter: ui.outcomeFilter });

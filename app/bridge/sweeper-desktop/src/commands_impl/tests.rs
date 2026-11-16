@@ -62,3 +62,17 @@ fn execute_clean_preserves_normal_behavior_when_e2e_read_only_is_unset() {
 
     assert!(matches!(err, ContractError::PreviewTokenInvalid { .. }));
 }
+
+#[test]
+fn sandbox_path_hint_preserves_real_user_temp_cleanup() {
+    let real = r"C:\Users\Someone\AppData\Local\Temp\cleanup-target\file.tmp";
+    assert!(!is_sandbox_path_hint(real));
+}
+
+#[test]
+fn sandbox_path_hint_matches_tempfile_sandbox_dirs() {
+    let tempdir = r"C:\Users\Someone\AppData\Local\Temp\.tmpAbCd12\sweeper";
+    assert!(is_sandbox_path_hint(tempdir));
+    let named = r"C:\work\sweeper-sandbox\Temp\a.tmp";
+    assert!(is_sandbox_path_hint(named));
+}

@@ -57,7 +57,10 @@ function parseAuditRowsFromObjs(objs: Record<string, unknown>[]): AuditRow[] {
 }
 
 function scanActivity(objs: Record<string, unknown>[]): ActivitySummary {
-  const scan = [...objs].reverse().find(isScanSummaryRecord) ?? {};
+  const rev = [...objs].reverse();
+  const scan = rev.find(isScanSummaryRecord)
+    ?? rev.find((o) => String(o.record ?? '') === 'outcome')
+    ?? {};
   const reclaim = scan.total_reclaimable_bytes ?? scan.eligible_bytes ?? scan.totalBytes ?? '0';
   const filesRaw = scan.total_eligible_files ?? scan.eligible_count ?? '0';
   const skippedRaw = scan.total_skipped_files ?? '0';
