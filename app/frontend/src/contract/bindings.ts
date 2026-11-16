@@ -20,7 +20,7 @@ async getScanResults(sessionId: string) : Promise<Result<{ sessionId: string; st
     else return { status: "error", error: e  as any };
 }
 },
-async previewClean(sessionId: string, itemIds: string[], confirmations: { typedConfirmation: string | null } | null) : Promise<Result<{ previewToken: string; breakdown: PreviewTargetBreakdownDto[]; totalSelectedCount: string; totalSelectedBytes: string }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+async previewClean(sessionId: string, itemIds: string[], confirmations: { typedConfirmation: string | null } | null) : Promise<Result<{ previewToken: string; breakdown: PreviewTargetBreakdownDto[]; totalSelectedCount: string; totalSelectedBytes: string; skippedCount: number; skippedReasons: string[] }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("preview_clean", { sessionId, itemIds, confirmations }) };
 } catch (e) {

@@ -197,6 +197,10 @@ pub struct PreviewTokenSpec {
     pub total_bytes: u64,
     /// Per-target breakdown for UI.
     pub breakdown: Vec<sweeper_contract::PreviewTargetBreakdownDto>,
+    /// Number of selected items skipped during preview validation.
+    pub skipped_count: usize,
+    /// Distinct skip reasons recorded during preview validation.
+    pub skipped_reasons: Vec<String>,
 }
 
 /// Cohesive request for executing an already-validated clean batch.

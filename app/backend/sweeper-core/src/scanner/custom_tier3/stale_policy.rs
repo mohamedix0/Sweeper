@@ -1,4 +1,5 @@
 use super::*;
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -14,29 +15,100 @@ fn push_unique_search_root(out: &mut Vec<String>, canon: &CanonicalPath) {
         return;
     }
     let s = canon.to_string();
-    if !out.iter().any(|existing| existing.eq_ignore_ascii_case(&s)) {
+    if !out.iter().any(|e| e.eq_ignore_ascii_case(&s)) {
         out.push(s);
     }
 }
 
-fn candidate_dev_roots_on_drives() -> Vec<CanonicalPath> {
-    let mut roots = Vec::new();
-    for letter in ['C', 'D', 'E', 'F', 'G'] {
-        let base = format!("{letter}:\\Users");
-        if let Ok(cp) = CanonicalPath::from_existing_path(&base) {
-            roots.push(cp.into_canonical());
+fn is_ignored_profile_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "public" | "default" | "default user" | "all users"
+    )
+}
+
+fn is_eligible_profile_child(name: &str, path: &Path) -> bool {
+    if name.starts_with('.') || is_ignored_child_name(name) {
+        return false;
+    }
+    !is_policy_protected_path(path)
+}
+
+fn is_ignored_child_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "appdata" | "ntuser" | "application data" | "local settings"
+    )
+}
+
+fn is_policy_protected_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let Ok(cp) = CanonicalPath::parse_lexical(&s) else {
+        return true;
+    };
+    policy::is_subtree_protected(&cp)
+        || policy::is_ancestor_of_subtree_protected(&cp)
+        || policy::is_protected_container_root(&cp)
+}
+
+fn is_plain_child_dir(entry: &std::fs::DirEntry) -> bool {
+    let Ok(ft) = entry.file_type() else {
+        return false;
+    };
+    if !ft.is_dir() || ft.is_symlink() {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+        return false;
+    };
+    (meta.file_attributes() & 0x0400) == 0
+}
+
+fn append_profile_children(profile_dir: &Path, roots: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(profile_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !is_plain_child_dir(&entry) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if !is_eligible_profile_child(&name, &path) {
+            continue;
+        }
+        if let Ok(canon) = CanonicalPath::from_existing_path(&path.to_string_lossy()) {
+            push_unique_search_root(roots, &canon.into_canonical());
         }
     }
-    roots
+}
+
+fn append_user_profile_roots(users_dir: &Path, roots: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(users_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !is_plain_child_dir(&entry) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_ignored_profile_name(&name) {
+            continue;
+        }
+        append_profile_children(&entry.path(), roots);
+    }
 }
 
 pub(super) fn default_tier3_project_search_roots() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(canon) = user_profile_search_root() {
-        push_unique_search_root(&mut out, &canon);
+        append_profile_children(Path::new(canon.as_str()), &mut out);
     }
-    for root in candidate_dev_roots_on_drives() {
-        push_unique_search_root(&mut out, &root);
+    for letter in ['C', 'D', 'E', 'F', 'G'] {
+        let base = format!("{letter}:\\Users");
+        if Path::new(&base).is_dir() {
+            append_user_profile_roots(Path::new(&base), &mut out);
+        }
     }
     out
 }
@@ -204,4 +276,34 @@ pub(super) fn is_path_stale_enough(
     now.duration_since(mtime)
         .map(|age| age >= stale_threshold)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn make_dir(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn profile_children_include_dev_and_skip_protected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = tmp.path().join("Users").join("Example");
+        make_dir(&profile.join("dev").join("my_app").join("target"));
+        fs::write(
+            profile.join("dev").join("my_app").join("Cargo.toml"),
+            "[package]\n",
+        )
+        .unwrap();
+        make_dir(&profile.join("Documents"));
+        make_dir(&profile.join("AppData").join("Local"));
+        let mut roots = Vec::new();
+        append_profile_children(&profile, &mut roots);
+        let joined = roots.join("|").to_ascii_lowercase();
+        assert!(joined.contains("\\dev"));
+        assert!(!joined.contains("\\documents"));
+        assert!(!joined.contains("\\appdata"));
+    }
 }

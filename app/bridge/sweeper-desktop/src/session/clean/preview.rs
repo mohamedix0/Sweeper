@@ -23,6 +23,8 @@ struct TokenIssueRequest {
     validated_items: Vec<ValidatedItem>,
     total_bytes: u64,
     breakdown: Vec<PreviewTargetBreakdownDto>,
+    skipped_count: usize,
+    skipped_reasons: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -30,6 +32,8 @@ struct PreviewBuild {
     total_bytes: u64,
     validated_items: Vec<ValidatedItem>,
     breakdown: Vec<PreviewTargetBreakdownDto>,
+    skipped_count: usize,
+    skipped_reasons: Vec<String>,
 }
 
 struct PreviewTarget<M, B> {
@@ -112,6 +116,8 @@ impl SessionStore {
             validated_items: built.validated_items,
             total_bytes: built.total_bytes,
             breakdown: built.breakdown,
+            skipped_count: built.skipped_count,
+            skipped_reasons: built.skipped_reasons,
         })
     }
 
@@ -127,6 +133,8 @@ impl SessionStore {
             total_bytes: built.total_bytes,
             validated_items: built.validated_items,
             breakdown: built.breakdown,
+            skipped_count: built.skipped_count,
+            skipped_reasons: built.skipped_reasons,
         })
     }
 
@@ -177,6 +185,8 @@ impl SessionStore {
         let mut by_target: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
         let mut total_bytes = 0u64;
         let mut validated = Vec::with_capacity(selected.len());
+        let mut skipped_count = 0usize;
+        let mut skipped_reasons = Vec::new();
         let mut last_err: Option<ContractError> = None;
         for item in selected {
             let mut assembly = ScanAssembly {
@@ -185,6 +195,8 @@ impl SessionStore {
                 validated: &mut validated,
             };
             if let Err(err) = Self::accumulate_scan_item(session, item, &mut assembly) {
+                skipped_count += 1;
+                Self::record_skip_reason(&mut skipped_reasons, &err);
                 last_err = Some(err);
                 continue;
             }
@@ -198,7 +210,24 @@ impl SessionStore {
             total_bytes,
             validated_items: validated,
             breakdown: Self::to_breakdown(by_target),
+            skipped_count,
+            skipped_reasons,
         })
+    }
+
+    fn record_skip_reason(reasons: &mut Vec<String>, err: &ContractError) {
+        let reason = Self::skip_reason_text(err);
+        if !reasons.iter().any(|r| r == &reason) {
+            reasons.push(reason);
+        }
+    }
+
+    fn skip_reason_text(err: &ContractError) -> String {
+        match err {
+            ContractError::InvalidInput { reason } => reason.clone(),
+            ContractError::UnknownItem { .. } => "unknown item".to_string(),
+            _ => "selected item failed validation".to_string(),
+        }
     }
 
     fn accumulate_scan_item(
@@ -223,6 +252,11 @@ impl SessionStore {
         session: &ScanSession,
         item: &StoredItem,
     ) -> Result<ValidatedItem, ContractError> {
+        if std::fs::symlink_metadata(&item.dto.path).is_err() {
+            return Err(ContractError::InvalidInput {
+                reason: "selected item no longer exists".to_string(),
+            });
+        }
         let roots = Self::scan_item_roots(session, &item.target_id);
         if let Some(target_root) = Self::find_same_scan_root(&roots, &item.dto.path) {
             return Self::validate_scan_directory_item(item, target_root);
@@ -327,6 +361,8 @@ impl SessionStore {
             validated_items: spec.validated_items,
             total_bytes: spec.total_bytes,
             breakdown: spec.breakdown,
+            skipped_count: spec.skipped_count,
+            skipped_reasons: spec.skipped_reasons,
         })
     }
 
@@ -344,6 +380,8 @@ impl SessionStore {
             total_bytes: built.total_bytes,
             validated_items: built.validated_items,
             breakdown: built.breakdown,
+            skipped_count: built.skipped_count,
+            skipped_reasons: built.skipped_reasons,
         })
     }
 
@@ -382,6 +420,8 @@ impl SessionStore {
             total_bytes,
             validated_items: validated,
             breakdown: Self::to_breakdown(by_target),
+            skipped_count: 0,
+            skipped_reasons: Vec::new(),
         }
     }
 
@@ -408,6 +448,8 @@ impl SessionStore {
             breakdown: spec.breakdown,
             total_selected_count: U64String(total_selected_count),
             total_selected_bytes: U64String(spec.total_bytes),
+            skipped_count: spec.skipped_count,
+            skipped_reasons: spec.skipped_reasons,
         })
     }
 }

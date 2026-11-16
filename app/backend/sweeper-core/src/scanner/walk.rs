@@ -31,6 +31,16 @@ fn is_policy_excluded_file(path: &str) -> bool {
     if lower.ends_with(".vhdx") || lower.ends_with(".vhd") {
         return true;
     }
+    if CanonicalPath::parse_lexical(path).is_err() {
+        return true;
+    }
+    is_policy_protected_path(path)
+}
+
+fn is_excluded_scan_dir(path: &str, name_lower: &str) -> bool {
+    if name_lower == "node_modules" {
+        return true;
+    }
     is_policy_protected_path(path)
 }
 
@@ -139,8 +149,9 @@ pub(super) fn skip_reason_for_reparse(reparse: ReparseTagClass) -> Option<SkipRe
 
 pub(super) fn handle_directory_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
     let path_str = ent.path.to_string_lossy().to_string();
-    if is_policy_protected_path(&path_str) {
-        bump_skip_with_context(ctx.out, SkipReason::PolicyExcluded, path_str.clone());
+    let name_lower = ent.name.to_string_lossy().to_ascii_lowercase();
+    if is_excluded_scan_dir(&path_str, &name_lower) {
+        bump_skip_with_context(ctx.out, SkipReason::PolicyExcluded, path_str);
         ctx.progress
             .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
         return;

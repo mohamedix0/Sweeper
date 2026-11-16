@@ -315,12 +315,22 @@ fn cancel_analyzer_sets_cancellation_flag_for_active_session() {
     );
 }
 
-fn seed_multi_preview_session(store: &mut SessionStore) {
+fn canon_test_path(path: &std::path::Path) -> String {
+    let canon = std::fs::canonicalize(path).unwrap();
+    let mut s = canon.to_string_lossy().to_string();
+    if let Some(stripped) = s.strip_prefix(r"\\?\UNC\") {
+        s = format!(r"\\{stripped}");
+    } else if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        s = stripped.to_string();
+    }
+    s
+}
+
+fn seed_multi_preview_session(store: &mut SessionStore, root: &str, valid_path: &str) {
     use std::collections::HashMap;
     use sweeper_contract::{
         RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
     };
-    let root = r"C:\Users\Test\AppData\Local\Temp".to_string();
     let mk = |id: &str, path: &str, size: u64| ScanItemDto {
         id: id.to_string(),
         target_id: "user-temp".to_string(),
@@ -329,18 +339,14 @@ fn seed_multi_preview_session(store: &mut SessionStore) {
         mtime_unix_secs: U64String(1_700_000_000),
         age_eligible: true,
     };
-    let valid = mk(
-        "t1::valid",
-        r"C:\Users\Test\AppData\Local\Temp\valid.tmp",
-        123,
-    );
-    let invalid = mk("t1::invalid", r"C:\Outside\invalid.tmp", 999);
+    let valid = mk("t1::valid", valid_path, 123);
+    let invalid = mk("t1::invalid", r"C:\__sweeper_missing_invalid__.tmp", 999);
     let target = TargetScanResultDto {
         target_id: "user-temp".to_string(),
         target_name: "User Temp".to_string(),
         tier: TierDto::Tier1,
         risk: RiskDto::Safe,
-        resolved_paths: vec![root],
+        resolved_paths: vec![root.to_string()],
         scanned: true,
         status_reason: None,
         total_bytes: U64String(1122),
@@ -385,7 +391,12 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
     use sweeper_contract::U64String;
     let clock = FixedClock::new(1_800_000_000);
     let mut store = SessionStore::new();
-    seed_multi_preview_session(&mut store);
+    let tmp = tempfile::tempdir().unwrap();
+    let valid = tmp.path().join("valid.tmp");
+    std::fs::write(&valid, b"abc").unwrap();
+    let root = canon_test_path(tmp.path());
+    let valid_path = canon_test_path(&valid);
+    seed_multi_preview_session(&mut store, &root, &valid_path);
     let preview = store
         .preview_clean(
             &clock,
@@ -400,4 +411,6 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
     assert_eq!(preview.total_selected_bytes, U64String(123));
     assert_eq!(preview.total_selected_count, U64String(1));
     assert_eq!(preview.breakdown[0].selected_count, U64String(1));
+    assert_eq!(preview.skipped_count, 1);
+    assert!(!preview.skipped_reasons.is_empty());
 }

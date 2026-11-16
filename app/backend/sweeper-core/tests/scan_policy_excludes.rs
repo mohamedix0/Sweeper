@@ -22,38 +22,32 @@ fn set_old(path: &Path) {
     sweeper_testkit::set_last_write_time(path, ft).unwrap();
 }
 
-fn policy_test_base() -> std::path::PathBuf {
-    let local = sweeper_winfs::resolve_known_folder(sweeper_winfs::KnownFolderId::LocalAppData)
-        .expect("resolve LocalAppData");
-    local
+fn policy_temp_base() -> std::path::PathBuf {
+    sweeper_winfs::resolve_known_folder(sweeper_winfs::KnownFolderId::LocalAppData)
+        .expect("resolve LocalAppData")
         .join("Temp")
-        .join("__sweeper_scan_policy_excludes_test")
-}
-
-fn reset_dir(base: &Path) {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "rmdir", "/S", "/Q", &base.to_string_lossy()])
-        .status();
-    fs::create_dir_all(base).unwrap();
 }
 
 fn setup_policy_fixture(base: &Path) {
     fs::write(base.join("swap.vhdx"), b"fakevhdx").unwrap();
     let git_dir = base.join(".git");
     fs::create_dir_all(&git_dir).unwrap();
-    fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    fs::write(git_dir.join("HEAD"), b"ref\n").unwrap();
+    let nm = base.join("node_modules").join("pkg");
+    fs::create_dir_all(&nm).unwrap();
+    fs::write(nm.join("index.js"), b"module.exports={}").unwrap();
     fs::write(base.join("normal.txt"), b"x").unwrap();
     set_old(&base.join("normal.txt"));
 }
 
-fn policy_target() -> TargetDefinition {
+fn policy_target(relative_subpath: &str) -> TargetDefinition {
     TargetDefinition {
         id: "policy-exclude-test".to_string(),
         name: "policy-exclude-test".to_string(),
         tier: Tier::Tier1,
         risk: Risk::Safe,
         known_folder: KnownFolder::LocalAppData,
-        relative_subpath: "Temp\\__sweeper_scan_policy_excludes_test".to_string(),
+        relative_subpath: relative_subpath.to_string(),
         scope: Scope::Contents,
         min_age_hours: 0,
         description: "test".to_string(),
@@ -63,37 +57,43 @@ fn policy_target() -> TargetDefinition {
 
 fn is_excluded_path(path: &str) -> bool {
     let lp = path.to_ascii_lowercase();
-    if lp.ends_with(".vhdx") {
-        return true;
-    }
-    if lp.ends_with(".vhd") {
-        return true;
-    }
-    lp.contains("\\.git\\")
+    lp.ends_with(".vhdx") || lp.ends_with(".vhd") || lp.contains("\\.git\\")
+}
+
+fn has_node_modules_path(path: &str) -> bool {
+    path.to_ascii_lowercase().contains("\\node_modules\\")
 }
 
 fn assert_policy_scan(report: &scanner::ScanReport) {
     let t = &report.targets[0];
-    let excluded = t.items.iter().all(|it| !is_excluded_path(&it.path));
-    assert!(excluded);
+    assert!(t.items.iter().all(|it| !is_excluded_path(&it.path)));
+    assert!(t.items.iter().all(|it| !has_node_modules_path(&it.path)));
+    assert!(t.items.iter().any(|it| it.path.ends_with("normal.txt")));
     let count = t
         .skipped_reasons
         .get("PolicyExcluded")
         .copied()
         .unwrap_or(0);
-    assert!(count >= 2);
+    assert!(count >= 3);
 }
 
 #[test]
-fn policy_excludes_vhdx_and_git_in_scanned_target() {
-    let base = policy_test_base();
-    reset_dir(&base);
-    setup_policy_fixture(&base);
-    let report = scanner::scan_targets(vec![policy_target()], 0).expect("scan");
+fn policy_excludes_vhdx_git_and_node_modules_in_scanned_target() {
+    let temp_base = policy_temp_base();
+    let fixture_dir = tempfile::Builder::new()
+        .prefix("sweeper-policy-exclude-")
+        .tempdir_in(&temp_base)
+        .unwrap();
+    setup_policy_fixture(fixture_dir.path());
+    let name = fixture_dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let relative_subpath = format!("Temp\\{name}");
+    let report = scanner::scan_targets(vec![policy_target(&relative_subpath)], 0).expect("scan");
     assert_policy_scan(&report);
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "rmdir", "/S", "/Q", &base.to_string_lossy()])
-        .status();
 }
 
 #[test]

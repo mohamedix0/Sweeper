@@ -310,6 +310,12 @@ pub struct PreviewCleanResponse {
     pub total_selected_count: U64String,
     /// Total selected bytes estimate (decimal string).
     pub total_selected_bytes: U64String,
+    /// Number of selected items skipped during preview validation.
+    #[serde(default)]
+    pub skipped_count: usize,
+    /// Distinct skip reasons recorded during preview validation.
+    #[serde(default)]
+    pub skipped_reasons: Vec<String>,
 }
 
 /// Progress event for clean operations.
