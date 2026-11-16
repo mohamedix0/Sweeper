@@ -123,25 +123,44 @@ fn process_stale_search_dir(
     state: &mut StaleScanState<'_, '_, '_>,
     walk: &mut StaleWalk<'_>,
 ) -> Result<(), ScanError> {
-    let key = dir.to_string_lossy().to_ascii_uppercase();
-    if !walk.seen.insert(key) || stale_policy::is_disallowed_tier3_scan_path(dir) {
+    if !should_visit_stale_search_dir(dir, walk) {
         return Ok(());
     }
     let Ok(entries) = sweeper_winfs::read_dir_entries(dir) else {
         return Ok(());
     };
-    for ent in &entries {
+    scan_stale_dir_entries(&entries, state)?;
+    enqueue_stale_child_dirs(entries, walk);
+    Ok(())
+}
+
+fn should_visit_stale_search_dir(dir: &Path, walk: &mut StaleWalk<'_>) -> bool {
+    let key = dir.to_string_lossy().to_ascii_uppercase();
+    if !walk.seen.insert(key) {
+        return false;
+    }
+    !stale_policy::is_disallowed_tier3_scan_path(dir)
+}
+
+fn scan_stale_dir_entries(
+    entries: &[sweeper_winfs::DirEntry],
+    state: &mut StaleScanState<'_, '_, '_>,
+) -> Result<(), ScanError> {
+    for ent in entries {
         if state.ctx.progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
         collect_stale_artifact(ent, state)?;
     }
+    Ok(())
+}
+
+fn enqueue_stale_child_dirs(entries: Vec<sweeper_winfs::DirEntry>, walk: &mut StaleWalk<'_>) {
     for ent in entries {
         if stale_policy::should_traverse_stale_child(&ent) {
             walk.stack.push(ent.path);
         }
     }
-    Ok(())
 }
 
 fn collect_stale_artifact(

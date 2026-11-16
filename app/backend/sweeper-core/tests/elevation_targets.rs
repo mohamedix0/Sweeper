@@ -33,12 +33,13 @@ fn non_elevated_excludes_requires_elevation_targets_even_if_enabled() {
         enable_elevation_targets: true,
         ..SweeperSettings::default()
     };
-    let report = scanner::scan_with_settings_options_and_elevation(
+    let report = scanner::scan_with_settings_options_and_elevation_with_progress(
         &settings,
         ScanSettingsOptions::default(),
         ScanElevationContext {
             process_elevated: false,
         },
+        scanner::ScanRunControl::default(),
     )
     .unwrap();
     for t in &report.targets {
@@ -58,12 +59,13 @@ fn elevated_without_elevation_targets_flag_excludes_requires_elevation_targets()
         enable_elevation_targets: false,
         ..SweeperSettings::default()
     };
-    let report = scanner::scan_with_settings_options_and_elevation(
+    let report = scanner::scan_with_settings_options_and_elevation_with_progress(
         &settings,
         ScanSettingsOptions::default(),
         ScanElevationContext {
             process_elevated: true,
         },
+        scanner::ScanRunControl::default(),
     )
     .unwrap();
     for t in &report.targets {
@@ -181,7 +183,7 @@ fn elevated_scan_discovers_and_cleans_sandboxed_elevation_target_contents_only()
         min_age_hours: 24,
         ..SweeperSettings::default()
     };
-    let report = scanner::scan_with_settings_options_and_elevation(
+    let report = scanner::scan_with_settings_options_and_elevation_with_progress(
         &settings,
         ScanSettingsOptions {
             elevation_target_root_overrides: overrides,
@@ -190,6 +192,7 @@ fn elevated_scan_discovers_and_cleans_sandboxed_elevation_target_contents_only()
         ScanElevationContext {
             process_elevated: true,
         },
+        scanner::ScanRunControl::default(),
     )
     .unwrap();
 

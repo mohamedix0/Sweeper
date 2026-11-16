@@ -40,16 +40,69 @@ function normalizeUpdatedSettings(settings: Settings): Settings {
 
 type Explanation = { itemId: string; title: string; description: string; risk: RiskDto };
 
+function toExplanation(input: { itemId: string; title: string; description: string; risk: RiskDto }): Explanation {
+  return { itemId: input.itemId, title: input.title, description: input.description, risk: input.risk };
+}
+
+function scanTitle(item: { targetName: string }): string {
+  return item.targetName;
+}
+
+function analyzerTitle(node: { name?: string | null; path: string }): string {
+  return node.name || node.path;
+}
+
+function explanationForEntry<T extends { description: string; risk: RiskDto }>(input: {
+  itemId: string;
+  entry: T | undefined;
+  titleOf: (entry: T) => string;
+}): Explanation | null {
+  if (!input.entry) return null;
+  return toExplanation({
+    itemId: input.itemId,
+    title: input.titleOf(input.entry),
+    description: input.entry.description,
+    risk: input.entry.risk,
+  });
+}
+
+function pickExplanation(current: Explanation | null, next: Explanation | null): Explanation | null {
+  return current ?? next;
+}
+
+function findInSessionList<TSession>(input: {
+  sessions: Iterable<TSession>;
+  resolve: (session: TSession) => Explanation | null;
+}): Explanation | null {
+  let found: Explanation | null = null;
+  for (const session of input.sessions) {
+    found = pickExplanation(found, input.resolve(session));
+  }
+  return found;
+}
+
 function findExplanation(input: { ctx: MockCtx; itemId: string }): Explanation | null {
-  for (const session of input.ctx.sessions.values()) {
-    const item = session.itemsById.get(input.itemId);
-    if (item) return { itemId: input.itemId, title: item.targetName, description: item.description, risk: item.risk };
-  }
-  for (const session of input.ctx.analyzerSessions.values()) {
-    const node = session.nodesById.get(input.itemId);
-    if (node) return { itemId: input.itemId, title: node.name || node.path, description: node.description, risk: node.risk };
-  }
-  return null;
+  const fromScan = findInSessionList({
+    sessions: input.ctx.sessions.values(),
+    resolve: (session) =>
+      explanationForEntry({
+        itemId: input.itemId,
+        entry: session.itemsById.get(input.itemId),
+        titleOf: scanTitle,
+      }),
+  });
+  return pickExplanation(
+    fromScan,
+    findInSessionList({
+      sessions: input.ctx.analyzerSessions.values(),
+      resolve: (session) =>
+        explanationForEntry({
+          itemId: input.itemId,
+          entry: session.nodesById.get(input.itemId),
+          titleOf: analyzerTitle,
+        }),
+    }),
+  );
 }
 
 function explainItem(input: { ctx: MockCtx; itemId: string }) {

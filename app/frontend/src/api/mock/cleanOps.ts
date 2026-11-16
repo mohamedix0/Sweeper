@@ -1,4 +1,4 @@
-import type { AnalyzerNodeDto, CleanProgressEvent } from '../client';
+import type { AnalyzerNodeDto, CleanProgressEvent, RiskDto } from '../client';
 import { dedupeAnalyzerNodes, err, isUnknownBlocked, toSkippedReasons } from './helpers';
 import { validateSession } from './scanAnalyzerOps';
 import type { AnalyzerSessionState, MockCtx, PreviewState, ScanSessionState } from './types';
@@ -37,20 +37,28 @@ function assertPreviewGeneration(input: { ctx: MockCtx; preview: PreviewState })
   err({ code: 'sessionInvalid', reason: 'Session invalidated by settings change.' });
 }
 
+function riskAllowed(input: { risk: RiskDto; allowDeleteUnknown: boolean }): boolean {
+  if (input.risk === 'Protected') return false;
+  return !isUnknownBlocked({ risk: input.risk, allowDeleteUnknown: input.allowDeleteUnknown });
+}
+
+function nodeFlagsBlocked(node: AnalyzerNodeDto): boolean {
+  if (!node.selectable) return true;
+  if (node.displayOnly) return true;
+  if (node.isLinkPoint) return true;
+  return node.isCloudPlaceholder;
+}
+
+function blockedByShape(input: { item?: ScanItemInfo; node?: AnalyzerNodeDto }): boolean {
+  if (input.item) return !input.item.ageEligible;
+  if (!input.node) return true;
+  return nodeFlagsBlocked(input.node);
+}
+
 function entryCleanable(input: { item?: ScanItemInfo; node?: AnalyzerNodeDto; allowDeleteUnknown: boolean }): boolean {
-  if (input.item) {
-    if (!input.item.ageEligible) return false;
-    if (input.item.risk === 'Protected') return false;
-    return !isUnknownBlocked({ risk: input.item.risk, allowDeleteUnknown: input.allowDeleteUnknown });
-  }
-  if (!input.node) return false;
-  if (!input.node.selectable) return false;
-  if (input.node.displayOnly) return false;
-  if (input.node.risk === 'Protected') return false;
-  if (input.node.isLinkPoint) return false;
-  if (input.node.isCloudPlaceholder) return false;
-  if (input.node.risk !== 'Unknown') return true;
-  return input.allowDeleteUnknown;
+  if (blockedByShape(input)) return false;
+  const risk = (input.item?.risk ?? input.node?.risk ?? 'Protected') as RiskDto;
+  return riskAllowed({ risk, allowDeleteUnknown: input.allowDeleteUnknown });
 }
 
 function removeScanItem(input: { session: ScanSessionState; itemId: string }) {
@@ -60,16 +68,21 @@ function removeScanItem(input: { session: ScanSessionState; itemId: string }) {
   }
 }
 
+function outcomeBytes(input: { ok: boolean; size?: string | null }): bigint {
+  if (!input.ok) return 0n;
+  return BigInt(input.size ?? '0');
+}
+
 function resolveOutcome(input: { scan?: ScanSessionState; analyzer?: AnalyzerSessionState; itemId: string; allowDeleteUnknown: boolean }): CleanOutcome {
-  if (input.scan) {
-    const item = input.scan.itemsById.get(input.itemId);
-    const ok = entryCleanable({ item, allowDeleteUnknown: input.allowDeleteUnknown });
-    if (ok) removeScanItem({ session: input.scan, itemId: input.itemId });
-    return { targetId: item ? item.targetId : 'unknown', ok, bytes: ok && item ? BigInt(item.size ?? '0') : 0n };
-  }
+  const item = input.scan?.itemsById.get(input.itemId);
   const node = input.analyzer?.nodesById.get(input.itemId);
-  const ok = entryCleanable({ node, allowDeleteUnknown: input.allowDeleteUnknown });
-  return { targetId: node?.targetId ? node.targetId : 'custom-path', ok, bytes: ok && node ? BigInt(node.sizeBytes ?? '0') : 0n };
+  const ok = entryCleanable({ item, node, allowDeleteUnknown: input.allowDeleteUnknown });
+  if (ok && input.scan) removeScanItem({ session: input.scan, itemId: input.itemId });
+  return {
+    targetId: item ? item.targetId : (node?.targetId ?? 'custom-path'),
+    ok,
+    bytes: outcomeBytes({ ok, size: item?.size ?? node?.sizeBytes }),
+  };
 }
 
 function resolveExecuteIds(input: { preview: PreviewState; analyzerSession?: AnalyzerSessionState }): string[] {

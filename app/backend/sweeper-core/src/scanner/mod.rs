@@ -299,38 +299,21 @@ pub fn scan_with_settings_options(
     settings: &crate::settings::SweeperSettings,
     opts: ScanSettingsOptions,
 ) -> Result<ScanReport, ScanError> {
-    scan_with_settings_options_and_elevation(settings, opts, crate::ScanElevationContext::default())
+    scan_with_settings_options_and_elevation_with_progress(
+        settings,
+        opts,
+        crate::ScanElevationContext::default(),
+        ScanRunControl::default(),
+    )
 }
 
 /// Scan using the current process elevation state (via `sweeper_winfs::is_process_elevated()`).
 pub fn scan_with_settings_current_elevation(
     settings: &crate::settings::SweeperSettings,
 ) -> Result<ScanReport, ScanError> {
-    scan_with_settings_options_current_elevation(settings, ScanSettingsOptions::default())
-}
-
-/// Scan with options using the current process elevation state.
-pub fn scan_with_settings_options_current_elevation(
-    settings: &crate::settings::SweeperSettings,
-    opts: ScanSettingsOptions,
-) -> Result<ScanReport, ScanError> {
     scan_with_settings_options_current_elevation_with_progress(
         settings,
-        opts,
-        ScanRunControl::default(),
-    )
-}
-
-/// Scan with explicit elevation context (deterministic for tests).
-pub fn scan_with_settings_options_and_elevation(
-    settings: &crate::settings::SweeperSettings,
-    opts: ScanSettingsOptions,
-    elevation: crate::ScanElevationContext,
-) -> Result<ScanReport, ScanError> {
-    scan_with_settings_options_and_elevation_with_progress(
-        settings,
-        opts,
-        elevation,
+        ScanSettingsOptions::default(),
         ScanRunControl::default(),
     )
 }
