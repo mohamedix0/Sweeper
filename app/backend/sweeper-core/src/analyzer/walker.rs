@@ -346,6 +346,78 @@ fn retain_top_files(files: &mut Vec<FileInfo>, max_files: usize) {
     files.truncate(max_files);
 }
 
+#[derive(Debug, Default)]
+struct ScanAccum {
+    files: Vec<FileInfo>,
+    child_dirs: Vec<ChildDirEntry>,
+    file_count: u64,
+    byte_count: u64,
+}
+
+fn reparse_flags(class: &ReparseTagClass) -> (bool, bool, bool) {
+    match class {
+        ReparseTagClass::LinkPoint => (true, false, false),
+        ReparseTagClass::CloudPlaceholder => (false, true, false),
+        ReparseTagClass::OtherReparse(_) => (false, false, true),
+        ReparseTagClass::NotReparse => (false, false, false),
+    }
+}
+
+fn push_special_dir(
+    child_dirs: &mut Vec<ChildDirEntry>,
+    path_str: String,
+    flags: (bool, bool, bool),
+) {
+    child_dirs.push(ChildDirEntry {
+        path: path_str.clone(),
+        kind: ChildDirKind::Special(FileInfo {
+            name: String::new(),
+            path: path_str,
+            size: 0,
+            is_link_point: flags.0,
+            is_cloud_placeholder: flags.1,
+            reparse_other: flags.2,
+            is_vhdx: false,
+        }),
+    });
+}
+
+fn push_file_entry(
+    acc: &mut ScanAccum,
+    name: String,
+    path_str: String,
+    size: u64,
+    flags: (bool, bool, bool),
+    is_vhdx: bool,
+) {
+    acc.files.push(FileInfo {
+        name,
+        path: path_str,
+        size,
+        is_link_point: flags.0,
+        is_cloud_placeholder: flags.1,
+        reparse_other: flags.2,
+        is_vhdx,
+    });
+    acc.file_count += 1;
+    acc.byte_count = acc.byte_count.saturating_add(size);
+}
+
+fn handle_reparse_entry(
+    ent: &sweeper_winfs::DirEntry,
+    name: String,
+    path_str: String,
+    is_vhdx: bool,
+    acc: &mut ScanAccum,
+) {
+    let flags = reparse_flags(&ent.reparse);
+    if ent.is_dir {
+        push_special_dir(&mut acc.child_dirs, path_str, flags);
+    } else {
+        push_file_entry(acc, name, path_str, ent.size, flags, is_vhdx);
+    }
+}
+
 fn scan_directory(
     dir_path: &str,
     cancel: &AtomicBool,
@@ -361,10 +433,7 @@ fn scan_directory(
     }
     let entries =
         sweeper_winfs::read_dir_entries(Path::new(dir_path)).map_err(|e| e.to_string())?;
-    let mut files = Vec::new();
-    let mut child_dirs = Vec::new();
-    let mut file_count: u64 = 0;
-    let mut byte_count: u64 = 0;
+    let mut acc = ScanAccum::default();
     for ent in entries {
         if cancel.load(AtomicOrdering::Relaxed) {
             break;
@@ -372,120 +441,31 @@ fn scan_directory(
         let name = ent.name.to_string_lossy().to_string();
         let path_str = ent.path.to_string_lossy().to_string();
         let is_vhdx = annotate::is_vhdx_path(&path_str);
-        match ent.reparse {
-            ReparseTagClass::LinkPoint => {
-                if ent.is_dir {
-                    child_dirs.push(ChildDirEntry {
-                        path: path_str.clone(),
-                        kind: ChildDirKind::Special(FileInfo {
-                            name: String::new(),
-                            path: path_str,
-                            size: 0,
-                            is_link_point: true,
-                            is_cloud_placeholder: false,
-                            reparse_other: false,
-                            is_vhdx: false,
-                        }),
-                    });
-                } else {
-                    files.push(FileInfo {
-                        name,
-                        path: path_str,
-                        size: ent.size,
-                        is_link_point: true,
-                        is_cloud_placeholder: false,
-                        reparse_other: false,
-                        is_vhdx,
-                    });
-                    file_count += 1;
-                    byte_count = byte_count.saturating_add(ent.size);
-                }
-                continue;
-            }
-            ReparseTagClass::CloudPlaceholder => {
-                if ent.is_dir {
-                    child_dirs.push(ChildDirEntry {
-                        path: path_str.clone(),
-                        kind: ChildDirKind::Special(FileInfo {
-                            name: String::new(),
-                            path: path_str,
-                            size: 0,
-                            is_link_point: false,
-                            is_cloud_placeholder: true,
-                            reparse_other: false,
-                            is_vhdx: false,
-                        }),
-                    });
-                } else {
-                    files.push(FileInfo {
-                        name,
-                        path: path_str,
-                        size: ent.size,
-                        is_link_point: false,
-                        is_cloud_placeholder: true,
-                        reparse_other: false,
-                        is_vhdx,
-                    });
-                    file_count += 1;
-                    byte_count = byte_count.saturating_add(ent.size);
-                }
-                continue;
-            }
-            ReparseTagClass::OtherReparse(_) => {
-                if ent.is_dir {
-                    child_dirs.push(ChildDirEntry {
-                        path: path_str.clone(),
-                        kind: ChildDirKind::Special(FileInfo {
-                            name: String::new(),
-                            path: path_str,
-                            size: 0,
-                            is_link_point: false,
-                            is_cloud_placeholder: false,
-                            reparse_other: true,
-                            is_vhdx: false,
-                        }),
-                    });
-                } else {
-                    files.push(FileInfo {
-                        name,
-                        path: path_str,
-                        size: ent.size,
-                        is_link_point: false,
-                        is_cloud_placeholder: false,
-                        reparse_other: true,
-                        is_vhdx,
-                    });
-                    file_count += 1;
-                    byte_count = byte_count.saturating_add(ent.size);
-                }
-                continue;
-            }
-            ReparseTagClass::NotReparse => {}
+        if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
+            handle_reparse_entry(&ent, name, path_str, is_vhdx, &mut acc);
+            continue;
         }
         if ent.is_dir {
-            child_dirs.push(ChildDirEntry {
+            acc.child_dirs.push(ChildDirEntry {
                 path: path_str,
                 kind: ChildDirKind::Traverse,
             });
         } else {
-            files.push(FileInfo {
+            push_file_entry(
+                &mut acc,
                 name,
-                path: path_str,
-                size: ent.size,
-                is_link_point: false,
-                is_cloud_placeholder: false,
-                reparse_other: false,
+                path_str,
+                ent.size,
+                (false, false, false),
                 is_vhdx,
-            });
-            file_count += 1;
-            byte_count = byte_count.saturating_add(ent.size);
+            );
         }
     }
-    retain_top_files(&mut files, max_files_per_dir);
+    retain_top_files(&mut acc.files, max_files_per_dir);
     Ok(ScanDirOutput {
-        files,
-        child_dirs,
-        file_count,
-        byte_count,
+        files: acc.files,
+        child_dirs: acc.child_dirs,
+        file_count: acc.file_count,
+        byte_count: acc.byte_count,
     })
 }
