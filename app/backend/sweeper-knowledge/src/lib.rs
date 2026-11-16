@@ -473,6 +473,14 @@ impl TryFrom<LintTarget> for TargetDefinition {
 
 pub use lint::{lint_allowlist_toml, lint_targets, LintError, LintTarget};
 
+/// Deterministic fuzz entrypoint for allowlist parsing/linting.
+/// Accepts arbitrary bytes (valid UTF-8 slices are linted) and must never panic.
+pub fn fuzz_allowlist_bytes(data: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = lint::lint_allowlist_toml(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,41 +515,109 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn lint_rejects_globstar() {
-        let toml = r#"
+    fn single_target_allowlist_toml(relative_subpath: &str) -> String {
+        format!(
+            r#"
 [[targets]]
 id="x"
 name="X"
 tier="Tier1"
 risk="Safe"
 known_folder="LocalAppData"
-relative_subpath="Foo\\**\\Bar"
+relative_subpath="{relative_subpath}"
 scope="contents"
 min_age_hours=24
 requires_elevation=false
 description="x"
-"#;
-        let err = lint_allowlist_toml(toml).unwrap_err();
+"#
+        )
+    }
+
+    #[test]
+    fn lint_rejects_globstar() {
+        let err = lint_allowlist_toml(&single_target_allowlist_toml(r"Foo\\**\\Bar")).unwrap_err();
         assert!(err.to_string().contains("**"), "{err}");
     }
 
     #[test]
     fn lint_rejects_wildcard_in_final_segment() {
-        let toml = r#"
+        let err = lint_allowlist_toml(&single_target_allowlist_toml(r"Foo\\*")).unwrap_err();
+        assert!(err.to_string().contains("final path segment"), "{err}");
+    }
+
+    #[test]
+    fn fuzz_allowlist_bytes_handles_binary_malformed_and_valid() {
+        fuzz_allowlist_bytes(&[0xff, 0xfe, 0x00, 0x80]);
+        fuzz_allowlist_bytes(b"not = [valid toml");
+        let valid = r#"
 [[targets]]
 id="x"
 name="X"
 tier="Tier1"
 risk="Safe"
 known_folder="LocalAppData"
-relative_subpath="Foo\\*"
+relative_subpath="Temp"
 scope="contents"
 min_age_hours=24
 requires_elevation=false
 description="x"
 "#;
-        let err = lint_allowlist_toml(toml).unwrap_err();
-        assert!(err.to_string().contains("final path segment"), "{err}");
+        fuzz_allowlist_bytes(valid.as_bytes());
+    }
+
+    fn utf8_overlap_toml(subpath_a: &str, subpath_b: &str) -> String {
+        format!(
+            r#"
+[[targets]]
+id="a"
+name="A"
+tier="Tier2"
+risk="Safe"
+known_folder="LocalAppData"
+relative_subpath='{subpath_a}'
+scope="contents"
+min_age_hours=24
+requires_elevation=false
+description="x"
+
+[[targets]]
+id="b"
+name="B"
+tier="Tier2"
+risk="Safe"
+known_folder="LocalAppData"
+relative_subpath='{subpath_b}'
+scope="contents"
+min_age_hours=24
+requires_elevation=false
+description="y"
+"#
+        )
+    }
+
+    #[test]
+    fn lint_non_overlapping_utf8_wildcard_and_literal() {
+        let toml = utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}\\Cache");
+        assert!(lint_allowlist_toml(&toml).is_ok());
+    }
+
+    #[test]
+    fn lint_non_overlapping_utf8_wildcards() {
+        let toml = utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}*\\Cache");
+        assert!(lint_allowlist_toml(&toml).is_ok());
+    }
+
+    #[test]
+    fn lint_overlapping_utf8_wildcard_and_literal() {
+        let toml = utf8_overlap_toml("\u{00E9}*\\Cache", "\u{00E9}x\\Cache");
+        let err = lint_allowlist_toml(&toml).unwrap_err();
+        assert!(matches!(err, LintError::Overlap { .. }));
+    }
+
+    #[test]
+    fn fuzz_allowlist_bytes_handles_utf8_overlap_pairs_without_panic() {
+        fuzz_allowlist_bytes(utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}\\Cache").as_bytes());
+        fuzz_allowlist_bytes(utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}*\\Cache").as_bytes());
+        fuzz_allowlist_bytes(utf8_overlap_toml("\u{00E9}*\\Cache", "\u{00E9}x\\Cache").as_bytes());
     }
 }

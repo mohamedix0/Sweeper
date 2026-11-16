@@ -531,8 +531,8 @@ fn segment_pattern_matches_literal(pattern: &str, literal: &str) -> bool {
     if literal.len() < pre.len() + suf.len() {
         return false;
     }
-    literal[..pre.len()].eq_ignore_ascii_case(pre)
-        && literal[literal.len() - suf.len()..].eq_ignore_ascii_case(suf)
+    literal.as_bytes()[..pre.len()].eq_ignore_ascii_case(pre.as_bytes())
+        && literal.as_bytes()[literal.len() - suf.len()..].eq_ignore_ascii_case(suf.as_bytes())
 }
 
 fn validate_browser_profile_leaf_rule(id: &str, segments: &[String]) -> Result<(), LintError> {
@@ -648,7 +648,7 @@ fn wildcard_patterns_may_intersect(a: &str, b: &str) -> bool {
             } else {
                 (bp, ap)
             };
-            if !long_p[..short_p.len()].eq_ignore_ascii_case(short_p) {
+            if !long_p.as_bytes()[..short_p.len()].eq_ignore_ascii_case(short_p.as_bytes()) {
                 return false;
             }
             let (short_s, long_s) = if asuf.len() <= bsuf.len() {
@@ -656,7 +656,9 @@ fn wildcard_patterns_may_intersect(a: &str, b: &str) -> bool {
             } else {
                 (bsuf, asuf)
             };
-            if !long_s[long_s.len() - short_s.len()..].eq_ignore_ascii_case(short_s) {
+            if !long_s.as_bytes()[long_s.len() - short_s.len()..]
+                .eq_ignore_ascii_case(short_s.as_bytes())
+            {
                 return false;
             }
             // Possible intersection exists (e.g. satisfy longer prefix/suffix constraints).
