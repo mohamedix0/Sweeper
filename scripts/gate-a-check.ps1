@@ -327,8 +327,53 @@ function Try-StartRustQuoteString([hashtable]$state) {
   return $true
 }
 
+function Try-BlankRustSimpleChar([hashtable]$state) {
+  $i = $state.Index
+  $len = $state.Len
+  if (($i + 2) -ge $len) { return $false }
+  $c1 = $state.Out[$i + 1]
+  $isBad = (($c1 -eq '\') -or ($c1 -eq "'") -or ($c1 -eq "`r") -or ($c1 -eq "`n"))
+  if ($isBad) { return $false }
+  if ($state.Out[$i + 2] -ne "'") { return $false }
+  $state.Out[$i] = ' '; $state.Out[$i + 1] = ' '; $state.Out[$i + 2] = ' '
+  $state.Index = $i + 3
+  return $true
+}
+
+function Find-RustEscapedCharEnd([hashtable]$state) {
+  $i = $state.Index
+  $max = [Math]::Min($state.Len - 1, $i + 12)
+  $j = $i + 3
+  while ($j -le $max) {
+    $c = $state.Out[$j]
+    if (($c -eq "`r") -or ($c -eq "`n")) { return -1 }
+    if ($c -eq "'") { return $j }
+    $j++
+  }
+  return -1
+}
+
+function Try-BlankRustEscapedChar([hashtable]$state) {
+  $i = $state.Index
+  $len = $state.Len
+  if (($i + 2) -ge $len) { return $false }
+  if ($state.Out[$i + 1] -ne '\') { return $false }
+  $endIdx = Find-RustEscapedCharEnd $state
+  if ($endIdx -lt 0) { return $false }
+  for ($k = $i; $k -le $endIdx; $k++) { $state.Out[$k] = ' ' }
+  $state.Index = $endIdx + 1
+  return $true
+}
+
+function Try-SkipRustCharLiteral([hashtable]$state) {
+  if ($state.Out[$state.Index] -ne "'") { return $false }
+  if (Try-BlankRustSimpleChar $state) { return $true }
+  return (Try-BlankRustEscapedChar $state)
+}
+
 function Step-RustNormal([hashtable]$state) {
   if (Try-StartRustRawString $state) { return }
+  if (Try-SkipRustCharLiteral $state) { return }
   if (Try-StartRustLineComment $state) { return }
   if (Try-StartRustBlockComment $state) { return }
   if (Try-StartRustQuoteString $state) { return }
@@ -630,6 +675,23 @@ function Test-SelfTestRawStrings([ref]$ok) {
   Assert-SelfTest ($unsafeCount -eq 1) "unsafe in raw string ignored, real unsafe checked" $ok
 }
 
+function Test-SelfTestCharLiterals([ref]$ok) {
+  $quoteFixture = "const QUOTE: char = '`"';`nconst TEXT: &str = `"`n#![forbid(unsafe_code)]`n`";`n"
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $quoteFixture)) "char literal quote before string must ignore forbid in string" $ok
+
+  $esc = "const ESC: char = '\'';`nconst T: &str = `"`n#![forbid(unsafe_code)]`n`";`n"
+  $byteQuote = "const B: u8 = b'`"';`nconst T: &str = `"`n#![forbid(unsafe_code)]`n`";`n"
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $esc)) "escaped char literal must not open string" $ok
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $byteQuote)) "byte char literal quote must not open string" $ok
+
+  $active = "#![forbid(unsafe_code)]`nfn f<'a>(_x: &'a str) {}`nconst QUOTE: char = '`"';`n"
+  Assert-SelfTest (Test-HasActiveForbidUnsafe $active) "active forbid with lifetimes and char literal must pass" $ok
+
+  $unsafeFixture = "const Q: char = '`"';`nfn main() {`n  unsafe { GetLastError() }`n}`n"
+  $unsafeCount = Get-UnsafeIssueCount 'char_unsafe.rs' $unsafeFixture
+  Assert-SelfTest ($unsafeCount -eq 1) "real unsafe after char literal quote must still be reported" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -639,6 +701,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestUnsafeMultiline $okRef
   Test-SelfTestNestedBlockComments $okRef
   Test-SelfTestRawStrings $okRef
+  Test-SelfTestCharLiterals $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
