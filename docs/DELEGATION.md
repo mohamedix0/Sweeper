@@ -29,7 +29,7 @@ The Orchestrator operates strictly as the **coordinator and decision-maker**:
 All sub-agents (implementation, research, testing, design, and review) must use the following target configuration unless the user explicitly specifies another model or effort for a particular task:
 
 - **`providerInstanceId`:** `opencode`
-- **`model`:** `opencode-go/iceman-contributor-free` (*Iceman Contributor Free* on OpenCode Go)
+- **`model`:** `opencode-go/hy4-flash-free` (*Hy4 flash Free* on OpenCode Go)
 - **`options`:** `{}` (default effort; no custom effort/variant overrides)
 
 ## 4. Delegation Rules
