@@ -260,7 +260,8 @@ function Test-HasSafetyBeforeUnsafe([string[]]$lines, [hashtable]$unsafeSet, [in
   return $false
 }
 
-function Get-WinfsUnsafeIssues([string]$path, [string]$text, [string[]]$lines) {
+function Get-WinfsUnsafeIssuesForText([string]$text, [string]$path) {
+  $lines = @($text -split "`r?`n")
   $indices = @(Get-UnsafeStartIndices $text)
   $set = New-UnsafeIndexSet $indices
   $issues = @()
@@ -272,11 +273,14 @@ function Get-WinfsUnsafeIssues([string]$path, [string]$text, [string[]]$lines) {
   return @($issues)
 }
 
+function Get-WinfsUnsafeIssues([string]$path, [string]$text, [string[]]$lines) {
+  return @(Get-WinfsUnsafeIssuesForText $text $path)
+}
+
 function Assert-WinfsFileSafety([string]$path) {
   $text = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
-  $lines = @(Get-Content -LiteralPath $path -ErrorAction SilentlyContinue)
   if ($null -eq $text) { return }
-  $issues = @(Get-WinfsUnsafeIssues $path $text $lines)
+  $issues = @(Get-WinfsUnsafeIssuesForText $text $path)
   foreach ($issue in $issues) { Fail $issue }
 }
 
@@ -415,14 +419,6 @@ function Invoke-GateAChecks {
   Write-Host "GATE-A checks passed." -ForegroundColor Green
 }
 
-function New-SelfTestTempFile([string]$name, [string]$content) {
-  $dir = Join-Path $env:TEMP 'sweeper-gate-a-selftest'
-  New-Item -ItemType Directory -Path $dir -Force | Out-Null
-  $path = Join-Path $dir $name
-  Set-Content -LiteralPath $path -Value $content -NoNewline
-  return $path
-}
-
 function Assert-SelfTest([bool]$condition, [string]$name, [ref]$ok) {
   if ($condition) {
     Write-Host "SELFTEST PASS: $name"
@@ -442,15 +438,13 @@ function Test-SelfTestForbidUnsafe([ref]$ok) {
 }
 
 function Get-UnsafeIssueCount([string]$path, [string]$content) {
-  $lines = @($content -split "`r?`n")
-  $issues = @(Get-WinfsUnsafeIssues $path $content $lines)
+  $issues = @(Get-WinfsUnsafeIssuesForText $content $path)
   return $issues.Count
 }
 
 function Test-SelfTestSharedSafety([ref]$ok) {
-  $path = New-SelfTestTempFile 'shared_safety.rs' "// SAFETY: first block only`nunsafe { first(); }`nunsafe { second(); }`n"
-  $content = Get-Content -LiteralPath $path -Raw
-  $count = Get-UnsafeIssueCount $path $content
+  $content = "// SAFETY: first block only`nunsafe { first(); }`nunsafe { second(); }`n"
+  $count = Get-UnsafeIssueCount 'shared_safety.rs' $content
   Assert-SelfTest ($count -eq 1) "second unsafe block without its own SAFETY must be reported" $ok
 }
 
@@ -481,14 +475,18 @@ function Invoke-GateASelfTests {
   Test-SelfTestUnsafeMultiline $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
-    exit 0
+    return
   }
   Write-Host "GATE-A self-tests failed." -ForegroundColor Red
   exit 1
 }
 
-if ($SelfTest) {
-  Invoke-GateASelfTests
+function Invoke-GateAMain {
+  if ($SelfTest) {
+    Invoke-GateASelfTests
+    return
+  }
+  Invoke-GateAChecks
 }
 
-Invoke-GateAChecks
+Invoke-GateAMain

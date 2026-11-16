@@ -444,6 +444,7 @@ fn query_reparse_tag(handle: &SafeHandle) -> Result<Option<u32>> {
         )
     };
     if ok == 0 {
+        // SAFETY: reads thread-local last-error state immediately after failed `DeviceIoControl`.
         let err = unsafe { GetLastError() };
         const ERROR_NOT_A_REPARSE_POINT: u32 = 4390;
         if err == ERROR_NOT_A_REPARSE_POINT {
@@ -532,6 +533,7 @@ pub fn set_file_disposition_delete(handle: &SafeHandle) -> Result<()> {
     if ok != 0 {
         return Ok(());
     }
+    // SAFETY: reads thread-local last-error state immediately after failed disposition call.
     let err = unsafe { GetLastError() };
     if err == ERROR_INVALID_FUNCTION || err == ERROR_NOT_SUPPORTED {
         let info = FileDispositionInfo { delete_file: 1 };
@@ -549,6 +551,7 @@ pub fn set_file_disposition_delete(handle: &SafeHandle) -> Result<()> {
         }
         return Err(WinfsError::Win32 {
             context: "SetFileInformationByHandle(FileDispositionInfo fallback)",
+            // SAFETY: reads thread-local last-error state immediately after failed fallback call.
             code: unsafe { GetLastError() },
         });
     }
@@ -621,6 +624,7 @@ pub fn read_dir_entries_with_options(
             )
         };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            // SAFETY: reads thread-local last-error state immediately after failed `FindFirstFileExW`.
             let err = unsafe { GetLastError() };
             if err == ERROR_FILE_NOT_FOUND
                 || err == ERROR_PATH_NOT_FOUND
@@ -648,6 +652,7 @@ pub fn read_dir_entries_with_options(
             // is writable storage for the next entry. Advancing enumeration is read-only.
             let ok = unsafe { FindNextFileW(handle, &mut data) };
             if ok == 0 {
+                // SAFETY: reads thread-local last-error state immediately after failed `FindNextFileW`.
                 let err = unsafe { GetLastError() };
                 // SAFETY: close the valid find handle exactly once before returning or breaking.
                 unsafe {
@@ -746,6 +751,7 @@ pub fn inspect_reparse_point(handle: &SafeHandle) -> Result<ReparseTagClass> {
         )
     };
     if ok == 0 {
+        // SAFETY: reads thread-local last-error state immediately after failed `DeviceIoControl`.
         let err = unsafe { GetLastError() };
         const ERROR_NOT_A_REPARSE_POINT: u32 = 4390;
         if err == ERROR_NOT_A_REPARSE_POINT {
@@ -868,6 +874,8 @@ pub fn env_var(name: &str) -> Option<String> {
     // SAFETY: querying required size with null buffer/0 is valid; `wide_name` is NUL-terminated.
     let needed = unsafe { GetEnvironmentVariableW(wide_name.as_ptr(), std::ptr::null_mut(), 0) };
     if needed == 0 {
+        // SAFETY: reads thread-local last-error state after `GetEnvironmentVariableW` reports
+        // required size 0 (absent variable or error).
         let err = unsafe { GetLastError() };
         if err == ERROR_ENVVAR_NOT_FOUND {
             return None;

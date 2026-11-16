@@ -42,6 +42,8 @@ pub fn is_process_elevated() -> Result<bool> {
             });
         }
         let token = crate::SafeHandle::from_raw(token_raw);
+        // SAFETY: `TOKEN_ELEVATION` is a plain Win32 data struct; zero-initialization is valid
+        // before `GetTokenInformation(TokenElevation)` overwrites the expected bytes.
         let mut elevation: TOKEN_ELEVATION = unsafe { mem::zeroed() };
         let mut returned_len: u32 = 0;
         let expected_len = mem::size_of::<TOKEN_ELEVATION>() as u32;
