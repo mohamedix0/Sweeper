@@ -664,18 +664,6 @@ requires_elevation = false
 description = "Yarn package cache. Removing it frees space but may slow installs while packages are re-downloaded."
 
 [[targets]]
-id = "uv-cache"
-name = "uv Cache"
-tier = "Tier2"
-risk = "Caution"
-known_folder = "LocalAppData"
-relative_subpath = "uv\\cache"
-scope = "contents"
-min_age_hours = 24
-requires_elevation = false
-description = "uv package/cache directory. Removing it frees space but may slow future operations while data is rebuilt or re-downloaded."
-
-[[targets]]
 id = "bun-install-cache"
 name = "Bun Install Cache"
 tier = "Tier2"
@@ -686,18 +674,6 @@ scope = "contents"
 min_age_hours = 24
 requires_elevation = false
 description = "Bun install cache. Removing it frees space but may slow installs while packages are re-downloaded."
-
-[[targets]]
-id = "maven-repository-cache"
-name = "Maven Local Repository Cache"
-tier = "Tier2"
-risk = "Caution"
-known_folder = "UserProfile"
-relative_subpath = ".m2\\repository"
-scope = "contents"
-min_age_hours = 24
-requires_elevation = false
-description = "Maven local repository cache (~/.m2/repository). Removing it frees space but will force dependencies to be re-downloaded on future builds."
 
 [[targets]]
 id = "windows-delivery-optimization-cache"

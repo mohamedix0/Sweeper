@@ -485,12 +485,30 @@ fn developer_and_elevation_knowledge_entries() -> Vec<KnowledgeEntry> {
         },
         KnowledgeEntry {
             id: "kb-developer-package-caches".to_string(),
-            title: "Developer Package Manager Caches (pnpm, Yarn, uv, Bun, Maven)".to_string(),
-            description: "Package manager and build-tool download caches for pnpm, Yarn, uv, Bun, and Maven stored in user-local locations.".to_string(),
+            title: "Developer Package Manager Caches (pnpm, Yarn, Bun)".to_string(),
+            description: "Package manager download caches for pnpm, Yarn, and Bun stored in user-local locations.".to_string(),
             risk: Risk::Caution,
             known_folder: Some(KnownFolder::UserProfile),
-            relative_pattern: r"pnpm-cache; Yarn\Cache; uv\cache; .bun\install\cache; .m2\repository".to_string(),
+            relative_pattern: r"pnpm-cache; Yarn\Cache; .bun\install\cache".to_string(),
             notes: "Caution. Contents are generally re-downloadable/rebuildable, but clearing can slow installs/builds and require network access to restore dependencies.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-uv-cache".to_string(),
+            title: "uv Cache".to_string(),
+            description: "uv package/cache directory. Informative Analyzer entry only.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::LocalAppData),
+            relative_pattern: r"uv\cache".to_string(),
+            notes: "Analyzer only. Do not use partial file-age deletion because it can corrupt uv's internal hardlink/archive index; prune via `uv cache clean` or remove the entire cache.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-maven-repository-cache".to_string(),
+            title: "Maven Local Repository (~/.m2/repository)".to_string(),
+            description: "Maven local repository containing downloaded dependencies and locally installed artifacts.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::UserProfile),
+            relative_pattern: r".m2\repository".to_string(),
+            notes: "Analyzer only; excluded from automatic Allowlist cleanup because it may contain locally installed (`mvn install`) artifacts alongside downloaded dependencies that cannot be re-downloaded.".to_string(),
         },
     ]
 }
