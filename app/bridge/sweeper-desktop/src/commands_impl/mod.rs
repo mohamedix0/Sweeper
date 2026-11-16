@@ -17,12 +17,7 @@ pub(crate) fn is_sandbox_path_hint(path: &str) -> bool {
         ".sweeper-sentinel",
         "sweeper-test",
     ];
-    if MARKERS.iter().any(|marker| lower.contains(marker)) {
-        return true;
-    }
-    const TEMPFILE_MARKERS: [&str; 2] =
-        ["\\appdata\\local\\temp\\.tmp", "/appdata/local/temp/.tmp"];
-    TEMPFILE_MARKERS.iter().any(|marker| lower.contains(marker))
+    MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 pub use analyzer::{cancel_analyzer, start_analyzer};

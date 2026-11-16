@@ -2,13 +2,17 @@ import type { AuditRow, Flags } from './logParseTypes';
 import { bytesToString, isJournalPerItemOutcome, rowSizeText } from './logParseUtils';
 import { normalizeOutcome } from './logParseOutcome';
 
-function isScanSummaryEvent(ev: string, o: Record<string, unknown>): boolean {
-  if (ev !== 'scan') return false;
+function scanSummaryFieldPresent(o: Record<string, unknown>): boolean {
   if (o.categoriesCount != null) return true;
   if (o.categories_count != null) return true;
   if (o.totalBytes != null) return true;
-  if (o.total_reclaimable_bytes != null) return true;
-  return Array.isArray(o.targets);
+  return o.total_reclaimable_bytes != null;
+}
+
+function isScanSummaryEvent(ev: string, o: Record<string, unknown>): boolean {
+  if (ev !== 'scan') return false;
+  if (Array.isArray(o.targets)) return true;
+  return scanSummaryFieldPresent(o);
 }
 
 function rowRecordIgnored(rec: string, o: Record<string, unknown>): boolean {
@@ -17,13 +21,21 @@ function rowRecordIgnored(rec: string, o: Record<string, unknown>): boolean {
   return rec === 'intent';
 }
 
-function rowHasKnownField(o: Record<string, unknown>): boolean {
+function rowHasIdentityField(o: Record<string, unknown>): boolean {
   if (o.category != null) return true;
   if (o.path != null) return true;
-  if (o.target != null) return true;
+  return o.target != null;
+}
+
+function rowHasMetricField(o: Record<string, unknown>): boolean {
   if (o.size != null) return true;
   if (o.bytes != null) return true;
-  if (o.target_id != null) return true;
+  return o.target_id != null;
+}
+
+function rowHasKnownField(o: Record<string, unknown>): boolean {
+  if (rowHasIdentityField(o)) return true;
+  if (rowHasMetricField(o)) return true;
   return Boolean(o.status);
 }
 
@@ -43,9 +55,18 @@ function skippedParentLabel(rawCategory: string, location: string): string {
   return 'Custom Path · CustomCleanup';
 }
 
-function resolveSkippedFileRow(rawCategory: string, location: string, tone: AuditRow['outcomeTone']) {
+function isMissingLocation(location: string): boolean {
+  if (!location) return true;
+  return location === '—';
+}
+
+function resolveSkippedFileRow(
+  rawCategory: string,
+  location: string,
+  tone: AuditRow['outcomeTone'],
+) {
   if (tone !== 'skipped') return null;
-  if (!location || location === '—') return null;
+  if (isMissingLocation(location)) return null;
   const parts = location.split(/[\\/]/).filter(Boolean);
   const category = parts[parts.length - 1] || rawCategory;
   return { category, sublabel: skippedParentLabel(rawCategory, location) };
@@ -65,14 +86,22 @@ function outcomeRaw(o: Record<string, unknown>, flags: Flags): unknown {
 }
 
 function itemOutcome(o: Record<string, unknown>, flags: Flags) {
-  return normalizeOutcome({ raw: outcomeRaw(o, flags), fallback: outcomeDefault(flags) });
+  return normalizeOutcome({
+    raw: outcomeRaw(o, flags),
+    fallback: outcomeDefault(flags),
+  });
 }
 
-function itemCategory(o: Record<string, unknown>, flags: Flags): string {
+function categoryFromTarget(o: Record<string, unknown>): string | null {
   if (o.category != null) return String(o.category);
   if (o.target != null) return String(o.target);
   if (o.target_name != null) return String(o.target_name);
-  if (o.target_id != null) return String(o.target_id);
+  return o.target_id != null ? String(o.target_id) : null;
+}
+
+function itemCategory(o: Record<string, unknown>, flags: Flags): string {
+  const fromTarget = categoryFromTarget(o);
+  if (fromTarget) return fromTarget;
   if (o.action != null) return String(o.action);
   if (flags.isScan) return 'Scan';
   return 'Cleanup';
@@ -85,12 +114,27 @@ function itemKind(o: Record<string, unknown>): 'Category' | 'File' {
   return 'File';
 }
 
-function itemSublabel(kind: 'Category' | 'File', skipped: { sublabel: string } | null, tone: AuditRow['outcomeTone'], targetId?: unknown) {
-  if (kind === 'Category') return undefined;
+function fileSublabel(
+  skipped: { sublabel: string } | null,
+  tone: AuditRow['outcomeTone'],
+  targetId?: unknown,
+): string | undefined {
   if (skipped) return skipped.sublabel;
-  if (tone === 'skipped') return targetId ? `Skipped file · ${String(targetId)}` : 'Skipped file';
+  if (tone === 'skipped') {
+    return targetId ? `Skipped file · ${String(targetId)}` : 'Skipped file';
+  }
   if (targetId) return String(targetId);
   return undefined;
+}
+
+function itemSublabel(
+  kind: 'Category' | 'File',
+  skipped: { sublabel: string } | null,
+  tone: AuditRow['outcomeTone'],
+  targetId?: unknown,
+) {
+  if (kind === 'Category') return undefined;
+  return fileSublabel(skipped, tone, targetId);
 }
 
 function rowType(tone: AuditRow['outcomeTone']): string {
@@ -98,15 +142,27 @@ function rowType(tone: AuditRow['outcomeTone']): string {
   return 'Category';
 }
 
-function skippedForRow(kind: 'Category' | 'File', rawCategory: string, location: string, tone: AuditRow['outcomeTone']) {
+function skippedForRow(
+  kind: 'Category' | 'File',
+  rawCategory: string,
+  location: string,
+  tone: AuditRow['outcomeTone'],
+) {
   if (kind !== 'File') return null;
   return resolveSkippedFileRow(rawCategory, location, tone);
 }
 
+function pickLocation(o: Record<string, unknown>): string {
+  return String(o.path ?? o.details ?? o.location ?? '—');
+}
+
+function pickSize(o: Record<string, unknown>): string {
+  return rowSizeText(o.size ?? o.bytes ?? o.bytesFreed ?? o.totalBytes ?? o.eligible_bytes);
+}
+
 export function normalizeItemRow(o: Record<string, unknown>, flags: Flags): AuditRow {
   const rawCategory = itemCategory(o, flags);
-  const location = String(o.path ?? o.details ?? o.location ?? '—');
-  const size = rowSizeText(o.size ?? o.bytes ?? o.bytesFreed ?? o.totalBytes ?? o.eligible_bytes);
+  const location = pickLocation(o);
   const outcome = itemOutcome(o, flags);
   const kind = itemKind(o);
   const skipped = skippedForRow(kind, rawCategory, location, outcome.tone);
@@ -115,7 +171,7 @@ export function normalizeItemRow(o: Record<string, unknown>, flags: Flags): Audi
     type: rowType(outcome.tone),
     category,
     location,
-    size,
+    size: pickSize(o),
     outcome: outcome.label,
     outcomeTone: outcome.tone,
     kind,
@@ -123,7 +179,10 @@ export function normalizeItemRow(o: Record<string, unknown>, flags: Flags): Audi
   };
 }
 
-export function cleanedTargetRow(targetId: string, agg: { bytes: bigint; count: number }): AuditRow {
+export function cleanedTargetRow(
+  targetId: string,
+  agg: { bytes: bigint; count: number },
+): AuditRow {
   const countLabel = agg.count === 1 ? 'item' : 'items';
   return {
     type: 'Category',
@@ -147,9 +206,14 @@ function skippedOutcomeLabel(reason: string): string {
   return 'Skipped';
 }
 
+function isSkippedCleanStatus(status: string): boolean {
+  if (status === 'skipped') return true;
+  return status === 'aborted';
+}
+
 export function skippedCleanRow(o: Record<string, unknown>): AuditRow | null {
   const status = String(o.status ?? '').toLowerCase();
-  if (status !== 'skipped' && status !== 'aborted') return null;
+  if (!isSkippedCleanStatus(status)) return null;
   const reason = String(o.reason ?? '');
   return {
     type: 'Skipped file',
@@ -163,27 +227,38 @@ export function skippedCleanRow(o: Record<string, unknown>): AuditRow | null {
   };
 }
 
-export function addCleanedAggregate(map: Map<string, { bytes: bigint; count: number }>, o: Record<string, unknown>) {
+function parseBytesValue(value: unknown): bigint {
+  const raw = bytesToString(value ?? 0) ?? '0';
+  try {
+    return BigInt(raw);
+  } catch {
+    return 0n;
+  }
+}
+
+export function addCleanedAggregate(
+  map: Map<string, { bytes: bigint; count: number }>,
+  o: Record<string, unknown>,
+) {
   const targetId = String(o.target_id ?? 'Cleanup');
   const cur = map.get(targetId) ?? { bytes: 0n, count: 0 };
-  const b = bytesToString(o.bytes ?? 0) ?? '0';
-  try {
-    cur.bytes += BigInt(b);
-  } catch {
-    /* ignore */
-  }
+  cur.bytes += parseBytesValue(o.bytes);
   cur.count += 1;
   map.set(targetId, cur);
 }
 
+function scanFilesLabel(files: number): string {
+  if (files === 1) return 'file';
+  return 'files';
+}
+
 export function scanTargetRow(t: Record<string, unknown>): AuditRow {
   const files = Number(t.eligible_count ?? t.file_count ?? 0);
-  const filesLabel = files === 1 ? 'file' : 'files';
   const name = String(t.target_name ?? t.target_id ?? 'Target');
   return {
     type: 'Category',
     category: name,
-    location: `${files} ${filesLabel} found`,
+    location: `${files} ${scanFilesLabel(files)} found`,
     size: rowSizeText(t.eligible_bytes ?? t.total_bytes ?? 0),
     outcome: 'Safe',
     outcomeTone: 'eligible',
@@ -192,12 +267,23 @@ export function scanTargetRow(t: Record<string, unknown>): AuditRow {
   };
 }
 
+function scanSummaryCategories(scan: Record<string, unknown>): unknown {
+  if (scan.categories_count != null) return scan.categories_count;
+  return scan.categoriesCount ?? 0;
+}
+
+function scanSummaryBytes(scan: Record<string, unknown>): unknown {
+  if (scan.total_reclaimable_bytes != null) return scan.total_reclaimable_bytes;
+  if (scan.eligible_bytes != null) return scan.eligible_bytes;
+  return scan.totalBytes ?? 0;
+}
+
 export function scanSummaryFallbackRow(scan: Record<string, unknown>): AuditRow {
   return {
     type: 'Category',
     category: 'System Scan',
-    location: `${scan.categories_count ?? scan.categoriesCount ?? 0} categories`,
-    size: rowSizeText(scan.total_reclaimable_bytes ?? scan.eligible_bytes ?? scan.totalBytes ?? 0),
+    location: `${scanSummaryCategories(scan)} categories`,
+    size: rowSizeText(scanSummaryBytes(scan)),
     outcome: 'Safe',
     outcomeTone: 'eligible',
     kind: 'Category',

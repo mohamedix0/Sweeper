@@ -66,20 +66,46 @@ fn has_any_builtin_tier_enabled(settings: &sweeper_core::settings::SweeperSettin
     settings.enable_tier3
 }
 
+fn custom_path_is_verified_sandbox(path: &str) -> bool {
+    if super::is_sandbox_path_hint(path) {
+        return true;
+    }
+    std::path::Path::new(path)
+        .join(".sweeper_sandbox_sentinel")
+        .exists()
+}
+
+fn path_is_within_verified_custom_sandbox(
+    settings: &sweeper_core::settings::SweeperSettings,
+    path: &str,
+) -> bool {
+    let candidate = std::path::Path::new(path);
+    settings.custom_paths.iter().any(|custom| {
+        if !custom_path_is_verified_sandbox(custom) {
+            return false;
+        }
+        candidate.starts_with(custom)
+    })
+}
+
 fn all_custom_paths_are_sandbox(settings: &sweeper_core::settings::SweeperSettings) -> bool {
     settings
         .custom_paths
         .iter()
-        .all(|p| super::is_sandbox_path_hint(p))
+        .all(|p| custom_path_is_verified_sandbox(p))
 }
 
-fn report_targets_are_sandbox_custom(report: &scanner::ScanReport) -> bool {
+fn report_targets_are_sandbox_custom(
+    settings: &sweeper_core::settings::SweeperSettings,
+    report: &scanner::ScanReport,
+) -> bool {
     report.targets.iter().all(|t| {
-        let paths_ok = t
-            .resolved_paths
-            .iter()
-            .all(|p| super::is_sandbox_path_hint(p));
-        paths_ok && t.target_id.starts_with("custom-path")
+        if !t.target_id.starts_with("custom-path") {
+            return false;
+        }
+        t.resolved_paths.iter().all(|p| {
+            super::is_sandbox_path_hint(p) || path_is_within_verified_custom_sandbox(settings, p)
+        })
     })
 }
 
@@ -96,7 +122,7 @@ fn is_sandbox_scan(
     if !all_custom_paths_are_sandbox(settings) {
         return false;
     }
-    report_targets_are_sandbox_custom(report)
+    report_targets_are_sandbox_custom(settings, report)
 }
 
 fn scan_logs_base_dir() -> PathBuf {

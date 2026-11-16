@@ -168,21 +168,115 @@ function isSelectedInFilter(selectedId: string | undefined, filteredLogs: LogMet
   return filteredLogs.some((l) => l.id === selectedId);
 }
 
-export function useLogsSelectionModel(args: { client: SweeperClient; focusLogId?: string | null; onFocusConsumed?: () => void }) {
+function shouldSuppressAutoOpen(args: {
+  focusLogId?: string | null;
+  selected: SelectedLog | null;
+  filteredLogs: LogMeta[];
+  logs: LogMeta[];
+}) {
+  if (args.focusLogId) return false;
+  if (args.selected) return false;
+  if (args.filteredLogs.length !== 0) return false;
+  return args.logs.length > 0;
+}
+
+function resolveEffectiveSelected(selected: SelectedLog | null, filteredLogs: LogMeta[]) {
+  if (!isSelectedInFilter(selected?.id, filteredLogs)) return null;
+  return selected;
+}
+
+function useFilteredLogs(args: {
+  logs: LogMeta[];
+  contentById: Record<string, string>;
+  selected: SelectedLog | null;
+  filter: LogFilter;
+  query: string;
+}) {
+  const { logs, contentById, selected, filter, query } = args;
+  return useMemo(
+    () =>
+      logs.filter((l) =>
+        matchesLogFilter({
+          meta: l,
+          content: contentForLog({ meta: l, selected, contentById }),
+          filter,
+          query,
+        }),
+      ),
+    [logs, contentById, selected, filter, query],
+  );
+}
+
+export function useLogsSelectionModel(args: {
+  client: SweeperClient;
+  focusLogId?: string | null;
+  onFocusConsumed?: () => void;
+}) {
   const { client, focusLogId, onFocusConsumed } = args;
   const data = useLogData(client);
   const ui = useLogsUiState(data.selected?.id);
   const query = ui.query.trim().toLowerCase();
-  const filteredLogs = useMemo(() => data.logs.filter((l) => matchesLogFilter({ meta: l, content: contentForLog({ meta: l, selected: data.selected, contentById: data.contentById }), filter: ui.filter, query })), [data.logs, data.contentById, data.selected, ui.filter, query]);
+  const filteredLogs = useFilteredLogs({
+    logs: data.logs,
+    contentById: data.contentById,
+    selected: data.selected,
+    filter: ui.filter,
+    query,
+  });
+  const suppress = shouldSuppressAutoOpen({
+    focusLogId,
+    selected: data.selected,
+    filteredLogs,
+    logs: data.logs,
+  });
 
-  const suppressAutoOpen = !focusLogId && !data.selected && filteredLogs.length === 0 && data.logs.length > 0;
-  useAutoOpen({ client, focusLogId, data, suppress: suppressAutoOpen });
+  useAutoOpen({ client, focusLogId, data, suppress });
   useFocusOpen({ client, focusLogId, onFocusConsumed, data });
-  useFilterSelectionSync({ filteredLogs, selectedId: data.selected?.id ?? null, openLog: data.openLog, clearSelected: data.clearSelected, focusLogId });
+  useFilterSelectionSync({
+    filteredLogs,
+    selectedId: data.selected?.id ?? null,
+    openLog: data.openLog,
+    clearSelected: data.clearSelected,
+    focusLogId,
+  });
 
-  const selectedInFilter = isSelectedInFilter(data.selected?.id, filteredLogs);
-  const effectiveSelected = selectedInFilter ? data.selected : null;
-  const derived = useLogsDerived({ logs: data.logs, selected: effectiveSelected, outcomeFilter: ui.outcomeFilter });
-  const actions = useLogActions({ data, selectedMetaName: derived.selectedMeta?.name, setCopied: ui.setCopied, setExpandedSkippedGroups: ui.setExpandedSkippedGroups });
-  return { logs: data.logs, selected: effectiveSelected, mode: ui.mode, setMode: ui.setMode, error: data.error, copied: ui.copied, filter: ui.filter, setFilter: ui.setFilter, outcomeFilter: ui.outcomeFilter, setOutcomeFilter: ui.setOutcomeFilter, query: ui.query, setQuery: ui.setQuery, selectedMeta: derived.selectedMeta, auditRows: derived.auditRows, visibleAuditRows: derived.visibleAuditRows, selectedSummary: derived.selectedSummary, activitySummary: derived.activitySummary, filteredLogs, contentById: data.contentById, expandedSkippedGroups: ui.expandedSkippedGroups, openLog: data.openLog, copyLog: actions.copyLog, exportLog: actions.exportLog, toggleSkippedGroup: actions.toggleSkippedGroup };
+  const effectiveSelected = resolveEffectiveSelected(data.selected, filteredLogs);
+  const derived = useLogsDerived({
+    logs: data.logs,
+    selected: effectiveSelected,
+    outcomeFilter: ui.outcomeFilter,
+  });
+  const actions = useLogActions({
+    data,
+    selectedMetaName: derived.selectedMeta?.name,
+    setCopied: ui.setCopied,
+    setExpandedSkippedGroups: ui.setExpandedSkippedGroups,
+  });
+
+  return {
+    logs: data.logs,
+    selected: effectiveSelected,
+    mode: ui.mode,
+    setMode: ui.setMode,
+    error: data.error,
+    copied: ui.copied,
+    filter: ui.filter,
+    setFilter: ui.setFilter,
+    outcomeFilter: ui.outcomeFilter,
+    setOutcomeFilter: ui.setOutcomeFilter,
+    query: ui.query,
+    setQuery: ui.setQuery,
+    selectedMeta: derived.selectedMeta,
+    auditRows: derived.auditRows,
+    visibleAuditRows: derived.visibleAuditRows,
+    selectedSummary: derived.selectedSummary,
+    activitySummary: derived.activitySummary,
+    filteredLogs,
+    contentById: data.contentById,
+    expandedSkippedGroups: ui.expandedSkippedGroups,
+    openLog: data.openLog,
+    copyLog: actions.copyLog,
+    exportLog: actions.exportLog,
+    toggleSkippedGroup: actions.toggleSkippedGroup,
+  };
 }
