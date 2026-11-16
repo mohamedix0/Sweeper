@@ -35,21 +35,23 @@ where
         .map_err(commands_impl::join_error_to_contract_error)?
 }
 
+fn event_cb<T>(app: &tauri::AppHandle, event: &'static str) -> impl Fn(T) + Send + Sync + 'static
+where
+    T: serde::Serialize + Clone + Send + 'static,
+{
+    let app = app.clone();
+    move |payload: T| emit_event(&app, event, payload)
+}
+
 #[tauri::command]
 async fn start_scan(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState<SystemClock>>,
     tiers: Option<Vec<TierDto>>,
 ) -> Result<StartScanResponse, ContractError> {
-    let app_emit = app.clone();
+    let on_progress = event_cb::<ScanProgressEvent>(&app, "ScanProgressEvent");
     run_blocking(state, move |s| {
-        commands_impl::start_scan(
-            s,
-            tiers,
-            Some(move |evt: ScanProgressEvent| {
-                emit_event(&app_emit, "ScanProgressEvent", evt);
-            }),
-        )
+        commands_impl::start_scan(s, tiers, Some(on_progress))
     })
     .await
 }
@@ -84,10 +86,9 @@ async fn execute_clean(
     state: tauri::State<'_, AppState<SystemClock>>,
     preview_token: String,
 ) -> Result<ExecuteCleanResponse, ContractError> {
+    let on_progress = event_cb::<CleanProgressEvent>(&app, "CleanProgressEvent");
     run_blocking(state, move |s| {
-        commands_impl::execute_clean(s, preview_token, None, |evt: CleanProgressEvent| {
-            emit_event(&app, "CleanProgressEvent", evt);
-        })
+        commands_impl::execute_clean(s, preview_token, None, on_progress)
     })
     .await
 }
@@ -98,15 +99,9 @@ async fn start_analyzer(
     state: tauri::State<'_, AppState<SystemClock>>,
     root: Option<String>,
 ) -> Result<StartAnalyzerResponse, ContractError> {
-    let app_emit = app.clone();
+    let on_progress = event_cb::<AnalyzerProgressEvent>(&app, "AnalyzerProgressEvent");
     run_blocking(state, move |s| {
-        commands_impl::start_analyzer(
-            s,
-            root,
-            Some(move |evt: AnalyzerProgressEvent| {
-                emit_event(&app_emit, "AnalyzerProgressEvent", evt);
-            }),
-        )
+        commands_impl::start_analyzer(s, root, Some(on_progress))
     })
     .await
 }

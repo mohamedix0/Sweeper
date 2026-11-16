@@ -41,10 +41,21 @@ fn select_configured_base(raw: &Path) -> Option<PathBuf> {
     if is_safe_sandbox_base(&normalized) {
         return Some(normalized);
     }
+    // If normalization resolved/canonicalized to an unsafe location (e.g. junction outside
+    // Users pointing into Users), reject instead of falling back to the raw path.
+    if resolved_to_unsafe_sandbox_location(&normalized) {
+        return None;
+    }
     if is_safe_sandbox_base(raw) {
         return Some(raw.to_path_buf());
     }
     None
+}
+
+fn resolved_to_unsafe_sandbox_location(normalized: &Path) -> bool {
+    is_under_protected_container_root_for_sandbox(normalized)
+        || has_parent_dir_component(normalized)
+        || has_short_name_component(normalized)
 }
 
 fn unsafe_configured_base_error(raw: &Path) -> io::Error {
@@ -69,12 +80,13 @@ fn resolve_temp_sandbox_base() -> Option<PathBuf> {
 
 fn resolve_cargo_target_sandbox_base() -> Option<PathBuf> {
     let base = cargo_target_sandbox_base()?;
-    let _ = fs::create_dir_all(&base);
     let canonical_base = canonicalize_sandbox_base(base.clone());
     if is_safe_sandbox_base(&canonical_base) {
+        let _ = fs::create_dir_all(&canonical_base);
         return Some(canonical_base);
     }
     if is_safe_sandbox_base(&base) {
+        let _ = fs::create_dir_all(&base);
         return Some(base);
     }
     None

@@ -11,6 +11,16 @@ function setup() {
   return { user: userEvent.setup(), ...render(<App />) };
 }
 
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+function baseSettings(): Settings {
+  return { enableTier1: true, enableTier2: true, enableTier3: false, enableElevationTargets: false, minAgeHours: 24, allowDeleteUnknown: false, customPaths: [], staleProjectDays: 30 };
+}
+
 describe('Sweeper frontend', () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -63,16 +73,7 @@ describe('Sweeper frontend', () => {
     render(
       <SettingsView
         client={mockController}
-        settings={{
-          enableTier1: true,
-          enableTier2: true,
-          enableTier3: false,
-          enableElevationTargets: false,
-          minAgeHours: 24,
-          allowDeleteUnknown: false,
-          customPaths: [],
-          staleProjectDays: 30,
-        }}
+        settings={baseSettings()}
         elevationStatus={{ isElevated: false }}
         elevationError={null}
         onSaved={() => {}}
@@ -95,5 +96,47 @@ describe('Sweeper frontend', () => {
     const customPathInput = screen.getByLabelText('Add Custom Path') as HTMLInputElement;
     expect(customPathInput.value).toMatch(/^C:\\Temp\\/);
     expect(customPathInput.value.toLowerCase()).not.toContain('\\users\\');
+  });
+
+  it('keeps unsaved settings draft when onSaved identity changes', async () => {
+    const settings = baseSettings();
+    const { rerender } = render(<SettingsView client={mockController} settings={settings} elevationStatus={{ isElevated: false }} elevationError={null} onSaved={() => {}} />);
+    const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
+    fireEvent.change(minAge, { target: { value: '12' } });
+    rerender(<SettingsView client={mockController} settings={settings} elevationStatus={{ isElevated: false }} elevationError={null} onSaved={() => {}} />);
+    expect((screen.getByLabelText('Minimum file age') as HTMLInputElement).value).toBe('12');
+  });
+
+  it('preserves unrelated draft edits while custom path validation is pending', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<any>();
+    const client = { ...mockController, validateCustomPath: vi.fn(() => pending.promise), updateSettings: vi.fn(async (s: Settings) => s) } as any;
+    render(<SettingsView client={client} settings={baseSettings()} elevationStatus={{ isElevated: false }} elevationError={null} onSaved={() => {}} />);
+    await user.type(screen.getByLabelText('Add Custom Path'), 'C:\\Temp\\MyCache');
+    await user.click(screen.getByRole('button', { name: 'Add Folder' }));
+    const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
+    await user.clear(minAge);
+    await user.type(minAge, '12');
+    pending.resolve({ allowed: true, path: 'C:\\Temp\\MyCache', reason: null });
+    await waitFor(() => expect(client.updateSettings).toHaveBeenCalled());
+    const saved = client.updateSettings.mock.calls[0][0] as Settings;
+    expect(saved.customPaths).toContain('C:\\Temp\\MyCache');
+    expect(saved.minAgeHours).toBe(12);
+  });
+
+  it('preserves post-submit edits while updateSettings is in flight', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Settings>();
+    const client = { ...mockController, updateSettings: vi.fn(() => pending.promise) } as any;
+    render(<SettingsView client={client} settings={baseSettings()} elevationStatus={{ isElevated: false }} elevationError={null} onSaved={() => {}} />);
+    const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
+    await user.clear(minAge);
+    await user.type(minAge, '12');
+    await user.click(screen.getAllByRole('button', { name: 'Save Settings' })[0]);
+    const allow = screen.getByLabelText('Allow deleting unknown folders (advanced)') as HTMLInputElement;
+    await user.click(allow);
+    pending.resolve({ ...baseSettings(), minAgeHours: 12 });
+    await waitFor(() => expect(screen.getByText(/Settings saved/i)).toBeInTheDocument());
+    expect((screen.getByLabelText('Allow deleting unknown folders (advanced)') as HTMLInputElement).checked).toBe(true);
   });
 });

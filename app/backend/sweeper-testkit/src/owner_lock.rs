@@ -1,4 +1,4 @@
-﻿use std::fs;
+use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -18,6 +18,10 @@ pub(crate) fn acquire_owner_lock(path: &Path) -> io::Result<fs::File> {
     let file = opts.open(path)?;
     // Best-effort: ensure file exists and is lock marker.
     let _ = file.set_len(0);
+    #[cfg(not(windows))]
+    {
+        file.lock()?;
+    }
     Ok(file)
 }
 
@@ -31,8 +35,7 @@ pub(crate) fn is_owner_lock_held(lock_path: &Path) -> bool {
     }
     #[cfg(not(windows))]
     {
-        let _ = lock_path;
-        false
+        is_owner_lock_held_unix(lock_path)
     }
 }
 
@@ -51,5 +54,24 @@ fn is_owner_lock_held_windows(lock_path: &Path) -> bool {
             matches!(e.raw_os_error(), Some(32 | 33 | 5))
                 || e.kind() == io::ErrorKind::PermissionDenied
         }
+    }
+}
+
+#[cfg(not(windows))]
+fn is_owner_lock_held_unix(lock_path: &Path) -> bool {
+    use std::fs::{OpenOptions, TryLockError};
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true);
+    let Ok(file) = opts.open(lock_path) else {
+        // If liveness cannot be established, be conservative and skip automatic cleanup.
+        return true;
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(TryLockError::WouldBlock) => true,
+        Err(TryLockError::Error(_)) => true,
     }
 }

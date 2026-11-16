@@ -21,19 +21,19 @@ export function AppSidebar(props: {
         <nav className="nav" aria-label="Primary">
           <div className="nav-group">
             <div className="nav-group-label">Workspace</div>
-            <button aria-current={props.view === 'scan' ? 'page' : undefined} onClick={(e) => { props.onSwitchView('scan'); e.currentTarget.blur(); }}>
+            <button aria-current={props.view === 'scan' ? 'page' : undefined} onClick={() => props.onSwitchView('scan')}>
               <ScanIcon className="nav-icon" /><span>Scan &amp; Clean</span>
             </button>
-            <button aria-current={props.view === 'analyzer' ? 'page' : undefined} onClick={(e) => { props.onSwitchView('analyzer'); e.currentTarget.blur(); }}>
+            <button aria-current={props.view === 'analyzer' ? 'page' : undefined} onClick={() => props.onSwitchView('analyzer')}>
               <AnalyzerIcon className="nav-icon" /><span>Analyzer</span>
             </button>
           </div>
           <div className="nav-group">
             <div className="nav-group-label">System</div>
-            <button aria-current={props.view === 'settings' ? 'page' : undefined} onClick={(e) => { props.onSwitchView('settings'); e.currentTarget.blur(); }}>
+            <button aria-current={props.view === 'settings' ? 'page' : undefined} onClick={() => props.onSwitchView('settings')}>
               <SettingsIcon className="nav-icon" /><span>Settings</span>
             </button>
-            <button aria-current={props.view === 'logs' ? 'page' : undefined} onClick={(e) => { props.onSwitchView('logs'); e.currentTarget.blur(); }}>
+            <button aria-current={props.view === 'logs' ? 'page' : undefined} onClick={() => props.onSwitchView('logs')}>
               <LogsIcon className="nav-icon" /><span>Activity</span>
             </button>
           </div>

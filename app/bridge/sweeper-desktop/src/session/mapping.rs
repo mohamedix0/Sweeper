@@ -11,15 +11,32 @@ use sweeper_core::{Risk, Tier};
 use super::support::sanitize_reason;
 use super::{AnalyzerSession, ScanSession, StoredItem};
 
+#[derive(Clone, Copy)]
+struct SessionValidityInput {
+    created_at: u64,
+    settings_generation: u64,
+    now: u64,
+    current: u64,
+}
+
+fn session_valid_at(input: SessionValidityInput) -> bool {
+    if input.settings_generation != input.current {
+        return false;
+    }
+    input.now.saturating_sub(input.created_at) <= super::SCAN_SESSION_TTL_SECS
+}
+
 pub(crate) fn scan_session_valid_at(
     session: &ScanSession,
     now: u64,
     current_settings_generation: u64,
 ) -> bool {
-    if session.settings_generation != current_settings_generation {
-        return false;
-    }
-    now.saturating_sub(session.created_at) <= super::SCAN_SESSION_TTL_SECS
+    session_valid_at(SessionValidityInput {
+        created_at: session.created_at,
+        settings_generation: session.settings_generation,
+        now,
+        current: current_settings_generation,
+    })
 }
 
 pub(crate) fn analyzer_session_valid_at(
@@ -27,10 +44,12 @@ pub(crate) fn analyzer_session_valid_at(
     now: u64,
     current_settings_generation: u64,
 ) -> bool {
-    if session.settings_generation != current_settings_generation {
-        return false;
-    }
-    now.saturating_sub(session.created_at) <= super::SCAN_SESSION_TTL_SECS
+    session_valid_at(SessionValidityInput {
+        created_at: session.created_at,
+        settings_generation: session.settings_generation,
+        now,
+        current: current_settings_generation,
+    })
 }
 
 fn is_custom_path_scan_target(target_id: &str) -> bool {

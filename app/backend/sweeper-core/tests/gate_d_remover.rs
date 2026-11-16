@@ -375,7 +375,8 @@ fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
     assert!(!readonly.exists(), "readonly should be handled/deleted");
     assert!(!hidden.exists(), "hidden should be deleted in valid target");
     assert!(!system.exists(), "system should be deleted in valid target");
-    assert!(!old.exists(), "old file should be deleted");
+    let old_deleted = !old.exists();
+    assert!(old_deleted, "old file should be deleted");
     assert!(
         !boundary.exists(),
         "exact boundary should be eligible/deleted"
@@ -385,54 +386,46 @@ fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
     assert_sentinel_intact(&sb);
 }
 
-#[test]
-fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sensitive() {
-    let sb = Sandbox::new();
-    let target_root = sb.create_dir("target").unwrap();
-
-    // Deep 1000-level tree (iterative walker)
-    let deep = sweeper_testkit::create_deep_tree(&target_root, 1005).unwrap();
+fn seed_deep_and_long(target_root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let deep = sweeper_testkit::create_deep_tree(target_root, 1005).unwrap();
     let deep_file = deep.join("deep.txt");
     write_file(&deep_file, b"deep");
-
-    // Long path > 260 chars
     let long_dir = target_root
         .join("L".repeat(120))
         .join("M".repeat(120))
         .join("N".repeat(40));
     fs::create_dir_all(sweeper_testkit::to_extended_length_path(&long_dir)).unwrap();
-    let long_file = long_dir.join("long_file_name_".to_string() + &"x".repeat(80) + ".txt");
+    let long_file = long_dir.join(format!("long_file_name_{}.txt", "x".repeat(80)));
     write_file(
         &sweeper_testkit::to_extended_length_path(&long_file),
         b"long",
     );
+    (deep_file, long_file)
+}
 
-    // Reserved names via \\?\
-    let nul_path = target_root.join("NUL_test_safe.txt"); // avoid creating actual device name file; use reserved-like name handling path
+fn seed_special_names(
+    target_root: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let nul_path = target_root.join("NUL_test_safe.txt");
     write_file(&nul_path, b"nul-like");
     set_filetime(&nul_path, old_mtime_secs());
-    // Actual reserved device names as files are not creatable normally; ensure no crash when encountered via paths logic is covered elsewhere.
-    // Create a file and an ADS stream
     let ads_base = target_root.join("ads_base.txt");
     write_file(&ads_base, b"base");
     sweeper_testkit::write_ads(&ads_base, ":stream1:$DATA", b"ads-data").unwrap();
     set_filetime(&ads_base, old_mtime_secs());
-
-    // Arabic & emoji filenames
     let arabic = target_root.join("\u{0645}\u{0631}\u{062d}\u{0628}\u{0627} \u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}.txt");
-    let emoji = target_root.join("emoji ðŸ˜€ file.txt");
+    let emoji = target_root.join("emoji \u{1F600} file.txt");
     write_file(&arabic, b"arabic");
     write_file(&emoji, b"emoji");
     set_filetime(&arabic, old_mtime_secs());
     set_filetime(&emoji, old_mtime_secs());
+    (ads_base, arabic, emoji)
+}
 
-    // Trailing dots/spaces are invalid in normal Win32 names; create via extended path if possible is not allowed for creation,
-    // but we ensure scanner/remover handle/report paths safely. (Adversarial path corpus covers lexical rejection.)
-
-    // Per-directory case-sensitive filenames (best effort)
+fn try_enable_case_sensitive_dir(target_root: &std::path::Path) {
     let case_dir = target_root.join("casedir");
     fs::create_dir_all(&case_dir).unwrap();
-    let case_status = Command::new("fsutil")
+    let status = Command::new("fsutil")
         .args([
             "file",
             "setCaseSensitiveInfo",
@@ -440,25 +433,28 @@ fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sens
             "enable",
         ])
         .status();
-    if case_status.map(|s| s.success()).unwrap_or(false) {
-        write_file(&case_dir.join("Case.txt"), b"upper");
-        // Creating "case.txt" alongside "Case.txt" requires case-sensitive dir; may fail on some FS modes.
-        let _ = fs::write(case_dir.join("case.txt"), b"lower");
-        for e in fs::read_dir(&case_dir).unwrap().flatten() {
-            set_filetime(&e.path(), old_mtime_secs());
-        }
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        return;
     }
+    write_file(&case_dir.join("Case.txt"), b"upper");
+    let _ = fs::write(case_dir.join("case.txt"), b"lower");
+    for e in fs::read_dir(&case_dir).unwrap().flatten() {
+        set_filetime(&e.path(), old_mtime_secs());
+    }
+}
 
+fn run_long_path_clean(
+    target_root: &std::path::Path,
+    journal_dir: std::path::PathBuf,
+) -> sweeper_core::remover::CleanReport {
     let item = make_item(
         "root",
-        &target_root,
-        &target_root,
+        target_root,
+        target_root,
         1024 * 1024,
         Some(old_mtime_secs()),
     );
-    let journal_dir = sb.create_dir("journal").unwrap();
-    // Age checks are covered in a dedicated test; use min_age 0 here to focus on deep/long path deletion.
-    let report = remover::execute_clean(
+    remover::execute_clean(
         vec![item],
         CleanOptions {
             preview_estimated_bytes: 50 * 1024 * 1024,
@@ -467,18 +463,26 @@ fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sens
             journal_base_dir: Some(journal_dir),
         },
     )
-    .unwrap();
+    .unwrap()
+}
 
+#[test]
+fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sensitive() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("target").unwrap();
+    let (deep_file, long_file) = seed_deep_and_long(&target_root);
+    let (ads_base, arabic, emoji) = seed_special_names(&target_root);
+    try_enable_case_sensitive_dir(&target_root);
+    let report = run_long_path_clean(&target_root, sb.create_dir("journal").unwrap());
     assert!(!report.aborted, "aborted: {:?}", report.abort_reason);
     assert!(!deep_file.exists(), "deep file should be deleted");
-    assert!(
-        !long_file.exists() && !sweeper_testkit::to_extended_length_path(&long_file).exists(),
-        "long path file should be deleted"
-    );
+    let long_gone =
+        !long_file.exists() && !sweeper_testkit::to_extended_length_path(&long_file).exists();
+    assert!(long_gone, "long path file should be deleted");
     assert!(!ads_base.exists(), "base file should be deleted");
     assert!(!arabic.exists(), "arabic filename file should be deleted");
-    assert!(!emoji.exists(), "emoji filename file should be deleted");
-    // Target root directory must remain (contents-only)
+    let emoji_gone = !emoji.exists();
+    assert!(emoji_gone, "emoji filename file should be deleted");
     assert!(target_root.exists(), "target root must remain");
     assert_sentinel_intact(&sb);
 }
@@ -854,7 +858,8 @@ fn gate_d_age_checks_still_skip_unemptied_or_non_emptied_entries() {
     );
     assert!(empty_recent.exists(), "empty recent dir must be skipped");
     assert!(future_file.exists(), "future-mtime file must be skipped");
-    assert!(recent_file.exists(), "recent file must be skipped");
+    let recent_file_kept = recent_file.exists();
+    assert!(recent_file_kept, "recent file must be skipped");
     assert!(
         has_recent.exists() && recent_child.exists(),
         "directory containing unemptied recent file must remain"

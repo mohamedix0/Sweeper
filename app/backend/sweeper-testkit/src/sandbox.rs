@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -10,7 +10,7 @@ use crate::cleanup::{
     cleanup_stale_sandboxes, remove_dir_all_sandbox_root, SANDBOX_DIR_PREFIX, SENTINEL_FILE_NAME,
 };
 use crate::owner_lock::{acquire_owner_lock, OWNER_LOCK_FILE_NAME};
-use crate::paths::default_sandbox_base_checked;
+use crate::paths::{default_sandbox_base_checked, strip_extended_prefix};
 use crate::{Result, TestkitError};
 
 /// Per-test isolated sandbox rooted in a temp directory with a required sentinel file.
@@ -74,13 +74,17 @@ impl Sandbox {
     /// Resolve a path inside the sandbox after verifying the sentinel is present.
     pub fn guarded_path(&self, relative: impl AsRef<Path>) -> PathBuf {
         self.assert_sentinel_present();
-        self.root.join(relative)
+        self.checked_join_relative(relative.as_ref())
+            .unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Create a child directory inside the sandbox after verifying sentinel.
     pub fn create_dir(&self, relative: impl AsRef<Path>) -> Result<PathBuf> {
-        let path = self.guarded_path(relative);
+        self.assert_sentinel_present();
+        let path = self.checked_join_relative(relative.as_ref())?;
+        self.assert_path_within_root(&path)?;
         fs::create_dir_all(&path)?;
+        self.assert_path_within_root(&path)?;
         Ok(path)
     }
 
@@ -90,15 +94,105 @@ impl Sandbox {
         relative: impl AsRef<Path>,
         contents: impl AsRef<[u8]>,
     ) -> Result<PathBuf> {
-        let path = self.guarded_path(relative);
+        self.assert_sentinel_present();
+        let path = self.checked_join_relative(relative.as_ref())?;
+        self.assert_path_within_root(&path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            self.assert_path_within_root(parent)?;
         }
         let mut f = fs::File::create(&path)?;
         f.write_all(contents.as_ref())?;
         f.sync_all()?;
+        self.assert_path_within_root(&path)?;
         Ok(path)
     }
+
+    fn checked_join_relative(&self, relative: &Path) -> Result<PathBuf> {
+        if relative.as_os_str().is_empty() {
+            return Err(TestkitError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sandbox relative path must not be empty",
+            )));
+        }
+        for comp in relative.components() {
+            match comp {
+                Component::Normal(_) | Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(TestkitError::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "sandbox path escapes or is not a safe relative path: {}",
+                            relative.display()
+                        ),
+                    )));
+                }
+            }
+        }
+        Ok(self.root.join(relative))
+    }
+
+    fn assert_path_within_root(&self, path: &Path) -> Result<()> {
+        let root_canon = canonicalize_existing(&self.root)?;
+        let existing = deepest_existing_ancestor(path)?;
+        let existing_canon = canonicalize_existing(&existing)?;
+        if !existing_canon.starts_with(&root_canon) {
+            return Err(TestkitError::Io(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "sandbox path escapes root (symlink/junction traversal): {}",
+                    path.display()
+                ),
+            )));
+        }
+        // Lexical containment for the requested path under the sandbox root.
+        let root_norm = normalize_lexical(&self.root);
+        let path_norm = normalize_lexical(path);
+        if !path_norm.starts_with(&root_norm) {
+            return Err(TestkitError::Io(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("sandbox path escapes root: {}", path.display()),
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn canonicalize_existing(path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(path)
+        .map(strip_extended_prefix)
+        .map_err(TestkitError::Io)
+}
+
+fn deepest_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut cur = path.to_path_buf();
+    loop {
+        if cur.exists() || fs::symlink_metadata(&cur).is_ok() {
+            return Ok(cur);
+        }
+        if !cur.pop() {
+            return Err(TestkitError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no existing ancestor for path: {}", path.display()),
+            )));
+        }
+    }
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    use std::path::Component as C;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            C::Prefix(_) | C::RootDir => out.push(comp.as_os_str()),
+            C::CurDir => {}
+            C::ParentDir => {
+                out.pop();
+            }
+            C::Normal(s) => out.push(s),
+        }
+    }
+    out
 }
 
 fn write_sentinel(root: &Path) -> io::Result<()> {

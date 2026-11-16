@@ -1,0 +1,80 @@
+import { formatContractError, type CleanProgressEvent, type ExecuteCleanResponse, type SweeperClient } from '../../api/client';
+import type { AnalyzerNodeDto, ContractError } from '../../contract/bindings';
+import type { PreviewResult } from '../cleanShared';
+
+type RunAnalyzerArgs = {
+  client: SweeperClient;
+  pathOverride?: string;
+  rootPath: string;
+  setRootPath: (v: string) => void;
+  invalidatePreviewRequest: () => void;
+  resetInspection: () => void;
+  clearRunState: () => void;
+  setSelectedIds: (v: Set<string>) => void;
+  setResult: (v: any) => void;
+  setExpanded: (v: Set<string>) => void;
+  setShowAllAnalyzerNodes: (v: Set<string>) => void;
+  setAnalyzing: (v: boolean) => void;
+  setProgress: (v: any) => void;
+  setSessionId: (v: string | null) => void;
+  setStartedAt: (v: number | null) => void;
+  setAnalyzedPath: (v: string | null) => void;
+  inspectNode: (input: { id: string }) => void;
+  setError: (v: string | null) => void;
+};
+
+function targetPathOf(args: { pathOverride?: string; rootPath: string }): string {
+  let raw = args.rootPath;
+  if (args.pathOverride) raw = args.pathOverride;
+  const trimmed = raw.trim();
+  if (trimmed) return trimmed;
+  return 'C:\\';
+}
+
+function nodeBytes(node: AnalyzerNodeDto): bigint {
+  const raw = node.sizeBytes;
+  if (raw) return BigInt(raw);
+  return 0n;
+}
+
+function compareDesc(a: AnalyzerNodeDto, b: AnalyzerNodeDto): number {
+  const sa = nodeBytes(a);
+  const sb = nodeBytes(b);
+  if (sa === sb) return 0;
+  if (sa > sb) return -1;
+  return 1;
+}
+
+function autoInspectId(root: AnalyzerNodeDto): string {
+  const sorted = [...(root.children ?? [])].sort(compareDesc);
+  const first = sorted[0];
+  if (first) return first.id;
+  return root.id;
+}
+
+export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
+  const targetPath = targetPathOf({ pathOverride: args.pathOverride, rootPath: args.rootPath });
+  args.setRootPath(targetPath);
+  args.invalidatePreviewRequest();
+  args.resetInspection();
+  args.clearRunState();
+  args.setSelectedIds(new Set());
+  args.setResult(null);
+  args.setExpanded(new Set());
+  args.setShowAllAnalyzerNodes(new Set());
+  args.setAnalyzing(true);
+  args.setProgress(null);
+  try {
+    const res = await args.client.startAnalyzer(targetPath, (p) => args.setProgress(p));
+    args.setResult(res);
+    args.setSessionId(res.sessionId);
+    args.setStartedAt(Date.now());
+    args.setExpanded(new Set());
+    args.setAnalyzedPath(res.rootPath || targetPath);
+    args.inspectNode({ id: autoInspectId(res.root) });
+  } catch (e) {
+    args.setError(formatContractError(e));
+  } finally {
+    args.setAnalyzing(false);
+  }
+}

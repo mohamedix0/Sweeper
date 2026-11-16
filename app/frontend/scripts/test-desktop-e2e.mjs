@@ -1,282 +1,92 @@
 import { chromium } from '@playwright/test';
-import { spawn, spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import net from 'node:net';
-import os from 'node:os';
-import path from 'node:path';
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import {
+  assert,
+  assertSweeperWindowVisible,
+  cleanupTemp,
+  closeBrowser,
+  findSweeperPage,
+  getFreePort,
+  killProcessTree,
+  probeEval,
+  readScanEval,
+  resolveDesktopExePath,
+  runScanFlow,
+  safeEval,
+  scanReadyEval,
+  spawnDesktop,
+  stopProbeEval,
+  verifyBasicNavigation,
+  verifyStatePreserved,
+  waitForCdp,
+  waitForExit,
+} from './test-desktop-e2e.helpers.mjs';
 
-function assert(condition, message) { if (!condition) throw new Error(message); }
-
-async function getFreePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Failed to allocate a TCP port')));
-        return;
-      }
-      const { port } = address;
-      server.close((err) => (err ? reject(err) : resolve(port)));
-    });
+function attachCollectors(page) {
+  const collectors = { consoleErrors: [], pageErrors: [] };
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') collectors.consoleErrors.push(msg.text());
   });
-}
-
-async function waitForCdp(port, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (response.ok) return;
-      lastError = new Error(`CDP endpoint returned ${response.status}`);
-    } catch (error) { lastError = error; }
-    await delay(250);
-  }
-  throw new Error(`Timed out waiting for WebView2 CDP endpoint on port ${port}: ${String(lastError)}`);
-}
-
-function isRelevantSweeperPage(page) {
-  const url = page.url();
-  if (!url || url === 'about:blank') return false;
-  if (url.includes('tauri-isolation') || url.includes('/isolation/')) return false;
-  return true;
-}
-
-async function pageHasSweeperUi(page) {
-  try {
-    return await page.evaluate(() => {
-      const text = document.body?.innerText ?? '';
-      if (document.title.includes('Sweeper')) return true;
-      return text.includes('Scan') || text.includes('Analyzer') || text.includes('Settings');
-    });
-  } catch { return false; }
-}
-
-async function findSweeperPage(browser, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    for (const context of browser.contexts()) {
-      for (const page of context.pages()) {
-        if (!isRelevantSweeperPage(page)) continue;
-        if (await pageHasSweeperUi(page)) return page;
-      }
-    }
-    await delay(250);
-  }
-  throw new Error('Could not locate the main Sweeper WebView2 page over CDP');
-}
-
-function killProcessTree(pid) { if (pid) spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); }
-async function waitForExit(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await Promise.race([new Promise((resolve) => child.once('exit', resolve)), delay(timeoutMs)]);
-}
-
-function readSweeperWindowState(pid) {
-  const script = [
-    '$ErrorActionPreference = "Stop";',
-    'Add-Type @"',
-    'using System; using System.Text; using System.Runtime.InteropServices;',
-    'public static class Win {',
-    '  public delegate bool EWP(IntPtr h, IntPtr p);',
-    '  [DllImport("user32.dll")] public static extern bool EnumWindows(EWP cb, IntPtr p);',
-    '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
-    '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
-    '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder b, int m);',
-    '}',
-    '"@;',
-    `$want=${pid}; $hit=$null;`,
-    '$cb = [Win+EWP]{ param($h,$p) $proc=0; [Win]::GetWindowThreadProcessId($h,[ref]$proc)|Out-Null; if($proc -ne $want -or -not [Win]::IsWindowVisible($h)){return $true}; $sb=New-Object System.Text.StringBuilder 512; [Win]::GetWindowText($h,$sb,$sb.Capacity)|Out-Null; $t=$sb.ToString(); if($t -eq "Sweeper"){$script:hit=@($t,[int64]$h); return $false}; return $true };',
-    '[Win]::EnumWindows($cb,[IntPtr]::Zero)|Out-Null;',
-    'if($hit){ Write-Output ("{0}|{1}" -f $hit[0],$hit[1]) }',
-  ].join('\n');
-  const result = spawnSync('powershell', ['-NoProfile', '-Command', script], { encoding: 'utf8' });
-  if (result.status !== 0) return { ok: false, detail: (result.stderr || result.stdout || '').trim() };
-  const out = (result.stdout || '').trim();
-  if (!out) return { ok: false, title: '', handle: '0' };
-  const [title = '', handle = '0'] = out.split('|');
-  return { ok: title === 'Sweeper' && handle !== '0', title, handle };
-}
-
-async function assertSweeperWindowVisible(pid, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  let last = { ok: false, detail: 'window state not checked yet' };
-  while (Date.now() < deadline) {
-    last = readSweeperWindowState(pid);
-    if (last.ok) return;
-    await delay(250);
-  }
-  const detail = last.detail || `title="${last.title ?? ''}", handle=${last.handle ?? '0'}`;
-  throw new Error(`Sweeper window visibility check failed: ${detail}`);
-}
-
-function resolveDesktopExePath() {
-  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-  const exePath = process.env.SWEEPER_DESKTOP_EXE ? path.resolve(process.env.SWEEPER_DESKTOP_EXE) : path.resolve(scriptDir, '../../../target/debug/sweeper-desktop.exe');
-  if (fs.existsSync(exePath)) return exePath;
-  const repoRoot = path.resolve(scriptDir, '../../..');
-  const targetDir = path.join(repoRoot, 'target');
-  throw new Error(`sweeper-desktop executable not found at ${exePath}. Build it first with CARGO_TARGET_DIR set to the repository-root target directory so Cargo writes to <repo>/target/debug/ instead of app/target/debug/ (PowerShell: $env:CARGO_TARGET_DIR='${targetDir}'; cargo build --manifest-path app/Cargo.toml --package sweeper-desktop --locked).`);
-}
-
-function isolatedEnv(exePath, port) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sweeper-desktop-e2e-'));
-  const appData = path.join(tempRoot, 'AppData', 'Roaming');
-  const localAppData = path.join(tempRoot, 'AppData', 'Local');
-  const webViewUserData = path.join(tempRoot, 'WebView2');
-  fs.mkdirSync(appData, { recursive: true });
-  fs.mkdirSync(localAppData, { recursive: true });
-  fs.mkdirSync(webViewUserData, { recursive: true });
-  const env = { ...process.env, SWEEPER_E2E_READ_ONLY: '1', WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`, WEBVIEW2_USER_DATA_FOLDER: webViewUserData, APPDATA: appData, LOCALAPPDATA: localAppData };
-  const child = spawn(exePath, [], { cwd: path.dirname(exePath), env, stdio: 'ignore', windowsHide: false });
-  return { child, tempRoot };
-}
-
-async function installPageErrorCollectors(page) {
-  const consoleErrors = []; const pageErrors = [];
-  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
-  page.on('pageerror', (err) => { pageErrors.push(String(err)); });
-  return { consoleErrors, pageErrors };
-}
-
-async function verifyBasicNavigation(page) {
-  await page.waitForLoadState('domcontentloaded', { timeout: 30_000 });
-  await page.getByRole('button', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Analyzer' }).waitFor({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
-  await page.getByText(/Standard \(Non-Elevated\)|Administrator \(Elevated\)/).waitFor({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Scan & Clean' }).click();
-  await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Start Scan' }).waitFor({ timeout: 30_000 });
-}
-
-async function startUiProbe(page) {
-  await page.evaluate(() => {
-    const state = { maxDelta: 0, last: performance.now(), running: true, samples: 0 };
-    window.__sweeperUiProbe = state;
-    const tick = () => {
-      if (!state.running) return;
-      const now = performance.now();
-      const delta = now - state.last;
-      if (delta > state.maxDelta) state.maxDelta = delta;
-      state.last = now; state.samples += 1; requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
+  page.on('pageerror', (err) => {
+    collectors.pageErrors.push(String(err));
   });
+  return collectors;
 }
 
-async function detectScanProgress(page) {
-  try {
-    await page.locator('.scan-progress-notice, [aria-label="Scan target progress"]').first().waitFor({ timeout: 5_000 });
-    return true;
-  } catch { return false; }
+function collectProblems(collectors) {
+  const problems = [];
+  for (const msg of collectors.consoleErrors) problems.push(`console.error: ${msg}`);
+  for (const msg of collectors.pageErrors) problems.push(`pageerror: ${msg}`);
+  return problems;
 }
 
-async function waitForScanCompletion(page) {
-  await page.waitForFunction(() => {
-    const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
-    const hasResults = document.querySelectorAll('article.target-card').length > 0;
-    const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
-    const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
-    const progressVisible = !!document.querySelector('.scan-progress-notice');
-    const errorNotice = Array.from(document.querySelectorAll('[role="alert"]')).some((el) => /scan failed|session expired|invalid/i.test(el.textContent || ''));
-    return !progressVisible && !errorNotice && inspector && (hasResults || noTargets) && !readyVisible;
-  }, undefined, { timeout: 300_000 });
-}
-
-async function readScanState(page) {
-  return await page.evaluate(() => {
-    const hasResults = document.querySelectorAll('article.target-card').length > 0;
-    const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
-    const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
-    const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
-    return { hasResults, noTargets, inspector, readyVisible };
-  });
-}
-
-async function verifyStatePreserved(page, initialScanState) {
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
-  await page.getByRole('button', { name: 'Scan & Clean' }).click();
-  await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
-  const preserved = await readScanState(page);
-  assert(preserved.hasResults === initialScanState.hasResults && preserved.noTargets === initialScanState.noTargets && preserved.inspector && !preserved.readyVisible, `Scan state was not preserved after navigating Settings -> Scan & Clean (initial=${JSON.stringify(initialScanState)}, preserved=${JSON.stringify(preserved)})`);
-}
-
-async function stopUiProbe(page) {
-  await delay(250);
-  try {
-    return await page.evaluate(() => {
-      const state = window.__sweeperUiProbe;
-      if (!state) return null;
-      state.running = false;
-      return { maxDelta: state.maxDelta, samples: state.samples };
-    });
-  } catch { return null; }
-}
-
-function assertProbeOk(probe, sawProgress) {
-  assert(probe && typeof probe.maxDelta === 'number', 'UI responsiveness probe did not run');
-  assert(probe.maxDelta < 2000, `UI responsiveness probe detected main-thread stall (max RAF delta ${probe.maxDelta.toFixed(1)}ms >= 2000ms, samples=${probe.samples}, sawProgress=${sawProgress})`);
-}
-
-async function verifyDesktopViews(page) {
+async function runPageFlow(page) {
   await verifyBasicNavigation(page);
-  await startUiProbe(page);
-  await page.getByRole('button', { name: 'Start Scan' }).click();
-  const sawProgress = await detectScanProgress(page);
-  await waitForScanCompletion(page);
-  const initialScanState = await readScanState(page);
-  await verifyStatePreserved(page, initialScanState);
-  const probe = await stopUiProbe(page);
-  assertProbeOk(probe, sawProgress);
+  await page.evaluate(probeEval);
+  const sawProgress = await runScanFlow(page);
+  await page.waitForFunction(scanReadyEval, undefined, { timeout: 300_000 });
+  await verifyStatePreserved(page, await page.evaluate(readScanEval));
+  await delay(250);
   return sawProgress;
 }
 
-function assertNoRuntimeProblems(collectors) {
-  const runtimeProblems = [...collectors.consoleErrors.map((msg) => `console.error: ${msg}`), ...collectors.pageErrors.map((msg) => `pageerror: ${msg}`)];
-  const cspIsolationRuntimeProblems = runtimeProblems.filter((msg) => /csp|content security policy|isolation|runtime/i.test(msg));
-  assert(runtimeProblems.length === 0, `Unexpected WebView2 console/page errors:\n${runtimeProblems.join('\n')}`);
-  assert(cspIsolationRuntimeProblems.length === 0, `Unexpected CSP/isolation/runtime errors:\n${cspIsolationRuntimeProblems.join('\n')}`);
+async function finishChecks(ctx) {
+  const probe = await safeEval(ctx.page, stopProbeEval);
+  assert(probe && typeof probe.maxDelta === 'number', 'UI responsiveness probe did not run');
+  assert(probe.maxDelta < 2000, `UI responsiveness probe detected main-thread stall (max RAF delta ${probe.maxDelta.toFixed(1)}ms >= 2000ms, samples=${probe.samples}, sawProgress=${ctx.sawProgress})`);
+  await delay(1500);
+  await assertSweeperWindowVisible(ctx.child.pid);
+  const problems = collectProblems(ctx.collectors);
+  const cspProblems = problems.filter((msg) => /csp|content security policy|isolation|runtime/i.test(msg));
+  assert(problems.length === 0, `Unexpected WebView2 console/page errors:\n${problems.join('\n')}`);
+  assert(cspProblems.length === 0, `Unexpected CSP/isolation/runtime errors:\n${cspProblems.join('\n')}`);
 }
 
-function successLine(args) {
-  return `desktop-e2e: ok (exe=${args.exePath}, pid=${args.pid}, cdpPort=${args.port}, consoleErrors=0, pageErrors=0, cspIsolationRuntimeErrors=0, sawProgress=${args.sawProgress})\n`;
-}
-
-async function runDesktopE2E(exePath, port, child) {
-  await waitForCdp(port, 30_000);
-  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+async function runDesktopE2E(opts) {
+  await waitForCdp(opts.port, 30_000);
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${opts.port}`);
   try {
     const page = await findSweeperPage(browser, 30_000);
-    const collectors = await installPageErrorCollectors(page);
-    const sawProgress = await verifyDesktopViews(page);
-    await delay(1500);
-    await assertSweeperWindowVisible(child.pid);
-    assertNoRuntimeProblems(collectors);
-    process.stdout.write(successLine({ exePath, pid: child.pid, port, sawProgress }));
+    const collectors = attachCollectors(page);
+    const sawProgress = await runPageFlow(page);
+    await finishChecks({ page, child: opts.child, collectors, sawProgress });
+    process.stdout.write(`desktop-e2e: ok (exe=${opts.exePath}, pid=${opts.child.pid}, cdpPort=${opts.port}, consoleErrors=0, pageErrors=0, cspIsolationRuntimeErrors=0, sawProgress=${sawProgress})\n`);
   } finally {
-    try { await browser.close(); } catch { /* best effort */ }
+    await closeBrowser(browser);
   }
 }
 
 async function main() {
   const exePath = resolveDesktopExePath();
   const port = await getFreePort();
-  const { child, tempRoot } = isolatedEnv(exePath, port);
+  const { child, tempRoot } = spawnDesktop(exePath, port);
   try {
-    await runDesktopE2E(exePath, port, child);
+    await runDesktopE2E({ exePath, port, child });
   } finally {
     killProcessTree(child.pid);
     await waitForExit(child, 10_000);
-    try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+    cleanupTemp(tempRoot);
   }
 }
 

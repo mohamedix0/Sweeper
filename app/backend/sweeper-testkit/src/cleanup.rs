@@ -1,4 +1,4 @@
-﻿use std::fs;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -56,10 +56,15 @@ fn cleanup_stale_owned_dirs(
     let Some(base_canon) = prepare_cleanup_base(base)? else {
         return Ok(0);
     };
-    let now = SystemTime::now();
+    let ctx = CleanupEntryCtx {
+        base_canon: &base_canon,
+        now: SystemTime::now(),
+        max_age,
+        kind,
+    };
     let mut removed = 0usize;
     for entry in fs::read_dir(&base_canon)? {
-        if try_cleanup_stale_entry(entry?, &base_canon, now, max_age, kind) {
+        if try_cleanup_stale_entry(entry?, ctx) {
             removed += 1;
         }
     }
@@ -75,32 +80,28 @@ fn prepare_cleanup_base(base: &Path) -> io::Result<Option<PathBuf>> {
     Ok(Some(base_canon))
 }
 
-fn try_cleanup_stale_entry(
-    entry: fs::DirEntry,
-    base_canon: &Path,
+#[derive(Clone, Copy)]
+struct CleanupEntryCtx<'a> {
+    base_canon: &'a Path,
     now: SystemTime,
     max_age: Duration,
     kind: OwnedTempKind,
-) -> bool {
+}
+
+fn try_cleanup_stale_entry(entry: fs::DirEntry, ctx: CleanupEntryCtx<'_>) -> bool {
     let path = entry.path();
-    if !is_stale_cleanup_candidate(&path, base_canon, now, max_age, kind) {
+    if !is_stale_cleanup_candidate(&path, ctx) {
         return false;
     }
-    if !is_canonical_direct_child(&path, base_canon) {
+    if !is_canonical_direct_child(&path, ctx.base_canon) {
         return false;
     }
     remove_dir_all_sandbox_root(&strip_extended_prefix_canon(&path)).is_ok()
         || remove_dir_all_sandbox_root(&path).is_ok()
 }
 
-fn is_stale_cleanup_candidate(
-    path: &Path,
-    base_canon: &Path,
-    now: SystemTime,
-    max_age: Duration,
-    kind: OwnedTempKind,
-) -> bool {
-    if !is_direct_named_child(path, base_canon, kind.prefix()) {
+fn is_stale_cleanup_candidate(path: &Path, ctx: CleanupEntryCtx<'_>) -> bool {
+    if !is_direct_named_child(path, ctx.base_canon, ctx.kind.prefix()) {
         return false;
     }
     let Ok(meta) = fs::symlink_metadata(path) else {
@@ -109,7 +110,7 @@ fn is_stale_cleanup_candidate(
     if !meta.is_dir() || is_reparse_point(path, &meta) {
         return false;
     }
-    if !kind.has_required_marker(path) || !is_older_than(&meta, now, max_age) {
+    if !ctx.kind.has_required_marker(path) || !is_older_than(&meta, ctx.now, ctx.max_age) {
         return false;
     }
     !is_owner_lock_held(&path.join(OWNER_LOCK_FILE_NAME))
@@ -235,25 +236,27 @@ fn is_traversable_owned_dir(dir: &Path) -> bool {
     meta.is_dir() && !is_reparse_point(dir, &meta) && !meta.file_type().is_symlink()
 }
 
+struct RemovalWalkCtx<'a> {
+    root: &'a Path,
+    dir: &'a Path,
+    stack: &'a mut Vec<PathBuf>,
+}
+
 fn collect_dir_children(root: &Path, dir: &Path, stack: &mut Vec<PathBuf>) -> io::Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
+    let mut ctx = RemovalWalkCtx { root, dir, stack };
     for entry in entries {
-        process_removal_child(root, dir, &entry?.path(), stack)?;
+        process_removal_child(&mut ctx, &entry?.path())?;
     }
     Ok(())
 }
 
-fn process_removal_child(
-    root: &Path,
-    dir: &Path,
-    child: &Path,
-    stack: &mut Vec<PathBuf>,
-) -> io::Result<()> {
-    if is_deferred_ownership_marker(root, dir, child) {
+fn process_removal_child(ctx: &mut RemovalWalkCtx<'_>, child: &Path) -> io::Result<()> {
+    if is_deferred_ownership_marker(ctx.root, ctx.dir, child) {
         return Ok(());
     }
     let meta = match fs::symlink_metadata(child) {
@@ -265,7 +268,7 @@ fn process_removal_child(
         return remove_reparse_entry(child, &meta);
     }
     if is_plain_directory_child(child, &meta) {
-        stack.push(child.to_path_buf());
+        ctx.stack.push(child.to_path_buf());
         return Ok(());
     }
     remove_file_if_exists(child)
@@ -288,8 +291,15 @@ fn remove_single_postorder_dir(root: &Path, dir: &Path) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) if dir == root && is_retryable_dir_not_empty(&e) => remove_root_after_markers(root),
+        Err(e) if is_deferred_canary_nested_dir(root, dir) && is_retryable_dir_not_empty(&e) => {
+            Ok(())
+        }
         Err(e) => Err(e),
     }
+}
+
+fn is_deferred_canary_nested_dir(root: &Path, dir: &Path) -> bool {
+    has_canary_markers(root) && dir == root.join("nested")
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -331,7 +341,11 @@ fn is_deferred_canary_marker(root: &Path, current_dir: &Path, name: &str) -> boo
     if current_dir == root && name == "root.txt" {
         return true;
     }
-    current_dir == root && name == "nested"
+    is_canary_nested_marker_file(root, current_dir, name)
+}
+
+fn is_canary_nested_marker_file(root: &Path, current_dir: &Path, name: &str) -> bool {
+    current_dir == root.join("nested") && matches!(name, "file.txt" | "data.bin")
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -361,8 +375,8 @@ fn remove_canary_markers_if_present(root: &Path) -> io::Result<()> {
 
 fn canary_marker_paths(root: &Path) -> [PathBuf; 4] {
     [
-        root.join("nested").join("data.bin"),
         root.join("nested").join("file.txt"),
+        root.join("nested").join("data.bin"),
         root.join("nested"),
         root.join("root.txt"),
     ]
@@ -415,8 +429,8 @@ fn is_directory_reparse_entry(_path: &Path, meta: &fs::Metadata) -> bool {
 
 #[allow(clippy::disallowed_methods)]
 fn remove_reparse_entry(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
-    // Directory junctions/symlink-dirs must be unlinked with remove_dir; files with remove_file.
-    let res = if is_directory_reparse_entry(path, meta) || meta.is_dir() {
+    // Directory junctions/symlink-dirs must be unlinked with remove_dir; file symlinks/files with remove_file.
+    let res = if should_remove_reparse_as_dir(path, meta) {
         fs::remove_dir(path)
     } else {
         fs::remove_file(path)
@@ -426,4 +440,14 @@ fn remove_reparse_entry(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+#[cfg(windows)]
+fn should_remove_reparse_as_dir(path: &Path, meta: &fs::Metadata) -> bool {
+    is_directory_reparse_entry(path, meta) || meta.is_dir()
+}
+
+#[cfg(not(windows))]
+fn should_remove_reparse_as_dir(_path: &Path, meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink() && meta.is_dir()
 }

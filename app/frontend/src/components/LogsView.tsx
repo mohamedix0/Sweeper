@@ -5,12 +5,19 @@ import { LogsEntryList } from './logs/LogsEntryList';
 import { LogsFilterBar } from './logs/LogsFilterBar';
 import { useLogsSelection } from './logs/useLogsSelection';
 
-export function LogsView({ client, focusLogId, onFocusConsumed, onScanAgain }: { client: SweeperClient; focusLogId?: string | null; onFocusConsumed?: () => void; onScanAgain?: () => void }) {
-  const w = useLogsSelection({ client, focusLogId, onFocusConsumed });
+interface LogsViewProps {
+  client: SweeperClient;
+  focusLogId?: string | null;
+  onFocusConsumed?: () => void;
+  onScanAgain?: () => void;
+}
+
+export function LogsView(props: LogsViewProps) {
+  const w = useLogsSelection({ client: props.client, focusLogId: props.focusLogId, onFocusConsumed: props.onFocusConsumed });
   return (
     <div className="view-stack view-stack-fill">
       <header className="page-header" aria-label="Activity History header">
-        <div className="page-header-left"><h1 className="page-title" id="logs-heading">Activity History</h1><span className="header-subtitle num">{pluralize(w.logs.length, 'activity', 'activities')}</span></div>
+        <div className="page-header-left"><h1 className="page-title" id="logs-heading">Activity History</h1><span className="header-subtitle num">{pluralize({ count: w.logs.length, singular: 'activity', plural: 'activities' })}</span></div>
       </header>
       {w.error && <div className="notice error" role="alert">{w.error}</div>}
       <section className="logs-layout" aria-label="Activity history">
@@ -39,7 +46,7 @@ export function LogsView({ client, focusLogId, onFocusConsumed, onScanAgain }: {
           onExport={w.exportLog}
           onOutcome={w.setOutcomeFilter}
           onToggle={w.toggleSkippedGroup}
-          onScanAgain={onScanAgain}
+          onScanAgain={props.onScanAgain}
         />
       </section>
     </div>

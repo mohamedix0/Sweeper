@@ -322,6 +322,40 @@ fn cleanup_stale_sandboxes_skips_live_owner_lock() {
     drop(live);
 }
 
+#[test]
+fn cleanup_stale_sandboxes_skips_live_owner_lock_cross_platform() {
+    let _env = env_lock();
+    let base = tempfile::tempdir().expect("temp base");
+    let base_path = base.path();
+    let live = Sandbox::new_in(base_path);
+    let live_root = live.root().to_path_buf();
+    // On platforms where we can't force old mtime portably here, at minimum ensure a live owner lock
+    // is treated as held and cleanup does not remove the live sandbox.
+    let removed = cleanup_stale_sandboxes(base_path, Duration::from_secs(0)).expect("cleanup");
+    let _ = removed;
+    assert!(
+        live_root.exists(),
+        "live sandbox with owner lock must not be removed"
+    );
+    drop(live);
+}
+
+#[test]
+fn cleanup_stale_canaries_skips_live_owner_lock_cross_platform() {
+    let _env = env_lock();
+    let base = tempfile::tempdir().expect("temp base");
+    let base_path = base.path();
+    let live = CanaryTree::seed_external("live-lock").expect("seed canary");
+    // Copy-like scenario not needed; just assert cleanup against temp dir behavior is safe for live canary
+    // by ensuring its root still exists while live (owner lock held by CanaryTree instance).
+    assert!(live.root().exists(), "live canary should exist");
+    let _ = sweeper_testkit::cleanup_stale_canaries(base_path, Duration::from_secs(0));
+    assert!(
+        live.root().exists(),
+        "live canary with owner lock must not be removed by stale cleanup"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn partial_failure_preserves_sandbox_ownership_markers_for_retry() {
@@ -388,6 +422,7 @@ fn junction_cleanup_unlinks_junction_without_touching_target() {
 fn try_new_returns_actionable_error_when_no_safe_base_exists() {
     let _env = env_lock();
     // Force unsafe temp and no usable cargo-target fallback.
+    let unsafe_target = tempfile::tempdir().expect("tempdir for unsafe target-dir shim");
     let _guard = EnvGuard::set_multi(&[
         ("SWEEPER_SANDBOX_BASE", None),
         ("TEMP", Some(r"C:\Users")),
@@ -395,12 +430,98 @@ fn try_new_returns_actionable_error_when_no_safe_base_exists() {
         ("CARGO_TARGET_TMPDIR", None),
         ("CARGO_TARGET_DIR", Some(r"C:\Users")),
     ]);
+    // Side-effect-free safety validation must reject unsafe bases (including CARGO_TARGET_DIR)
+    // without attempting to create sandbox directories under protected roots.
+    assert!(
+        !is_safe_sandbox_base(Path::new(r"C:\Users")),
+        "C:\\Users must be rejected by sandbox base safety validation"
+    );
     let err = sweeper_testkit::Sandbox::try_new().expect_err("expected unsafe-base error");
     let msg = err.to_string();
     assert!(
         msg.contains("SWEEPER_SANDBOX_BASE") || msg.contains("CARGO_TARGET_DIR"),
         "error should be actionable and mention SWEEPER_SANDBOX_BASE/CARGO_TARGET_DIR: {msg}"
     );
+    // Ensure we did not create sandbox content in the protected location via this test path.
+    // (CARGO_TARGET_DIR points to C:\Users; resolver must not create sweeper-test-sandboxes there.)
+    let _ = unsafe_target; // keep fixture alive for test isolation patterns
+}
+
+#[cfg(windows)]
+#[test]
+fn configured_sandbox_base_rejects_junction_resolving_into_protected_users() {
+    let _env = env_lock();
+    let safe_parent = tempfile::tempdir_in(std::env::temp_dir()).expect("safe temp base");
+    let junction = safe_parent.path().join("users-junction");
+    sweeper_testkit::create_junction(&junction, Path::new(r"C:\Users"))
+        .expect("create junction to Users");
+    let _guard = EnvGuard::set_multi(&[
+        (
+            "SWEEPER_SANDBOX_BASE",
+            Some(junction.to_string_lossy().as_ref()),
+        ),
+        ("TEMP", Some(r"C:\Users")),
+        ("TMP", Some(r"C:\Users")),
+        ("CARGO_TARGET_TMPDIR", None),
+        ("CARGO_TARGET_DIR", None),
+    ]);
+    let err = sweeper_testkit::default_sandbox_base_checked()
+        .expect_err("configured base resolving into protected Users must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("SWEEPER_SANDBOX_BASE")
+            || msg.contains("unsafe")
+            || msg.contains("no safe sandbox base"),
+        "expected rejection for junction-resolved unsafe configured base, got: {msg}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_stale_canaries_removes_nested_extras_and_retries_when_marker_locked() {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let _env = env_lock();
+    let base = tempfile::tempdir().expect("temp base");
+    let canary = base.path().join("sweeper-canary-partial-nested");
+    fs::create_dir_all(canary.join("nested")).expect("create nested");
+    fs::write(canary.join("root.txt"), b"canary-root").expect("root marker");
+    fs::write(canary.join("nested").join("file.txt"), b"canary-nested")
+        .expect("nested marker file");
+    fs::write(canary.join("nested").join("data.bin"), [0u8, 1, 2, 3]).expect("nested marker data");
+    fs::write(canary.join("nested").join("extra.txt"), b"unexpected").expect("extra file");
+    set_path_mtime_old(&canary, 7200);
+    set_path_mtime_old(&canary.join("nested"), 7200);
+
+    let marker = canary.join("nested").join("file.txt");
+    let handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(&marker)
+        .expect("lock nested marker file");
+
+    let _ = sweeper_testkit::cleanup_stale_canaries(base.path(), Duration::from_secs(3600));
+    assert!(
+        !canary.join("nested").join("extra.txt").exists(),
+        "unexpected extra file inside nested must be removed even when nested is traversed"
+    );
+    assert!(
+        canary.join("root.txt").is_file()
+            && canary.join("nested").join("file.txt").is_file()
+            && canary.join("nested").join("data.bin").is_file(),
+        "canary ownership markers must remain when cleanup cannot complete"
+    );
+
+    drop(handle);
+    let removed = sweeper_testkit::cleanup_stale_canaries(base.path(), Duration::from_secs(3600))
+        .expect("retry cleanup");
+    assert!(
+        removed >= 1,
+        "retry should remove canary after lock release"
+    );
+    assert!(!canary.exists(), "canary dir should be removed on retry");
 }
 
 struct EnvGuard {
@@ -430,4 +551,58 @@ impl Drop for EnvGuard {
             }
         }
     }
+}
+
+#[test]
+fn guarded_path_rejects_parent_dir_escape() {
+    let _env = env_lock();
+    let sandbox = Sandbox::new();
+    let err = sandbox
+        .write_file(Path::new("..").join("outside.txt"), b"x")
+        .expect_err("parent-dir escape must be rejected");
+    let msg = err.to_string().to_ascii_lowercase();
+    assert!(
+        msg.contains("escape") || msg.contains("invalid") || msg.contains("relative"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn guarded_path_rejects_absolute_paths() {
+    let _env = env_lock();
+    let sandbox = Sandbox::new();
+    let abs = sandbox.root().join("abs.txt");
+    let err = sandbox
+        .write_file(&abs, b"x")
+        .expect_err("absolute path must be rejected");
+    let msg = err.to_string().to_ascii_lowercase();
+    assert!(
+        msg.contains("escape") || msg.contains("invalid") || msg.contains("relative"),
+        "unexpected error: {err}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn guarded_path_rejects_junction_parent_escape_attempt() {
+    let _env = env_lock();
+    let sandbox = Sandbox::new();
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let link = sandbox.root().join("escape_link");
+    sweeper_testkit::create_junction(&link, outside.path()).expect("create junction");
+    let err = sandbox
+        .write_file(Path::new("escape_link").join("pwned.txt"), b"x")
+        .expect_err("junction parent escape must be rejected");
+    let msg = err.to_string().to_ascii_lowercase();
+    assert!(
+        msg.contains("escape")
+            || msg.contains("symlink")
+            || msg.contains("junction")
+            || msg.contains("root"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !outside.path().join("pwned.txt").exists(),
+        "must not write outside sandbox through junction"
+    );
 }

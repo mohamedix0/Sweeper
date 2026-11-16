@@ -1,62 +1,121 @@
-import { describe, expect, it } from 'vitest';
-import { formatBytes, formatUnixSeconds, middleTruncatePath, normalizeDisplayPath, relativeAge, sumDecimalStrings, toBigInt } from './format';
+﻿import { describe, expect, it } from 'vitest';
+import { formatBytes, formatUnixSeconds, middleTruncatePath, normalizeDisplayPath, pluralize, relativeAge, sumDecimalStrings, toBigInt } from './format';
+
+interface BigIntCase { input: string; expected: bigint }
+interface SumCase { values: Array<string>; expected: bigint }
+interface BytesCase { input: string; expected?: string; contains?: string }
+interface UnixCase { secs: string | null; expected?: string; fromEpoch?: boolean }
+interface RelativeCase { secs: string | null | undefined; expected: string }
+interface PathCase { input: string; expected: string }
+
+const NOW = Date.parse('2026-11-15T12:00:00Z');
+
+function secsAgo(args: { ms: number }): string {
+  return String(Math.floor((NOW - args.ms) / 1000));
+}
+
+function expectBigIntCases(cases: BigIntCase[]) {
+  for (const item of cases) expect(toBigInt({ value: item.input })).toBe(item.expected);
+}
+
+function expectSumCases(cases: SumCase[]) {
+  for (const item of cases) expect(sumDecimalStrings({ values: item.values })).toBe(item.expected);
+}
+
+function assertBytesCase(item: BytesCase) {
+  const actual = formatBytes({ bytes: item.input });
+  if (item.contains) expect(actual).toContain(item.contains);
+  if (item.expected) expect(actual).toBe(item.expected);
+}
+
+function expectBytesCases(cases: BytesCase[]) {
+  for (const item of cases) assertBytesCase(item);
+}
+
+function assertUnixCase(item: UnixCase) {
+  const actual = formatUnixSeconds({ secs: item.secs });
+  if (item.fromEpoch) expect(actual).toBe(new Date(0).toLocaleString());
+  if (item.expected) expect(actual).toBe(item.expected);
+}
+
+function expectUnixCases(cases: UnixCase[]) {
+  for (const item of cases) assertUnixCase(item);
+}
+
+function expectRelativeCases(cases: RelativeCase[]) {
+  for (const item of cases) expect(relativeAge({ secs: item.secs, nowMs: NOW })).toBe(item.expected);
+}
+
+function expectNormalizeCases(cases: PathCase[]) {
+  for (const item of cases) expect(normalizeDisplayPath({ p: item.input })).toBe(item.expected);
+}
+
+function expectTruncateCases(cases: PathCase[]) {
+  for (const item of cases) expect(middleTruncatePath({ path: item.input, maxLen: 200 })).toBe(item.expected);
+}
 
 describe('format utils (BigInt-safe)', () => {
   it('parses decimal strings as BigInt', () => {
-    expect(toBigInt('0')).toBe(0n);
-    expect(toBigInt('9007199254740993')).toBe(9007199254740993n);
+    expectBigIntCases([{ input: '0', expected: 0n }, { input: '9007199254740993', expected: 9007199254740993n }]);
   });
 
   it('sums decimal strings using BigInt', () => {
-    expect(sumDecimalStrings(['1048576', '2048', '5242880'])).toBe(6293504n);
-    expect(sumDecimalStrings(['9007199254740991', '2'])).toBe(9007199254740993n);
+    expectSumCases([{ values: ['1048576', '2048', '5242880'], expected: 6293504n }, { values: ['9007199254740991', '2'], expected: 9007199254740993n }]);
   });
 
   it('formats bytes with units', () => {
-    const cases: Array<[string, string, boolean]> = [['0', '0 B', false], ['512', '512 B', false], ['1024', '1 KB', false], ['1048576', '1 MB', false], ['7340032', 'MB', true]];
-    for (const [input, out, contains] of cases) {
-      const actual = formatBytes(input);
-      if (contains) expect(actual).toContain(out);
-      else expect(actual).toBe(out);
-    }
+    expectBytesCases([{ input: '0', expected: '0 B' }, { input: '512', expected: '512 B' }, { input: '1024', expected: '1 KB' }, { input: '1048576', expected: '1 MB' }, { input: '7340032', contains: 'MB' }]);
   });
 
   it('handles very large byte counts without Number precision loss', () => {
-    const big = '9007199254740993';
-    expect(formatBytes(big)).toContain('PB');
+    expect(formatBytes({ bytes: '9007199254740993' })).toContain('PB');
   });
 
   it('range-checks BigInt before Number conversion for unix seconds', () => {
-    expect(formatUnixSeconds(null)).toBe('—');
-    expect(formatUnixSeconds('0')).toBe(new Date(0).toLocaleString());
-    expect(formatUnixSeconds('9007199254740993')).toBe('9007199254740993');
+    expectUnixCases([{ secs: null, expected: '\u2014' }, { secs: '0', fromEpoch: true }, { secs: '9007199254740993', expected: '9007199254740993' }]);
+  });
+
+  it('pluralizes labels', () => {
+    expect(pluralize({ count: 1, singular: 'item' })).toBe('1 item');
+    expect(pluralize({ count: 2, singular: 'item' })).toBe('2 items');
   });
 });
 
 describe('relativeAge (fixed now)', () => {
-  const NOW = Date.parse('2026-11-15T12:00:00Z');
-  const secsAgo = (ms: number) => String(Math.floor((NOW - ms) / 1000));
-
   it('renders human relative ages from unix seconds', () => {
-    const cases: Array<[string, string]> = [
-      [secsAgo(0), 'just now'], [secsAgo(90_000), 'just now'], [secsAgo(4 * 3_600_000), '4h ago'],
-      [secsAgo(4 * 86_400_000), '4d ago'], [secsAgo(12 * 86_400_000), '12d ago'], [secsAgo(30 * 86_400_000), '1mo ago'],
-      [secsAgo(60 * 86_400_000), '2mo ago'], [secsAgo(359 * 86_400_000), '11mo ago'], [secsAgo(360 * 86_400_000), '12mo ago'],
-      [secsAgo(364 * 86_400_000), '12mo ago'], [secsAgo(365 * 86_400_000), '1y ago'], [secsAgo(400 * 86_400_000), '1y ago'],
-    ];
-    for (const [input, out] of cases) expect(relativeAge(input, NOW)).toBe(out);
+    expectRelativeCases([
+      { secs: secsAgo({ ms: 0 }), expected: 'just now' }, { secs: secsAgo({ ms: 90_000 }), expected: 'just now' },
+      { secs: secsAgo({ ms: 4 * 3_600_000 }), expected: '4h ago' }, { secs: secsAgo({ ms: 4 * 86_400_000 }), expected: '4d ago' },
+      { secs: secsAgo({ ms: 12 * 86_400_000 }), expected: '12d ago' }, { secs: secsAgo({ ms: 30 * 86_400_000 }), expected: '1mo ago' },
+      { secs: secsAgo({ ms: 60 * 86_400_000 }), expected: '2mo ago' }, { secs: secsAgo({ ms: 359 * 86_400_000 }), expected: '11mo ago' },
+      { secs: secsAgo({ ms: 360 * 86_400_000 }), expected: '12mo ago' }, { secs: secsAgo({ ms: 364 * 86_400_000 }), expected: '12mo ago' },
+      { secs: secsAgo({ ms: 365 * 86_400_000 }), expected: '1y ago' }, { secs: secsAgo({ ms: 400 * 86_400_000 }), expected: '1y ago' },
+    ]);
   });
 
   it('treats future timestamps as just now and unsafe values as em dash', () => {
-    const cases: Array<[string | null | undefined, string]> = [[String(Math.floor(NOW / 1000) + 60), 'just now'], [null, '—'], [undefined, '—'], ['9007199254740993', '—'], ['not-a-number', '—']];
-    for (const [input, out] of cases) expect(relativeAge(input, NOW)).toBe(out);
+    expectRelativeCases([
+      { secs: String(Math.floor(NOW / 1000) + 60), expected: 'just now' }, { secs: null, expected: '\u2014' },
+      { secs: undefined, expected: '\u2014' }, { secs: '9007199254740993', expected: '\u2014' }, { secs: 'not-a-number', expected: '\u2014' },
+    ]);
   });
 });
 
 describe('normalizeDisplayPath and middleTruncatePath', () => {
   it('preserves UNC and extended-length prefixes while collapsing separators elsewhere', () => {
-    const paths = [['\\\\server\\share\\a\\\\b\\c', '\\\\server\\share\\a\\b\\c'], ['\\\\?\\C:\\temp\\\\logs\\app.log', '\\\\?\\C:\\temp\\logs\\app.log'], ['\\\\?\\UNC\\server\\share\\\\dir\\file.txt', '\\\\?\\UNC\\server\\share\\dir\\file.txt']] as const;
-    for (const [input, expected] of paths) expect(normalizeDisplayPath(input)).toBe(expected);
-    for (const [input, expected] of paths.slice(0, 2)) expect(middleTruncatePath(input, 200)).toBe(expected);
+    const paths: PathCase[] = [
+      { input: '\\\\server\\share\\a\\\\b\\c', expected: '\\\\server\\share\\a\\b\\c' },
+      { input: '\\\\?\\C:\\temp\\\\logs\\app.log', expected: '\\\\?\\C:\\temp\\logs\\app.log' },
+      { input: '\\\\?\\UNC\\server\\share\\\\dir\\file.txt', expected: '\\\\?\\UNC\\server\\share\\dir\\file.txt' },
+    ];
+    expectNormalizeCases(paths);
+    expectTruncateCases(paths.slice(0, 2));
+  });
+
+  it('preserves leading \\\\ for long UNC paths', () => {
+    const input = '\\\\server\\share\\very\\long\\folder\\structure\\that\\keeps\\going\\cache\\file.log';
+    const out = middleTruncatePath({ path: input, maxLen: 36 });
+    expect(out.startsWith('\\\\server\\share\\')).toBe(true);
+    expect(out.includes('\\server\\...')).toBe(false);
   });
 });

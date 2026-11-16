@@ -9,7 +9,7 @@ use sweeper_core::scanner::{self, ScanError, ScanReport};
 use sweeper_core::settings::SweeperSettings;
 
 use super::mapping::map_report_to_session;
-use super::support::{build_store_scan_cb, emit_scan_progress, sanitize_reason};
+use super::support::{build_store_scan_cb, emit_scan_progress, sanitize_reason, SessionIdRef};
 use super::{PreparedScan, ScanFinishInput, ScanSession, SessionStore};
 use crate::clock::Clock;
 
@@ -183,11 +183,13 @@ impl SessionStore {
                 session_id: ctx.session_id.clone(),
             },
         );
-        let core_cb = build_store_scan_cb(&ctx.session_id, &shared_cb);
+        let core_cb = build_store_scan_cb(SessionIdRef(&ctx.session_id), &shared_cb);
         let scan_result = scanner::scan_with_settings_current_elevation_with_progress(
             &ctx.prepared.effective_settings,
-            ctx.prepared.cancel.clone(),
-            core_cb,
+            scanner::ScanRunControl {
+                cancel: ctx.prepared.cancel.clone(),
+                progress_cb: core_cb,
+            },
         );
         self.finalize_store_scan(
             clock,

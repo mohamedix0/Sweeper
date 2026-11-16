@@ -5558,7 +5558,7 @@ svg.alloc-bar .alloc-segment.hotspot-seg { stroke: transparent; }
   font-weight: 500;
 }
 
-/* Scan: Skipped Â· Unverified pill as subtle interactive button/link when actionable */
+/* Scan: Skipped · Unverified pill as subtle interactive button/link when actionable */
 .scan-status-action-pill {
   cursor: pointer;
   border: 1px solid var(--border-divider);

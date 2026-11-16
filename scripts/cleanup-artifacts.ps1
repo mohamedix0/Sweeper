@@ -193,7 +193,7 @@ function Invoke-CargoCleanForTarget {
 
 function Test-CargoCleanSkipForSandboxOnlyTarget {
     param([string]$Message, [string]$RepoTarget)
-    if ($Message -notmatch "missing or invalid CACHEDIR\.TAG") { return $false }
+    if ($Message -notmatch '(missing or invalid|invalid signature in) `?CACHEDIR\.TAG') { return $false }
     return (Test-Path -LiteralPath (Join-Path $RepoTarget "sweeper-test-sandboxes"))
 }
 
