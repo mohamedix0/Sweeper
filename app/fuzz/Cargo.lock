@@ -3133,6 +3133,7 @@ dependencies = [
  "libfuzzer-sys",
  "sweeper-contract",
  "sweeper-core",
+ "sweeper-knowledge",
 ]
 
 [[package]]

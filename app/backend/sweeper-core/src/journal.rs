@@ -4,7 +4,7 @@
 //! outcomes recorded after each item/batch, and readers ignore a truncated trailing line.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -129,10 +129,19 @@ impl JournalWriter {
     }
 }
 
+/// Parse journal records from in-memory JSON-lines bytes.
+/// Ignores a truncated trailing incomplete line; malformed non-trailing lines error.
+pub fn parse_records_bytes(data: &[u8]) -> Result<Vec<JournalRecord>, JournalError> {
+    parse_records_from_reader(Cursor::new(data))
+}
+
 /// Read journal records from a file, ignoring a truncated trailing incomplete line (crash recovery).
 pub fn read_records(path: &Path) -> Result<Vec<JournalRecord>, JournalError> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    parse_records_from_reader(BufReader::new(file))
+}
+
+fn parse_records_from_reader<R: BufRead>(reader: R) -> Result<Vec<JournalRecord>, JournalError> {
     let mut records = Vec::new();
     let mut lines = reader.lines().peekable();
     while let Some(line_res) = lines.next() {
@@ -143,7 +152,6 @@ pub fn read_records(path: &Path) -> Result<Vec<JournalRecord>, JournalError> {
         match serde_json::from_str::<JournalRecord>(&line) {
             Ok(rec) => records.push(rec),
             Err(e) => {
-                // If this is the last line, treat as truncated/crash-mid-write and ignore.
                 if lines.peek().is_none() {
                     break;
                 }
@@ -305,5 +313,24 @@ mod tests {
             .filter(|e| is_journal_log_file(&e.path()))
             .count();
         assert!(count <= 30, "count={count}");
+    }
+
+    #[test]
+    fn parse_records_bytes_handles_valid_malformed_and_binary() {
+        let mut bytes = serde_json::to_string(&intent_record("t", "C:\\a", 1, None))
+            .unwrap()
+            .into_bytes();
+        bytes.push(b'\n');
+        let recs = parse_records_bytes(&bytes).unwrap();
+        assert_eq!(recs.len(), 1);
+
+        let err = parse_records_bytes(b"{bad}\n{}\n");
+        assert!(err.is_err());
+
+        let truncated = parse_records_bytes(b"{\"record\":\"intent\"").unwrap();
+        assert!(truncated.is_empty());
+
+        let binary = parse_records_bytes(&[0xff, 0x00, 0xfe]);
+        assert!(binary.is_err());
     }
 }

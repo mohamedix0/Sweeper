@@ -473,6 +473,14 @@ impl TryFrom<LintTarget> for TargetDefinition {
 
 pub use lint::{lint_allowlist_toml, lint_targets, LintError, LintTarget};
 
+/// Deterministic fuzz entrypoint for allowlist parsing/linting.
+/// Accepts arbitrary bytes (valid UTF-8 slices are linted) and must never panic.
+pub fn fuzz_allowlist_bytes(data: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(data) {
+        let _ = lint::lint_allowlist_toml(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +551,25 @@ description="x"
 "#;
         let err = lint_allowlist_toml(toml).unwrap_err();
         assert!(err.to_string().contains("final path segment"), "{err}");
+    }
+
+    #[test]
+    fn fuzz_allowlist_bytes_handles_binary_malformed_and_valid() {
+        fuzz_allowlist_bytes(&[0xff, 0xfe, 0x00, 0x80]);
+        fuzz_allowlist_bytes(b"not = [valid toml");
+        let valid = r#"
+[[targets]]
+id="x"
+name="X"
+tier="Tier1"
+risk="Safe"
+known_folder="LocalAppData"
+relative_subpath="Temp"
+scope="contents"
+min_age_hours=24
+requires_elevation=false
+description="x"
+"#;
+        fuzz_allowlist_bytes(valid.as_bytes());
     }
 }
