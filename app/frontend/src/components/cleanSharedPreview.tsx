@@ -15,18 +15,31 @@ function PreviewTable(props: { breakdown: PreviewResult['breakdown'] }) {
   );
 }
 
+function SkippedCountLine(props: { count: PreviewResult['skippedCount'] }) {
+  if (props.count == null) return null;
+  return <p className="muted small-note"><strong>Skipped:</strong> <span className="num">{props.count}</span></p>;
+}
+
+function SkippedReasonsList(props: { reasons: string[] }) {
+  if (props.reasons.length === 0) return null;
+  return (
+    <ul className="skipped-reasons">
+      {props.reasons.map((reason, idx) => <li key={`${reason}-${idx}`}>{reason}</li>)}
+    </ul>
+  );
+}
+
 function PreviewSkippedNotice(props: Pick<PreviewResult, 'skippedCount' | 'skippedReasons'>) {
   const { skippedCount, skippedReasons } = props;
-  if (skippedCount == null && (skippedReasons == null || skippedReasons.length === 0)) return null;
+  const reasons = skippedReasons ?? [];
+  if (skippedCount == null) {
+    if (reasons.length === 0) return null;
+  }
   return (
     <div className="preview-skipped" role="status" aria-label="Preview skipped items">
       <strong className="subheading-xs">Skipped during preview</strong>
-      {skippedCount != null && <p className="muted small-note"><strong>Skipped:</strong> <span className="num">{skippedCount}</span></p>}
-      {skippedReasons != null && skippedReasons.length > 0 && (
-        <ul className="skipped-reasons">
-          {skippedReasons.map((reason, idx) => <li key={`${reason}-${idx}`}>{reason}</li>)}
-        </ul>
-      )}
+      <SkippedCountLine count={skippedCount} />
+      <SkippedReasonsList reasons={reasons} />
     </div>
   );
 }

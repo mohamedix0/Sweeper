@@ -205,8 +205,21 @@ fn classify_artifact_search_root(
     {
         return Ok(false);
     }
+    // A root merely named `target` can be an ordinary project container. Only prune it as a
+    // Rust build artifact when its parent has the Cargo.toml that the staleness check itself
+    // requires; otherwise keep walking it so nested stale artifacts are still discovered.
+    if matches!(spec.kind, StaleKind::RustTarget) && !has_rust_build_evidence(root) {
+        return Ok(false);
+    }
     record_stale_dir(spec, root, state)?;
     Ok(true)
+}
+
+fn has_rust_build_evidence(target_root: &Path) -> bool {
+    target_root
+        .parent()
+        .map(|parent| parent.join("Cargo.toml").is_file())
+        .unwrap_or(false)
 }
 
 fn collect_stale_artifact(
