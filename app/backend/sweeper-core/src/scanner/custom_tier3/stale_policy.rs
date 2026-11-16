@@ -134,29 +134,45 @@ pub(super) fn default_tier3_project_search_roots() -> Vec<String> {
     // Enumerate every local fixed drive instead of assuming C-G. The winfs primitive is a
     // read-only query (no handles, no reparse traversal); all path-level safety stays here.
     for drive in sweeper_winfs::fixed_drive_letters() {
-        let drive_root = PathBuf::from(format!("{drive}:\\"));
-
-        // Profile discovery on this drive. A `Users` container that is a Link Point is
-        // rejected before enumeration because `is_dir()` would follow it.
-        let users = drive_root.join("Users");
-        if is_plain_directory_at(&users) {
-            append_user_profile_roots(&users, &mut out);
-        }
-
-        // Development-root discovery outside profile containers. A candidate must be a plain
-        // directory (the gate rejects files, symlinks and reparse points), must resolve through
-        // a handle that rejects Link Points, and must survive the shared Protected Path /
-        // container-root policy gate in `push_unique_search_root`.
-        for candidate in dev_root_candidate_paths(drive) {
-            if !is_plain_directory_at(&candidate) {
-                continue;
-            }
-            if let Ok(canon) = CanonicalPath::from_existing_path(&candidate.to_string_lossy()) {
-                push_unique_search_root(&mut out, &canon.into_canonical());
-            }
-        }
+        append_search_roots_for_drive(drive, &mut out);
     }
     out
+}
+
+fn append_search_roots_for_drive(drive: char, roots: &mut Vec<String>) {
+    append_profile_roots_for_drive(drive, roots);
+    append_dev_roots_for_drive(drive, roots);
+}
+
+fn append_profile_roots_for_drive(drive: char, roots: &mut Vec<String>) {
+    let users = PathBuf::from(format!("{drive}:\\Users"));
+    // A `Users` container that is a Link Point is rejected before enumeration because
+    // `is_dir()` would follow it.
+    if !is_plain_directory_at(&users) {
+        return;
+    }
+    append_user_profile_roots(&users, roots);
+}
+
+fn append_dev_roots_for_drive(drive: char, roots: &mut Vec<String>) {
+    for canon in dev_root_candidate_paths(drive)
+        .iter()
+        .filter_map(|candidate| canonical_dev_root(candidate))
+    {
+        push_unique_search_root(roots, &canon);
+    }
+}
+
+/// Canonicalize a drive-root development candidate only when it is a plain directory.
+/// The plain-directory gate rejects files, symlinks and reparse points; `from_existing_path`
+/// additionally rejects Link Points on the opened handle before the policy gate runs.
+fn canonical_dev_root(candidate: &Path) -> Option<CanonicalPath> {
+    if !is_plain_directory_at(candidate) {
+        return None;
+    }
+    CanonicalPath::from_existing_path(&candidate.to_string_lossy())
+        .ok()
+        .map(|validated| validated.into_canonical())
 }
 
 pub(super) fn user_profile_search_root() -> Option<CanonicalPath> {
