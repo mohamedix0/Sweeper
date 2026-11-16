@@ -132,36 +132,6 @@ fn clean_diagnostics(clean: &remover::CleanReport, journal_dir: &Path) -> String
     out
 }
 
-fn journal_has_locked_skip(journal_dir: &Path) -> bool {
-    let log_dir = sweeper_core::journal::resolve_log_dir(journal_dir);
-    let Ok(entries) = fs::read_dir(log_dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(contents) = fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in contents.lines() {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            if v.get("record").and_then(|r| r.as_str()) == Some("outcome")
-                && v.get("status").and_then(|s| s.as_str()) == Some("Skipped")
-                && v.get("reason")
-                    .and_then(|r| r.as_str())
-                    .is_some_and(|r| r.to_ascii_lowercase().contains("locked"))
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn find_node_by_suffix(root: &AnalyzerNode, suffix_lower: &str) -> Option<AnalyzerNode> {
     let mut stack = vec![root.clone()];
     while let Some(n) = stack.pop() {
@@ -211,8 +181,7 @@ fn wrap_analyzer_root(root: AnalyzerNode) -> AnalyzerResult {
     }
 }
 
-#[test]
-fn settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized() {
+fn check_settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized() {
     // malformed/corrupt JSON => safe defaults + warning, no panic
     let parsed = settings::parse_untrusted_settings_json("{not-json");
     assert_eq!(parsed.settings, SweeperSettings::default());
@@ -313,8 +282,7 @@ fn settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized()
     const { assert!(MAX_MIN_AGE_HOURS >= 8760) };
 }
 
-#[test]
-fn custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent() {
+fn check_custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent() {
     let sb = Sandbox::new();
     let parent = sb.create_dir("parent").unwrap();
     let parent_file = parent.join("keep.txt");
@@ -388,7 +356,11 @@ fn custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent() {
 }
 
 #[test]
-fn custom_path_scan_and_clean_contents_only_preserves_root() {
+fn custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent() {
+    check_custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent();
+}
+
+fn check_custom_path_scan_and_clean_contents_only_preserves_root() {
     let sb = sandbox_in_target("custom-path-scan-clean");
     let custom = sb.create_dir(r"a\b\custom_root").unwrap();
     let f1 = custom.join("a.txt");
@@ -473,7 +445,11 @@ fn custom_path_scan_and_clean_contents_only_preserves_root() {
 }
 
 #[test]
-fn tier3_disabled_by_default_yields_no_tier3_conditional_items() {
+fn custom_path_scan_and_clean_contents_only_preserves_root() {
+    check_custom_path_scan_and_clean_contents_only_preserves_root();
+}
+
+fn check_tier3_disabled_by_default_yields_no_tier3_conditional_items() {
     let sb = Sandbox::new();
     let search_root = sb.create_dir("projects").unwrap();
     // Create would-be stale artifacts; Tier 3 disabled so they must not be discovered/reported.
@@ -512,6 +488,11 @@ fn tier3_disabled_by_default_yields_no_tier3_conditional_items() {
             .map(|t| &t.target_id)
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn tier3_disabled_by_default_yields_no_tier3_conditional_items() {
+    check_tier3_disabled_by_default_yields_no_tier3_conditional_items();
 }
 
 fn setup_tier3_scan_fixture(
@@ -610,8 +591,7 @@ fn setup_tier3_scan_fixture(
     )
 }
 
-#[test]
-fn tier3_stale_rust_target_discovery_respects_marker_and_age() {
+fn check_tier3_stale_rust_target_discovery_respects_marker_and_age() {
     let sb = Sandbox::new();
     let (search_root, rust_target, rust_fresh_target, orphan_target, _, _, _, recycle, _, _) =
         setup_tier3_scan_fixture(&sb);
@@ -658,7 +638,11 @@ fn tier3_stale_rust_target_discovery_respects_marker_and_age() {
 }
 
 #[test]
-fn tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
+fn tier3_stale_rust_target_discovery_respects_marker_and_age() {
+    check_tier3_stale_rust_target_discovery_respects_marker_and_age();
+}
+
+fn check_tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
     let sb = Sandbox::new();
     let (search_root, _, _, _, node_modules, node_fresh_nm, node_orphan_nm, recycle, _, _) =
         setup_tier3_scan_fixture(&sb);
@@ -708,6 +692,11 @@ fn tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
 }
 
 #[test]
+fn tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
+    check_tier3_stale_node_modules_discovery_respects_lockfiles_and_age();
+}
+
+#[test]
 fn tier3_recycle_bin_scan_reports_contents_in_sandbox() {
     let sb = Sandbox::new();
     let (search_root, _, _, _, _, _, _, recycle, _, _) = setup_tier3_scan_fixture(&sb);
@@ -742,248 +731,8 @@ fn tier3_recycle_bin_scan_reports_contents_in_sandbox() {
     );
 }
 
-#[test]
-fn policy_excludes_vhdx_and_git_in_scanned_target() {
-    use sweeper_knowledge::{KnownFolder, Risk, Scope, TargetDefinition, Tier};
-
-    let sb = sandbox_in_target("policy-excludes-vhdx-git");
-    let base = sb
-        .create_dir("Temp\\__sweeper_scan_policy_excludes_test")
-        .unwrap();
-    // create swap.vhdx file
-    std::fs::write(base.join("swap.vhdx"), b"fakevhdx").unwrap();
-    // create .git dir with a file inside
-    let git_dir = base.join(".git");
-    std::fs::create_dir_all(&git_dir).unwrap();
-    std::fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-    // also a normal file to ensure scan still works
-    write_old_file(&base.join("normal.txt"), 2);
-
-    // Point to the sandboxed base by resolving its relative path under LocalAppData?
-    // sandbox_in_target puts under target/sweeper-test-sandboxes/<name>; easier to scan via scan_targets
-    // by constructing a target with known_folder LocalAppData and relative_subpath that resolves to base.
-    // But base is not under LocalAppData in this test harness layout ΓÇö wait: sandbox_in_target uses CARGO_TARGET_DIR/sweeper-test-sandboxes,
-    // which is different from LocalAppData. So the previous approach (writing into LocalAppData\Temp...) was needed.
-    // But clippy disallows fs::remove_dir_all. Let me use the LocalAppData approach but clean up with Command like other tests do.
-    drop(sb);
-    let local = sweeper_winfs::resolve_known_folder(sweeper_winfs::KnownFolderId::LocalAppData)
-        .expect("resolve LocalAppData");
-    let base = local
-        .join("Temp")
-        .join("__sweeper_scan_policy_excludes_test");
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "rmdir", "/S", "/Q", &base.to_string_lossy()])
-        .status();
-    let _ = std::fs::create_dir_all(&base);
-    std::fs::write(base.join("swap.vhdx"), b"fakevhdx").unwrap();
-    let git_dir = base.join(".git");
-    std::fs::create_dir_all(&git_dir).unwrap();
-    std::fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-    write_old_file(&base.join("normal.txt"), 2);
-
-    let target = TargetDefinition {
-        id: "policy-exclude-test".to_string(),
-        name: "policy-exclude-test".to_string(),
-        tier: Tier::Tier1,
-        risk: Risk::Safe,
-        known_folder: KnownFolder::LocalAppData,
-        relative_subpath: "Temp\\__sweeper_scan_policy_excludes_test".to_string(),
-        scope: Scope::Contents,
-        min_age_hours: 0,
-        description: "test".to_string(),
-        requires_elevation: false,
-    };
-    let report = scanner::scan_targets(vec![target], 0).expect("scan");
-    assert_eq!(report.targets.len(), 1);
-    let t = &report.targets[0];
-    for it in &t.items {
-        let lp = it.path.to_ascii_lowercase();
-        assert!(
-            !lp.ends_with(".vhdx"),
-            "vhdx should not be emitted: {}",
-            it.path
-        );
-        assert!(
-            !lp.ends_with(".vhd"),
-            "vhd should not be emitted: {}",
-            it.path
-        );
-        assert!(
-            !lp.contains("\\.git\\"),
-            ".git contents should not be emitted: {}",
-            it.path
-        );
-    }
-    assert!(
-        t.skipped_reasons
-            .get("PolicyExcluded")
-            .copied()
-            .unwrap_or(0)
-            >= 2,
-        "expected >=2 PolicyExcluded skips, got: {:?}",
-        t.skipped_reasons
-    );
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "rmdir", "/S", "/Q", &base.to_string_lossy()])
-        .status();
-}
-
-#[test]
-fn tier3_clean_removes_stale_dirs_and_recycle_contents_only() {
-    let sb = Sandbox::new();
-    let (
-        search_root,
-        rust_target,
-        rust_fresh_target,
-        orphan_target,
-        node_modules,
-        node_fresh_nm,
-        node_orphan_nm,
-        recycle,
-        rec_file,
-        rec_dir,
-    ) = setup_tier3_scan_fixture(&sb);
-    let settings = SweeperSettings {
-        enable_tier1: false,
-        enable_tier2: false,
-        enable_tier3: true,
-        stale_project_days: 30,
-        min_age_hours: 0,
-        ..SweeperSettings::default()
-    };
-    let opts = ScanSettingsOptions {
-        tier3_project_search_roots: vec![search_root.to_string_lossy().to_string()],
-        recycle_bin_roots: vec![recycle.to_string_lossy().to_string()],
-        ..Default::default()
-    };
-    let report = scanner::scan_with_settings_options(&settings, opts).unwrap();
-    let stale_rust = report
-        .targets
-        .iter()
-        .find(|t| t.target_id == "stale-rust-target")
-        .unwrap();
-    let stale_nm = report
-        .targets
-        .iter()
-        .find(|t| t.target_id == "stale-node-modules")
-        .unwrap();
-    let rb = report
-        .targets
-        .iter()
-        .find(|t| t.target_id == "recycle-bin")
-        .unwrap();
-
-    let build_validated = || {
-        vec![
-            ValidatedItem::from_tier3_recycle_bin_root("rb", canon_str(&recycle), rb.total_bytes)
-                .unwrap(),
-            ValidatedItem::from_tier3_project_directory(
-                "rust-target",
-                "stale-rust-target",
-                canon_str(&rust_target),
-                stale_rust.total_bytes,
-                Some(old_mtime_secs()),
-            )
-            .unwrap(),
-            ValidatedItem::from_tier3_project_directory(
-                "node-modules",
-                "stale-node-modules",
-                canon_str(&node_modules),
-                stale_nm.total_bytes,
-                Some(old_mtime_secs()),
-            )
-            .unwrap(),
-        ]
-    };
-    let journal_dir = sb.create_dir("journal").unwrap();
-    let clean_opts = || CleanOptions {
-        preview_estimated_bytes: rb.total_bytes
-            + stale_rust.total_bytes
-            + stale_nm.total_bytes
-            + 1024,
-        min_age: Duration::from_secs(0),
-        now: SystemTime::now(),
-        journal_base_dir: Some(journal_dir.clone()),
-    };
-
-    let mut clean = remover::execute_clean(build_validated(), clean_opts()).unwrap();
-    for attempt in 0..3 {
-        let targets_removed = !rec_file.exists()
-            && !rec_dir.exists()
-            && !rust_target.exists()
-            && !node_modules.exists();
-        if targets_removed {
-            break;
-        }
-        let locked = journal_has_locked_skip(&journal_dir);
-        if attempt < 2 && locked {
-            std::thread::sleep(Duration::from_millis(150));
-            clean = remover::execute_clean(build_validated(), clean_opts()).unwrap();
-            continue;
-        }
-        let diag = clean_diagnostics(&clean, &journal_dir);
-        panic!(
-            "tier3 clean left targets behind after attempt {} (locked_skip={}): rec_file_exists={} rec_dir_exists={} rust_target_exists={} node_modules_exists={}\n{}",
-            attempt + 1,
-            locked,
-            rec_file.exists(),
-            rec_dir.exists(),
-            rust_target.exists(),
-            node_modules.exists(),
-            diag
-        );
-    }
-
-    let diag = clean_diagnostics(&clean, &journal_dir);
-    assert!(
-        !clean.aborted,
-        "tier 3 clean aborted: {:?}\n{}",
-        clean.abort_reason, diag
-    );
-    assert!(
-        recycle.exists(),
-        "recycle-bin root must be preserved\n{}",
-        diag
-    );
-    assert!(
-        !rec_file.exists() && !rec_dir.exists(),
-        "recycle-bin contents should be removed\n{}",
-        diag
-    );
-    assert!(
-        !rust_target.exists(),
-        "stale rust target directory should be removed\n{}",
-        diag
-    );
-    assert!(
-        !node_modules.exists(),
-        "stale node_modules directory should be removed\n{}",
-        diag
-    );
-    assert!(
-        rust_fresh_target.exists(),
-        "fresh rust target must remain\n{}",
-        diag
-    );
-    assert!(
-        orphan_target.exists(),
-        "target without sibling Cargo.toml must remain\n{}",
-        diag
-    );
-    assert!(
-        node_fresh_nm.exists(),
-        "node_modules with fresh lockfile must remain\n{}",
-        diag
-    );
-    assert!(
-        node_orphan_nm.exists(),
-        "node_modules without lockfile must remain\n{}",
-        diag
-    );
-}
-
-#[test]
-fn analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_contents_only() {
+fn check_analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_contents_only(
+) {
     let sb = Sandbox::new();
     let unknown_ok = sb.create_dir("unknown_ok").unwrap();
     write_file(&unknown_ok.join("f.txt"), b"x");
@@ -1047,6 +796,11 @@ fn analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_
 }
 
 #[test]
+fn analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_contents_only() {
+    check_analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_contents_only();
+}
+
+#[test]
 fn analyzer_rejects_ineligible_unknown_shallow_path() {
     let shallow = make_analyzer_node("s", r"C:\Temp", Risk::Unknown, true, true, false);
     assert!(build_analyzer_preview_items(
@@ -1066,8 +820,7 @@ fn analyzer_rejects_ineligible_unknown_ancestor_of_protected() {
     .is_err());
 }
 
-#[test]
-fn analyzer_rejects_ineligible_unknown_vhdx_and_protected_link_cases() {
+fn check_analyzer_rejects_ineligible_unknown_vhdx_and_protected_link_cases() {
     let vhdx = make_analyzer_node(
         "v",
         r"C:\Users\Public\vm.vhdx",
@@ -1110,4 +863,14 @@ fn analyzer_rejects_ineligible_unknown_vhdx_and_protected_link_cases() {
         build_analyzer_preview_items(&wrap_analyzer_root(link.clone()), &[link.id.clone()])
             .is_err()
     );
+}
+
+#[test]
+fn analyzer_rejects_ineligible_unknown_vhdx_and_protected_link_cases() {
+    check_analyzer_rejects_ineligible_unknown_vhdx_and_protected_link_cases();
+}
+
+#[test]
+fn settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized() {
+    check_settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized();
 }

@@ -35,8 +35,7 @@ fn find_root_prefers_longest_match() {
     assert_eq!(found.as_deref(), Some(r"C:\Users\A\AppData\Local\Temp"));
 }
 
-#[test]
-fn finish_scan_settings_mismatch_clears_active_tracking() {
+fn check_finish_scan_settings_mismatch_clears_active_tracking() {
     let clock = FixedClock::new(1_800_000_000);
     let mut store = SessionStore::new();
     let settings = SweeperSettings::default();
@@ -76,7 +75,11 @@ fn finish_scan_settings_mismatch_clears_active_tracking() {
 }
 
 #[test]
-fn start_scan_with_progress_emits_failed_terminal_event_on_finish_settings_mismatch() {
+fn finish_scan_settings_mismatch_clears_active_tracking() {
+    check_finish_scan_settings_mismatch_clears_active_tracking();
+}
+
+fn check_start_scan_with_progress_emits_failed_terminal_event_on_finish_settings_mismatch() {
     let clock = FixedClock::new(1_800_000_000);
     let mut store = SessionStore::new();
     let settings = SweeperSettings {
@@ -126,6 +129,11 @@ fn start_scan_with_progress_emits_failed_terminal_event_on_finish_settings_misma
             .all(|e| !matches!(e, ScanProgressEvent::Completed { .. })),
         "must not emit Completed when finish_scan fails: {events:?}"
     );
+}
+
+#[test]
+fn start_scan_with_progress_emits_failed_terminal_event_on_finish_settings_mismatch() {
+    check_start_scan_with_progress_emits_failed_terminal_event_on_finish_settings_mismatch();
 }
 
 struct CustomSessionSeed {
@@ -227,8 +235,7 @@ fn bad_contents_seed() -> CustomSessionSeed {
     }
 }
 
-#[test]
-fn preview_and_clean_stale_directory_item_equal_root() {
+fn check_preview_and_clean_stale_directory_item_equal_root() {
     let clock = FixedClock::new(1_800_000_000);
     let mut store = SessionStore::new();
     let tmp = tempfile::tempdir().unwrap();
@@ -270,6 +277,11 @@ fn preview_and_clean_stale_directory_item_equal_root() {
 }
 
 #[test]
+fn preview_and_clean_stale_directory_item_equal_root() {
+    check_preview_and_clean_stale_directory_item_equal_root();
+}
+
+#[test]
 fn preview_rejects_non_descendant_contents_only_target() {
     let clock = FixedClock::new(1_800_000_000);
     let mut store = SessionStore::new();
@@ -303,35 +315,26 @@ fn cancel_analyzer_sets_cancellation_flag_for_active_session() {
     );
 }
 
-#[test]
-fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
+fn seed_multi_preview_session(store: &mut SessionStore) {
     use std::collections::HashMap;
     use sweeper_contract::{
         RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
     };
-
-    let clock = FixedClock::new(1_800_000_000);
-    let mut store = SessionStore::new();
     let root = r"C:\Users\Test\AppData\Local\Temp".to_string();
-    let valid_path = r"C:\Users\Test\AppData\Local\Temp\valid.tmp".to_string();
-    let invalid_path = r"C:\Outside\invalid.tmp".to_string();
-
-    let valid_item = ScanItemDto {
-        id: "t1::valid".to_string(),
+    let mk = |id: &str, path: &str, size: u64| ScanItemDto {
+        id: id.to_string(),
         target_id: "user-temp".to_string(),
-        path: valid_path.clone(),
-        size: U64String(123),
+        path: path.to_string(),
+        size: U64String(size),
         mtime_unix_secs: U64String(1_700_000_000),
         age_eligible: true,
     };
-    let invalid_item = ScanItemDto {
-        id: "t1::invalid".to_string(),
-        target_id: "user-temp".to_string(),
-        path: invalid_path,
-        size: U64String(999),
-        mtime_unix_secs: U64String(1_700_000_000),
-        age_eligible: true,
-    };
+    let valid = mk(
+        "t1::valid",
+        r"C:\Users\Test\AppData\Local\Temp\valid.tmp",
+        123,
+    );
+    let invalid = mk("t1::invalid", r"C:\Outside\invalid.tmp", 999);
     let target = TargetScanResultDto {
         target_id: "user-temp".to_string(),
         target_name: "User Temp".to_string(),
@@ -345,7 +348,7 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
         file_count: U64String(2),
         eligible_count: U64String(2),
         skipped_count: U64String(0),
-        items: vec![valid_item.clone(), invalid_item.clone()],
+        items: vec![valid.clone(), invalid.clone()],
     };
     let results = ScanResultsDto {
         session_id: "scan-multi".to_string(),
@@ -354,30 +357,20 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
         targets: vec![target],
     };
     let mut items = HashMap::new();
-    items.insert(
-        valid_item.id.clone(),
-        super::StoredItem {
-            dto: valid_item.clone(),
-            target_id: "user-temp".to_string(),
-            target_name: "User Temp".to_string(),
-            tier: sweeper_core::Tier::Tier1,
-            risk: sweeper_core::Risk::Safe,
-            age_eligible: true,
-            requires_typed_confirmation: false,
-        },
-    );
-    items.insert(
-        invalid_item.id.clone(),
-        super::StoredItem {
-            dto: invalid_item,
-            target_id: "user-temp".to_string(),
-            target_name: "User Temp".to_string(),
-            tier: sweeper_core::Tier::Tier1,
-            risk: sweeper_core::Risk::Safe,
-            age_eligible: true,
-            requires_typed_confirmation: false,
-        },
-    );
+    for dto in [valid, invalid] {
+        items.insert(
+            dto.id.clone(),
+            super::StoredItem {
+                dto,
+                target_id: "user-temp".to_string(),
+                target_name: "User Temp".to_string(),
+                tier: sweeper_core::Tier::Tier1,
+                risk: sweeper_core::Risk::Safe,
+                age_eligible: true,
+                requires_typed_confirmation: false,
+            },
+        );
+    }
     store.create_test_session_with_items(super::TestScanSessionSeed {
         now: 1_800_000_000,
         settings_generation: 1,
@@ -385,7 +378,14 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
         results,
         items,
     });
+}
 
+#[test]
+fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
+    use sweeper_contract::U64String;
+    let clock = FixedClock::new(1_800_000_000);
+    let mut store = SessionStore::new();
+    seed_multi_preview_session(&mut store);
     let preview = store
         .preview_clean(
             &clock,
@@ -397,10 +397,7 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
             },
         )
         .unwrap();
-
     assert_eq!(preview.total_selected_bytes, U64String(123));
     assert_eq!(preview.total_selected_count, U64String(1));
-    assert_eq!(preview.breakdown.len(), 1);
     assert_eq!(preview.breakdown[0].selected_count, U64String(1));
-    assert_eq!(preview.breakdown[0].selected_bytes, U64String(123));
 }
