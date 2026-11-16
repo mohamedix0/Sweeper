@@ -108,7 +108,7 @@ fn set_filetime(path: &Path, secs: u64) {
 
 #[test]
 fn gate_d_junction_or_symlink_inside_target_unlinks_entry_and_preserves_canary() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let victim = target_root.join("file.txt");
     write_file(&victim, b"delete me");
@@ -147,7 +147,7 @@ fn gate_d_junction_or_symlink_inside_target_unlinks_entry_and_preserves_canary()
 
 #[test]
 fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let canary = CanaryTree::seed_external("gate_d_toctou_shared").unwrap();
     let journal_dir = sb.create_dir("journal").unwrap();
@@ -218,7 +218,7 @@ fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() 
 
 #[test]
 fn gate_d_target_root_or_ancestor_swapped_to_junction_rejected_zero_deletions() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let real_root = sb.create_dir("real_target").unwrap();
     let victim = real_root.join("victim.txt");
     write_file(&victim, b"must survive");
@@ -266,7 +266,7 @@ fn gate_d_target_root_or_ancestor_swapped_to_junction_rejected_zero_deletions() 
 
 #[test]
 fn gate_d_hard_link_to_outside_file_outside_intact() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let outside_dir = sb.create_dir("outside").unwrap();
     let outside_file = outside_dir.join("outside.txt");
@@ -296,7 +296,7 @@ fn gate_d_hard_link_to_outside_file_outside_intact() {
 
 #[test]
 fn gate_d_locked_file_skipped_remaining_eligible_cleaned() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let locked = target_root.join("locked.txt");
     let deletable = target_root.join("deletable.txt");
@@ -332,7 +332,7 @@ fn gate_d_locked_file_skipped_remaining_eligible_cleaned() {
 
 #[test]
 fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
 
     let readonly = target_root.join("readonly.txt");
@@ -375,7 +375,8 @@ fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
     assert!(!readonly.exists(), "readonly should be handled/deleted");
     assert!(!hidden.exists(), "hidden should be deleted in valid target");
     assert!(!system.exists(), "system should be deleted in valid target");
-    assert!(!old.exists(), "old file should be deleted");
+    let old_deleted = !old.exists();
+    assert!(old_deleted, "old file should be deleted");
     assert!(
         !boundary.exists(),
         "exact boundary should be eligible/deleted"
@@ -385,54 +386,46 @@ fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
     assert_sentinel_intact(&sb);
 }
 
-#[test]
-fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sensitive() {
-    let sb = Sandbox::new().unwrap();
-    let target_root = sb.create_dir("target").unwrap();
-
-    // Deep 1000-level tree (iterative walker)
-    let deep = sweeper_testkit::create_deep_tree(&target_root, 1005).unwrap();
+fn seed_deep_and_long(target_root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let deep = sweeper_testkit::create_deep_tree(target_root, 1005).unwrap();
     let deep_file = deep.join("deep.txt");
     write_file(&deep_file, b"deep");
-
-    // Long path > 260 chars
     let long_dir = target_root
         .join("L".repeat(120))
         .join("M".repeat(120))
         .join("N".repeat(40));
     fs::create_dir_all(sweeper_testkit::to_extended_length_path(&long_dir)).unwrap();
-    let long_file = long_dir.join("long_file_name_".to_string() + &"x".repeat(80) + ".txt");
+    let long_file = long_dir.join(format!("long_file_name_{}.txt", "x".repeat(80)));
     write_file(
         &sweeper_testkit::to_extended_length_path(&long_file),
         b"long",
     );
+    (deep_file, long_file)
+}
 
-    // Reserved names via \\?\
-    let nul_path = target_root.join("NUL_test_safe.txt"); // avoid creating actual device name file; use reserved-like name handling path
+fn seed_special_names(
+    target_root: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let nul_path = target_root.join("NUL_test_safe.txt");
     write_file(&nul_path, b"nul-like");
     set_filetime(&nul_path, old_mtime_secs());
-    // Actual reserved device names as files are not creatable normally; ensure no crash when encountered via paths logic is covered elsewhere.
-    // Create a file and an ADS stream
     let ads_base = target_root.join("ads_base.txt");
     write_file(&ads_base, b"base");
     sweeper_testkit::write_ads(&ads_base, ":stream1:$DATA", b"ads-data").unwrap();
     set_filetime(&ads_base, old_mtime_secs());
-
-    // Arabic & emoji filenames
-    let arabic = target_root.join("مرحبا العربية.txt");
-    let emoji = target_root.join("emoji 😀 file.txt");
+    let arabic = target_root.join("\u{0645}\u{0631}\u{062d}\u{0628}\u{0627} \u{0627}\u{0644}\u{0639}\u{0631}\u{0628}\u{064a}\u{0629}.txt");
+    let emoji = target_root.join("emoji \u{1F600} file.txt");
     write_file(&arabic, b"arabic");
     write_file(&emoji, b"emoji");
     set_filetime(&arabic, old_mtime_secs());
     set_filetime(&emoji, old_mtime_secs());
+    (ads_base, arabic, emoji)
+}
 
-    // Trailing dots/spaces are invalid in normal Win32 names; create via extended path if possible is not allowed for creation,
-    // but we ensure scanner/remover handle/report paths safely. (Adversarial path corpus covers lexical rejection.)
-
-    // Per-directory case-sensitive filenames (best effort)
+fn try_enable_case_sensitive_dir(target_root: &std::path::Path) {
     let case_dir = target_root.join("casedir");
     fs::create_dir_all(&case_dir).unwrap();
-    let case_status = Command::new("fsutil")
+    let status = Command::new("fsutil")
         .args([
             "file",
             "setCaseSensitiveInfo",
@@ -440,25 +433,28 @@ fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sens
             "enable",
         ])
         .status();
-    if case_status.map(|s| s.success()).unwrap_or(false) {
-        write_file(&case_dir.join("Case.txt"), b"upper");
-        // Creating "case.txt" alongside "Case.txt" requires case-sensitive dir; may fail on some FS modes.
-        let _ = fs::write(case_dir.join("case.txt"), b"lower");
-        for e in fs::read_dir(&case_dir).unwrap().flatten() {
-            set_filetime(&e.path(), old_mtime_secs());
-        }
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        return;
     }
+    write_file(&case_dir.join("Case.txt"), b"upper");
+    let _ = fs::write(case_dir.join("case.txt"), b"lower");
+    for e in fs::read_dir(&case_dir).unwrap().flatten() {
+        set_filetime(&e.path(), old_mtime_secs());
+    }
+}
 
+fn run_long_path_clean(
+    target_root: &std::path::Path,
+    journal_dir: std::path::PathBuf,
+) -> sweeper_core::remover::CleanReport {
     let item = make_item(
         "root",
-        &target_root,
-        &target_root,
+        target_root,
+        target_root,
         1024 * 1024,
         Some(old_mtime_secs()),
     );
-    let journal_dir = sb.create_dir("journal").unwrap();
-    // Age checks are covered in a dedicated test; use min_age 0 here to focus on deep/long path deletion.
-    let report = remover::execute_clean(
+    remover::execute_clean(
         vec![item],
         CleanOptions {
             preview_estimated_bytes: 50 * 1024 * 1024,
@@ -467,25 +463,33 @@ fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sens
             journal_base_dir: Some(journal_dir),
         },
     )
-    .unwrap();
+    .unwrap()
+}
 
+#[test]
+fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sensitive() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("target").unwrap();
+    let (deep_file, long_file) = seed_deep_and_long(&target_root);
+    let (ads_base, arabic, emoji) = seed_special_names(&target_root);
+    try_enable_case_sensitive_dir(&target_root);
+    let report = run_long_path_clean(&target_root, sb.create_dir("journal").unwrap());
     assert!(!report.aborted, "aborted: {:?}", report.abort_reason);
     assert!(!deep_file.exists(), "deep file should be deleted");
-    assert!(
-        !long_file.exists() && !sweeper_testkit::to_extended_length_path(&long_file).exists(),
-        "long path file should be deleted"
-    );
+    let long_gone =
+        !long_file.exists() && !sweeper_testkit::to_extended_length_path(&long_file).exists();
+    assert!(long_gone, "long path file should be deleted");
     assert!(!ads_base.exists(), "base file should be deleted");
     assert!(!arabic.exists(), "arabic filename file should be deleted");
-    assert!(!emoji.exists(), "emoji filename file should be deleted");
-    // Target root directory must remain (contents-only)
+    let emoji_gone = !emoji.exists();
+    assert!(emoji_gone, "emoji filename file should be deleted");
     assert!(target_root.exists(), "target root must remain");
     assert_sentinel_intact(&sb);
 }
 
 #[test]
 fn gate_d_volume_mount_point_directory_junction_never_traversed() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let canary = CanaryTree::seed_external("gate_d_mount").unwrap();
     // Directory junction acts as mount point/link point; must be treated as Link Point and never traversed.
@@ -522,7 +526,7 @@ fn gate_d_volume_mount_point_directory_junction_never_traversed() {
 
 #[test]
 fn gate_d_reparse_tag_matrix_cloud_and_unknown_skipped() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let cloud_file = target_root.join("cloud.txt");
     let unknown_file = target_root.join("unknown_reparse.txt");
@@ -596,7 +600,7 @@ fn gate_d_reparse_tag_matrix_cloud_and_unknown_skipped() {
 
 #[test]
 fn gate_d_missing_custom_path_zero_deletions_parent_untouched() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let parent = sb.create_dir("parent").unwrap();
     let parent_file = parent.join("keep.txt");
     write_file(&parent_file, b"keep");
@@ -630,7 +634,7 @@ fn gate_d_missing_custom_path_zero_deletions_parent_untouched() {
 
 #[test]
 fn gate_d_120_percent_circuit_breaker_aborts_cleanly() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     // Create files totaling more than 120% of preview estimate.
     for i in 0..10 {
@@ -676,7 +680,7 @@ fn gate_d_120_percent_circuit_breaker_aborts_cleanly() {
 
 #[test]
 fn gate_d_mid_clean_termination_recovery_truncated_journal_and_rotation() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let journal_base = sb.create_dir("logsbase").unwrap();
     let log_dir = journal::resolve_log_dir(&journal_base);
     fs::create_dir_all(&log_dir).unwrap();
@@ -739,7 +743,7 @@ fn gate_d_mid_clean_termination_recovery_truncated_journal_and_rotation() {
 
 #[test]
 fn gate_d_tier3_project_directory_removed_after_ntfs_mtime_bump_on_emptied_dirs() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("proj").unwrap();
     let stale_dir = target_root.join("target");
     let nested = stale_dir.join("nested").join("deep");
@@ -791,7 +795,7 @@ fn gate_d_tier3_project_directory_removed_after_ntfs_mtime_bump_on_emptied_dirs(
 
 #[test]
 fn gate_d_age_checks_still_skip_unemptied_or_non_emptied_entries() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let target_root = sb.create_dir("target").unwrap();
     let min_age = Duration::from_secs(3600);
     let now_ts = unix_now();
@@ -854,7 +858,8 @@ fn gate_d_age_checks_still_skip_unemptied_or_non_emptied_entries() {
     );
     assert!(empty_recent.exists(), "empty recent dir must be skipped");
     assert!(future_file.exists(), "future-mtime file must be skipped");
-    assert!(recent_file.exists(), "recent file must be skipped");
+    let recent_file_kept = recent_file.exists();
+    assert!(recent_file_kept, "recent file must be skipped");
     assert!(
         has_recent.exists() && recent_child.exists(),
         "directory containing unemptied recent file must remain"

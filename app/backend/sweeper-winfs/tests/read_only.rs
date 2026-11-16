@@ -9,7 +9,7 @@ use sweeper_winfs::{
 #[cfg(windows)]
 #[test]
 fn open_handle_does_not_follow_junction() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let canary = CanaryTree::seed_external("junction-target").expect("canary");
     let inside = sandbox.create_dir("inside").expect("inside dir");
     let link = sandbox.root().join("junction_link");
@@ -37,7 +37,7 @@ fn open_handle_does_not_follow_junction() {
 #[cfg(windows)]
 #[test]
 fn open_handle_does_not_follow_file_symlink() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let canary = CanaryTree::seed_external("symlink-target").expect("canary");
     let target_file = canary.root().join("root.txt");
     let link = sandbox.root().join("file_link.txt");
@@ -67,7 +67,7 @@ fn open_handle_does_not_follow_file_symlink() {
 
 #[test]
 fn reparse_classification_and_dir_entry_metadata() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let regular = sandbox
         .write_file("regular.txt", b"abc")
         .expect("write regular");
@@ -99,7 +99,7 @@ fn reparse_classification_and_dir_entry_metadata() {
 
 #[test]
 fn canonical_path_and_file_identity_via_handle() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let file = sandbox
         .write_file("id.txt", b"identity")
         .expect("write file");
@@ -119,7 +119,7 @@ fn canonical_path_and_file_identity_via_handle() {
 
 #[test]
 fn directory_enumeration_records_link_points_without_traversing_external_canary() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let canary = CanaryTree::seed_external("enum-canary").expect("canary");
     let safe_sub = sandbox.create_dir("safe").expect("safe dir");
     sandbox

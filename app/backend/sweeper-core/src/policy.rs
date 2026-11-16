@@ -780,7 +780,7 @@ mod tests {
             users_root.reason.contains("depth >= 3") || users_root.reason.contains("protected")
         );
 
-        let sandbox = sweeper_testkit::Sandbox::new().expect("sandbox");
+        let sandbox = sweeper_testkit::Sandbox::new();
         // clean depth >= 3 directory allowed
         let clean = sandbox.create_dir("a/b/c").expect("create clean dir");
         let clean_str = clean.to_string_lossy().to_string();
@@ -827,7 +827,7 @@ mod tests {
             "NTUSER.DAT",
         ];
         for pat in patterns {
-            let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+            let sb = sweeper_testkit::Sandbox::new();
             let root_dir = sb.create_dir("a/b/c").expect("root dir");
             let target = root_dir.join(pat);
             if pat == "NTUSER.DAT" {
@@ -842,7 +842,7 @@ mod tests {
             );
         }
 
-        let clean_sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+        let clean_sb = sweeper_testkit::Sandbox::new();
         let clean_root = clean_sb.create_dir("a/b/c").expect("clean root");
         let clean_cp =
             CanonicalPath::parse_lexical(&clean_root.to_string_lossy()).expect("canonical");
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn contains_subtree_protected_descendant_traverses_normal_dirs_and_finds_nested() {
         // Kills mutant where traversal/recursion into normal directories is skipped.
-        let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+        let sb = sweeper_testkit::Sandbox::new();
         let root_dir = sb.create_dir("a/b/c").expect("root dir");
         let nested = root_dir.join("normal_subdir").join("deeper");
         fs::create_dir_all(&nested).expect("create nested dirs");
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn validate_tier3_target_root_resolved_protection_on_existing_paths() {
         // Keep end-to-end validation on real tempdir paths.
-        let sb = sweeper_testkit::Sandbox::new().expect("sandbox");
+        let sb = sweeper_testkit::Sandbox::new();
 
         let clean = sb.create_dir("tier3/clean/leaf").expect("create clean dir");
         let clean_v = validate_tier3_target_root(&clean.to_string_lossy());

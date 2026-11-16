@@ -38,7 +38,7 @@ fn sandbox_base_dir() -> PathBuf {
 #[cfg(windows)]
 #[test]
 fn ntfs_junction_is_detected_as_link_point_and_rejected() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir());
     let target = sb.create_dir(r"real\target\dir").unwrap();
     let link_parent = sb.create_dir(r"links\here").unwrap();
     let link = link_parent.join("junc");
@@ -57,7 +57,7 @@ fn ntfs_junction_is_detected_as_link_point_and_rejected() {
 #[cfg(windows)]
 #[test]
 fn ntfs_symlink_is_rejected_when_privilege_available() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir());
     let target = sb.write_file(r"real\target\file.txt", b"hi").unwrap();
     let link = sb.root().join("linksym.txt");
     match sweeper_testkit::create_file_symlink(&link, &target) {
@@ -81,7 +81,7 @@ fn ntfs_symlink_is_rejected_when_privilege_available() {
 
 #[test]
 fn unicode_names_can_be_parsed_and_resolved() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir());
     let p = sb.create_dir(r"uni\مرحبا\😀emoji\dir").unwrap();
     let v = CanonicalPath::from_existing_path(&p.to_string_lossy());
     assert!(v.is_ok(), "resolve unicode path failed: {v:?}");
@@ -99,7 +99,7 @@ fn long_lexical_paths_over_260_are_rejected_or_handled_safely() {
 
 #[test]
 fn prefix_collision_paths_are_segment_aware_on_disk() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir());
     let base = sb.create_dir(r"Windows").unwrap();
     let old = sb.create_dir(r"Windows.old\Temp").unwrap();
     let apps = sb.create_dir(r"WindowsApps\Temp").unwrap();
@@ -118,7 +118,7 @@ fn prefix_collision_paths_are_segment_aware_on_disk() {
 
 #[test]
 fn custom_path_validation_requires_existing_path() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir());
     let p = sb.create_dir(r"a\b\c").unwrap();
     let verdict = policy::validate_custom_path(&p.to_string_lossy());
     assert!(verdict.allowed, "expected allowed, got: {}", verdict.reason);
@@ -129,7 +129,7 @@ fn custom_path_validation_requires_existing_path() {
 
 #[test]
 fn real_long_path_over_260_is_supported_for_legitimate_sandbox_paths() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb = Sandbox::new_in(sandbox_base_dir());
     let mut long_dir = sb.root().to_path_buf();
     long_dir.push("long_base_for_gate_c");
     long_dir.push("a".repeat(80));
@@ -160,7 +160,7 @@ fn real_long_path_over_260_is_supported_for_legitimate_sandbox_paths() {
 
 #[test]
 fn custom_path_validation_rejects_directory_containing_pattern_protected_descendant() {
-    let sb_git = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb_git = Sandbox::new_in(sandbox_base_dir());
     let root = sb_git.create_dir(r"proj\safe\rootdir").unwrap();
     let git_dir = root.join(".git");
     fs::create_dir_all(to_extended_path(&git_dir)).unwrap();
@@ -172,7 +172,7 @@ fn custom_path_validation_rejects_directory_containing_pattern_protected_descend
         verdict_git.reason
     );
 
-    let sb_ssh = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let sb_ssh = Sandbox::new_in(sandbox_base_dir());
     let root2 = sb_ssh.create_dir(r"proj2\safe\rootdir").unwrap();
     let ssh_dir = root2.join(".ssh");
     fs::create_dir_all(to_extended_path(&ssh_dir)).unwrap();

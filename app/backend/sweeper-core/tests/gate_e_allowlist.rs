@@ -241,7 +241,7 @@ fn redirected_temp_guard_deterministic_sandbox_and_end_to_end_scan() {
     }
 
     // (d) Link Point / junction (direct and child inside junction ancestor) -> auto-disabled, zero traversal
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let canary = CanaryTree::seed_external("gate-e-rt-junc").expect("seed canary");
     let direct_link_parent = sandbox.guarded_path(r"a\b");
     fs::create_dir_all(&direct_link_parent).unwrap();

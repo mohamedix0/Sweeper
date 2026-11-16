@@ -65,7 +65,7 @@ fn find_by_suffix<'a>(
 
 #[test]
 fn recursive_size_and_item_count_aggregation_accuracy() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).expect("sandbox");
+    let sb = Sandbox::new_in(sandbox_base_dir());
     sb.write_file("a.txt", b"aaaaa").expect("a");
     sb.create_dir("dir1").expect("dir1");
     sb.write_file("dir1/b.bin", [0u8; 10]).expect("b");
@@ -110,7 +110,7 @@ fn recursive_size_and_item_count_aggregation_accuracy() {
 
 #[test]
 fn junction_is_not_traversed_and_external_canary_excluded() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).expect("sandbox");
+    let sb = Sandbox::new_in(sandbox_base_dir());
     let canary = CanaryTree::seed_external("analyzer-junction").expect("canary");
 
     sb.write_file("inside.txt", b"inside").expect("inside file");
@@ -156,7 +156,7 @@ fn junction_is_not_traversed_and_external_canary_excluded() {
 
 #[test]
 fn vhdx_marked_display_only_and_rejected_by_conversion_seam() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).expect("sandbox");
+    let sb = Sandbox::new_in(sandbox_base_dir());
     sb.create_dir("vms").expect("vms dir");
     sb.write_file("vms/distro.vhdx", [0u8; 4096])
         .expect("vhdx file");
@@ -256,7 +256,7 @@ fn protected_and_non_allowlist_descendants_under_protected_container_are_not_sel
 #[test]
 fn eligibility_rules_for_safe_caution_unknown() {
     // Safe selectable directory in a normal (non-protected-container) location
-    let safe_sb = Sandbox::new_in(sandbox_base_dir()).expect("safe sandbox");
+    let safe_sb = Sandbox::new_in(sandbox_base_dir());
     safe_sb.create_dir("safe_dir").expect("safe dir");
     safe_sb.write_file("safe_dir/x.txt", b"x").expect("x");
     let safe_res = analyze_path(
@@ -291,7 +291,7 @@ fn eligibility_rules_for_safe_caution_unknown() {
     // to make deterministic, check annotation on resolved path via policy/knowledge indirectly by simulating
     // a Caution node conversion expectation: Unknown default non-selectable and Caution respects enabled tiers.
     // We validate unknown default via a clearly unknown path name inside sandbox.
-    let unk_sb = Sandbox::new_in(sandbox_base_dir()).expect("unknown sandbox");
+    let unk_sb = Sandbox::new_in(sandbox_base_dir());
     unk_sb
         .create_dir("totally_unknown_folder_zz")
         .expect("unknown dir");
@@ -360,7 +360,7 @@ fn dirs_next_to_home_cache() -> Option<(PathBuf, bool)> {
 
 #[test]
 fn deep_directory_tree_finishes_without_stack_overflow_and_safe_drop() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).expect("sandbox");
+    let sb = Sandbox::new_in(sandbox_base_dir());
     // Create 1000-level deep directory tree (iterative creation helper) and a file at bottom.
     let deep = sweeper_testkit::create_deep_tree(sb.root(), 1000).expect("create deep tree");
     fs::write(deep.join("leaf.txt"), b"leaf").expect("leaf");
@@ -394,7 +394,7 @@ fn deep_directory_tree_finishes_without_stack_overflow_and_safe_drop() {
 
 #[test]
 fn cancellation_stops_cleanly() {
-    let sb = Sandbox::new_in(sandbox_base_dir()).expect("sandbox");
+    let sb = Sandbox::new_in(sandbox_base_dir());
     // Fixture is intentionally moderate; cancellation is triggered deterministically on the first
     // progress callback so this remains stable on fast CI SSDs and local machines.
     for i in 0..60 {

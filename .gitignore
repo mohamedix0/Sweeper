@@ -3,6 +3,7 @@
 
 # Local agent skills / tooling
 /.agents/
+/.impeccable/
 
 # Rust / Cargo
 /target/

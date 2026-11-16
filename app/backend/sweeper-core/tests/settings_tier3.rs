@@ -44,7 +44,7 @@ fn sandbox_base_dir() -> PathBuf {
 }
 
 fn sandbox_in_target(_name: &str) -> Sandbox {
-    Sandbox::new_in(sandbox_base_dir()).unwrap()
+    Sandbox::new_in(sandbox_base_dir())
 }
 
 fn old_mtime_secs() -> u64 {
@@ -222,7 +222,7 @@ fn settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized()
     );
 
     // tampered/out-of-bounds + invalid custom paths + protected overrides injected
-    let custom_sb = Sandbox::new_in(sandbox_base_dir()).unwrap();
+    let custom_sb = Sandbox::new_in(sandbox_base_dir());
     let valid_custom = custom_sb.create_dir(r"a\b\custom_ok").unwrap();
     let missing_custom = custom_sb.root().join(r"a\b\missing_custom_path_dir");
     assert!(
@@ -315,7 +315,7 @@ fn settings_untrusted_tampered_malformed_and_protected_overrides_are_sanitized()
 
 #[test]
 fn custom_path_scan_missing_yields_zero_items_and_clean_never_touches_parent() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let parent = sb.create_dir("parent").unwrap();
     let parent_file = parent.join("keep.txt");
     write_file(&parent_file, b"keep");
@@ -474,7 +474,7 @@ fn custom_path_scan_and_clean_contents_only_preserves_root() {
 
 #[test]
 fn tier3_disabled_by_default_yields_no_tier3_conditional_items() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let search_root = sb.create_dir("projects").unwrap();
     // Create would-be stale artifacts; Tier 3 disabled so they must not be discovered/reported.
     let proj = search_root.join("proj");
@@ -612,7 +612,7 @@ fn setup_tier3_scan_fixture(
 
 #[test]
 fn tier3_stale_rust_target_discovery_respects_marker_and_age() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let (search_root, rust_target, rust_fresh_target, orphan_target, _, _, _, recycle, _, _) =
         setup_tier3_scan_fixture(&sb);
     let settings = SweeperSettings {
@@ -659,7 +659,7 @@ fn tier3_stale_rust_target_discovery_respects_marker_and_age() {
 
 #[test]
 fn tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let (search_root, _, _, _, node_modules, node_fresh_nm, node_orphan_nm, recycle, _, _) =
         setup_tier3_scan_fixture(&sb);
     let settings = SweeperSettings {
@@ -709,7 +709,7 @@ fn tier3_stale_node_modules_discovery_respects_lockfiles_and_age() {
 
 #[test]
 fn tier3_recycle_bin_scan_reports_contents_in_sandbox() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let (search_root, _, _, _, _, _, _, recycle, _, _) = setup_tier3_scan_fixture(&sb);
     let settings = SweeperSettings {
         enable_tier1: false,
@@ -744,7 +744,7 @@ fn tier3_recycle_bin_scan_reports_contents_in_sandbox() {
 
 #[test]
 fn tier3_clean_removes_stale_dirs_and_recycle_contents_only() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let (
         search_root,
         rust_target,
@@ -898,7 +898,7 @@ fn tier3_clean_removes_stale_dirs_and_recycle_contents_only() {
 
 #[test]
 fn analyzer_allow_unknown_selectable_dir_requires_typed_confirmation_and_cleans_contents_only() {
-    let sb = Sandbox::new().unwrap();
+    let sb = Sandbox::new();
     let unknown_ok = sb.create_dir("unknown_ok").unwrap();
     write_file(&unknown_ok.join("f.txt"), b"x");
     set_old(&unknown_ok.join("f.txt"));

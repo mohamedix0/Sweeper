@@ -1,369 +1,184 @@
-import { useMemo, useState } from 'react';
-import {
-  formatContractError,
-  type CleanProgressEvent,
-  type ElevationStatus,
-  type ExecuteCleanResponse,
-  type ScanResults,
-  type Settings,
-  type SweeperClient,
-} from '../api/client';
-import type { ContractError, TargetScanResultDto } from '../contract/bindings';
-import { formatBytes, sumDecimalStrings } from '../utils/format';
-import {
-  ExplainDrawer,
-  PREVIEW_TTL_MS,
-  SESSION_TTL_MS,
-  TtlIndicator,
-  TYPED_CONFIRMATION_PHRASE,
-  riskClass,
-  type ExplainState,
-  type PreviewResult,
-} from './cleanShared';
+import { forwardRef, useImperativeHandle, useMemo, type ReactNode } from 'react';
+import { type ElevationStatus, type Settings, type SweeperClient } from '../api/client';
+import type { TargetScanResultDto } from '../contract/bindings';
+import { formatBytes } from '../utils/format';
+import { TYPED_CONFIRMATION_PHRASE } from './cleanShared';
+import { ScanCleanBar } from './scan/ScanCleanBar';
+import { ScanResultsSection, ScanScanningLayout } from './scan/ScanResultsSection';
+import { ScanViewControls } from './scan/ScanViewControls';
+import { ScanViewHeader } from './scan/ScanViewHeader';
+import { ScanNotices, ScanOnboarding, ScanProgressNotice, ScanTerminalStatus } from './scan/ScanViewStatus';
+import { isSelectableScanItem } from './scan/scanHelpers';
+import { useScanDerived } from './scan/useScanDerived';
+import { clearScanSelection, runScanClean, runScanPreview, selectAllSafeIds, setTargetSelection, toggleScanItem, toggleSelectAllEligibleSafe } from './scan/useScanViewActions';
+import { useScanWorkflow } from './scan/useScanWorkflow';
 
-function isCustomPathTargetId(targetId: string): boolean {
-  return targetId === 'custom-path' || targetId.startsWith('custom-path');
-}
+export type ScanAndPreviewViewHandle = { runScan: () => Promise<void> | void };
 
-function isSelectableScanItem(item: { ageEligible: boolean }, target: TargetScanResultDto, allowDeleteUnknown: boolean): boolean {
-  if (target.risk === 'Protected') return false;
-  if (!item.ageEligible) return false;
-  if (target.risk === 'Unknown' && !allowDeleteUnknown) return false;
-  return true;
-}
-
-function scanSelectionNeedsConfirmation(targets: TargetScanResultDto[], selectedIds: Set<string>): boolean {
-  for (const t of targets) {
-    for (const item of t.items) {
-      if (!selectedIds.has(item.id)) continue;
-      if (t.risk === 'Unknown' || isCustomPathTargetId(t.targetId)) return true;
-    }
-  }
-  return false;
-}
-
-export function ScanAndPreviewView({
-  client,
-  settings,
-  elevationStatus,
-  elevationError,
-  onOpenLog,
-}: {
+type Props = {
   client: SweeperClient;
   settings: Settings | null;
+  settingsVersion?: number;
   elevationStatus: ElevationStatus;
   elevationError: string | null;
   onOpenLog: (logId: string) => void;
-}) {
-  const [tier1, setTier1] = useState(true);
-  const [tier2, setTier2] = useState(true);
-  const [scanning, setScanning] = useState(false);
-  const [scanStatus, setScanStatus] = useState<string>('');
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [scanStartedAt, setScanStartedAt] = useState<number | null>(null);
-  const [results, setResults] = useState<ScanResults | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [explain, setExplain] = useState<ExplainState>(null);
-  const [preview, setPreview] = useState<PreviewResult | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [confirmText, setConfirmText] = useState('');
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanProgress, setCleanProgress] = useState<CleanProgressEvent | null>(null);
-  const [cleanSummary, setCleanSummary] = useState<ExecuteCleanResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
-  const [relaunching, setRelaunching] = useState(false);
-  const [relaunchInfo, setRelaunchInfo] = useState<string | null>(null);
-  const [relaunchError, setRelaunchError] = useState<string | null>(null);
+  onOpenSettings?: (focus?: 'allowDeleteUnknown' | 'enableTier3' | null, prefillCustomPath?: string | null) => void;
+};
 
-  const targets = useMemo(() => results?.targets ?? [], [results]);
-  const allowDeleteUnknown = settings?.allowDeleteUnknown ?? false;
+function toggleSetId(prev: Set<string>, id: string): Set<string> {
+  const next = new Set(prev);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
 
-  const selectedBytes = useMemo(() => {
-    const sizes: string[] = [];
-    for (const t of targets) for (const item of t.items) if (selectedIds.has(item.id)) sizes.push(item.size);
-    return sumDecimalStrings(sizes);
-  }, [targets, selectedIds]);
+function focusItemId(focus: ReturnType<typeof useScanWorkflow>['focus']): string | null {
+  if (!focus) return null;
+  if (focus.kind !== 'item') return null;
+  return focus.itemId;
+}
 
-  const selectableCount = useMemo(() => {
-    let n = 0;
-    for (const t of targets) for (const i of t.items) if (isSelectableScanItem(i, t, allowDeleteUnknown)) n++;
-    return n;
-  }, [targets, allowDeleteUnknown]);
+function inspectedMatches(args: { inspected: ReturnType<typeof useScanWorkflow>['inspected']; itemId: string | null }): boolean {
+  if (!args.itemId) return false;
+  if (!args.inspected) return false;
+  return args.inspected.itemId === args.itemId;
+}
 
-  const requiresConfirmation = useMemo(() => scanSelectionNeedsConfirmation(targets, selectedIds), [targets, selectedIds]);
+function findItemInTarget(target: TargetScanResultDto, itemId: string) {
+  const item = target.items.find((i) => i.id === itemId);
+  if (!item) return null;
+  return { target, item };
+}
 
-  function resetForInvalidSession(message?: string) {
-    setSessionId(null);
-    setScanStartedAt(null);
-    setResults(null);
-    setSelectedIds(new Set());
-    setPreview(null);
-    setConfirmText('');
-    setCleanProgress(null);
-    if (message) setInfo(message);
-  }
+function findInspectedCtx(args: { focus: ReturnType<typeof useScanWorkflow>['focus']; inspected: ReturnType<typeof useScanWorkflow>['inspected']; targets: TargetScanResultDto[] }) {
+  const itemId = focusItemId(args.focus);
+  if (!inspectedMatches({ inspected: args.inspected, itemId })) return null;
+  const found = args.targets.map((target) => findItemInTarget(target, itemId!)).find((value) => value != null);
+  return found ?? null;
+}
 
-  async function runScan() {
-    setError(null); setInfo(null); setPreview(null); setExplain(null); setSelectedIds(new Set());
-    setResults(null); setCleanSummary(null); setCleanProgress(null); setScanning(true);
-    setScanStatus('Starting Scan…');
-    const tiers = [tier1 ? 'Tier1' : null, tier2 ? 'Tier2' : null].filter(Boolean) as ('Tier1' | 'Tier2')[];
-    try {
-      const { sessionId: sid } = await client.startScan(tiers.length ? tiers : null, (ev) => {
-        if (ev.kind === 'started') setScanStatus('Scan in progress…');
-        if (ev.kind === 'completed') setScanStatus('Scan completed.');
-        if (ev.kind === 'failed') setScanStatus('Scan failed.');
-      });
-      setSessionId(sid);
-      setScanStartedAt(Date.now());
-      const data = await client.getScanResults(sid);
-      setResults(data);
-      setInfo('Scan complete. Select eligible items, run Preview, then Clean Permanently if you confirm.');
-    } catch (e) {
-      setError(formatContractError(e));
-      const ce = e as ContractError | undefined;
-      if (ce?.code === 'sessionInvalid') resetForInvalidSession();
-    } finally {
-      setScanning(false);
-    }
-  }
+function cleanProgressLabel(progress: ReturnType<typeof useScanWorkflow>['cleanProgress']): string | null {
+  if (!progress) return null;
+  return `Progress: ${progress.completedItems} / ${progress.totalItems} items — ${formatBytes({ bytes: progress.bytesFreedSoFar })} freed so far (${progress.status})`;
+}
 
-  function toggleItem(itemId: string, target: TargetScanResultDto, ageEligible: boolean) {
-    if (!isSelectableScanItem({ ageEligible }, target, allowDeleteUnknown)) return;
-    setPreview(null); setCleanSummary(null); setCleanProgress(null);
-    setSelectedIds((prev) => { const next = new Set(prev); if (next.has(itemId)) next.delete(itemId); else next.add(itemId); return next; });
-  }
+function allSelectableSelected(target: TargetScanResultDto, args: { selectedIds: Set<string>; allow: boolean }): boolean {
+  const selectable = target.items.filter((i) => isSelectableScanItem({ item: i, target, allowDeleteUnknown: args.allow }));
+  return selectable.every((i) => args.selectedIds.has(i.id));
+}
 
-  async function onExplain(itemId: string) {
-    setError(null);
-    try { setExplain(await client.explainItem(itemId)); } catch (e) { setError(formatContractError(e)); }
-  }
+function idleState(args: { scanning: boolean; previewLoading: boolean; cleaning: boolean }): boolean {
+  if (args.scanning) return false;
+  if (args.previewLoading) return false;
+  return !args.cleaning;
+}
 
-  async function runPreview() {
-    if (!sessionId) return;
-    setError(null); setInfo(null); setPreviewLoading(true); setCleanSummary(null); setCleanProgress(null);
-    try {
-      const confirmations = requiresConfirmation ? { typedConfirmation: confirmText || null } : null;
-      const res = await client.previewClean(sessionId, Array.from(selectedIds), confirmations);
-      setPreview({ ...res, issuedAtMs: Date.now() });
-      setInfo('Preview ready. Review the breakdown and the permanent deletion warning before cleaning.');
-    } catch (e) {
-      const ce = e as ContractError | undefined;
-      setError(formatContractError(e));
-      if (ce?.code === 'sessionInvalid') resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
-      else if (ce?.code === 'previewTokenInvalid') setPreview(null);
-    } finally { setPreviewLoading(false); }
-  }
+function canPreview(args: { sessionId: string | null; selected: number; idle: boolean; expired: boolean; confirmed: boolean }): boolean {
+  if (args.sessionId == null) return false;
+  if (args.selected <= 0) return false;
+  if (!args.idle) return false;
+  if (args.expired) return false;
+  return args.confirmed;
+}
 
-  async function runClean() {
-    if (!preview) return;
-    setError(null); setInfo(null); setCleaning(true); setCleanProgress(null); setCleanSummary(null);
-    try {
-      const res = await client.executeClean(preview.previewToken, (ev) => setCleanProgress(ev));
-      setCleanSummary(res);
-      setPreview(null);
-      setSelectedIds(new Set());
-      setConfirmText('');
-      setInfo('Clean completed. Review the summary and operation log below.');
-      if (sessionId) { try { setResults(await client.getScanResults(sessionId)); } catch { /* ignore */ } }
-    } catch (e) {
-      const ce = e as ContractError | undefined;
-      setError(formatContractError(e));
-      if (ce?.code === 'sessionInvalid') resetForInvalidSession('ScanSession expired or was invalidated. Start a new Scan.');
-      else if (ce?.code === 'previewTokenInvalid') { setPreview(null); setInfo('Preview token is invalid, expired, or already used. Run Preview again.'); }
-    } finally { setCleaning(false); }
-  }
+function Show(props: { when: boolean; children: ReactNode }) {
+  if (!props.when) return null;
+  return <>{props.children}</>;
+}
 
-  async function runAsAdministrator() {
-    setRelaunching(true);
-    setRelaunchInfo(null);
-    setRelaunchError(null);
-    try {
-      const res = await client.relaunchElevated();
-      if (res.launched) {
-        setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
-      } else {
-        setRelaunchError('Administrator launch was not started.');
-      }
-    } catch (e) {
-      setRelaunchError(formatContractError(e));
-    } finally {
-      setRelaunching(false);
-    }
-  }
+function canShowTerminal(args: { scanning: boolean; status: string }): boolean {
+  if (args.scanning) return false;
+  return Boolean(args.status);
+}
 
-  const canPreview = !!sessionId && selectedIds.size > 0 && !scanning && !previewLoading && !cleaning && (!requiresConfirmation || confirmText === TYPED_CONFIRMATION_PHRASE);
-  const canClean = !!preview && !scanning && !previewLoading && !cleaning;
+function canShowOnboarding(args: { hasResults: boolean; scanning: boolean }): boolean {
+  if (args.hasResults) return false;
+  return !args.scanning;
+}
 
+function showScanningLayout(args: { scanning: boolean; hasResults: boolean }): boolean {
+  if (!args.scanning) return false;
+  return !args.hasResults;
+}
+
+function scanLayoutDisabled(args: { none: boolean; scanning: boolean; cleaning: boolean }): boolean {
+  if (args.none) return true;
+  if (args.scanning) return true;
+  return args.cleaning;
+}
+
+function StatusBlocks(props: { w: ReturnType<typeof useScanWorkflow>; d: ReturnType<typeof useScanDerived>; masterIndeterminate: boolean }) {
+  const w = props.w;
+  const d = props.d;
+  const hasResults = !!w.results;
+  const disabled = scanLayoutDisabled({ none: d.eligibleSafeIds.length === 0, scanning: w.scanning, cleaning: w.cleaning });
   return (
-    <div>
-      <section className="panel" aria-labelledby="scan-heading">
-        <div className="row">
-          <h2 id="scan-heading">Scan &amp; Preview</h2>
-          <div className="spacer" />
-          <span className={`badge ${elevationStatus.isElevated ? 'risk-Safe' : 'risk-Caution'}`} aria-label={elevationStatus.isElevated ? 'Administrator (Elevated)' : 'Standard (Non-Elevated)'}>
-            {elevationStatus.isElevated ? 'Administrator (Elevated)' : 'Standard (Non-Elevated)'}
-          </span>
-        </div>
-        <p className="muted">Discover reclaimable Targets, explain items, preview selections, and run permanent Clean only after confirmation.</p>
-        {elevationError && <div className="notice error" role="alert">Elevation status unavailable: {elevationError}</div>}
-        {relaunchInfo && <div className="notice info" role="status">{relaunchInfo}</div>}
-        {relaunchError && <div className="notice error" role="alert">{relaunchError}</div>}
-        {!elevationStatus.isElevated && (
-          <div className="notice warn" role="note">
-            <div><strong>Administrator-only Tier 3 targets locked.</strong> Windows Temp, Windows Update cache, Prefetch, and Package Cache require administrator elevation and Tier 3 opt-in. Standard startup never triggers UAC.</div>
-            <div className="row row-top">
-              <button className="btn" onClick={runAsAdministrator} disabled={relaunching}>Run as administrator</button>
-              {relaunching && <span className="muted" role="status">Requesting administrator launch…</span>}
-            </div>
-          </div>
-        )}
-        <div className="row">
-          <label className="checkbox"><input type="checkbox" checked={tier1} onChange={(e) => setTier1(e.target.checked)} /> Tier 1 (system temp and caches)</label>
-          <label className="checkbox"><input type="checkbox" checked={tier2} onChange={(e) => setTier2(e.target.checked)} /> Tier 2 (developer caches)</label>
-          <div className="spacer" />
-          <button className="btn primary" onClick={runScan} disabled={scanning || cleaning}>Start Scan</button>
-        </div>
-        {scanning && (
-          <div role="status" aria-live="polite" className="notice info">
-            {scanStatus || 'Scanning…'}
-            <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
-          </div>
-        )}
-        {!scanning && scanStatus && <div className="notice">{scanStatus}</div>}
-        {sessionId && scanStartedAt && (
-          <div className="row muted" aria-label="Scan session status">
-            <span>Session: {sessionId}</span>
-            <TtlIndicator label="ScanSession TTL (15m)" issuedAtMs={scanStartedAt} ttlMs={SESSION_TTL_MS} />
-          </div>
-        )}
-      </section>
-
-      {error && <div className="notice error" role="alert">{error}</div>}
-      {info && <div className="notice info" role="status">{info}</div>}
-
-      {results && (
-        <section className="panel" aria-labelledby="results-heading">
-          <div className="row">
-            <h2 id="results-heading">Scan Results</h2>
-            <div className="spacer" />
-            <span className="muted">Selectable eligible items: {selectableCount}</span>
-            <span className="muted">Selected: {selectedIds.size} ({formatBytes(selectedBytes)})</span>
-          </div>
-          {targets.length === 0 && <p className="muted">No Targets returned for this Scan.</p>}
-          {targets.map((t) => (
-            <article key={t.targetId} className="target-card" aria-labelledby={`target-${t.targetId}-name`}>
-              <div className="target-header">
-                <div className="target-meta">
-                  <div className="row">
-                    <strong id={`target-${t.targetId}-name`}>{t.targetName}</strong>
-                    <span className={riskClass(t.risk)}>{t.risk}</span>
-                    <span className="badge">{t.tier}</span>
-                  </div>
-                  <div className="target-stats">
-                    <span>Size: {formatBytes(t.totalBytes)}</span>
-                    <span>Eligible: {formatBytes(t.eligibleBytes)}</span>
-                    <span>Files: {t.fileCount}</span>
-                    <span>Eligible count: {t.eligibleCount}</span>
-                    <span>Skipped: {t.skippedCount}</span>
-                  </div>
-                  <div className="muted">Resolved path(s): {t.resolvedPaths.join(', ') || '—'}</div>
-                  {t.statusReason && <div className="muted">{t.statusReason}</div>}
-                </div>
-              </div>
-              <div className="items" role="group" aria-label={`${t.targetName} items`}>
-                {t.items.length === 0 && <div className="item-row"><span className="muted">No items.</span></div>}
-                {t.items.map((item) => {
-                  const selectable = isSelectableScanItem(item, t, allowDeleteUnknown);
-                  const checked = selectedIds.has(item.id);
-                  const reason = t.risk === 'Protected'
-                    ? 'Protected — never selectable'
-                    : (t.risk === 'Unknown' && !allowDeleteUnknown)
-                      ? 'Unknown — gated by Settings (Allow deleting unknown folders)'
-                      : (!item.ageEligible ? 'Not eligible (Minimum Age / recent or ineligible)' : 'Eligible');
-                  return (
-                    <div key={item.id} className="item-row">
-                      <label className="checkbox">
-                        <input type="checkbox" aria-label={`Select ${item.path}`} checked={checked} disabled={!selectable || cleaning} onChange={() => toggleItem(item.id, t, item.ageEligible)} />
-                      </label>
-                      <div>
-                        <div className="item-path">{item.path}</div>
-                        <div className="item-status">{!selectable ? `Skipped/Not selectable: ${reason}` : (t.risk === 'Unknown' || isCustomPathTargetId(t.targetId) ? 'Eligible (typed confirmation required at Preview)' : 'Eligible for Preview selection')}</div>
-                      </div>
-                      <div className="item-size">{formatBytes(item.size)}</div>
-                      <button className="btn" onClick={() => onExplain(item.id)}>Explain</button>
-                      <span className={riskClass(t.risk)} aria-label={`Risk ${t.risk}`}>{t.risk}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </article>
-          ))}
-
-          <section aria-labelledby="preview-heading" className="panel">
-            <h3 id="preview-heading">Preview</h3>
-            <p className="muted">Selection total: <strong>{formatBytes(selectedBytes)}</strong> ({selectedIds.size} item(s)). Preview requires a valid ScanSession and issues a single-use preview token (10m, bounded by session).</p>
-            {requiresConfirmation && (
-              <div className="notice warn" role="note">
-                <div><strong>Typed confirmation required</strong> for this selection (Unknown and/or Custom Path items). Enter <code>{TYPED_CONFIRMATION_PHRASE}</code> to request Preview.</div>
-                <div className="field">
-                  <label htmlFor="confirm-delete">Typed confirmation</label>
-                  <input id="confirm-delete" type="text" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={`Type ${TYPED_CONFIRMATION_PHRASE}`} autoComplete="off" disabled={cleaning} />
-                </div>
-              </div>
-            )}
-            <div className="row"><button className="btn primary" onClick={runPreview} disabled={!canPreview}>{previewLoading ? 'Generating Preview…' : 'Preview Clean'}</button></div>
-            {preview && (
-              <div aria-live="polite">
-                <h4 className="section-title">Preview Breakdown</h4>
-                <div className="row">
-                  <span>Preview token: <code>{preview.previewToken}</code></span>
-                  <TtlIndicator label="Preview token TTL (10m)" issuedAtMs={preview.issuedAtMs} ttlMs={PREVIEW_TTL_MS} />
-                  {scanStartedAt && <TtlIndicator label="Session TTL (15m)" issuedAtMs={scanStartedAt} ttlMs={SESSION_TTL_MS} />}
-                </div>
-                <p><strong>Total selected:</strong> {preview.totalSelectedCount} item(s), {formatBytes(preview.totalSelectedBytes)}</p>
-                <table className="table" aria-label="Preview breakdown by Target">
-                  <thead><tr><th>Target</th><th>Selected count</th><th>Selected bytes</th></tr></thead>
-                  <tbody>
-                    {preview.breakdown.map((b) => (
-                      <tr key={b.targetId}><td>{b.targetName} <span className="muted">({b.targetId})</span></td><td>{b.selectedCount}</td><td>{formatBytes(b.selectedBytes)}</td></tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="notice warn" role="alert" aria-live="polite"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div>
-                <div className="row"><button className="btn danger primary" onClick={runClean} disabled={!canClean} aria-label="Clean Permanently">{cleaning ? 'Cleaning…' : 'Clean Permanently'}</button></div>
-                {cleaning && (
-                  <div className="notice info" role="status" aria-live="polite">
-                    <div>Cleaning in progress…</div>
-                    {cleanProgress && <div>Progress: {cleanProgress.completedItems} / {cleanProgress.totalItems} items — {formatBytes(cleanProgress.bytesFreedSoFar)} freed so far ({cleanProgress.status})</div>}
-                    <div className="progress" aria-hidden="true"><div className="progress-bar progress-indeterminate" /></div>
-                  </div>
-                )}
-              </div>
-            )}
-            {cleanSummary && (
-              <div className="panel" aria-labelledby="clean-summary-heading" role="status">
-                <h4 id="clean-summary-heading" className="section-title">Clean Summary</h4>
-                {cleanSummary.aborted && <div className="notice error" role="alert"><strong>Clean aborted.</strong> {cleanSummary.abortReason || 'The operation was aborted.'}</div>}
-                <dl className="kv">
-                  <dt>Bytes freed</dt><dd>{formatBytes(cleanSummary.bytesFreed)}</dd>
-                  <dt>Deleted count</dt><dd>{cleanSummary.deletedCount}</dd>
-                  <dt>Skipped count</dt><dd>{cleanSummary.skippedCount}</dd>
-                </dl>
-                <div>
-                  <strong>Skipped reasons</strong>
-                  {cleanSummary.skippedReasons.length === 0 ? <p className="muted" aria-label="Skipped reasons">None.</p> : (
-                    <ul aria-label="Skipped reasons">{cleanSummary.skippedReasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>
-                  )}
-                </div>
-                {cleanSummary.logId && <div className="row row-top"><button className="btn" onClick={() => onOpenLog(cleanSummary.logId!)}>View Operation Log</button><span className="muted">Log: {cleanSummary.logId}</span></div>}
-              </div>
-            )}
-          </section>
-        </section>
-      )}
-      <ExplainDrawer explain={explain} onClose={() => setExplain(null)} />
-    </div>
+    <>
+      <Show when={w.scanning}><ScanProgressNotice scanStatus={w.scanStatus} scanProgress={w.scanProgress} /></Show>
+      <Show when={canShowTerminal({ scanning: w.scanning, status: w.scanStatus })}><ScanTerminalStatus scanStatus={w.scanStatus} /></Show>
+      <Show when={canShowOnboarding({ hasResults, scanning: w.scanning })}><ScanOnboarding /></Show>
+      <Show when={showScanningLayout({ scanning: w.scanning, hasResults })}><ScanScanningLayout allEligibleSelected={d.allEligibleSelected} masterIndeterminate={props.masterIndeterminate} disabled={disabled} onToggle={() => toggleSelectAllEligibleSafe({ w, allEligibleSelected: d.allEligibleSelected, eligibleSafeIds: d.eligibleSafeIds })} /></Show>
+    </>
   );
 }
+
+function ResultsBlocks(props: { client: SweeperClient; w: ReturnType<typeof useScanWorkflow>; d: ReturnType<typeof useScanDerived>; focusedGroup: TargetScanResultDto | null; inspectedCtx: ReturnType<typeof findInspectedCtx>; canPreview: boolean; canClean: boolean; onOpenLog: Props['onOpenLog']; onOpenSettings: Props['onOpenSettings']; onToggleCollapsed: (id: string) => void; onToggleShowAll: (id: string) => void; onToggleGroupSelect: (t: TargetScanResultDto) => void; cleanProgress: string | null }) {
+  if (!props.w.results) return null;
+  const { w, d } = props;
+  const masterIndeterminate = !d.allEligibleSelected && d.sel.size > 0;
+  return (
+    <>
+      <ScanResultsSection targets={d.targets} visibleTargets={w.visibleTargets} allow={d.allow} minAgeHours={w.effectiveMinAgeHours} selectedIds={d.sel} collapsedTargets={w.collapsedTargets} showAllGroups={w.showAllGroups} focus={w.focus} focusedGroup={props.focusedGroup} inspected={w.inspected} inspectedCtx={props.inspectedCtx} cleaning={w.cleaning} scanning={w.scanning} eligibleSafeIdsLength={d.eligibleSafeIds.length} allEligibleSelected={d.allEligibleSelected} masterIndeterminate={masterIndeterminate} requiresConfirmation={d.requiresConfirmation} confirmText={w.confirmText} preview={w.preview} cleanProgressLabel={props.cleanProgress} cleanSummary={w.cleanSummary} onToggleSelectAll={() => toggleSelectAllEligibleSafe({ w, allEligibleSelected: d.allEligibleSelected, eligibleSafeIds: d.eligibleSafeIds })} onFocusGroup={(targetId) => w.setFocus({ kind: 'group', targetId })} onToggleCollapsed={props.onToggleCollapsed} onToggleGroupSelect={props.onToggleGroupSelect} onToggleItem={(item, target) => toggleScanItem({ w, item, target, allow: d.allow })} onToggleShowAll={props.onToggleShowAll} onConfirmText={w.setConfirmText} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
+      <ScanCleanBar selectedIdsCount={d.sel.size} selectedCategoryCount={d.selectedCategoryCount} selectedBytes={d.selectedBytes} cleaning={w.cleaning} previewLoading={w.previewLoading} hasPreview={!!w.preview} canPreview={props.canPreview} canClean={props.canClean} onClear={() => clearScanSelection({ w })} onPreview={() => void runScanPreview({ w, client: props.client, sel: d.sel, requiresConfirmation: d.requiresConfirmation, sessionId: w.sessionId!, confirmText: w.confirmText })} onClean={() => void runScanClean({ w, client: props.client })} />
+    </>
+  );
+}
+
+function focusedGroupFor(focus: ReturnType<typeof useScanWorkflow>['focus'], targets: TargetScanResultDto[]) {
+  if (focus?.kind !== 'group') return null;
+  return targets.find((t) => t.targetId === focus.targetId) ?? null;
+}
+
+export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(function ScanAndPreviewView(props, ref) {
+  const { client, settings, settingsVersion, elevationError, onOpenLog, onOpenSettings } = props;
+  const w = useScanWorkflow({ client, settings, settingsVersion });
+  const d = useScanDerived(w, settingsVersion);
+  const inspectedCtx = useMemo(() => findInspectedCtx({ focus: w.focus, inspected: w.inspected, targets: d.targets }), [w.focus, w.inspected, d.targets]);
+  const focusedGroup = useMemo(() => focusedGroupFor(w.focus, d.targets), [w.focus, d.targets]);
+  const progress = cleanProgressLabel(w.cleanProgress);
+  useImperativeHandle(ref, () => ({ runScan: w.runScan }), [w.runScan]);
+  const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId(prev, targetId));
+  const onToggleShowAll = (targetId: string) => w.setShowAllGroups((prev) => toggleSetId(prev, targetId));
+  const hasTargets = d.targets.length > 0;
+  const hasCollapsed = w.collapsedTargets.size > 0;
+  const collapseAllState = () => {
+    if (!hasTargets) return new Set<string>();
+    if (hasCollapsed) return new Set<string>();
+    return new Set(d.targets.map((t) => t.targetId));
+  };
+  const onToggleCollapseAll = () => w.setCollapsedTargets(collapseAllState());
+  const onToggleGroupSelect = (target: TargetScanResultDto) => setTargetSelection({ w, target, select: !allSelectableSelected(target, { selectedIds: d.sel, allow: d.allow }), allow: d.allow });
+  const requiresConfirm = d.requiresConfirmation;
+  const typedDelete = w.confirmText === TYPED_CONFIRMATION_PHRASE;
+  let confirmed = true;
+  if (requiresConfirm) confirmed = typedDelete;
+  const idle = idleState({ scanning: w.scanning, previewLoading: w.previewLoading, cleaning: w.cleaning });
+  const previewOk = canPreview({ sessionId: w.sessionId, selected: d.sel.size, idle, expired: w.isSessionExpired, confirmed });
+  const hasPreview = w.preview != null;
+  let cleanOk = false;
+  if (hasPreview) cleanOk = idle;
+  let anyCollapsed = false;
+  if (hasTargets) anyCollapsed = hasCollapsed;
+  const hasSelectedCount = d.sel.size > 0;
+  let masterIndeterminate = hasSelectedCount;
+  if (d.allEligibleSelected) masterIndeterminate = false;
+  return (
+    <div className="view-stack view-stack-fill">
+      <ScanViewHeader hasResults={!!w.results} heroReclaimable={d.heroReclaimable} tier1={w.tier1} tier2={w.tier2} scanning={w.scanning} cleaning={w.cleaning} settings={settings} settingsStale={d.settingsStale} hasActiveScope={w.hasActiveScanScope} onTier1={w.setTier1} onTier2={w.setTier2} onRunScan={() => void w.runScan()} onOpenSettings={onOpenSettings} />
+      <ScanNotices elevationError={elevationError} relaunchInfo={w.relaunchInfo} relaunchError={w.relaunchError} error={w.error} info={w.info} />
+      <ScanViewControls toolbar={w.toolbar} targetsCount={d.targets.length} selectableCount={d.selectableCount} skippedCount={d.skippedCount} hasResults={!!w.results} cleaning={w.cleaning} anyCollapsed={anyCollapsed} isFilterActive={d.isFilterActive} selectSafeIdsLength={d.selectSafeIds.length} allSelectSafeSelected={d.allSelectSafeSelected} onToolbar={w.setToolbar} onToggleCollapseAll={onToggleCollapseAll} onSelectAllSafe={() => selectAllSafeIds({ w, selectSafeIds: d.selectSafeIds })} />
+      <StatusBlocks w={w} d={d} masterIndeterminate={masterIndeterminate} />
+      <ResultsBlocks client={client} w={w} d={d} focusedGroup={focusedGroup} inspectedCtx={inspectedCtx} canPreview={previewOk} canClean={cleanOk} onOpenLog={onOpenLog} onOpenSettings={onOpenSettings} onToggleCollapsed={onToggleCollapsed} onToggleShowAll={onToggleShowAll} onToggleGroupSelect={onToggleGroupSelect} cleanProgress={progress} />
+    </div>
+  );
+});

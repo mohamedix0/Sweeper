@@ -34,10 +34,23 @@ export type ExecuteCleanResponse = {
 export type ElevationStatus = { isElevated: boolean };
 export type RelaunchResult = { launched: boolean };
 
-export type ScanProgress =
+export type ScanProgressEvent =
   | { kind: 'started'; session_id: string }
+  | {
+      kind: 'progress';
+      session_id: string;
+      completed_targets: number;
+      total_targets: number;
+      current_target_id: string | null;
+      current_target_name: string | null;
+      scanned_items: string;
+      scanned_bytes: string;
+    }
+  | { kind: 'cancelled'; session_id: string }
   | { kind: 'completed'; session_id: string }
   | { kind: 'failed'; session_id: string; error: ContractError };
+
+export type ScanProgress = ScanProgressEvent;
 
 export type AnalyzerProgressEvent = {
   sessionId: string;
@@ -85,7 +98,7 @@ export type Settings = {
 };
 
 export interface SweeperClient {
-  startScan(tiers: TierDto[] | null, onProgress?: (e: ScanProgress) => void): Promise<{ sessionId: string }>;
+  startScan(tiers: TierDto[] | null, onProgress?: (e: ScanProgressEvent) => void): Promise<{ sessionId: string }>;
   getScanResults(sessionId: string): Promise<ScanResults>;
   previewClean(
     sessionId: string,
@@ -124,78 +137,45 @@ function normalizeSettings(settings: Settings & { enableElevationTargets?: boole
   return { ...settings, enableElevationTargets: settings.enableElevationTargets ?? false };
 }
 
+async function withScanProgress<T>(onProgress: ((e: ScanProgressEvent) => void) | undefined, run: () => Promise<{ status: 'ok'; data: T } | { status: 'error'; error: ContractError }>): Promise<T> {
+  let unlisten: (() => void) | null = null;
+  try {
+    if (onProgress) unlisten = await events.scanProgressEvent.listen((event) => onProgress(event.payload as ScanProgressEvent));
+    return unwrap(await run());
+  } finally { if (unlisten) unlisten(); }
+}
+
+async function withCleanProgress<T>(previewToken: string, onProgress: ((e: CleanProgressEvent) => void) | undefined, run: () => Promise<{ status: 'ok'; data: T } | { status: 'error'; error: ContractError }>): Promise<T> {
+  let unlisten: (() => void) | null = null;
+  try {
+    if (onProgress) unlisten = await events.cleanProgressEvent.listen((event) => { const payload = event.payload as CleanProgressEvent; if (payload.previewToken === previewToken) onProgress(payload); });
+    return unwrap(await run());
+  } finally { if (unlisten) unlisten(); }
+}
+
+async function withAnalyzerProgress<T>(onProgress: ((e: AnalyzerProgressEvent) => void) | undefined, run: () => Promise<{ status: 'ok'; data: T } | { status: 'error'; error: ContractError }>): Promise<T> {
+  let unlisten: (() => void) | null = null;
+  try {
+    if (onProgress) unlisten = await events.analyzerProgressEvent.listen((event) => onProgress(event.payload as AnalyzerProgressEvent));
+    return unwrap(await run());
+  } finally { if (unlisten) unlisten(); }
+}
+
 export function createTauriClient(): SweeperClient {
   return {
-    async startScan(tiers, onProgress) {
-      let unlisten: (() => void) | null = null;
-      try {
-        if (onProgress) {
-          unlisten = await events.scanProgressEvent.listen((event) => {
-            onProgress(event.payload as ScanProgress);
-          });
-        }
-        return unwrap(await commands.startScan(tiers));
-      } finally {
-        if (unlisten) unlisten();
-      }
-    },
-    async getScanResults(sessionId) {
-      return unwrap(await commands.getScanResults(sessionId));
-    },
-    async previewClean(sessionId, itemIds, confirmations) {
-      return unwrap(await commands.previewClean(sessionId, itemIds, confirmations));
-    },
-    async executeClean(previewToken, onProgress) {
-      let unlisten: (() => void) | null = null;
-      try {
-        if (onProgress) {
-          unlisten = await events.cleanProgressEvent.listen((event) => {
-            const payload = event.payload as CleanProgressEvent;
-            if (payload.previewToken === previewToken) onProgress(payload);
-          });
-        }
-        return unwrap(await commands.executeClean(previewToken));
-      } finally {
-        if (unlisten) unlisten();
-      }
-    },
-    async startAnalyzer(root, onProgress) {
-      let unlisten: (() => void) | null = null;
-      try {
-        if (onProgress) {
-          unlisten = await events.analyzerProgressEvent.listen((event) => {
-            onProgress(event.payload as AnalyzerProgressEvent);
-          });
-        }
-        return unwrap(await commands.startAnalyzer(root));
-      } finally {
-        if (unlisten) unlisten();
-      }
-    },
-    async explainItem(itemId) {
-      return unwrap(await commands.explainItem(itemId));
-    },
-    async getSettings() {
-      return normalizeSettings(unwrap(await commands.getSettings()) as Settings & { enableElevationTargets?: boolean });
-    },
-    async updateSettings(settings) {
-      return normalizeSettings(unwrap(await commands.updateSettings(settings)) as Settings & { enableElevationTargets?: boolean });
-    },
-    async getElevationStatus() {
-      return unwrap(await commands.getElevationStatus());
-    },
-    async relaunchElevated() {
-      return unwrap(await commands.relaunchElevated());
-    },
-    async validateCustomPath(path) {
-      return unwrap(await commands.validateCustomPath(path));
-    },
-    async listLogs() {
-      return unwrap(await commands.listLogs());
-    },
-    async readLog(logId) {
-      return unwrap(await commands.readLog(logId));
-    },
+    startScan: (tiers, onProgress) => withScanProgress(onProgress, () => commands.startScan(tiers)),
+    getScanResults: async (sessionId) => unwrap(await commands.getScanResults(sessionId)),
+    previewClean: async (sessionId, itemIds, confirmations) => unwrap(await commands.previewClean(sessionId, itemIds, confirmations)),
+    executeClean: (previewToken, onProgress) => withCleanProgress(previewToken, onProgress, () => commands.executeClean(previewToken)),
+    startAnalyzer: (root, onProgress) => withAnalyzerProgress(onProgress, () => commands.startAnalyzer(root)),
+    explainItem: async (itemId) => unwrap(await commands.explainItem(itemId)),
+    getSettings: async () => normalizeSettings(unwrap(await commands.getSettings()) as Settings & { enableElevationTargets?: boolean }),
+    updateSettings: async (settings) => normalizeSettings(unwrap(await commands.updateSettings(settings)) as Settings & { enableElevationTargets?: boolean }),
+    getElevationStatus: async () => unwrap(await commands.getElevationStatus()),
+    relaunchElevated: async () => unwrap(await commands.relaunchElevated()),
+    validateCustomPath: async (path) => unwrap(await commands.validateCustomPath(path)),
+    listLogs: async () => unwrap(await commands.listLogs()),
+    readLog: async (logId) => unwrap(await commands.readLog(logId)),
   };
 }
 
