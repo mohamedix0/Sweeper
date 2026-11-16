@@ -177,13 +177,39 @@ impl SessionStore {
         let mut by_target: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
         let mut total_bytes = 0u64;
         let mut validated = Vec::with_capacity(selected.len());
-        for item in selected {
-            let mut assembly = ScanAssembly {
-                by_target: &mut by_target,
-                total_bytes: &mut total_bytes,
-                validated: &mut validated,
-            };
-            Self::accumulate_scan_item(session, item, &mut assembly)?;
+        if selected.len() <= 1 {
+            for item in selected {
+                let mut assembly = ScanAssembly {
+                    by_target: &mut by_target,
+                    total_bytes: &mut total_bytes,
+                    validated: &mut validated,
+                };
+                Self::accumulate_scan_item(session, item, &mut assembly)?;
+            }
+        } else {
+            for item in selected {
+                match Self::validate_scan_item(session, item) {
+                    Ok(v) => {
+                        let size = item.dto.size.get();
+                        let entry = by_target
+                            .entry(item.target_id.clone())
+                            .or_insert_with(|| (item.target_name.clone(), 0u64, 0u64));
+                        entry.1 = entry.1.saturating_add(1);
+                        entry.2 = entry.2.saturating_add(size);
+                        total_bytes = total_bytes.saturating_add(size);
+                        validated.push(v);
+                    }
+                    Err(_) => {
+                        // Gracefully skip invalid/ineligible items in multi-select previews.
+                        continue;
+                    }
+                }
+            }
+        }
+        if validated.is_empty() {
+            return Err(ContractError::InvalidInput {
+                reason: "selected item failed validation".to_string(),
+            });
         }
         Ok(ScanPreviewBuild {
             total_bytes,

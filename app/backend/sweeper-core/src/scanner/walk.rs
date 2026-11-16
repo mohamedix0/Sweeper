@@ -1,4 +1,5 @@
 use super::*;
+use crate::policy;
 
 pub(super) struct ScanWalkCtx<'a> {
     target: &'a TargetDefinition,
@@ -114,6 +115,30 @@ pub(super) fn skip_reason_for_reparse(reparse: ReparseTagClass) -> Option<SkipRe
 }
 
 pub(super) fn handle_directory_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
+    // Do not traverse into policy-protected directories.
+    if let Ok(canon) = CanonicalPath::parse_lexical(&ent.path.to_string_lossy()) {
+        if policy::is_subtree_protected(&canon)
+            || policy::is_ancestor_of_subtree_protected(&canon)
+            || policy::is_protected_container_root(&canon)
+        {
+            bump_skip_with_context(
+                ctx.out,
+                SkipReason::PolicyExcluded,
+                format!(
+                    "protected directory skipped: {}",
+                    ent.path.to_string_lossy()
+                ),
+            );
+            return;
+        }
+    } else {
+        bump_skip_with_context(
+            ctx.out,
+            SkipReason::Unreadable,
+            format!("invalid directory path: {}", ent.path.to_string_lossy()),
+        );
+        return;
+    }
     match inspect_directory_reparse(ent) {
         Ok(None) => ctx.stack.push(ent.path.clone()),
         Ok(Some(reason)) => bump_skip(ctx.out, reason),
@@ -129,6 +154,51 @@ pub(super) fn inspect_directory_reparse(ent: &DirEntry) -> Result<Option<SkipRea
 }
 
 pub(super) fn record_file_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
+    // Skip virtual disk files inside temp/other allowlisted roots.
+    if let Some(ext) = ent.path.extension().and_then(|s| s.to_str()) {
+        let ext_lc = ext.to_ascii_lowercase();
+        if ext_lc == "vhdx" || ext_lc == "vhd" {
+            bump_skip_with_context(
+                ctx.out,
+                SkipReason::PolicyExcluded,
+                format!("virtual disk file excluded: {}", ent.path.to_string_lossy()),
+            );
+            ctx.progress.scanned_items = ctx.progress.scanned_items.saturating_add(1);
+            ctx.progress.scanned_bytes = ctx.progress.scanned_bytes.saturating_add(ent.size);
+            ctx.progress
+                .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
+            return;
+        }
+    }
+    // Skip files that fall under protected subtrees/containers (must not be eligible).
+    if let Ok(canon) = CanonicalPath::parse_lexical(&ent.path.to_string_lossy()) {
+        if policy::is_subtree_protected(&canon)
+            || policy::is_ancestor_of_subtree_protected(&canon)
+            || policy::is_protected_container_root(&canon)
+        {
+            bump_skip_with_context(
+                ctx.out,
+                SkipReason::PolicyExcluded,
+                format!("protected path excluded: {}", ent.path.to_string_lossy()),
+            );
+            ctx.progress.scanned_items = ctx.progress.scanned_items.saturating_add(1);
+            ctx.progress.scanned_bytes = ctx.progress.scanned_bytes.saturating_add(ent.size);
+            ctx.progress
+                .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
+            return;
+        }
+    } else {
+        bump_skip_with_context(
+            ctx.out,
+            SkipReason::Unreadable,
+            format!("invalid path: {}", ent.path.to_string_lossy()),
+        );
+        ctx.progress.scanned_items = ctx.progress.scanned_items.saturating_add(1);
+        ctx.progress.scanned_bytes = ctx.progress.scanned_bytes.saturating_add(ent.size);
+        ctx.progress
+            .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
+        return;
+    }
     let mtime_secs = super::allowlist::filetime_to_unix_secs(ent.last_write_time);
     let old_enough = is_file_age_eligible(mtime_secs, ctx.now, ctx.min_age);
     *ctx.next_item_seq += 1;
