@@ -11,14 +11,18 @@ mod tests;
 
 pub(crate) fn is_sandbox_path_hint(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    if lower.contains("sweeper-sandbox")
-        || lower.contains(".sweeper_sandbox_sentinel")
-        || lower.contains(".sweeper-sentinel")
-        || lower.contains("sweeper-test")
-    {
+    const MARKERS: [&str; 4] = [
+        "sweeper-sandbox",
+        ".sweeper_sandbox_sentinel",
+        ".sweeper-sentinel",
+        "sweeper-test",
+    ];
+    if MARKERS.iter().any(|marker| lower.contains(marker)) {
         return true;
     }
-    lower.contains("\\appdata\\local\\temp\\.tmp") || lower.contains("/appdata/local/temp/.tmp")
+    const TEMPFILE_MARKERS: [&str; 2] =
+        ["\\appdata\\local\\temp\\.tmp", "/appdata/local/temp/.tmp"];
+    TEMPFILE_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 pub use analyzer::{cancel_analyzer, start_analyzer};

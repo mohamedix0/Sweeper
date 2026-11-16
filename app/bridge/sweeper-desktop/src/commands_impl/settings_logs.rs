@@ -231,7 +231,7 @@ fn list_logs_in_dir_impl(
     out.sort_by(|a, b| {
         let ta = a.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
         let tb = b.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
-        tb.cmp(&ta).then_with(|| b.id.cmp(&a.id))
+        tb.cmp(&ta).then_with(|| a.id.cmp(&b.id))
     });
     Ok(out)
 }
