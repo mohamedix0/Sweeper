@@ -448,7 +448,7 @@ impl SessionStore {
             breakdown: spec.breakdown,
             total_selected_count: U64String(total_selected_count),
             total_selected_bytes: U64String(spec.total_bytes),
-            skipped_count: spec.skipped_count,
+            skipped_count: U64String(spec.skipped_count as u64),
             skipped_reasons: spec.skipped_reasons,
         })
     }

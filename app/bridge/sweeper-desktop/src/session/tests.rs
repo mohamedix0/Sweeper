@@ -411,6 +411,6 @@ fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
     assert_eq!(preview.total_selected_bytes, U64String(123));
     assert_eq!(preview.total_selected_count, U64String(1));
     assert_eq!(preview.breakdown[0].selected_count, U64String(1));
-    assert_eq!(preview.skipped_count, 1);
+    assert_eq!(preview.skipped_count, U64String(1));
     assert!(!preview.skipped_reasons.is_empty());
 }

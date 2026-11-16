@@ -281,29 +281,44 @@ pub(super) fn is_path_stale_enough(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
-    fn make_dir(path: &Path) {
-        fs::create_dir_all(path).unwrap();
-    }
 
     #[test]
     fn profile_children_include_dev_and_skip_protected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let profile = tmp.path().join("Users").join("Example");
-        make_dir(&profile.join("dev").join("my_app").join("target"));
-        fs::write(
-            profile.join("dev").join("my_app").join("Cargo.toml"),
-            "[package]\n",
-        )
-        .unwrap();
-        make_dir(&profile.join("Documents"));
-        make_dir(&profile.join("AppData").join("Local"));
-        let mut roots = Vec::new();
-        append_profile_children(&profile, &mut roots);
-        let joined = roots.join("|").to_ascii_lowercase();
-        assert!(joined.contains("\\dev"));
-        assert!(!joined.contains("\\documents"));
-        assert!(!joined.contains("\\appdata"));
+        // Eligibility is decided from the absolute, production-shaped path
+        // `C:\Users\<name>\<child>`. Use literal paths so the verdict does not
+        // depend on the machine's temp directory: a sandbox nested under a real
+        // user profile skews the segment-based policy checks (and canonical
+        // handle resolution can fail on locked-down runners), making a
+        // filesystem-based test non-deterministic across environments.
+        assert!(is_eligible_profile_child(
+            "dev",
+            Path::new(r"C:\Users\Test\dev")
+        ));
+        // Known user-data subtrees are never project search roots.
+        assert!(!is_eligible_profile_child(
+            "Documents",
+            Path::new(r"C:\Users\Test\Documents")
+        ));
+        // AppData is an ignored child name regardless of the absolute path.
+        assert!(!is_eligible_profile_child(
+            "AppData",
+            Path::new(r"C:\Users\Test\AppData")
+        ));
+        // Dot-directories (e.g. a nested .git) are never search roots.
+        assert!(!is_eligible_profile_child(
+            ".git",
+            Path::new(r"C:\Users\Test\.git")
+        ));
+    }
+
+    #[test]
+    fn ignored_profile_names_are_filtered() {
+        for name in ["Public", "Default", "Default User", "All Users"] {
+            assert!(
+                is_ignored_profile_name(name),
+                "expected {name} to be ignored"
+            );
+        }
+        assert!(!is_ignored_profile_name("Example"));
     }
 }

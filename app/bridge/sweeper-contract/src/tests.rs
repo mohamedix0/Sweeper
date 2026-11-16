@@ -215,6 +215,27 @@ fn fuzz_entrypoint_never_panics_on_smoke_inputs() {
     }
 }
 
+fn sample_preview_clean_response() -> PreviewCleanResponse {
+    PreviewCleanResponse {
+        preview_token: "pt".to_string(),
+        breakdown: vec![],
+        total_selected_count: U64String(2),
+        total_selected_bytes: U64String(100),
+        skipped_count: U64String(1),
+        skipped_reasons: vec!["selected item no longer exists".to_string()],
+    }
+}
+
+#[test]
+fn preview_clean_response_serializes_counts_as_strings() {
+    let v = serde_json::to_value(sample_preview_clean_response()).unwrap();
+    assert_eq!(v["totalSelectedCount"], serde_json::json!("2"));
+    assert_eq!(v["totalSelectedBytes"], serde_json::json!("100"));
+    assert_eq!(v["skippedCount"], serde_json::json!("1"));
+    let back: PreviewCleanResponse = serde_json::from_value(v).unwrap();
+    assert_eq!(back, sample_preview_clean_response());
+}
+
 #[test]
 fn export_ts_bindings_matches_committed_file() {
     let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
