@@ -55,14 +55,23 @@ export function isScanSummaryRecord(o: Record<string, unknown>): boolean {
   return false;
 }
 
+function isPerItemOutcomeStatus(status: string): boolean {
+  if (status === 'deleted' || status === 'skipped') return true;
+  return status === 'aborted';
+}
+
+function hasOutcomeItemRef(o: Record<string, unknown>): boolean {
+  if (o.path != null) return true;
+  return o.target_id != null;
+}
+
 export function isJournalPerItemOutcome(o: Record<string, unknown>): boolean {
   const rec = String(o.record ?? '');
   if (rec !== 'outcome') return false;
   if (isScanSummaryRecord(o)) return false;
   const status = String(o.status ?? '').toLowerCase();
-  if (status !== 'deleted' && status !== 'skipped' && status !== 'aborted') return false;
-  if (o.path == null && o.target_id == null) return false;
-  return true;
+  if (!isPerItemOutcomeStatus(status)) return false;
+  return hasOutcomeItemRef(o);
 }
 
 export function cleanOutcomeRecords(objs: Record<string, unknown>[]): Record<string, unknown>[] {

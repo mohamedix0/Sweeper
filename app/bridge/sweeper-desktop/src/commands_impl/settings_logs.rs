@@ -78,52 +78,73 @@ pub fn list_logs<C: Clock>(_state: &AppState<C>) -> Result<Vec<LogMetadataDto>, 
     list_logs_in_dir_impl(default_logs_dir().as_deref(), true)
 }
 
+#[derive(Default)]
+struct CleanLogScanState {
+    saw_outcome: bool,
+    saw_path: bool,
+    all_sandbox: bool,
+}
+
+fn json_record_kind(value: &serde_json::Value) -> Option<&str> {
+    if let Some(kind) = value.get("kind").and_then(|v| v.as_str()) {
+        return Some(kind);
+    }
+    let record = value.get("record").and_then(|v| v.as_str())?;
+    match record {
+        "outcome" => Some("outcome"),
+        "intent" => Some("intent"),
+        _ => None,
+    }
+}
+
+fn note_path_hint(state: &mut CleanLogScanState, path: &str) {
+    state.saw_path = true;
+    if !super::is_sandbox_path_hint(path) {
+        state.all_sandbox = false;
+    }
+}
+
+fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Value) {
+    if json_record_kind(value) == Some("outcome") {
+        state.saw_outcome = true;
+    }
+    if let Some(p) = value.get("path").and_then(|v| v.as_str()) {
+        note_path_hint(state, p);
+    }
+    if let Some(target) = value.get("target_path").and_then(|v| v.as_str()) {
+        note_path_hint(state, target);
+    }
+}
+
+fn inspect_clean_log_line(state: &mut CleanLogScanState, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return;
+    };
+    inspect_clean_log_value(state, &value);
+}
+
+fn accumulate_clean_log_state(reader: BufReader<fs::File>) -> CleanLogScanState {
+    let mut state = CleanLogScanState {
+        all_sandbox: true,
+        ..CleanLogScanState::default()
+    };
+    for line in reader.lines().map_while(Result::ok) {
+        inspect_clean_log_line(&mut state, &line);
+    }
+    state
+}
+
 fn clean_log_phantom_reasons(path: &Path) -> (bool, bool) {
     let Ok(file) = fs::File::open(path) else {
         return (true, false);
     };
-    let reader = BufReader::new(file);
-    let mut saw_outcome = false;
-    let mut saw_path = false;
-    let mut all_sandbox = true;
-
-    for line in reader.lines().map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-        let kind = value.get("kind").and_then(|v| v.as_str()).or_else(|| {
-            value
-                .get("record")
-                .and_then(|v| v.as_str())
-                .and_then(|r| match r {
-                    "outcome" => Some("outcome"),
-                    "intent" => Some("intent"),
-                    _ => None,
-                })
-        });
-        if kind == Some("outcome") {
-            saw_outcome = true;
-        }
-        if let Some(p) = value.get("path").and_then(|v| v.as_str()) {
-            saw_path = true;
-            if !super::is_sandbox_path_hint(p) {
-                all_sandbox = false;
-            }
-        }
-        if let Some(target) = value.get("target_path").and_then(|v| v.as_str()) {
-            saw_path = true;
-            if !super::is_sandbox_path_hint(target) {
-                all_sandbox = false;
-            }
-        }
-    }
-
-    let no_outcome = !saw_outcome;
-    let sandbox_only = saw_path && all_sandbox;
+    let state = accumulate_clean_log_state(BufReader::new(file));
+    let no_outcome = !state.saw_outcome;
+    let sandbox_only = state.saw_path && state.all_sandbox;
     (no_outcome, sandbox_only)
 }
 

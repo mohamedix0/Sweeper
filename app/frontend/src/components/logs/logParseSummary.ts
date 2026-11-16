@@ -45,20 +45,39 @@ function scanFilesCount(o: Record<string, unknown>): number | null {
   if (!Number.isFinite(n)) return null;
   return n;
 }
+function scanFilesWord(files: number): string {
+  if (files === 1) return 'file';
+  return 'files';
+}
+
+function scanCategoryWord(n: number): string {
+  if (n === 1) return 'category';
+  return 'categories';
+}
+
+function positiveCategoryCount(o: Record<string, unknown>): number | null {
+  const cats = o.categories_count ?? o.categoriesCount;
+  if (cats == null) return null;
+  const n = Number(cats);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function scanTitleWithCounts(reclaim: string | null, files: number | null): string | null {
+  if (reclaim && files != null) {
+    return `Scan Completed \u00b7 ${reclaim} \u00b7 ${files} ${scanFilesWord(files)}`;
+  }
+  if (reclaim) return `Scan Completed \u00b7 ${reclaim}`;
+  return null;
+}
+
 function scanTitle(o: Record<string, unknown>): string {
   const files = scanFilesCount(o);
   const reclaim = scanReclaimable(o);
-  if (reclaim && files != null) {
-    let word = 'files';
-    if (files === 1) word = 'file';
-    return `Scan Completed \u00b7 ${reclaim} \u00b7 ${files} ${word}`;
-  }
-  if (reclaim) return `Scan Completed \u00b7 ${reclaim}`;
-  const cats = o.categories_count ?? o.categoriesCount;
-  if (cats != null) {
-    const n = Number(cats);
-    if (Number.isFinite(n) && n > 0) return `Scan Completed \u00b7 ${n} ${n === 1 ? 'category' : 'categories'}`;
-  }
+  const withCounts = scanTitleWithCounts(reclaim, files);
+  if (withCounts) return withCounts;
+  const n = positiveCategoryCount(o);
+  if (n != null) return `Scan Completed \u00b7 ${n} ${scanCategoryWord(n)}`;
   return 'Scan Completed';
 }
 function summarizeScan(objs: Record<string, unknown>[], base: BaseSummary): LogSummary {

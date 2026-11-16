@@ -59,29 +59,44 @@ fn commit_scan_outcome<C: Clock>(
     )
 }
 
+fn has_any_builtin_tier_enabled(settings: &sweeper_core::settings::SweeperSettings) -> bool {
+    if settings.enable_tier1 || settings.enable_tier2 {
+        return true;
+    }
+    settings.enable_tier3
+}
+
+fn all_custom_paths_are_sandbox(settings: &sweeper_core::settings::SweeperSettings) -> bool {
+    settings
+        .custom_paths
+        .iter()
+        .all(|p| super::is_sandbox_path_hint(p))
+}
+
+fn report_targets_are_sandbox_custom(report: &scanner::ScanReport) -> bool {
+    report.targets.iter().all(|t| {
+        let paths_ok = t
+            .resolved_paths
+            .iter()
+            .all(|p| super::is_sandbox_path_hint(p));
+        paths_ok && t.target_id.starts_with("custom-path")
+    })
+}
+
 fn is_sandbox_scan(
     settings: &sweeper_core::settings::SweeperSettings,
     report: &scanner::ScanReport,
 ) -> bool {
-    if settings.enable_tier1 || settings.enable_tier2 || settings.enable_tier3 {
+    if has_any_builtin_tier_enabled(settings) {
         return false;
     }
     if settings.custom_paths.is_empty() {
         return false;
     }
-    if !settings
-        .custom_paths
-        .iter()
-        .all(|p| super::is_sandbox_path_hint(p))
-    {
+    if !all_custom_paths_are_sandbox(settings) {
         return false;
     }
-    report.targets.iter().all(|t| {
-        t.resolved_paths
-            .iter()
-            .all(|p| super::is_sandbox_path_hint(p))
-            && t.target_id.starts_with("custom-path")
-    })
+    report_targets_are_sandbox_custom(report)
 }
 
 fn scan_logs_base_dir() -> PathBuf {
