@@ -192,117 +192,135 @@ function Get-ForbidUnsafeTargets([string]$root) {
   return @($targets)
 }
 
-function Get-RustCharPair([char[]]$chars, [int]$i) {
-  $a = $chars[$i]
-  $b = [char]0
-  $hasNext = ($i + 1 -lt $chars.Length)
-  if ($hasNext) { $b = $chars[$i + 1] }
-  return @($a, $b, $hasNext)
-}
-
 function Test-RustNewline([char]$c) {
   return ($c -eq "`r") -or ($c -eq "`n")
 }
 
-function Set-RustBlankChar([char[]]$out, [int]$i) {
-  $isNl = Test-RustNewline $out[$i]
-  if ($isNl) { return }
-  $out[$i] = ' '
+function Get-RustScanState([string]$text) {
+  $out = $text.ToCharArray()
+  return @{ Out = $out; Len = $out.Length; Index = 0; Depth = 0; InString = $false; InLine = $false; RawHashes = -1 }
 }
 
-function Step-RustBlock([char[]]$out, [int]$i, [ref]$depth) {
-  $pair = Get-RustCharPair $out $i
-  $open = (($pair[0] -eq '/') -and ($pair[1] -eq '*') -and $pair[2])
+function Step-RustBlock([hashtable]$state) {
+  $i = $state.Index
+  $j = $i + 1
+  $open = (($state.Out[$i] -eq '/') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '*'))
   if ($open) {
-    $out[$i] = ' '
-    $out[$i + 1] = ' '
-    $depth.Value++
-    return ($i + 2)
+    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth++; $state.Index = $i + 2; return
   }
-  $close = (($pair[0] -eq '*') -and ($pair[1] -eq '/') -and $pair[2])
+  $close = (($state.Out[$i] -eq '*') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '/'))
   if ($close) {
-    $out[$i] = ' '
-    $out[$i + 1] = ' '
-    $depth.Value--
-    return ($i + 2)
+    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth--; $state.Index = $i + 2; return
   }
-  Set-RustBlankChar $out $i
-  return ($i + 1)
+  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+  $state.Index = $i + 1
 }
 
-function Step-RustLineComment([char[]]$out, [int]$i, [ref]$inLine) {
-  $isNl = Test-RustNewline $out[$i]
-  if ($isNl) {
-    $inLine.Value = $false
-    return ($i + 1)
-  }
-  $out[$i] = ' '
-  return ($i + 1)
+function Step-RustLineComment([hashtable]$state) {
+  $i = $state.Index
+  $isNl = Test-RustNewline $state.Out[$i]
+  if ($isNl) { $state.InLine = $false; $state.Index = $i + 1; return }
+  $state.Out[$i] = ' '; $state.Index = $i + 1
 }
 
-function Step-RustString([char[]]$out, [int]$i, [ref]$inString) {
-  $pair = Get-RustCharPair $out $i
-  $esc = (($pair[0] -eq '\') -and $pair[2])
+function Step-RustString([hashtable]$state) {
+  $i = $state.Index
+  $j = $i + 1
+  $esc = (($state.Out[$i] -eq '\') -and ($j -lt $state.Len))
   if ($esc) {
-    Set-RustBlankChar $out $i
-    Set-RustBlankChar $out ($i + 1)
-    return ($i + 2)
+    if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+    if (-not (Test-RustNewline $state.Out[$j])) { $state.Out[$j] = ' ' }
+    $state.Index = $i + 2; return
   }
-  $quote = ($pair[0] -eq '"')
-  if ($quote) {
-    $out[$i] = ' '
-    $inString.Value = $false
-    return ($i + 1)
+  if ($state.Out[$i] -eq '"') {
+    $state.Out[$i] = ' '; $state.InString = $false; $state.Index = $i + 1; return
   }
-  Set-RustBlankChar $out $i
-  return ($i + 1)
+  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+  $state.Index = $i + 1
 }
 
-function Step-RustNormal([char[]]$out, [int]$i, [ref]$depth, [ref]$inString, [ref]$inLine) {
-  $pair = Get-RustCharPair $out $i
-  $line = (($pair[0] -eq '/') -and ($pair[1] -eq '/') -and $pair[2])
+function Test-RustRawHashesAt([hashtable]$state, [int]$i) {
+  $j = $i
+  while (($j -lt $state.Len) -and ($state.Out[$j] -eq '#')) { $j++ }
+  $ok = (($j -lt $state.Len) -and ($state.Out[$j] -eq '"'))
+  if (-not $ok) { return -1 }
+  return ($j - $i)
+}
+
+function Get-RustRawPrefixStart([hashtable]$state) {
+  $i = $state.Index
+  if ($state.Out[$i] -eq 'r') { return $i }
+  $j = $i + 1
+  $isB = (($state.Out[$i] -eq 'b') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq 'r'))
+  if ($isB) { return $j }
+  $isC = (($state.Out[$i] -eq 'c') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq 'r'))
+  if ($isC) { return $j }
+  return -1
+}
+
+function Try-StartRustRawString([hashtable]$state) {
+  $rIdx = Get-RustRawPrefixStart $state
+  if ($rIdx -lt 0) { return $false }
+  $prev = $state.Index - 1
+  $ident = (($prev -ge 0) -and ($state.Out[$prev] -match '[A-Za-z0-9_]'))
+  if ($ident) { return $false }
+  $hashes = Test-RustRawHashesAt $state ($rIdx + 1)
+  if ($hashes -lt 0) { return $false }
+  $end = $rIdx + 1 + $hashes
+  for ($k = $state.Index; $k -le $end; $k++) { $state.Out[$k] = ' ' }
+  $state.RawHashes = $hashes; $state.Index = $end + 1; return $true
+}
+
+function Step-RustRawString([hashtable]$state) {
+  $i = $state.Index
+  $quote = ($state.Out[$i] -eq '"')
+  $ok = $quote
+  if ($ok) {
+    for ($k = 0; $k -lt $state.RawHashes; $k++) {
+      $j = $i + 1 + $k
+      $ok = (($ok) -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '#'))
+    }
+  }
+  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+  if ($ok) {
+    $end = $i + $state.RawHashes
+    for ($k = $i + 1; $k -le $end; $k++) { $state.Out[$k] = ' ' }
+    $state.RawHashes = -1; $state.Index = $end + 1; return
+  }
+  $state.Index = $i + 1
+}
+
+function Step-RustNormal([hashtable]$state) {
+  $started = Try-StartRustRawString $state
+  if ($started) { return }
+  $i = $state.Index
+  $j = $i + 1
+  $line = (($state.Out[$i] -eq '/') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '/'))
   if ($line) {
-    $out[$i] = ' '
-    $out[$i + 1] = ' '
-    $inLine.Value = $true
-    return ($i + 2)
+    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.InLine = $true; $state.Index = $i + 2; return
   }
-  $block = (($pair[0] -eq '/') -and ($pair[1] -eq '*') -and $pair[2])
+  $block = (($state.Out[$i] -eq '/') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '*'))
   if ($block) {
-    $out[$i] = ' '
-    $out[$i + 1] = ' '
-    $depth.Value = 1
-    return ($i + 2)
+    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth = 1; $state.Index = $i + 2; return
   }
-  $str = ($pair[0] -eq '"')
-  if ($str) {
-    $out[$i] = ' '
-    $inString.Value = $true
-    return ($i + 1)
+  if ($state.Out[$i] -eq '"') {
+    $state.Out[$i] = ' '; $state.InString = $true; $state.Index = $i + 1; return
   }
-  return ($i + 1)
+  $state.Index = $i + 1
 }
 
-function Step-RustScan([char[]]$out, [int]$i, [ref]$depth, [ref]$inString, [ref]$inLine) {
-  if ($depth.Value -gt 0) { return (Step-RustBlock $out $i $depth) }
-  if ($inLine.Value) { return (Step-RustLineComment $out $i $inLine) }
-  if ($inString.Value) { return (Step-RustString $out $i $inString) }
-  return (Step-RustNormal $out $i $depth $inString $inLine)
+function Step-RustScan([hashtable]$state) {
+  if ($state.RawHashes -ge 0) { Step-RustRawString $state; return }
+  if ($state.Depth -gt 0) { Step-RustBlock $state; return }
+  if ($state.InLine) { Step-RustLineComment $state; return }
+  if ($state.InString) { Step-RustString $state; return }
+  Step-RustNormal $state
 }
 
 function Get-RustScanText([string]$text) {
-  $out = $text.ToCharArray()
-  $i = 0
-  $depth = 0
-  $inString = $false
-  $inLine = $false
-  $dRef = [ref]$depth
-  $sRef = [ref]$inString
-  $lRef = [ref]$inLine
-  while ($i -lt $out.Length) {
-    $i = Step-RustScan $out $i $dRef $sRef $lRef
-  }
-  return -join $out
+  $state = Get-RustScanState $text
+  while ($state.Index -lt $state.Len) { Step-RustScan $state }
+  return -join $state.Out
 }
 
 function Test-HasActiveForbidUnsafe([string]$text) {
@@ -574,6 +592,18 @@ function Test-SelfTestNestedBlockComments([ref]$ok) {
   Assert-SelfTest ($safeCount -eq 0) "unsafe with nested block comment and SAFETY must pass" $ok
 }
 
+function Test-SelfTestRawStrings([ref]$ok) {
+  $cr = "const X: &str = r#`"`n`"`n#![forbid(unsafe_code)]`n`"#;`nfn main() {}`n"
+  $hashes = "const Y: &str = r##`" `"# #![forbid(unsafe_code)] `"##;`nfn main() {}`n"
+  $br = "const Z: &[u8] = br#`"/* `"#;`n#![forbid(unsafe_code)]`nfn main() {}`n"
+  $unsafe = "const U: &str = r`"unsafe { x() }`";`nunsafe { y(); }`n"
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $cr)) "raw string with embedded quote must ignore forbid" $ok
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $hashes)) "r## raw string must ignore forbid" $ok
+  Assert-SelfTest (Test-HasActiveForbidUnsafe $br) "active forbid after br# raw string must pass" $ok
+  $unsafeCount = Get-UnsafeIssueCount 'raw_unsafe.rs' $unsafe
+  Assert-SelfTest ($unsafeCount -eq 1) "unsafe in raw string ignored, real unsafe checked" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -582,6 +612,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestUnsafeBlockComment $okRef
   Test-SelfTestUnsafeMultiline $okRef
   Test-SelfTestNestedBlockComments $okRef
+  Test-SelfTestRawStrings $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
