@@ -192,22 +192,117 @@ function Get-ForbidUnsafeTargets([string]$root) {
   return @($targets)
 }
 
-function Remove-RustBlockComments([string]$text) {
-  return [regex]::Replace($text, '(?s)/\*.*?\*/', { param($m) $m.Value -replace '[^\r\n]', ' ' })
+function Get-RustCharPair([char[]]$chars, [int]$i) {
+  $a = $chars[$i]
+  $b = [char]0
+  $hasNext = ($i + 1 -lt $chars.Length)
+  if ($hasNext) { $b = $chars[$i + 1] }
+  return @($a, $b, $hasNext)
 }
 
-function Remove-RustDoubleQuotedStrings([string]$text) {
-  return [regex]::Replace($text, '"(?:\\.|[^"\\])*"', { param($m) $m.Value -replace '[^\r\n]', ' ' })
+function Test-RustNewline([char]$c) {
+  return ($c -eq "`r") -or ($c -eq "`n")
 }
 
-function Remove-RustLineComments([string]$text) {
-  return [regex]::Replace($text, '(?m)//[^\r\n]*', { param($m) ' ' * $m.Value.Length })
+function Set-RustBlankChar([char[]]$out, [int]$i) {
+  $isNl = Test-RustNewline $out[$i]
+  if ($isNl) { return }
+  $out[$i] = ' '
+}
+
+function Step-RustBlock([char[]]$out, [int]$i, [ref]$depth) {
+  $pair = Get-RustCharPair $out $i
+  $open = (($pair[0] -eq '/') -and ($pair[1] -eq '*') -and $pair[2])
+  if ($open) {
+    $out[$i] = ' '
+    $out[$i + 1] = ' '
+    $depth.Value++
+    return ($i + 2)
+  }
+  $close = (($pair[0] -eq '*') -and ($pair[1] -eq '/') -and $pair[2])
+  if ($close) {
+    $out[$i] = ' '
+    $out[$i + 1] = ' '
+    $depth.Value--
+    return ($i + 2)
+  }
+  Set-RustBlankChar $out $i
+  return ($i + 1)
+}
+
+function Step-RustLineComment([char[]]$out, [int]$i, [ref]$inLine) {
+  $isNl = Test-RustNewline $out[$i]
+  if ($isNl) {
+    $inLine.Value = $false
+    return ($i + 1)
+  }
+  $out[$i] = ' '
+  return ($i + 1)
+}
+
+function Step-RustString([char[]]$out, [int]$i, [ref]$inString) {
+  $pair = Get-RustCharPair $out $i
+  $esc = (($pair[0] -eq '\') -and $pair[2])
+  if ($esc) {
+    Set-RustBlankChar $out $i
+    Set-RustBlankChar $out ($i + 1)
+    return ($i + 2)
+  }
+  $quote = ($pair[0] -eq '"')
+  if ($quote) {
+    $out[$i] = ' '
+    $inString.Value = $false
+    return ($i + 1)
+  }
+  Set-RustBlankChar $out $i
+  return ($i + 1)
+}
+
+function Step-RustNormal([char[]]$out, [int]$i, [ref]$depth, [ref]$inString, [ref]$inLine) {
+  $pair = Get-RustCharPair $out $i
+  $line = (($pair[0] -eq '/') -and ($pair[1] -eq '/') -and $pair[2])
+  if ($line) {
+    $out[$i] = ' '
+    $out[$i + 1] = ' '
+    $inLine.Value = $true
+    return ($i + 2)
+  }
+  $block = (($pair[0] -eq '/') -and ($pair[1] -eq '*') -and $pair[2])
+  if ($block) {
+    $out[$i] = ' '
+    $out[$i + 1] = ' '
+    $depth.Value = 1
+    return ($i + 2)
+  }
+  $str = ($pair[0] -eq '"')
+  if ($str) {
+    $out[$i] = ' '
+    $inString.Value = $true
+    return ($i + 1)
+  }
+  return ($i + 1)
+}
+
+function Step-RustScan([char[]]$out, [int]$i, [ref]$depth, [ref]$inString, [ref]$inLine) {
+  if ($depth.Value -gt 0) { return (Step-RustBlock $out $i $depth) }
+  if ($inLine.Value) { return (Step-RustLineComment $out $i $inLine) }
+  if ($inString.Value) { return (Step-RustString $out $i $inString) }
+  return (Step-RustNormal $out $i $depth $inString $inLine)
 }
 
 function Get-RustScanText([string]$text) {
-  $t = Remove-RustBlockComments $text
-  $t = Remove-RustDoubleQuotedStrings $t
-  return (Remove-RustLineComments $t)
+  $out = $text.ToCharArray()
+  $i = 0
+  $depth = 0
+  $inString = $false
+  $inLine = $false
+  $dRef = [ref]$depth
+  $sRef = [ref]$inString
+  $lRef = [ref]$inLine
+  while ($i -lt $out.Length) {
+    $i = Step-RustScan $out $i $dRef $sRef $lRef
+  }
+  return -join $out
 }
 
 function Test-HasActiveForbidUnsafe([string]$text) {
@@ -466,6 +561,19 @@ function Test-SelfTestUnsafeMultiline([ref]$ok) {
   Assert-SelfTest ($goodCount -eq 0) "multiline unsafe with SAFETY must pass" $ok
 }
 
+function Test-SelfTestNestedBlockComments([ref]$ok) {
+  $nestedForbid = "/* outer comment`n   /* nested comment */`n#![forbid(unsafe_code)]`n*/`nfn main() {}`n"
+  $strBlock = "const X: &str = `"/*`";`n#![forbid(unsafe_code)]`nfn main() {}`n"
+  $unsafeNested = "unsafe /* outer /* inner */ */ { GetLastError() }`n"
+  $safeNested = "// SAFETY: nested comment in unsafe`nunsafe /* outer /* inner */ */ { GetLastError() }`n"
+  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $nestedForbid)) "forbid-unsafe in nested block comment must fail" $ok
+  Assert-SelfTest (Test-HasActiveForbidUnsafe $strBlock) "forbid-unsafe after string containing block opener must pass" $ok
+  $unsafeCount = Get-UnsafeIssueCount 'nested_unsafe.rs' $unsafeNested
+  $safeCount = Get-UnsafeIssueCount 'nested_unsafe_ok.rs' $safeNested
+  Assert-SelfTest ($unsafeCount -eq 1) "unsafe with nested block comment and no SAFETY must fail" $ok
+  Assert-SelfTest ($safeCount -eq 0) "unsafe with nested block comment and SAFETY must pass" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -473,6 +581,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestSharedSafety $okRef
   Test-SelfTestUnsafeBlockComment $okRef
   Test-SelfTestUnsafeMultiline $okRef
+  Test-SelfTestNestedBlockComments $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
