@@ -39,7 +39,7 @@ pub enum SkipReason {
     OtherReparse,
     /// Unreadable/inaccessible entry or metadata.
     Unreadable,
-    /// Policy-excluded (e.g. protected subtree, virtual disk files).
+    /// Policy-excluded file or path (e.g. virtual disk files, protected subtree segments).
     PolicyExcluded,
 }
 

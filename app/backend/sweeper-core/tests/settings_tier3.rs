@@ -743,6 +743,92 @@ fn tier3_recycle_bin_scan_reports_contents_in_sandbox() {
 }
 
 #[test]
+fn policy_excludes_vhdx_and_git_in_scanned_target() {
+    use sweeper_knowledge::{KnownFolder, Risk, Scope, TargetDefinition, Tier};
+
+    let sb = sandbox_in_target("policy-excludes-vhdx-git");
+    let base = sb
+        .create_dir("Temp\\__sweeper_scan_policy_excludes_test")
+        .unwrap();
+    // create swap.vhdx file
+    std::fs::write(base.join("swap.vhdx"), b"fakevhdx").unwrap();
+    // create .git dir with a file inside
+    let git_dir = base.join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    std::fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    // also a normal file to ensure scan still works
+    write_old_file(&base.join("normal.txt"), 2);
+
+    // Point to the sandboxed base by resolving its relative path under LocalAppData?
+    // sandbox_in_target puts under target/sweeper-test-sandboxes/<name>; easier to scan via scan_targets
+    // by constructing a target with known_folder LocalAppData and relative_subpath that resolves to base.
+    // But base is not under LocalAppData in this test harness layout ΓÇö wait: sandbox_in_target uses CARGO_TARGET_DIR/sweeper-test-sandboxes,
+    // which is different from LocalAppData. So the previous approach (writing into LocalAppData\Temp...) was needed.
+    // But clippy disallows fs::remove_dir_all. Let me use the LocalAppData approach but clean up with Command like other tests do.
+    drop(sb);
+    let local = sweeper_winfs::resolve_known_folder(sweeper_winfs::KnownFolderId::LocalAppData)
+        .expect("resolve LocalAppData");
+    let base = local
+        .join("Temp")
+        .join("__sweeper_scan_policy_excludes_test");
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "rmdir", "/S", "/Q", &base.to_string_lossy()])
+        .status();
+    let _ = std::fs::create_dir_all(&base);
+    std::fs::write(base.join("swap.vhdx"), b"fakevhdx").unwrap();
+    let git_dir = base.join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    std::fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    write_old_file(&base.join("normal.txt"), 2);
+
+    let target = TargetDefinition {
+        id: "policy-exclude-test".to_string(),
+        name: "policy-exclude-test".to_string(),
+        tier: Tier::Tier1,
+        risk: Risk::Safe,
+        known_folder: KnownFolder::LocalAppData,
+        relative_subpath: "Temp\\__sweeper_scan_policy_excludes_test".to_string(),
+        scope: Scope::Contents,
+        min_age_hours: 0,
+        description: "test".to_string(),
+        requires_elevation: false,
+    };
+    let report = scanner::scan_targets(vec![target], 0).expect("scan");
+    assert_eq!(report.targets.len(), 1);
+    let t = &report.targets[0];
+    for it in &t.items {
+        let lp = it.path.to_ascii_lowercase();
+        assert!(
+            !lp.ends_with(".vhdx"),
+            "vhdx should not be emitted: {}",
+            it.path
+        );
+        assert!(
+            !lp.ends_with(".vhd"),
+            "vhd should not be emitted: {}",
+            it.path
+        );
+        assert!(
+            !lp.contains("\\.git\\"),
+            ".git contents should not be emitted: {}",
+            it.path
+        );
+    }
+    assert!(
+        t.skipped_reasons
+            .get("PolicyExcluded")
+            .copied()
+            .unwrap_or(0)
+            >= 2,
+        "expected >=2 PolicyExcluded skips, got: {:?}",
+        t.skipped_reasons
+    );
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "rmdir", "/S", "/Q", &base.to_string_lossy()])
+        .status();
+}
+
+#[test]
 fn tier3_clean_removes_stale_dirs_and_recycle_contents_only() {
     let sb = Sandbox::new();
     let (

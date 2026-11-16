@@ -177,39 +177,22 @@ impl SessionStore {
         let mut by_target: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
         let mut total_bytes = 0u64;
         let mut validated = Vec::with_capacity(selected.len());
-        if selected.len() <= 1 {
-            for item in selected {
-                let mut assembly = ScanAssembly {
-                    by_target: &mut by_target,
-                    total_bytes: &mut total_bytes,
-                    validated: &mut validated,
-                };
-                Self::accumulate_scan_item(session, item, &mut assembly)?;
-            }
-        } else {
-            for item in selected {
-                match Self::validate_scan_item(session, item) {
-                    Ok(v) => {
-                        let size = item.dto.size.get();
-                        let entry = by_target
-                            .entry(item.target_id.clone())
-                            .or_insert_with(|| (item.target_name.clone(), 0u64, 0u64));
-                        entry.1 = entry.1.saturating_add(1);
-                        entry.2 = entry.2.saturating_add(size);
-                        total_bytes = total_bytes.saturating_add(size);
-                        validated.push(v);
-                    }
-                    Err(_) => {
-                        // Gracefully skip invalid/ineligible items in multi-select previews.
-                        continue;
-                    }
-                }
+        let mut last_err: Option<ContractError> = None;
+        for item in selected {
+            let mut assembly = ScanAssembly {
+                by_target: &mut by_target,
+                total_bytes: &mut total_bytes,
+                validated: &mut validated,
+            };
+            if let Err(err) = Self::accumulate_scan_item(session, item, &mut assembly) {
+                last_err = Some(err);
+                continue;
             }
         }
         if validated.is_empty() {
-            return Err(ContractError::InvalidInput {
+            return Err(last_err.unwrap_or_else(|| ContractError::InvalidInput {
                 reason: "selected item failed validation".to_string(),
-            });
+            }));
         }
         Ok(ScanPreviewBuild {
             total_bytes,
@@ -223,6 +206,7 @@ impl SessionStore {
         item: &StoredItem,
         assembly: &mut ScanAssembly<'_>,
     ) -> Result<(), ContractError> {
+        let validated_item = Self::validate_scan_item(session, item)?;
         let size = item.dto.size.get();
         let entry = assembly
             .by_target
@@ -231,9 +215,7 @@ impl SessionStore {
         entry.1 = entry.1.saturating_add(1);
         entry.2 = entry.2.saturating_add(size);
         *assembly.total_bytes = assembly.total_bytes.saturating_add(size);
-        assembly
-            .validated
-            .push(Self::validate_scan_item(session, item)?);
+        assembly.validated.push(validated_item);
         Ok(())
     }
 

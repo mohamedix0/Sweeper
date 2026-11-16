@@ -9,48 +9,36 @@ pub(super) fn resolve_stale_search_roots(opts: &ScanSettingsOptions) -> Vec<Stri
     default_tier3_project_search_roots()
 }
 
-pub(super) fn default_tier3_project_search_roots() -> Vec<String> {
-    let mut roots: Vec<String> = Vec::new();
-    // Always include user profile if available and allowed.
-    if let Some(canon) = user_profile_search_root() {
-        if !is_disallowed_stale_search_root(&canon) {
-            let s = canon.to_string();
-            if !roots.iter().any(|r| r.eq_ignore_ascii_case(&s)) {
-                roots.push(s);
-            }
-        }
+fn push_unique_search_root(out: &mut Vec<String>, canon: &CanonicalPath) {
+    if is_disallowed_stale_search_root(canon) {
+        return;
     }
-    // Common developer workspace folders on fixed drives (safe, bounded discovery downstream).
-    for drive in ['C', 'D', 'E', 'F'] {
-        let bases = [
-            format!("{}:\\Projects", drive),
-            format!("{}:\\projects", drive),
-            format!("{}:\\dev", drive),
-            format!("{}:\\Dev", drive),
-            format!("{}:\\code", drive),
-            format!("{}:\\Code", drive),
-            format!("{}:\\repos", drive),
-            format!("{}:\\Repos", drive),
-            format!("{}:\\work", drive),
-            format!("{}:\\Work", drive),
-            format!("{}:\\source", drive),
-            format!("{}:\\Source", drive),
-        ];
-        for b in bases {
-            let Ok(canon) = CanonicalPath::from_existing_path(&b) else {
-                continue;
-            };
-            let canon = canon.into_canonical();
-            if is_disallowed_stale_search_root(&canon) {
-                continue;
-            }
-            let s = canon.to_string();
-            if !roots.iter().any(|r| r.eq_ignore_ascii_case(&s)) {
-                roots.push(s);
-            }
+    let s = canon.to_string();
+    if !out.iter().any(|existing| existing.eq_ignore_ascii_case(&s)) {
+        out.push(s);
+    }
+}
+
+fn candidate_dev_roots_on_drives() -> Vec<CanonicalPath> {
+    let mut roots = Vec::new();
+    for letter in ['C', 'D', 'E', 'F', 'G'] {
+        let base = format!("{letter}:\\Users");
+        if let Ok(cp) = CanonicalPath::from_existing_path(&base) {
+            roots.push(cp.into_canonical());
         }
     }
     roots
+}
+
+pub(super) fn default_tier3_project_search_roots() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(canon) = user_profile_search_root() {
+        push_unique_search_root(&mut out, &canon);
+    }
+    for root in candidate_dev_roots_on_drives() {
+        push_unique_search_root(&mut out, &root);
+    }
+    out
 }
 
 pub(super) fn user_profile_search_root() -> Option<CanonicalPath> {

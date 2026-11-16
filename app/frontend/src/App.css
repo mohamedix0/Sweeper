@@ -193,6 +193,7 @@ input[type="checkbox"] { accent-color: var(--accent-primary); }
 .scan-select-slot { width: 16px; height: 16px; flex: 0 0 16px; display: inline-flex; align-items: center; justify-content: center; }
 .scan-select-slot .checkbox { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; }
 .scan-select-slot input[type="checkbox"] { margin: 0; width: 14px; height: 14px; }
+.scan-select-slot input[type="checkbox"]:disabled { cursor: default; }
 .lock-slot { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
 .status-muted { color: var(--text-muted); font-size: 11px; font-weight: 500; }
 .scan-item-empty { padding: 8px 14px 8px 48px; color: var(--text-muted); font-size: var(--text-sm); border-top: 1px solid var(--border-divider); }

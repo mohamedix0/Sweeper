@@ -302,3 +302,105 @@ fn cancel_analyzer_sets_cancellation_flag_for_active_session() {
         "cancel_analyzer must set the active session cancellation flag"
     );
 }
+
+#[test]
+fn preview_clean_multi_select_skips_invalid_item_and_keeps_valid() {
+    use std::collections::HashMap;
+    use sweeper_contract::{
+        RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
+    };
+
+    let clock = FixedClock::new(1_800_000_000);
+    let mut store = SessionStore::new();
+    let root = r"C:\Users\Test\AppData\Local\Temp".to_string();
+    let valid_path = r"C:\Users\Test\AppData\Local\Temp\valid.tmp".to_string();
+    let invalid_path = r"C:\Outside\invalid.tmp".to_string();
+
+    let valid_item = ScanItemDto {
+        id: "t1::valid".to_string(),
+        target_id: "user-temp".to_string(),
+        path: valid_path.clone(),
+        size: U64String(123),
+        mtime_unix_secs: U64String(1_700_000_000),
+        age_eligible: true,
+    };
+    let invalid_item = ScanItemDto {
+        id: "t1::invalid".to_string(),
+        target_id: "user-temp".to_string(),
+        path: invalid_path,
+        size: U64String(999),
+        mtime_unix_secs: U64String(1_700_000_000),
+        age_eligible: true,
+    };
+    let target = TargetScanResultDto {
+        target_id: "user-temp".to_string(),
+        target_name: "User Temp".to_string(),
+        tier: TierDto::Tier1,
+        risk: RiskDto::Safe,
+        resolved_paths: vec![root],
+        scanned: true,
+        status_reason: None,
+        total_bytes: U64String(1122),
+        eligible_bytes: U64String(1122),
+        file_count: U64String(2),
+        eligible_count: U64String(2),
+        skipped_count: U64String(0),
+        items: vec![valid_item.clone(), invalid_item.clone()],
+    };
+    let results = ScanResultsDto {
+        session_id: "scan-multi".to_string(),
+        started_unix_secs: U64String(1_800_000_000),
+        min_age_hours: 24,
+        targets: vec![target],
+    };
+    let mut items = HashMap::new();
+    items.insert(
+        valid_item.id.clone(),
+        super::StoredItem {
+            dto: valid_item.clone(),
+            target_id: "user-temp".to_string(),
+            target_name: "User Temp".to_string(),
+            tier: sweeper_core::Tier::Tier1,
+            risk: sweeper_core::Risk::Safe,
+            age_eligible: true,
+            requires_typed_confirmation: false,
+        },
+    );
+    items.insert(
+        invalid_item.id.clone(),
+        super::StoredItem {
+            dto: invalid_item,
+            target_id: "user-temp".to_string(),
+            target_name: "User Temp".to_string(),
+            tier: sweeper_core::Tier::Tier1,
+            risk: sweeper_core::Risk::Safe,
+            age_eligible: true,
+            requires_typed_confirmation: false,
+        },
+    );
+    store.create_test_session_with_items(super::TestScanSessionSeed {
+        now: 1_800_000_000,
+        settings_generation: 1,
+        session_id: "scan-multi".to_string(),
+        results,
+        items,
+    });
+
+    let preview = store
+        .preview_clean(
+            &clock,
+            super::PreviewCleanRequest {
+                session_id: "scan-multi".to_string(),
+                item_ids: vec!["t1::invalid".to_string(), "t1::valid".to_string()],
+                confirmations: None,
+                current_settings_generation: 1,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(preview.total_selected_bytes, U64String(123));
+    assert_eq!(preview.total_selected_count, U64String(1));
+    assert_eq!(preview.breakdown.len(), 1);
+    assert_eq!(preview.breakdown[0].selected_count, U64String(1));
+    assert_eq!(preview.breakdown[0].selected_bytes, U64String(123));
+}
