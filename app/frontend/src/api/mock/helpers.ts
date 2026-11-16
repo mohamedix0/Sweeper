@@ -1,0 +1,59 @@
+import type { AnalyzerNodeDto, PreviewTargetBreakdownDto, RiskDto, ScanItemDto, SkippedReasonDto, TargetScanResultDto, TierDto } from '../../contract/bindings';
+import type { ContractError, Settings } from '../client';
+
+export function err(code: ContractError['code'], reasonOrCount: string): never {
+  if (code === 'unknownItem') throw { code, details: { count: reasonOrCount } } satisfies ContractError;
+  throw { code, details: { reason: reasonOrCount } } as ContractError;
+}
+
+export function enabledTiers(settingsState: Settings, tiers: TierDto[] | null): Set<TierDto> {
+  const list = tiers ?? ([settingsState.enableTier1 ? 'Tier1' : null, settingsState.enableTier2 ? 'Tier2' : null, settingsState.enableTier3 ? 'Tier3' : null].filter(Boolean) as TierDto[]);
+  return new Set(list);
+}
+
+export function normalizeMockPath(path: string): string {
+  return path.replace(/[\\/]+$/, '').toLowerCase();
+}
+
+export function isAncestorMockPath(ancestorPath: string, descendantPath: string): boolean {
+  const a = normalizeMockPath(ancestorPath);
+  const d = normalizeMockPath(descendantPath);
+  if (!a || !d || a === d) return false;
+  const prefix = a.endsWith('\\') ? a : `${a}\\`;
+  return d.startsWith(prefix);
+}
+
+export function dedupeAnalyzerNodes(nodes: AnalyzerNodeDto[]): AnalyzerNodeDto[] {
+  return nodes.filter((node, _, all) => !all.some((other) => other.id !== node.id && isAncestorMockPath(other.path, node.path)));
+}
+
+export function analyzerBreakdown(selected: AnalyzerNodeDto[]): PreviewTargetBreakdownDto[] {
+  const deduped = dedupeAnalyzerNodes(selected);
+  const by = new Map<string, { targetId: string; targetName: string; count: bigint; bytes: bigint }>();
+  for (const n of deduped) {
+    const targetId = n.targetId ?? 'custom-path';
+    const targetName = targetId === 'custom-path' ? 'Custom Path' : (n.targetId ?? n.name);
+    const e = by.get(targetId) ?? { targetId, targetName, count: 0n, bytes: 0n };
+    e.count += 1n; e.bytes += BigInt(n.sizeBytes); by.set(targetId, e);
+  }
+  return [...by.values()].map((e) => ({ targetId: e.targetId, targetName: e.targetName, selectedCount: e.count.toString(), selectedBytes: e.bytes.toString() }));
+}
+
+export function scanBreakdown(selected: Array<{ item: { targetId: string; targetName: string; size: string } }>) {
+  const byTarget = new Map<string, { targetId: string; targetName: string; count: bigint; bytes: bigint }>();
+  let totalBytes = 0n;
+  for (const { item } of selected) {
+    const entry = byTarget.get(item.targetId) ?? { targetId: item.targetId, targetName: item.targetName, count: 0n, bytes: 0n };
+    entry.count += 1n; entry.bytes += BigInt(item.size); byTarget.set(item.targetId, entry); totalBytes += BigInt(item.size);
+  }
+  const breakdown: PreviewTargetBreakdownDto[] = [...byTarget.values()].map((e) => ({ targetId: e.targetId, targetName: e.targetName, selectedCount: e.count.toString(), selectedBytes: e.bytes.toString() }));
+  return { breakdown, totalBytes };
+}
+
+export function toSkippedReasons(reasons: Record<string, bigint>): SkippedReasonDto[] {
+  return Object.entries(reasons).map(([reason, count]) => ({ reason, count: count.toString() }));
+}
+
+export function sumNodeBytes(nodes: AnalyzerNodeDto[]): string {
+  return nodes.reduce((a, n) => a + BigInt(n.sizeBytes), 0n).toString();
+}

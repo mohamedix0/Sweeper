@@ -295,222 +295,289 @@ fn scan_allowlisted_targets_with_progress_runtime(
     started_unix_secs: u64,
 ) -> Result<ScanReport, ScanError> {
     validate_target_definitions(&targets).map_err(ScanError::Targets)?;
-    let now = UNIX_EPOCH + Duration::from_secs(started_unix_secs);
-    let min_age = Duration::from_secs(u64::from(min_age_hours) * 3600);
-
-    // Resolve known folder roots used by these targets.
-    let needed_kfs: HashSet<KnownFolder> = targets
-        .iter()
-        .filter(|t| !(t.requires_elevation && elevation_target_root_overrides.contains_key(&t.id)))
-        .map(|t| t.known_folder)
-        .collect();
-    let mut kf_roots: BTreeMap<KnownFolder, Result<CanonicalPath, String>> = BTreeMap::new();
-    for kf in needed_kfs {
-        kf_roots.insert(kf, resolve_validated_known_folder_root(kf));
-    }
-
-    let mut results = Vec::with_capacity(targets.len());
-    let mut all_resolved_roots: Vec<(String, CanonicalPath)> = Vec::new();
-
-    for target in targets {
-        if progress.cancelled() {
-            return Err(ScanError::Cancelled);
-        }
-        progress.emit(Some(&target.id), Some(&target.name));
-        let mut out = TargetScanResult {
-            target_id: target.id.clone(),
-            target_name: target.name.clone(),
-            tier: target.tier,
-            risk: target.risk,
-            resolved_paths: Vec::new(),
-            scanned: false,
-            status_reason: None,
-            total_bytes: 0,
-            eligible_bytes: 0,
-            file_count: 0,
-            eligible_count: 0,
-            skipped_count: 0,
-            skipped_reasons: BTreeMap::new(),
-            skipped_diagnostics: Vec::new(),
-            items: Vec::new(),
-        };
-
-        // Test/harness seam: override resolved root for audited elevation targets only.
-        if target.requires_elevation {
-            if let Some(override_path) = elevation_target_root_overrides.get(&target.id) {
-                match CanonicalPath::from_existing_path(override_path) {
-                    Ok(v) => {
-                        let canon = v.into_canonical();
-                        match validate_resolved_canonical_root(&canon) {
-                            Ok(()) => {
-                                let roots = vec![(target.id.clone(), canon)];
-                                if let Err(reason) =
-                                    validate_target_roots_policy(&roots, &all_resolved_roots)
-                                {
-                                    out.status_reason = Some(reason);
-                                    progress.completed_targets =
-                                        progress.completed_targets.saturating_add(1);
-                                    progress.emit(None, None);
-                                    results.push(out);
-                                    continue;
-                                }
-                                for (rid, r) in &roots {
-                                    all_resolved_roots.push((rid.clone(), r.clone()));
-                                }
-                                out.resolved_paths =
-                                    roots.iter().map(|(_, p)| p.to_string()).collect();
-                                scan_resolved_roots(
-                                    &target, &roots, min_age, now, &mut out, progress,
-                                )?;
-                                progress.completed_targets =
-                                    progress.completed_targets.saturating_add(1);
-                                progress.emit(None, None);
-                                results.push(out);
-                                continue;
-                            }
-                            Err(e) => {
-                                out.status_reason =
-                                    Some(format!("elevation target root override invalid: {e}"));
-                                progress.completed_targets =
-                                    progress.completed_targets.saturating_add(1);
-                                progress.emit(None, None);
-                                results.push(out);
-                                continue;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        out.status_reason =
-                            Some(format!("elevation target root override unresolved: {e}"));
-                        progress.completed_targets = progress.completed_targets.saturating_add(1);
-                        progress.emit(None, None);
-                        results.push(out);
-                        continue;
-                    }
-                }
-            }
-        }
-
-        let kf_res = kf_roots
-            .get(&target.known_folder)
-            .cloned()
-            .unwrap_or_else(|| Err("known folder not resolved".to_string()));
-        let base_root = match kf_res {
-            Ok(p) => p,
-            Err(e) => {
-                out.status_reason = Some(format!("known folder resolution failed: {e}"));
-                progress.completed_targets = progress.completed_targets.saturating_add(1);
-                progress.emit(None, None);
-                results.push(out);
-                continue;
-            }
-        };
-
-        // Special-case: redirected-temp conditional target.
-        if target.id == "redirected-temp" {
-            let temp_guard = match redirected_temp_candidate {
-                Some(candidate) => {
-                    let user_temp = match join_and_canonicalize(&base_root, "Temp") {
-                        Ok(p) => p,
-                        Err(e) => {
-                            out.status_reason = Some(format!(
-                                "redirected-temp disabled: failed to resolve user-temp: {e}"
-                            ));
-                            progress.completed_targets =
-                                progress.completed_targets.saturating_add(1);
-                            progress.emit(None, None);
-                            results.push(out);
-                            continue;
-                        }
-                    };
-                    evaluate_redirected_temp_candidate(Some(candidate), &user_temp)
-                }
-                None => evaluate_redirected_temp(&base_root),
-            };
-            match temp_guard {
-                TempGuard::Use(path) => {
-                    // scanned below using resolved path override
-                    match validate_and_collect_roots_for_target(&target, &base_root, Some(&path)) {
-                        Ok(roots) => {
-                            if let Err(reason) =
-                                validate_target_roots_policy(&roots, &all_resolved_roots)
-                            {
-                                out.status_reason = Some(reason);
-                                progress.completed_targets =
-                                    progress.completed_targets.saturating_add(1);
-                                progress.emit(None, None);
-                                results.push(out);
-                                continue;
-                            }
-                            for (rid, r) in &roots {
-                                all_resolved_roots.push((rid.clone(), r.clone()));
-                            }
-                            out.resolved_paths = roots.iter().map(|(_, p)| p.to_string()).collect();
-                            scan_resolved_roots(&target, &roots, min_age, now, &mut out, progress)?;
-                            progress.completed_targets =
-                                progress.completed_targets.saturating_add(1);
-                            progress.emit(None, None);
-                            results.push(out);
-                        }
-                        Err(e) => {
-                            out.status_reason = Some(e);
-                            progress.completed_targets =
-                                progress.completed_targets.saturating_add(1);
-                            progress.emit(None, None);
-                            results.push(out);
-                        }
-                    }
-                }
-                TempGuard::Disabled(reason) => {
-                    out.status_reason = Some(format!("redirected-temp disabled: {reason}"));
-                    progress.completed_targets = progress.completed_targets.saturating_add(1);
-                    progress.emit(None, None);
-                    results.push(out);
-                }
-            }
-            continue;
-        }
-
-        match validate_and_collect_roots_for_target(&target, &base_root, None) {
-            Ok(roots) => {
-                // Missing/unresolvable concrete roots (e.g. cache folders not present) are not scanned.
-                if roots.is_empty() {
-                    out.status_reason = Some("not present".to_string());
-                    progress.completed_targets = progress.completed_targets.saturating_add(1);
-                    progress.emit(None, None);
-                    results.push(out);
-                    continue;
-                }
-                if let Err(reason) = validate_target_roots_policy(&roots, &all_resolved_roots) {
-                    out.status_reason = Some(reason);
-                    progress.completed_targets = progress.completed_targets.saturating_add(1);
-                    progress.emit(None, None);
-                    results.push(out);
-                    continue;
-                }
-                for (rid, r) in &roots {
-                    all_resolved_roots.push((rid.clone(), r.clone()));
-                }
-                out.resolved_paths = roots.iter().map(|(_, p)| p.to_string()).collect();
-                scan_resolved_roots(&target, &roots, min_age, now, &mut out, progress)?;
-                progress.completed_targets = progress.completed_targets.saturating_add(1);
-                progress.emit(None, None);
-                results.push(out);
-            }
-            Err(e) => {
-                out.status_reason = Some(e);
-                progress.completed_targets = progress.completed_targets.saturating_add(1);
-                progress.emit(None, None);
-                results.push(out);
-            }
-        }
-    }
-
+    let ctx = AllowlistedScanCtx::new(started_unix_secs, min_age_hours, redirected_temp_candidate);
+    let kf_roots = resolve_needed_known_folder_roots(&targets, elevation_target_root_overrides);
+    let results = scan_allowlisted_target_list(
+        targets,
+        &kf_roots,
+        elevation_target_root_overrides,
+        &ctx,
+        progress,
+    )?;
     Ok(ScanReport {
         started_unix_secs,
         min_age_hours,
         targets: results,
     })
+}
+
+struct AllowlistedScanCtx<'a> {
+    now: SystemTime,
+    min_age: Duration,
+    redirected_temp_candidate: Option<&'a str>,
+}
+
+impl<'a> AllowlistedScanCtx<'a> {
+    fn new(
+        started_unix_secs: u64,
+        min_age_hours: u32,
+        redirected_temp_candidate: Option<&'a str>,
+    ) -> Self {
+        Self {
+            now: UNIX_EPOCH + Duration::from_secs(started_unix_secs),
+            min_age: Duration::from_secs(u64::from(min_age_hours) * 3600),
+            redirected_temp_candidate,
+        }
+    }
+}
+
+fn resolve_needed_known_folder_roots(
+    targets: &[TargetDefinition],
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+) -> BTreeMap<KnownFolder, Result<CanonicalPath, String>> {
+    let needed_kfs: HashSet<KnownFolder> = targets
+        .iter()
+        .filter(|t| !is_overridden_elevation_target(t, elevation_target_root_overrides))
+        .map(|t| t.known_folder)
+        .collect();
+    let mut kf_roots = BTreeMap::new();
+    for kf in needed_kfs {
+        kf_roots.insert(kf, resolve_validated_known_folder_root(kf));
+    }
+    kf_roots
+}
+
+fn is_overridden_elevation_target(
+    target: &TargetDefinition,
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+) -> bool {
+    target.requires_elevation && elevation_target_root_overrides.contains_key(&target.id)
+}
+
+fn scan_allowlisted_target_list(
+    targets: Vec<TargetDefinition>,
+    kf_roots: &BTreeMap<KnownFolder, Result<CanonicalPath, String>>,
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+    ctx: &AllowlistedScanCtx<'_>,
+    progress: &mut ScanProgressRuntime,
+) -> Result<Vec<TargetScanResult>, ScanError> {
+    let mut results = Vec::with_capacity(targets.len());
+    let mut all_resolved_roots: Vec<(String, CanonicalPath)> = Vec::new();
+    for target in targets {
+        if progress.cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        progress.emit(Some(&target.id), Some(&target.name));
+        let out = scan_single_allowlisted_target(
+            &target,
+            kf_roots,
+            elevation_target_root_overrides,
+            &mut all_resolved_roots,
+            ctx,
+            progress,
+        )?;
+        progress.completed_targets = progress.completed_targets.saturating_add(1);
+        progress.emit(None, None);
+        results.push(out);
+    }
+    Ok(results)
+}
+
+fn scan_single_allowlisted_target(
+    target: &TargetDefinition,
+    kf_roots: &BTreeMap<KnownFolder, Result<CanonicalPath, String>>,
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+    all_resolved_roots: &mut Vec<(String, CanonicalPath)>,
+    ctx: &AllowlistedScanCtx<'_>,
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
+    let mut out = empty_target_result(
+        target.id.clone(),
+        target.name.clone(),
+        target.tier,
+        target.risk,
+    );
+    if let Some(done) = try_scan_elevation_override(
+        target,
+        elevation_target_root_overrides,
+        all_resolved_roots,
+        ctx,
+        &mut out,
+        progress,
+    )? {
+        return Ok(done);
+    }
+    let base_root = match resolve_target_base_root(target, kf_roots) {
+        Ok(p) => p,
+        Err(reason) => return Ok(finish_target_with_status(out, reason)),
+    };
+    if target.id == "redirected-temp" {
+        return scan_redirected_temp_target(
+            target,
+            &base_root,
+            all_resolved_roots,
+            ctx,
+            out,
+            progress,
+        );
+    }
+    scan_standard_allowlisted_target(target, &base_root, all_resolved_roots, ctx, out, progress)
+}
+
+fn finish_target_with_status(mut out: TargetScanResult, reason: String) -> TargetScanResult {
+    out.status_reason = Some(reason);
+    out
+}
+
+fn try_scan_elevation_override(
+    target: &TargetDefinition,
+    elevation_target_root_overrides: &BTreeMap<String, String>,
+    all_resolved_roots: &mut Vec<(String, CanonicalPath)>,
+    ctx: &AllowlistedScanCtx<'_>,
+    out: &mut TargetScanResult,
+    progress: &mut ScanProgressRuntime,
+) -> Result<Option<TargetScanResult>, ScanError> {
+    if !target.requires_elevation {
+        return Ok(None);
+    }
+    let Some(override_path) = elevation_target_root_overrides.get(&target.id) else {
+        return Ok(None);
+    };
+    let result = scan_elevation_override_path(
+        target,
+        override_path,
+        all_resolved_roots,
+        ctx,
+        out,
+        progress,
+    )?;
+    Ok(Some(result))
+}
+
+fn scan_elevation_override_path(
+    target: &TargetDefinition,
+    override_path: &str,
+    all_resolved_roots: &mut Vec<(String, CanonicalPath)>,
+    ctx: &AllowlistedScanCtx<'_>,
+    out: &mut TargetScanResult,
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
+    let canon = match CanonicalPath::from_existing_path(override_path) {
+        Ok(v) => v.into_canonical(),
+        Err(e) => {
+            return Ok(finish_target_with_status(
+                out.clone(),
+                format!("elevation target root override unresolved: {e}"),
+            ));
+        }
+    };
+    if let Err(e) = validate_resolved_canonical_root(&canon) {
+        return Ok(finish_target_with_status(
+            out.clone(),
+            format!("elevation target root override invalid: {e}"),
+        ));
+    }
+    scan_validated_target_roots(
+        target,
+        vec![(target.id.clone(), canon)],
+        all_resolved_roots,
+        ctx,
+        out.clone(),
+        progress,
+    )
+}
+
+fn resolve_target_base_root(
+    target: &TargetDefinition,
+    kf_roots: &BTreeMap<KnownFolder, Result<CanonicalPath, String>>,
+) -> Result<CanonicalPath, String> {
+    let kf_res = kf_roots
+        .get(&target.known_folder)
+        .cloned()
+        .unwrap_or_else(|| Err("known folder not resolved".to_string()));
+    kf_res.map_err(|e| format!("known folder resolution failed: {e}"))
+}
+
+fn scan_redirected_temp_target(
+    target: &TargetDefinition,
+    base_root: &CanonicalPath,
+    all_resolved_roots: &mut Vec<(String, CanonicalPath)>,
+    ctx: &AllowlistedScanCtx<'_>,
+    mut out: TargetScanResult,
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
+    let temp_guard = match resolve_redirected_temp_guard(base_root, ctx.redirected_temp_candidate) {
+        Ok(g) => g,
+        Err(reason) => return Ok(finish_target_with_status(out, reason)),
+    };
+    match temp_guard {
+        TempGuard::Use(path) => {
+            let roots = match validate_and_collect_roots_for_target(target, base_root, Some(&path))
+            {
+                Ok(r) => r,
+                Err(e) => return Ok(finish_target_with_status(out, e)),
+            };
+            scan_validated_target_roots(target, roots, all_resolved_roots, ctx, out, progress)
+        }
+        TempGuard::Disabled(reason) => {
+            out.status_reason = Some(format!("redirected-temp disabled: {reason}"));
+            Ok(out)
+        }
+    }
+}
+
+fn resolve_redirected_temp_guard(
+    base_root: &CanonicalPath,
+    redirected_temp_candidate: Option<&str>,
+) -> Result<TempGuard, String> {
+    let Some(candidate) = redirected_temp_candidate else {
+        return Ok(evaluate_redirected_temp(base_root));
+    };
+    let user_temp = join_and_canonicalize(base_root, "Temp")
+        .map_err(|e| format!("redirected-temp disabled: failed to resolve user-temp: {e}"))?;
+    Ok(evaluate_redirected_temp_candidate(
+        Some(candidate),
+        &user_temp,
+    ))
+}
+
+fn scan_standard_allowlisted_target(
+    target: &TargetDefinition,
+    base_root: &CanonicalPath,
+    all_resolved_roots: &mut Vec<(String, CanonicalPath)>,
+    ctx: &AllowlistedScanCtx<'_>,
+    mut out: TargetScanResult,
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
+    let roots = match validate_and_collect_roots_for_target(target, base_root, None) {
+        Ok(r) => r,
+        Err(e) => return Ok(finish_target_with_status(out, e)),
+    };
+    if roots.is_empty() {
+        out.status_reason = Some("not present".to_string());
+        return Ok(out);
+    }
+    scan_validated_target_roots(target, roots, all_resolved_roots, ctx, out, progress)
+}
+
+fn scan_validated_target_roots(
+    target: &TargetDefinition,
+    roots: Vec<(String, CanonicalPath)>,
+    all_resolved_roots: &mut Vec<(String, CanonicalPath)>,
+    ctx: &AllowlistedScanCtx<'_>,
+    mut out: TargetScanResult,
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
+    if let Err(reason) = validate_target_roots_policy(&roots, all_resolved_roots) {
+        out.status_reason = Some(reason);
+        return Ok(out);
+    }
+    for (rid, r) in &roots {
+        all_resolved_roots.push((rid.clone(), r.clone()));
+    }
+    out.resolved_paths = roots.iter().map(|(_, p)| p.to_string()).collect();
+    scan_resolved_roots(target, &roots, ctx.min_age, ctx.now, &mut out, progress)?;
+    Ok(out)
 }
 
 fn scan_resolved_roots(
@@ -570,36 +637,53 @@ fn scan_one_root_iterative(
         progress,
     };
     while let Some(dir) = ctx.stack.pop() {
+        scan_directory_in_walk(&mut ctx, &dir)?;
+    }
+    Ok(())
+}
+
+fn scan_directory_in_walk(ctx: &mut ScanWalkCtx<'_>, dir: &Path) -> Result<(), ScanError> {
+    if ctx.progress.cancelled() {
+        return Err(ScanError::Cancelled);
+    }
+    let entries = match sweeper_winfs::read_dir_entries(dir) {
+        Ok(v) => v,
+        Err(e) => {
+            record_unreadable_directory(ctx, dir, &e);
+            return Ok(());
+        }
+    };
+    process_dir_entry_batch(ctx, entries)
+}
+
+fn record_unreadable_directory(ctx: &mut ScanWalkCtx<'_>, dir: &Path, e: &dyn std::fmt::Display) {
+    bump_skip_with_context(
+        ctx.out,
+        SkipReason::Unreadable,
+        format!("read_dir_entries {}: {e}", dir.to_string_lossy()),
+    );
+    ctx.progress
+        .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
+}
+
+fn process_dir_entry_batch(
+    ctx: &mut ScanWalkCtx<'_>,
+    entries: Vec<DirEntry>,
+) -> Result<(), ScanError> {
+    for ent in entries {
         if ctx.progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        let entries = match sweeper_winfs::read_dir_entries(&dir) {
-            Ok(v) => v,
-            Err(e) => {
-                bump_skip_with_context(
-                    ctx.out,
-                    SkipReason::Unreadable,
-                    format!("read_dir_entries {}: {e}", dir.to_string_lossy()),
-                );
-                ctx.progress.maybe_emit_throttled(
-                    Some(ctx.target.id.as_str()),
-                    Some(ctx.target.name.as_str()),
-                );
-                continue;
-            }
-        };
-        for ent in entries {
-            if ctx.progress.cancelled() {
-                return Err(ScanError::Cancelled);
-            }
-            process_entry(&mut ctx, &ent);
-            ctx.progress
-                .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
-        }
-        ctx.progress
-            .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
+        process_entry(ctx, &ent);
+        emit_batch_progress(ctx);
     }
+    emit_batch_progress(ctx);
     Ok(())
+}
+
+fn emit_batch_progress(ctx: &mut ScanWalkCtx<'_>) {
+    ctx.progress
+        .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
 }
 
 fn process_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
@@ -729,39 +813,7 @@ fn validate_and_collect_roots_for_target(
     let mut candidates = vec![PathBuf::from(known_folder_root.as_str())];
     for seg in segments {
         if seg.contains('*') {
-            let mut next = Vec::new();
-            for cand in candidates {
-                if !cand.exists() {
-                    continue;
-                }
-                let entries = match sweeper_winfs::read_dir_entries(&cand) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                for ent in entries {
-                    if !ent.is_dir {
-                        continue;
-                    }
-                    let name = ent.name.to_string_lossy();
-                    if !segment_pattern_matches(&name, seg) {
-                        continue;
-                    }
-                    // Intermediate wildcard expansion: only non-reparse directories
-                    if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
-                        continue;
-                    }
-                    // Defense-in-depth: ensure not a link point via handle.
-                    if sweeper_winfs::open_for_inspection(&ent.path)
-                        .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
-                        .map(|c| matches!(c, ReparseTagClass::LinkPoint))
-                        .unwrap_or(true)
-                    {
-                        continue;
-                    }
-                    next.push(ent.path);
-                }
-            }
-            candidates = next;
+            candidates = expand_wildcard_segment(candidates, seg);
         } else {
             for c in &mut candidates {
                 c.push(seg);
@@ -782,6 +834,44 @@ fn validate_and_collect_roots_for_target(
     roots.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
     roots.dedup_by(|a, b| a.1.is_same_path(&b.1));
     Ok(roots)
+}
+
+fn expand_wildcard_segment(candidates: Vec<PathBuf>, seg: &str) -> Vec<PathBuf> {
+    let mut next = Vec::new();
+    for cand in candidates {
+        if !cand.exists() {
+            continue;
+        }
+        let entries = match sweeper_winfs::read_dir_entries(&cand) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        for ent in entries {
+            if is_eligible_wildcard_entry(&ent, seg) {
+                next.push(ent.path);
+            }
+        }
+    }
+    next
+}
+
+fn is_eligible_wildcard_entry(ent: &sweeper_winfs::DirEntry, seg: &str) -> bool {
+    if !ent.is_dir {
+        return false;
+    }
+    let name = ent.name.to_string_lossy();
+    if !segment_pattern_matches(&name, seg) {
+        return false;
+    }
+    // Intermediate wildcard expansion: only non-reparse directories
+    if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
+        return false;
+    }
+    // Defense-in-depth: ensure not a link point via handle.
+    !sweeper_winfs::open_for_inspection(&ent.path)
+        .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
+        .map(|c| matches!(c, ReparseTagClass::LinkPoint))
+        .unwrap_or(true)
 }
 
 fn validate_single_resolved_root(
@@ -1257,13 +1347,7 @@ fn scan_custom_path_target(
     now: SystemTime,
     progress: &mut ScanProgressRuntime,
 ) -> Result<TargetScanResult, ScanError> {
-    let target_id = format!("custom-path-{}", idx + 1);
-    let mut out = empty_target_result(
-        target_id,
-        "Custom Path".to_string(),
-        Tier::Tier2, // display grouping tier; custom paths are Caution/contents-only
-        Risk::Caution,
-    );
+    let out = empty_custom_path_result(idx);
     if progress.cancelled() {
         return Err(ScanError::Cancelled);
     }
@@ -1271,60 +1355,81 @@ fn scan_custom_path_target(
     if progress.cancelled() {
         return Err(ScanError::Cancelled);
     }
-
-    let verdict = policy::validate_custom_path(raw_path);
-    if !verdict.allowed {
-        out.scanned = false;
-        out.status_reason = Some(format!(
-            "custom path invalid/missing (no fallback): {}",
-            verdict.reason
-        ));
-        out.skipped_diagnostics.push(format!(
-            "custom path rejected: {} ({})",
-            raw_path, verdict.reason
-        ));
-        progress.completed_targets = progress.completed_targets.saturating_add(1);
-        progress.emit(None, None);
-        return Ok(out);
+    if let Err((reason, diag)) = validate_custom_path_for_scan(raw_path) {
+        return Ok(finalize_custom_target(out, progress, reason, diag));
     }
-
-    let canon = match CanonicalPath::from_existing_path(raw_path) {
-        Ok(v) => v.into_canonical(),
-        Err(e) => {
-            out.scanned = false;
-            out.status_reason = Some(format!(
-                "custom path missing/unresolvable (no fallback): {e}"
-            ));
-            out.skipped_diagnostics
-                .push(format!("custom path unresolved: {raw_path} ({e})"));
-            progress.completed_targets = progress.completed_targets.saturating_add(1);
-            progress.emit(None, None);
-            return Ok(out);
+    let canon = match resolve_custom_path_for_scan(raw_path) {
+        Ok(c) => c,
+        Err((reason, diag)) => {
+            return Ok(finalize_custom_target(out, progress, reason, diag));
         }
     };
+    scan_custom_canonical_target(out, canon, min_age, now, progress)
+}
 
-    if let Err(e) = validate_resolved_canonical_root(&canon) {
-        out.scanned = false;
-        out.status_reason = Some(format!("custom path not allowed at scan time: {e}"));
-        out.skipped_diagnostics
-            .push(format!("custom path rejected at scan time: {e}"));
-        progress.completed_targets = progress.completed_targets.saturating_add(1);
-        progress.emit(None, None);
-        return Ok(out);
+fn empty_custom_path_result(idx: usize) -> TargetScanResult {
+    empty_target_result(
+        format!("custom-path-{}", idx + 1),
+        "Custom Path".to_string(),
+        Tier::Tier2,
+        Risk::Caution,
+    )
+}
+
+fn validate_custom_path_for_scan(raw_path: &str) -> Result<(), (String, String)> {
+    let verdict = policy::validate_custom_path(raw_path);
+    if verdict.allowed {
+        return Ok(());
     }
+    Err((
+        format!(
+            "custom path invalid/missing (no fallback): {}",
+            verdict.reason
+        ),
+        format!("custom path rejected: {} ({})", raw_path, verdict.reason),
+    ))
+}
 
-    let td = TargetDefinition {
-        id: out.target_id.clone(),
-        name: out.target_name.clone(),
-        tier: Tier::Tier2,
-        risk: Risk::Caution,
-        known_folder: KnownFolder::LocalAppData, // unused for custom resolved scan
-        relative_subpath: String::new(),
-        scope: sweeper_knowledge::Scope::Contents,
-        min_age_hours: (min_age.as_secs() / 3600) as u32,
-        description: "User-validated custom path (contents only).".to_string(),
-        requires_elevation: false,
-    };
+fn resolve_custom_path_for_scan(raw_path: &str) -> Result<CanonicalPath, (String, String)> {
+    let canon = CanonicalPath::from_existing_path(raw_path)
+        .map(|v| v.into_canonical())
+        .map_err(|e| {
+            (
+                format!("custom path missing/unresolvable (no fallback): {e}"),
+                format!("custom path unresolved: {raw_path} ({e})"),
+            )
+        })?;
+    validate_resolved_canonical_root(&canon).map_err(|e| {
+        (
+            format!("custom path not allowed at scan time: {e}"),
+            format!("custom path rejected at scan time: {e}"),
+        )
+    })?;
+    Ok(canon)
+}
+
+fn finalize_custom_target(
+    mut out: TargetScanResult,
+    progress: &mut ScanProgressRuntime,
+    status_reason: String,
+    diagnostic: String,
+) -> TargetScanResult {
+    out.scanned = false;
+    out.status_reason = Some(status_reason);
+    out.skipped_diagnostics.push(diagnostic);
+    progress.completed_targets = progress.completed_targets.saturating_add(1);
+    progress.emit(None, None);
+    out
+}
+
+fn scan_custom_canonical_target(
+    mut out: TargetScanResult,
+    canon: CanonicalPath,
+    min_age: Duration,
+    now: SystemTime,
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
+    let td = custom_path_target_definition(&out.target_id, &out.target_name, min_age);
     out.resolved_paths = vec![canon.to_string()];
     scan_resolved_roots(
         &td,
@@ -1337,6 +1442,25 @@ fn scan_custom_path_target(
     progress.completed_targets = progress.completed_targets.saturating_add(1);
     progress.emit(None, None);
     Ok(out)
+}
+
+fn custom_path_target_definition(
+    target_id: &str,
+    target_name: &str,
+    min_age: Duration,
+) -> TargetDefinition {
+    TargetDefinition {
+        id: target_id.to_string(),
+        name: target_name.to_string(),
+        tier: Tier::Tier2,
+        risk: Risk::Caution,
+        known_folder: KnownFolder::LocalAppData, // unused for custom resolved scan
+        relative_subpath: String::new(),
+        scope: sweeper_knowledge::Scope::Contents,
+        min_age_hours: (min_age.as_secs() / 3600) as u32,
+        description: "User-validated custom path (contents only).".to_string(),
+        requires_elevation: false,
+    }
 }
 
 fn empty_target_result(
@@ -1407,12 +1531,7 @@ fn scan_tier3_recycle_bin(
     now: SystemTime,
     progress: &mut ScanProgressRuntime,
 ) -> Result<TargetScanResult, ScanError> {
-    let mut result = empty_target_result(
-        "recycle-bin".to_string(),
-        "Recycle Bin (current user)".to_string(),
-        Tier::Tier3,
-        Risk::Caution,
-    );
+    let mut result = empty_recycle_bin_result();
     if progress.cancelled() {
         return Err(ScanError::Cancelled);
     }
@@ -1420,37 +1539,74 @@ fn scan_tier3_recycle_bin(
     if progress.cancelled() {
         return Err(ScanError::Cancelled);
     }
+    let valid_roots = collect_recycle_bin_items(opts, &mut result, progress)?;
+    finalize_recycle_bin_scan(result, valid_roots, min_age, now, progress)
+}
 
+fn empty_recycle_bin_result() -> TargetScanResult {
+    empty_target_result(
+        "recycle-bin".to_string(),
+        "Recycle Bin (current user)".to_string(),
+        Tier::Tier3,
+        Risk::Caution,
+    )
+}
+
+fn collect_recycle_bin_items(
+    opts: &ScanSettingsOptions,
+    result: &mut TargetScanResult,
+    progress: &ScanProgressRuntime,
+) -> Result<Vec<(String, CanonicalPath)>, ScanError> {
     let roots = if !opts.recycle_bin_roots.is_empty() {
         opts.recycle_bin_roots.clone()
     } else {
         discover_recycle_bin_roots()
     };
-
-    let mut valid_roots: Vec<(String, CanonicalPath)> = Vec::new();
+    let target_id = result.target_id.clone();
+    let mut valid_roots = Vec::new();
     for r in roots {
         if progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        if r.trim().is_empty() {
-            continue;
-        }
-        match CanonicalPath::from_existing_path(&r) {
-            Ok(v) => {
-                let canon = v.into_canonical();
-                match validate_recycle_bin_root(&canon) {
-                    Ok(()) => valid_roots.push((result.target_id.clone(), canon)),
-                    Err(e) => result
-                        .skipped_diagnostics
-                        .push(format!("recycle-bin root skipped: {} ({e})", canon)),
-                }
-            }
-            Err(e) => result
-                .skipped_diagnostics
-                .push(format!("recycle-bin root unresolved: {r} ({e})")),
-        }
+        collect_recycle_bin_root(
+            r,
+            &target_id,
+            &mut valid_roots,
+            &mut result.skipped_diagnostics,
+        );
     }
+    Ok(valid_roots)
+}
 
+fn collect_recycle_bin_root(
+    raw: String,
+    target_id: &str,
+    valid_roots: &mut Vec<(String, CanonicalPath)>,
+    diagnostics: &mut Vec<String>,
+) {
+    if raw.trim().is_empty() {
+        return;
+    }
+    let canon = match CanonicalPath::from_existing_path(&raw) {
+        Ok(v) => v.into_canonical(),
+        Err(e) => {
+            diagnostics.push(format!("recycle-bin root unresolved: {raw} ({e})"));
+            return;
+        }
+    };
+    match validate_recycle_bin_root(&canon) {
+        Ok(()) => valid_roots.push((target_id.to_string(), canon)),
+        Err(e) => diagnostics.push(format!("recycle-bin root skipped: {} ({e})", canon)),
+    }
+}
+
+fn finalize_recycle_bin_scan(
+    mut result: TargetScanResult,
+    mut valid_roots: Vec<(String, CanonicalPath)>,
+    min_age: Duration,
+    now: SystemTime,
+    progress: &mut ScanProgressRuntime,
+) -> Result<TargetScanResult, ScanError> {
     if valid_roots.is_empty() {
         result.scanned = false;
         result.status_reason = Some("no accessible user recycle-bin root found".to_string());
@@ -1458,12 +1614,18 @@ fn scan_tier3_recycle_bin(
         progress.emit(None, None);
         return Ok(result);
     }
-
     valid_roots.sort_by(|a, b| a.1.as_str().cmp(b.1.as_str()));
     valid_roots.dedup_by(|a, b| a.1.is_same_path(&b.1));
     result.resolved_paths = valid_roots.iter().map(|(_, p)| p.to_string()).collect();
+    let td = recycle_bin_target_definition(min_age);
+    scan_resolved_roots(&td, &valid_roots, min_age, now, &mut result, progress)?;
+    progress.completed_targets = progress.completed_targets.saturating_add(1);
+    progress.emit(None, None);
+    Ok(result)
+}
 
-    let td = TargetDefinition {
+fn recycle_bin_target_definition(min_age: Duration) -> TargetDefinition {
+    TargetDefinition {
         id: "recycle-bin".to_string(),
         name: "Recycle Bin (current user)".to_string(),
         tier: Tier::Tier3,
@@ -1475,11 +1637,7 @@ fn scan_tier3_recycle_bin(
         description: "Permanently empties user-accessible Recycle Bin contents (opt-in)."
             .to_string(),
         requires_elevation: false,
-    };
-    scan_resolved_roots(&td, &valid_roots, min_age, now, &mut result, progress)?;
-    progress.completed_targets = progress.completed_targets.saturating_add(1);
-    progress.emit(None, None);
-    Ok(result)
+    }
 }
 
 fn validate_recycle_bin_root(canon: &CanonicalPath) -> Result<(), String> {
@@ -1615,89 +1773,176 @@ fn discover_stale_project_dirs(
     node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
     progress: &ScanProgressRuntime,
 ) -> Result<(), ScanError> {
-    let root = match CanonicalPath::from_existing_path(search_root) {
-        Ok(v) => v.into_canonical(),
-        Err(_) => return Ok(()),
-    };
-    if policy::is_subtree_protected(&root)
-        || policy::is_ancestor_of_subtree_protected(&root)
-        || policy::is_protected_container_root(&root)
-    {
+    let Some(root) = normalize_stale_search_root(search_root) else {
         return Ok(());
-    }
-    // Never scan Windows / Program Files etc. (subtree-protected/container roots already blocked)
-    let mut stack: Vec<PathBuf> = vec![PathBuf::from(root.as_str())];
-    let mut seen: HashSet<String> = HashSet::new();
+    };
+    walk_stale_search_root(root, stale_threshold, now, rust_dirs, node_dirs, progress)?;
+    finalize_stale_dir_lists(rust_dirs, node_dirs);
+    Ok(())
+}
 
+fn normalize_stale_search_root(search_root: &str) -> Option<PathBuf> {
+    let root = CanonicalPath::from_existing_path(search_root)
+        .ok()?
+        .into_canonical();
+    if is_disallowed_stale_search_root(&root) {
+        return None;
+    }
+    Some(PathBuf::from(root.as_str()))
+}
+
+fn is_disallowed_stale_search_root(root: &CanonicalPath) -> bool {
+    policy::is_subtree_protected(root)
+        || policy::is_ancestor_of_subtree_protected(root)
+        || policy::is_protected_container_root(root)
+}
+
+fn walk_stale_search_root(
+    root: PathBuf,
+    stale_threshold: Duration,
+    now: SystemTime,
+    rust_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+    node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+    progress: &ScanProgressRuntime,
+) -> Result<(), ScanError> {
+    let mut stack = vec![root];
+    let mut seen: HashSet<String> = HashSet::new();
     while let Some(dir) = stack.pop() {
         if progress.cancelled() {
             return Err(ScanError::Cancelled);
         }
-        let dir_key = dir.to_string_lossy().to_ascii_uppercase();
-        if !seen.insert(dir_key) {
-            continue;
-        }
-        if is_disallowed_tier3_scan_path(&dir) {
-            continue;
-        }
-        let entries = match sweeper_winfs::read_dir_entries(&dir) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        // Check child dirs for stale project artifacts.
-        for ent in &entries {
-            if !ent.is_dir {
-                continue;
-            }
-            if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
-                continue;
-            }
-            let name = ent.name.to_string_lossy();
-            if name.eq_ignore_ascii_case("target") {
-                if let Some(info) = stale_rust_target_info(&ent.path, stale_threshold, now) {
-                    rust_dirs.push(info);
-                }
-            } else if name.eq_ignore_ascii_case("node_modules") {
-                if let Some(info) = stale_node_modules_info(&ent.path, stale_threshold, now) {
-                    node_dirs.push(info);
-                }
-            }
-        }
-        // Traverse deeper for discovery, but skip link points/protected/disallowed dirs and known heavy dirs.
-        for ent in entries {
-            if !ent.is_dir {
-                continue;
-            }
-            if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
-                continue;
-            }
-            let name = ent.name.to_string_lossy();
-            if name.eq_ignore_ascii_case("$Recycle.Bin")
-                || name.eq_ignore_ascii_case("System Volume Information")
-                || name.eq_ignore_ascii_case("Windows")
-                || name.eq_ignore_ascii_case("Program Files")
-                || name.eq_ignore_ascii_case("Program Files (x86)")
-            {
-                continue;
-            }
-            // Avoid descending into discovered stale dirs themselves.
-            if name.eq_ignore_ascii_case("target") && ent.path.join("..\\Cargo.toml").exists() {
-                continue;
-            }
-            if name.eq_ignore_ascii_case("node_modules") {
-                continue;
-            }
-            if !is_disallowed_tier3_scan_path(&ent.path) {
-                stack.push(ent.path);
-            }
+        process_stale_search_dir(
+            &dir,
+            stale_threshold,
+            now,
+            &mut stack,
+            &mut seen,
+            rust_dirs,
+            node_dirs,
+        );
+    }
+    Ok(())
+}
+
+fn process_stale_search_dir(
+    dir: &Path,
+    stale_threshold: Duration,
+    now: SystemTime,
+    stack: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+    rust_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+    node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+) {
+    if !mark_stale_dir_seen(dir, seen) || is_disallowed_tier3_scan_path(dir) {
+        return;
+    }
+    let Ok(entries) = sweeper_winfs::read_dir_entries(dir) else {
+        return;
+    };
+    collect_stale_artifacts(&entries, stale_threshold, now, rust_dirs, node_dirs);
+    push_stale_traversal_children(entries, stack);
+}
+
+fn mark_stale_dir_seen(dir: &Path, seen: &mut HashSet<String>) -> bool {
+    let key = dir.to_string_lossy().to_ascii_uppercase();
+    seen.insert(key)
+}
+
+fn collect_stale_artifacts(
+    entries: &[DirEntry],
+    stale_threshold: Duration,
+    now: SystemTime,
+    rust_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+    node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+) {
+    for ent in entries {
+        record_stale_artifact_if_eligible(ent, stale_threshold, now, rust_dirs, node_dirs);
+    }
+}
+
+fn record_stale_artifact_if_eligible(
+    ent: &DirEntry,
+    stale_threshold: Duration,
+    now: SystemTime,
+    rust_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+    node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+) {
+    if !is_plain_directory_entry(ent) {
+        return;
+    }
+    let name = ent.name.to_string_lossy();
+    if name.eq_ignore_ascii_case("target") {
+        append_stale_dir_info(
+            stale_rust_target_info(&ent.path, stale_threshold, now),
+            rust_dirs,
+        );
+        return;
+    }
+    if name.eq_ignore_ascii_case("node_modules") {
+        append_stale_dir_info(
+            stale_node_modules_info(&ent.path, stale_threshold, now),
+            node_dirs,
+        );
+    }
+}
+
+fn is_plain_directory_entry(ent: &DirEntry) -> bool {
+    ent.is_dir && matches!(ent.reparse, ReparseTagClass::NotReparse)
+}
+
+fn append_stale_dir_info(
+    info: Option<(String, u64, u64, u64, u64, u64)>,
+    out: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+) {
+    if let Some(v) = info {
+        out.push(v);
+    }
+}
+
+fn push_stale_traversal_children(entries: Vec<DirEntry>, stack: &mut Vec<PathBuf>) {
+    for ent in entries {
+        if should_traverse_stale_child(&ent) {
+            stack.push(ent.path);
         }
     }
+}
 
+fn should_traverse_stale_child(ent: &DirEntry) -> bool {
+    if !is_plain_directory_entry(ent) {
+        return false;
+    }
+    if is_stale_traversal_skip_name(&ent.name.to_string_lossy(), &ent.path) {
+        return false;
+    }
+    !is_disallowed_tier3_scan_path(&ent.path)
+}
+
+fn is_stale_traversal_skip_name(name: &str, path: &Path) -> bool {
+    if is_known_stale_skip_name(name) {
+        return true;
+    }
+    if name.eq_ignore_ascii_case("target") && path.join("..\\Cargo.toml").exists() {
+        return true;
+    }
+    name.eq_ignore_ascii_case("node_modules")
+}
+
+fn is_known_stale_skip_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("$Recycle.Bin")
+        || name.eq_ignore_ascii_case("System Volume Information")
+        || name.eq_ignore_ascii_case("Windows")
+        || name.eq_ignore_ascii_case("Program Files")
+        || name.eq_ignore_ascii_case("Program Files (x86)")
+}
+
+fn finalize_stale_dir_lists(
+    rust_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+    node_dirs: &mut Vec<(String, u64, u64, u64, u64, u64)>,
+) {
     rust_dirs.sort_by(|a, b| a.0.cmp(&b.0));
     rust_dirs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
     node_dirs.sort_by(|a, b| a.0.cmp(&b.0));
     node_dirs.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
-    Ok(())
 }
 
 fn is_disallowed_tier3_scan_path(path: &Path) -> bool {
@@ -1993,18 +2238,24 @@ mod tests {
         assert!(err.contains("**") || err.contains("glob"), "{err}");
     }
 
-    #[test]
-    fn redirected_temp_guard_depth_lt_3_drive_root_disabled() {
+    fn assert_redirected_temp_guard_disabled(candidate: &str, expected_reason_fragment: &str) {
         let local = sweeper_winfs::resolve_known_folder(KnownFolderId::LocalAppData)
             .expect("resolve local appdata");
         let user_temp = CanonicalPath::from_existing_path(&local.join("Temp").to_string_lossy())
             .expect("user temp")
             .into_canonical();
-        let guard = evaluate_redirected_temp_candidate(Some(r"C:\"), &user_temp);
+        let guard = evaluate_redirected_temp_candidate(Some(candidate), &user_temp);
         match guard {
-            TempGuard::Disabled(reason) => assert!(reason.contains("depth < 3"), "{reason}"),
+            TempGuard::Disabled(reason) => {
+                assert!(reason.contains(expected_reason_fragment), "{reason}");
+            }
             TempGuard::Use(p) => panic!("expected disabled, got {p}"),
         }
+    }
+
+    #[test]
+    fn redirected_temp_guard_depth_lt_3_drive_root_disabled() {
+        assert_redirected_temp_guard_disabled(r"C:\", "depth < 3");
     }
 
     #[test]
@@ -2014,11 +2265,7 @@ mod tests {
         let user_temp = CanonicalPath::from_existing_path(&local.join("Temp").to_string_lossy())
             .expect("user temp")
             .into_canonical();
-        let guard = evaluate_redirected_temp_candidate(Some(user_temp.as_str()), &user_temp);
-        match guard {
-            TempGuard::Disabled(reason) => assert!(reason.contains("identical"), "{reason}"),
-            TempGuard::Use(p) => panic!("expected disabled, got {p}"),
-        }
+        assert_redirected_temp_guard_disabled(user_temp.as_str(), "identical");
     }
 
     #[test]

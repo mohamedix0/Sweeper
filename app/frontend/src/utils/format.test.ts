@@ -13,11 +13,12 @@ describe('format utils (BigInt-safe)', () => {
   });
 
   it('formats bytes with units', () => {
-    expect(formatBytes('0')).toBe('0 B');
-    expect(formatBytes('512')).toBe('512 B');
-    expect(formatBytes('1024')).toBe('1 KB');
-    expect(formatBytes('1048576')).toBe('1 MB');
-    expect(formatBytes('7340032')).toContain('MB');
+    const cases: Array<[string, string, boolean]> = [['0', '0 B', false], ['512', '512 B', false], ['1024', '1 KB', false], ['1048576', '1 MB', false], ['7340032', 'MB', true]];
+    for (const [input, out, contains] of cases) {
+      const actual = formatBytes(input);
+      if (contains) expect(actual).toContain(out);
+      else expect(actual).toBe(out);
+    }
   });
 
   it('handles very large byte counts without Number precision loss', () => {
@@ -37,35 +38,25 @@ describe('relativeAge (fixed now)', () => {
   const secsAgo = (ms: number) => String(Math.floor((NOW - ms) / 1000));
 
   it('renders human relative ages from unix seconds', () => {
-    expect(relativeAge(secsAgo(0), NOW)).toBe('just now');
-    expect(relativeAge(secsAgo(90_000), NOW)).toBe('just now');
-    expect(relativeAge(secsAgo(4 * 3_600_000), NOW)).toBe('4h ago');
-    expect(relativeAge(secsAgo(4 * 86_400_000), NOW)).toBe('4d ago');
-    expect(relativeAge(secsAgo(12 * 86_400_000), NOW)).toBe('12d ago');
-    expect(relativeAge(secsAgo(30 * 86_400_000), NOW)).toBe('1mo ago');
-    expect(relativeAge(secsAgo(60 * 86_400_000), NOW)).toBe('2mo ago');
-    expect(relativeAge(secsAgo(359 * 86_400_000), NOW)).toBe('11mo ago');
-    expect(relativeAge(secsAgo(360 * 86_400_000), NOW)).toBe('12mo ago');
-    expect(relativeAge(secsAgo(364 * 86_400_000), NOW)).toBe('12mo ago');
-    expect(relativeAge(secsAgo(365 * 86_400_000), NOW)).toBe('1y ago');
-    expect(relativeAge(secsAgo(400 * 86_400_000), NOW)).toBe('1y ago');
+    const cases: Array<[string, string]> = [
+      [secsAgo(0), 'just now'], [secsAgo(90_000), 'just now'], [secsAgo(4 * 3_600_000), '4h ago'],
+      [secsAgo(4 * 86_400_000), '4d ago'], [secsAgo(12 * 86_400_000), '12d ago'], [secsAgo(30 * 86_400_000), '1mo ago'],
+      [secsAgo(60 * 86_400_000), '2mo ago'], [secsAgo(359 * 86_400_000), '11mo ago'], [secsAgo(360 * 86_400_000), '12mo ago'],
+      [secsAgo(364 * 86_400_000), '12mo ago'], [secsAgo(365 * 86_400_000), '1y ago'], [secsAgo(400 * 86_400_000), '1y ago'],
+    ];
+    for (const [input, out] of cases) expect(relativeAge(input, NOW)).toBe(out);
   });
 
   it('treats future timestamps as just now and unsafe values as em dash', () => {
-    expect(relativeAge(String(Math.floor(NOW / 1000) + 60), NOW)).toBe('just now');
-    expect(relativeAge(null, NOW)).toBe('—');
-    expect(relativeAge(undefined, NOW)).toBe('—');
-    expect(relativeAge('9007199254740993', NOW)).toBe('—');
-    expect(relativeAge('not-a-number', NOW)).toBe('—');
+    const cases: Array<[string | null | undefined, string]> = [[String(Math.floor(NOW / 1000) + 60), 'just now'], [null, '—'], [undefined, '—'], ['9007199254740993', '—'], ['not-a-number', '—']];
+    for (const [input, out] of cases) expect(relativeAge(input, NOW)).toBe(out);
   });
 });
 
 describe('normalizeDisplayPath and middleTruncatePath', () => {
   it('preserves UNC and extended-length prefixes while collapsing separators elsewhere', () => {
-    expect(normalizeDisplayPath('\\\\server\\share\\a\\\\b\\c')).toBe('\\\\server\\share\\a\\b\\c');
-    expect(normalizeDisplayPath('\\\\?\\C:\\temp\\\\logs\\app.log')).toBe('\\\\?\\C:\\temp\\logs\\app.log');
-    expect(normalizeDisplayPath('\\\\?\\UNC\\server\\share\\\\dir\\file.txt')).toBe('\\\\?\\UNC\\server\\share\\dir\\file.txt');
-    expect(middleTruncatePath('\\\\server\\share\\a\\\\b\\c', 200)).toBe('\\\\server\\share\\a\\b\\c');
-    expect(middleTruncatePath('\\\\?\\C:\\temp\\\\logs\\app.log', 200)).toBe('\\\\?\\C:\\temp\\logs\\app.log');
+    const paths = [['\\\\server\\share\\a\\\\b\\c', '\\\\server\\share\\a\\b\\c'], ['\\\\?\\C:\\temp\\\\logs\\app.log', '\\\\?\\C:\\temp\\logs\\app.log'], ['\\\\?\\UNC\\server\\share\\\\dir\\file.txt', '\\\\?\\UNC\\server\\share\\dir\\file.txt']] as const;
+    for (const [input, expected] of paths) expect(normalizeDisplayPath(input)).toBe(expected);
+    for (const [input, expected] of paths.slice(0, 2)) expect(middleTruncatePath(input, 200)).toBe(expected);
   });
 });

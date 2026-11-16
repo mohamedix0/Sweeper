@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use sweeper_testkit::{
@@ -9,8 +10,15 @@ use sweeper_testkit::{
     SENTINEL_FILE_NAME,
 };
 
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn sandbox_creates_isolated_root_with_sentinel() {
+    let _env = env_lock();
     let sandbox = Sandbox::new();
     let root = sandbox.root();
     assert!(root.exists(), "sandbox root must exist");
@@ -22,6 +30,7 @@ fn sandbox_creates_isolated_root_with_sentinel() {
 
 #[test]
 fn sandbox_refuses_operation_when_sentinel_missing() {
+    let _env = env_lock();
     let sandbox = Sandbox::new();
     let sentinel = sandbox.root().join(SENTINEL_FILE_NAME);
     #[allow(clippy::disallowed_methods)]
@@ -35,6 +44,7 @@ fn sandbox_refuses_operation_when_sentinel_missing() {
 
 #[test]
 fn canary_tree_seed_and_verify_hashes_outside_sandbox() {
+    let _env = env_lock();
     let sandbox = Sandbox::new();
     // Canary lives outside the sandbox target area (separate temp root).
     let canary = CanaryTree::seed_external("phase0-canary").expect("seed canary");
@@ -100,6 +110,7 @@ fn set_path_mtime_old(path: &Path, secs_ago: u64) {
 #[cfg(windows)]
 #[test]
 fn sandbox_drop_cleans_deep_tree_with_extended_paths() {
+    let _env = env_lock();
     let sandbox = Sandbox::new();
     let root = sandbox.root().to_path_buf();
     let deep_leaf = create_deep_tree_extended(&root, 320);
@@ -119,6 +130,7 @@ fn sandbox_drop_cleans_deep_tree_with_extended_paths() {
 #[cfg(windows)]
 #[test]
 fn cleanup_stale_sandboxes_respects_safety_guards() {
+    let _env = env_lock();
     let base = tempfile::tempdir().expect("temp base");
     let base_path = base.path();
 
@@ -173,6 +185,7 @@ fn cleanup_stale_sandboxes_respects_safety_guards() {
 
 #[test]
 fn is_safe_sandbox_base_rejects_protected_container_roots_and_users_paths() {
+    let _env = env_lock();
     for p in [
         r"C:\Users\alice\AppData\Local\Temp",
         r"c:\users\alice\AppData\Local\Temp",
@@ -204,6 +217,7 @@ fn is_safe_sandbox_base_rejects_protected_container_roots_and_users_paths() {
 
 #[test]
 fn default_sandbox_base_selects_safe_non_protected_location() {
+    let _env = env_lock();
     let base = sweeper_testkit::default_sandbox_base();
     assert!(
         is_safe_sandbox_base(&base),
@@ -215,6 +229,7 @@ fn default_sandbox_base_selects_safe_non_protected_location() {
 #[cfg(windows)]
 #[test]
 fn junction_helper_creates_link_point_inside_sandbox() {
+    let _env = env_lock();
     let sandbox = Sandbox::new();
     let target = sandbox.root().join("target_dir");
     let link = sandbox.root().join("link_dir");
@@ -236,6 +251,7 @@ fn junction_helper_creates_link_point_inside_sandbox() {
 #[cfg(windows)]
 #[test]
 fn symlink_file_helper_creates_symlink_inside_sandbox() {
+    let _env = env_lock();
     let sandbox = Sandbox::new();
     let target = sandbox.root().join("target.txt");
     let link = sandbox.root().join("link.txt");
@@ -265,6 +281,7 @@ fn symlink_file_helper_creates_symlink_inside_sandbox() {
 #[cfg(windows)]
 #[test]
 fn sandbox_drop_disarms_tempdir_when_sentinel_missing() {
+    let _env = env_lock();
     let sandbox = Sandbox::new();
     let root = sandbox.root().to_path_buf();
     let sentinel = root.join(SENTINEL_FILE_NAME);
@@ -281,6 +298,7 @@ fn sandbox_drop_disarms_tempdir_when_sentinel_missing() {
 #[cfg(windows)]
 #[test]
 fn cleanup_stale_sandboxes_skips_live_owner_lock() {
+    let _env = env_lock();
     let base = tempfile::tempdir().expect("temp base");
     let base_path = base.path();
 
@@ -310,6 +328,7 @@ fn partial_failure_preserves_sandbox_ownership_markers_for_retry() {
     use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
 
+    let _env = env_lock();
     let base = tempfile::tempdir().expect("temp base");
     let stale = base.path().join(format!("{SANDBOX_DIR_PREFIX}partial"));
     fs::create_dir_all(&stale).expect("create stale dir");
@@ -339,6 +358,7 @@ fn partial_failure_preserves_sandbox_ownership_markers_for_retry() {
 #[cfg(windows)]
 #[test]
 fn junction_cleanup_unlinks_junction_without_touching_target() {
+    let _env = env_lock();
     let base = tempfile::tempdir().expect("temp base");
     let stale = base
         .path()
@@ -366,6 +386,7 @@ fn junction_cleanup_unlinks_junction_without_touching_target() {
 
 #[test]
 fn try_new_returns_actionable_error_when_no_safe_base_exists() {
+    let _env = env_lock();
     // Force unsafe temp and no usable cargo-target fallback.
     let _guard = EnvGuard::set_multi(&[
         ("SWEEPER_SANDBOX_BASE", None),
@@ -385,9 +406,10 @@ fn try_new_returns_actionable_error_when_no_safe_base_exists() {
 struct EnvGuard {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
+
 impl EnvGuard {
     fn set_multi(vars: &[(&'static str, Option<&str>)]) -> Self {
-        let mut saved = Vec::new();
+        let mut saved = Vec::with_capacity(vars.len());
         for (k, v) in vars {
             saved.push((*k, std::env::var_os(k)));
             match v {
@@ -398,6 +420,7 @@ impl EnvGuard {
         Self { saved }
     }
 }
+
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         for (k, v) in self.saved.drain(..).rev() {

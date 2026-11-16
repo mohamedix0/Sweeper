@@ -1090,25 +1090,35 @@ mod tests {
         assert_eq!(de, v);
     }
 
-    #[test]
-    fn dto_u64_fields_roundtrip_as_strings() {
-        let item = ScanItemDto {
+    fn sample_scan_item() -> ScanItemDto {
+        ScanItemDto {
             id: "t::1".to_string(),
             target_id: "user-temp".to_string(),
             path: r"C:\Users\X\AppData\Local\Temp\a.tmp".to_string(),
             size: U64String(123),
             mtime_unix_secs: U64String(456),
             age_eligible: true,
-        };
-        let v = serde_json::to_value(&item).unwrap();
+        }
+    }
+
+    #[test]
+    fn scan_item_serializes_u64_fields_as_strings() {
+        let v = serde_json::to_value(sample_scan_item()).unwrap();
         assert_eq!(v["size"], serde_json::json!("123"));
         assert_eq!(v["mtimeUnixSecs"], serde_json::json!("456"));
+        assert_eq!(v["ageEligible"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn scan_item_roundtrips() {
+        let item = sample_scan_item();
+        let v = serde_json::to_value(&item).unwrap();
         let back: ScanItemDto = serde_json::from_value(v).unwrap();
         assert_eq!(back, item);
     }
 
     #[test]
-    fn clean_dtos_serialize_u64_fields_as_strings() {
+    fn clean_progress_event_serializes_u64_fields_as_strings() {
         let event = CleanProgressEvent {
             preview_token: "pt".to_string(),
             target_id: "t1".to_string(),
@@ -1121,7 +1131,10 @@ mod tests {
         assert_eq!(v["completedItems"], serde_json::json!("1"));
         assert_eq!(v["totalItems"], serde_json::json!("2"));
         assert_eq!(v["bytesFreedSoFar"], serde_json::json!("3"));
-        let resp = ExecuteCleanResponse {
+    }
+
+    fn sample_clean_response() -> ExecuteCleanResponse {
+        ExecuteCleanResponse {
             bytes_freed: U64String(10),
             deleted_count: U64String(2),
             skipped_count: U64String(1),
@@ -1132,16 +1145,27 @@ mod tests {
             aborted: false,
             abort_reason: None,
             log_id: Some("log-1".to_string()),
-        };
-        let vr = serde_json::to_value(&resp).unwrap();
-        assert_eq!(vr["bytesFreed"], serde_json::json!("10"));
-        assert_eq!(vr["deletedCount"], serde_json::json!("2"));
-        assert_eq!(vr["skippedCount"], serde_json::json!("1"));
-        assert_eq!(vr["skippedReasons"][0]["count"], serde_json::json!("1"));
+        }
     }
 
     #[test]
-    fn analyzer_dtos_serialize_u64_fields_as_strings() {
+    fn execute_clean_response_serializes_counts_as_strings() {
+        let vr = serde_json::to_value(sample_clean_response()).unwrap();
+        assert_eq!(vr["bytesFreed"], serde_json::json!("10"));
+        assert_eq!(vr["deletedCount"], serde_json::json!("2"));
+        assert_eq!(vr["skippedCount"], serde_json::json!("1"));
+    }
+
+    #[test]
+    fn execute_clean_response_serializes_skip_reason_counts() {
+        let vr = serde_json::to_value(sample_clean_response()).unwrap();
+        assert_eq!(vr["skippedReasons"][0]["count"], serde_json::json!("1"));
+        assert_eq!(vr["aborted"], serde_json::json!(false));
+        assert_eq!(vr["logId"], serde_json::json!("log-1"));
+    }
+
+    #[test]
+    fn analyzer_progress_event_serializes_u64_fields_as_strings() {
         let event = AnalyzerProgressEvent {
             session_id: "a1".to_string(),
             scanned_dirs: U64String(2),
@@ -1153,8 +1177,23 @@ mod tests {
         assert_eq!(ev["sessionId"], serde_json::json!("a1"));
         assert_eq!(ev["scannedDirs"], serde_json::json!("2"));
         assert_eq!(ev["scannedFiles"], serde_json::json!("3"));
-        assert_eq!(ev["scannedBytes"], serde_json::json!("4"));
+    }
 
+    #[test]
+    fn analyzer_progress_event_serializes_bytes_and_path() {
+        let event = AnalyzerProgressEvent {
+            session_id: "a1".to_string(),
+            scanned_dirs: U64String(2),
+            scanned_files: U64String(3),
+            scanned_bytes: U64String(4),
+            current_path: Some(r"C:\Temp".to_string()),
+        };
+        let ev = serde_json::to_value(&event).unwrap();
+        assert_eq!(ev["scannedBytes"], serde_json::json!("4"));
+        assert_eq!(ev["currentPath"], serde_json::json!(r"C:\Temp"));
+    }
+
+    fn sample_analyzer_response() -> StartAnalyzerResponse {
         let node = AnalyzerNodeDto {
             id: "n1".to_string(),
             name: "Temp".to_string(),
@@ -1173,7 +1212,7 @@ mod tests {
             selectable: true,
             children: vec![],
         };
-        let resp = StartAnalyzerResponse {
+        StartAnalyzerResponse {
             session_id: "a1".to_string(),
             root_path: r"C:\Temp".to_string(),
             total_bytes: U64String(10),
@@ -1182,21 +1221,30 @@ mod tests {
             scanned_files: U64String(1),
             cancelled: false,
             warnings: vec![],
-            root: node.clone(),
-        };
-        let v = serde_json::to_value(&resp).unwrap();
+            root: node,
+        }
+    }
+
+    #[test]
+    fn analyzer_response_serializes_totals_as_strings() {
+        let v = serde_json::to_value(sample_analyzer_response()).unwrap();
         assert_eq!(v["totalBytes"], serde_json::json!("10"));
         assert_eq!(v["totalItems"], serde_json::json!("2"));
         assert_eq!(v["scannedDirs"], serde_json::json!("1"));
+    }
+
+    #[test]
+    fn analyzer_response_serializes_root_and_roundtrips() {
+        let resp = sample_analyzer_response();
+        let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["scannedFiles"], serde_json::json!("1"));
         assert_eq!(v["root"]["sizeBytes"], serde_json::json!("10"));
         assert_eq!(v["root"]["itemCount"], serde_json::json!("2"));
         let _roundtrip: StartAnalyzerResponse = serde_json::from_value(v).unwrap();
     }
 
-    #[test]
-    fn scan_progress_event_progress_roundtrip() {
-        let ev = ScanProgressEvent::Progress {
+    fn sample_scan_progress() -> ScanProgressEvent {
+        ScanProgressEvent::Progress {
             session_id: "s1".to_string(),
             completed_targets: 1,
             total_targets: 3,
@@ -1204,22 +1252,36 @@ mod tests {
             current_target_name: Some("User Temp".to_string()),
             scanned_items: "42".to_string(),
             scanned_bytes: "4096".to_string(),
-        };
-        let v = serde_json::to_value(&ev).unwrap();
+        }
+    }
+
+    #[test]
+    fn scan_progress_event_serializes_core_fields() {
+        let v = serde_json::to_value(sample_scan_progress()).unwrap();
         assert_eq!(v["kind"], serde_json::json!("progress"));
         assert_eq!(v["session_id"], serde_json::json!("s1"));
         assert_eq!(v["completed_targets"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn scan_progress_event_serializes_counts_and_roundtrips() {
+        let ev = sample_scan_progress();
+        let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["total_targets"], serde_json::json!(3));
         assert_eq!(v["scanned_items"], serde_json::json!("42"));
         assert_eq!(v["scanned_bytes"], serde_json::json!("4096"));
         let back: ScanProgressEvent = serde_json::from_value(v).unwrap();
         assert_eq!(back, ev);
+    }
 
+    #[test]
+    fn scan_progress_cancelled_event_roundtrips() {
         let cancelled = ScanProgressEvent::Cancelled {
             session_id: "s1".to_string(),
         };
         let vc = serde_json::to_value(&cancelled).unwrap();
         assert_eq!(vc["kind"], serde_json::json!("cancelled"));
+        assert_eq!(vc["session_id"], serde_json::json!("s1"));
         let _: ScanProgressEvent = serde_json::from_value(vc).unwrap();
     }
 

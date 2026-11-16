@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Cleans temporary Sweeper build, test, and mutation artifacts strictly inside the repository root.
 
@@ -81,6 +81,72 @@ function Test-SweeperOwnerLockLive {
     }
 }
 
+function Get-SweeperStaleTempCandidates {
+    param(
+        [string]$TempRoot,
+        [hashtable]$Spec,
+        [datetime]$Cutoff
+    )
+
+    $items = Get-ChildItem -LiteralPath $TempRoot -Directory -ErrorAction SilentlyContinue
+    if (-not $items) { return @() }
+
+    $candidates = @()
+    foreach ($dir in $items) {
+        if (Test-SweeperTempCandidate -Dir $dir -Spec $Spec -Cutoff $Cutoff) {
+            $candidates += $dir
+        }
+    }
+    return $candidates
+}
+
+function Test-SweeperTempCandidate {
+    param(
+        [System.IO.DirectoryInfo]$Dir,
+        [hashtable]$Spec,
+        [datetime]$Cutoff
+    )
+
+    if (-not $Dir.Name.StartsWith($Spec.Prefix, [System.StringComparison]::Ordinal)) { return $false }
+    if (($Dir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    if ($Dir.LastWriteTime -ge $Cutoff) { return $false }
+    return $true
+}
+
+function Test-SweeperOwnerLockFree {
+    param([System.IO.DirectoryInfo]$Dir)
+    return -not (Test-SweeperOwnerLockLive -Dir $Dir)
+}
+
+function Test-SweeperTempDirSafeToRemove {
+    param(
+        [System.IO.DirectoryInfo]$Dir,
+        [hashtable]$Spec,
+        [string]$TempRoot,
+        [datetime]$Cutoff
+    )
+
+    $full = ([System.IO.Path]::GetFullPath($Dir.FullName)).TrimEnd('\', '/')
+    $parent = ([System.IO.Path]::GetFullPath($Dir.Parent.FullName)).TrimEnd('\', '/')
+    if ($parent -ne $TempRoot) { return $false }
+    if (-not $full.StartsWith($TempRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if (-not (Test-SweeperTempCandidate -Dir $Dir -Spec $Spec -Cutoff $Cutoff)) { return $false }
+    if (-not (Test-SweeperTempOwnedMarker -Dir $Dir -Kind $Spec.Kind)) { return $false }
+    if (-not (Test-SweeperOwnerLockFree -Dir $Dir)) { return $false }
+    return $true
+}
+
+function Remove-SingleSweeperTempDir {
+    param(
+        [System.IO.DirectoryInfo]$Dir,
+        [hashtable]$Spec
+    )
+
+    $full = ([System.IO.Path]::GetFullPath($Dir.FullName)).TrimEnd('\', '/')
+    Write-Host "Cleaning stale Sweeper temp $($Spec.Kind): $full"
+    Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 function Remove-StaleSweeperTempDirs {
     param([int]$MinAgeMinutes = 60)
 
@@ -94,29 +160,74 @@ function Remove-StaleSweeperTempDirs {
     )
 
     foreach ($spec in $prefixes) {
-        Get-ChildItem -LiteralPath $tempRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name.StartsWith($spec.Prefix, [System.StringComparison]::Ordinal) -and
-            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -and
-            $_.LastWriteTime -lt $cutoff
-        } | ForEach-Object {
-            $dir = $_
-            $full = ([System.IO.Path]::GetFullPath($dir.FullName)).TrimEnd('\', '/')
-
-            # Strict guards: direct child of canonical temp root only.
-            $parent = ([System.IO.Path]::GetFullPath($dir.Parent.FullName)).TrimEnd('\', '/')
-            if ($parent -ne $tempRoot) { return }
-            if (-not $full.StartsWith($tempRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return }
-
-            # Never touch anything outside the Sweeper-owned temp directory itself.
-            if (-not $dir.Name.StartsWith($spec.Prefix, [System.StringComparison]::Ordinal)) { return }
-            if (($dir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return }
-            if ($dir.LastWriteTime -ge $cutoff) { return }
-            if (-not (Test-SweeperTempOwnedMarker -Dir $dir -Kind $spec.Kind)) { return }
-            if (Test-SweeperOwnerLockLive -Dir $dir) { return }
-
-            Write-Host "Cleaning stale Sweeper temp $($spec.Kind): $full"
-            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+        $candidates = Get-SweeperStaleTempCandidates -TempRoot $tempRoot -Spec $spec -Cutoff $cutoff
+        foreach ($dir in $candidates) {
+            if (-not (Test-SweeperTempDirSafeToRemove -Dir $dir -Spec $spec -TempRoot $tempRoot -Cutoff $cutoff)) {
+                continue
+            }
+            Remove-SingleSweeperTempDir -Dir $dir -Spec $spec
         }
+    }
+}
+
+
+function Get-RepoTargetSizeGb {
+    param([string]$RepoTarget)
+    $targetBytes = (Get-ChildItem -LiteralPath $RepoTarget -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    if (-not $targetBytes) { $targetBytes = 0 }
+    return [math]::Round(($targetBytes / 1GB), 2)
+}
+
+function Ensure-CargoTargetCachedirTag {
+    param([string]$RepoTarget)
+    $cachedirTag = Join-Path $RepoTarget "CACHEDIR.TAG"
+    if (Test-Path -LiteralPath $cachedirTag -PathType Leaf) { return $false }
+    Set-Content -LiteralPath $cachedirTag -Value "Signature: 8a477f597d28d172789f06886806bc55" -NoNewline -Encoding ASCII
+    return $true
+}
+
+function Invoke-CargoCleanForTarget {
+    param([string]$RepoTarget)
+    return & cargo clean --manifest-path (Join-Path $NormRepoRoot "app\Cargo.toml") --target-dir $RepoTarget 2>&1
+}
+
+function Test-CargoCleanSkipForSandboxOnlyTarget {
+    param([string]$Message, [string]$RepoTarget)
+    if ($Message -notmatch "missing or invalid CACHEDIR\.TAG") { return $false }
+    return (Test-Path -LiteralPath (Join-Path $RepoTarget "sweeper-test-sandboxes"))
+}
+
+function Invoke-SafeCargoTargetClean {
+    param(
+        [string]$RepoTarget,
+        [bool]$ActiveRustBuild
+    )
+
+    $targetGb = Get-RepoTargetSizeGb -RepoTarget $RepoTarget
+    Write-Host "Project target/ size: $targetGb GB ($RepoTarget)"
+    $shouldPrune = ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)
+    if (-not $shouldPrune) { return }
+    if ($ActiveRustBuild) {
+        Write-Host "Skipping project target/ prune because cargo/rustc is actively running."
+        return
+    }
+    Write-Host "Pruning project target/ cache (threshold: $MaxTargetSizeGb GB)..."
+    $cargoCleanPrevEap = $ErrorActionPreference
+    $createdCachedirTag = $false
+    try {
+        $ErrorActionPreference = 'Continue'
+        $createdCachedirTag = Ensure-CargoTargetCachedirTag -RepoTarget $RepoTarget
+        $cargoCleanOutput = Invoke-CargoCleanForTarget -RepoTarget $RepoTarget
+        if ($LASTEXITCODE -eq 0) { return }
+        $msg = ($cargoCleanOutput | Out-String).Trim()
+        if (Test-CargoCleanSkipForSandboxOnlyTarget -Message $msg -RepoTarget $RepoTarget) {
+            Write-Host "Skipping cargo clean: target/ is missing/invalid CACHEDIR.TAG but contains sweeper-test-sandboxes; preserving target directory."
+            return
+        }
+        throw "cargo clean failed with exit code $LASTEXITCODE`n$msg"
+    } finally {
+        $ErrorActionPreference = $cargoCleanPrevEap
+        if ($createdCachedirTag) { $null = $createdCachedirTag }
     }
 }
 
@@ -167,41 +278,7 @@ try {
     # 4. Keep repo-root target/ bounded
     $repoTarget = Join-Path $NormRepoRoot "target"
     if (Test-Path -LiteralPath $repoTarget) {
-        $targetBytes = (Get-ChildItem -LiteralPath $repoTarget -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if (-not $targetBytes) { $targetBytes = 0 }
-        $targetGb = [math]::Round(($targetBytes / 1GB), 2)
-        Write-Host "Project target/ size: $targetGb GB ($repoTarget)"
-        if ((-not $activeRustBuild) -and ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)) {
-            Write-Host "Pruning project target/ cache (threshold: $MaxTargetSizeGb GB)..."
-            # Use explicit target dir and avoid native stderr becoming a terminating error under $ErrorActionPreference=Stop.
-            $cargoCleanPrevEap = $ErrorActionPreference
-            $cachedirTag = Join-Path $repoTarget "CACHEDIR.TAG"
-            $createdCachedirTag = $false
-            try {
-                $ErrorActionPreference = 'Continue'
-                if (-not (Test-Path -LiteralPath $cachedirTag -PathType Leaf)) {
-                    # Cargo clean requires CACHEDIR.TAG; sweeper test sandboxes may be created before Cargo initializes it.
-                    Set-Content -LiteralPath $cachedirTag -Value "Signature: 8a477f597d28d172789f06886806bc55" -NoNewline -Encoding ASCII
-                    $createdCachedirTag = $true
-                }
-                $cargoCleanOutput = & cargo clean --manifest-path (Join-Path $NormRepoRoot "app\Cargo.toml") --target-dir $repoTarget 2>&1
-                if ($LASTEXITCODE -ne 0) {
-                    $msg = ($cargoCleanOutput | Out-String).Trim()
-                    if ($msg -match "missing or invalid CACHEDIR\.TAG" -and (Test-Path -LiteralPath (Join-Path $repoTarget "sweeper-test-sandboxes"))) {
-                        Write-Host "Skipping cargo clean: target/ is missing/invalid CACHEDIR.TAG but contains sweeper-test-sandboxes; preserving target directory."
-                    } else {
-                        throw "cargo clean failed with exit code $LASTEXITCODE`n$msg"
-                    }
-                }
-            } finally {
-                if ($createdCachedirTag -and (Test-Path -LiteralPath $repoTarget) -and -not (Get-ChildItem -LiteralPath $repoTarget -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'CACHEDIR.TAG' })) {
-                    # Leave an empty marker-only target dir cleanable; harmless if it remains.
-                }
-                $ErrorActionPreference = $cargoCleanPrevEap
-            }
-        } elseif ($activeRustBuild -and ($PruneTargetCache -or $targetGb -gt $MaxTargetSizeGb)) {
-            Write-Host "Skipping project target/ prune because cargo/rustc is actively running."
-        }
+        Invoke-SafeCargoTargetClean -RepoTarget $repoTarget -ActiveRustBuild $activeRustBuild
     }
 
     # 5. Prune stale Sweeper-owned sandbox/canary directories in OS temp only (age-gated, strict guards).
@@ -211,3 +288,4 @@ try {
 finally {
     Pop-Location
 }
+

@@ -8,11 +8,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
-function assert(condition, message) {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
+function assert(condition, message) { if (!condition) throw new Error(message); }
 
 async function getFreePort() {
   return await new Promise((resolve, reject) => {
@@ -37,13 +33,9 @@ async function waitForCdp(port, timeoutMs) {
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (response.ok) {
-        return;
-      }
+      if (response.ok) return;
       lastError = new Error(`CDP endpoint returned ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
+    } catch (error) { lastError = error; }
     await delay(250);
   }
   throw new Error(`Timed out waiting for WebView2 CDP endpoint on port ${port}: ${String(lastError)}`);
@@ -51,13 +43,19 @@ async function waitForCdp(port, timeoutMs) {
 
 function isRelevantSweeperPage(page) {
   const url = page.url();
-  if (!url || url === 'about:blank') {
-    return false;
-  }
-  if (url.includes('tauri-isolation') || url.includes('/isolation/')) {
-    return false;
-  }
+  if (!url || url === 'about:blank') return false;
+  if (url.includes('tauri-isolation') || url.includes('/isolation/')) return false;
   return true;
+}
+
+async function pageHasSweeperUi(page) {
+  try {
+    return await page.evaluate(() => {
+      const text = document.body?.innerText ?? '';
+      if (document.title.includes('Sweeper')) return true;
+      return text.includes('Scan') || text.includes('Analyzer') || text.includes('Settings');
+    });
+  } catch { return false; }
 }
 
 async function findSweeperPage(browser, timeoutMs) {
@@ -65,25 +63,8 @@ async function findSweeperPage(browser, timeoutMs) {
   while (Date.now() < deadline) {
     for (const context of browser.contexts()) {
       for (const page of context.pages()) {
-        if (!isRelevantSweeperPage(page)) {
-          continue;
-        }
-        try {
-          const hasSweeperUi = await page.evaluate(() => {
-            const bodyText = document.body?.innerText ?? '';
-            return (
-              document.title.includes('Sweeper') ||
-              bodyText.includes('Scan') ||
-              bodyText.includes('Analyzer') ||
-              bodyText.includes('Settings')
-            );
-          });
-          if (hasSweeperUi) {
-            return page;
-          }
-        } catch {
-          // Page may still be navigating; retry until timeout.
-        }
+        if (!isRelevantSweeperPage(page)) continue;
+        if (await pageHasSweeperUi(page)) return page;
       }
     }
     await delay(250);
@@ -91,56 +72,60 @@ async function findSweeperPage(browser, timeoutMs) {
   throw new Error('Could not locate the main Sweeper WebView2 page over CDP');
 }
 
-function killProcessTree(pid) {
-  if (!pid) {
-    return;
-  }
-  spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
-}
-
+function killProcessTree(pid) { if (pid) spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); }
 async function waitForExit(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
-    delay(timeoutMs),
-  ]);
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await Promise.race([new Promise((resolve) => child.once('exit', resolve)), delay(timeoutMs)]);
 }
 
-function assertSweeperWindowVisible(pid) {
-  const command = [
+function readSweeperWindowState(pid) {
+  const script = [
     '$ErrorActionPreference = "Stop";',
-    `$p = Get-Process -Id ${pid} -ErrorAction Stop;`,
-    'if ($p.MainWindowTitle -ne "Sweeper") { throw "Unexpected window title: $($p.MainWindowTitle)" }',
-    'if ($p.MainWindowHandle -eq 0) { throw "Sweeper window handle is not visible" }',
-    'Write-Output $p.MainWindowTitle',
-  ].join(' ');
-  const result = spawnSync('powershell', ['-NoProfile', '-Command', command], {
-    encoding: 'utf8',
-  });
-  if (result.status !== 0) {
-    const details = (result.stderr || result.stdout || '').trim();
-    throw new Error(`Sweeper window visibility check failed: ${details}`);
-  }
-  const title = (result.stdout || '').trim();
-  assert(title === 'Sweeper', `Expected Sweeper window title, got "${title}"`);
+    'Add-Type @"',
+    'using System; using System.Text; using System.Runtime.InteropServices;',
+    'public static class Win {',
+    '  public delegate bool EWP(IntPtr h, IntPtr p);',
+    '  [DllImport("user32.dll")] public static extern bool EnumWindows(EWP cb, IntPtr p);',
+    '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+    '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
+    '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder b, int m);',
+    '}',
+    '"@;',
+    `$want=${pid}; $hit=$null;`,
+    '$cb = [Win+EWP]{ param($h,$p) $proc=0; [Win]::GetWindowThreadProcessId($h,[ref]$proc)|Out-Null; if($proc -ne $want -or -not [Win]::IsWindowVisible($h)){return $true}; $sb=New-Object System.Text.StringBuilder 512; [Win]::GetWindowText($h,$sb,$sb.Capacity)|Out-Null; $t=$sb.ToString(); if($t -eq "Sweeper"){$script:hit=@($t,[int64]$h); return $false}; return $true };',
+    '[Win]::EnumWindows($cb,[IntPtr]::Zero)|Out-Null;',
+    'if($hit){ Write-Output ("{0}|{1}" -f $hit[0],$hit[1]) }',
+  ].join('\n');
+  const result = spawnSync('powershell', ['-NoProfile', '-Command', script], { encoding: 'utf8' });
+  if (result.status !== 0) return { ok: false, detail: (result.stderr || result.stdout || '').trim() };
+  const out = (result.stdout || '').trim();
+  if (!out) return { ok: false, title: '', handle: '0' };
+  const [title = '', handle = '0'] = out.split('|');
+  return { ok: title === 'Sweeper' && handle !== '0', title, handle };
 }
 
-async function main() {
-  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-  const exePath = process.env.SWEEPER_DESKTOP_EXE
-    ? path.resolve(process.env.SWEEPER_DESKTOP_EXE)
-    : path.resolve(scriptDir, '../../../target/debug/sweeper-desktop.exe');
-
-  if (!fs.existsSync(exePath)) {
-    const repoRoot = path.resolve(scriptDir, '../../..');
-    const targetDir = path.join(repoRoot, 'target');
-    throw new Error(
-      `sweeper-desktop executable not found at ${exePath}. Build it first with CARGO_TARGET_DIR set to the repository-root target directory so Cargo writes to <repo>/target/debug/ instead of app/target/debug/ (PowerShell: $env:CARGO_TARGET_DIR='${targetDir}'; cargo build --manifest-path app/Cargo.toml --package sweeper-desktop --locked).`,
-    );
+async function assertSweeperWindowVisible(pid, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = { ok: false, detail: 'window state not checked yet' };
+  while (Date.now() < deadline) {
+    last = readSweeperWindowState(pid);
+    if (last.ok) return;
+    await delay(250);
   }
+  const detail = last.detail || `title="${last.title ?? ''}", handle=${last.handle ?? '0'}`;
+  throw new Error(`Sweeper window visibility check failed: ${detail}`);
+}
 
+function resolveDesktopExePath() {
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const exePath = process.env.SWEEPER_DESKTOP_EXE ? path.resolve(process.env.SWEEPER_DESKTOP_EXE) : path.resolve(scriptDir, '../../../target/debug/sweeper-desktop.exe');
+  if (fs.existsSync(exePath)) return exePath;
+  const repoRoot = path.resolve(scriptDir, '../../..');
+  const targetDir = path.join(repoRoot, 'target');
+  throw new Error(`sweeper-desktop executable not found at ${exePath}. Build it first with CARGO_TARGET_DIR set to the repository-root target directory so Cargo writes to <repo>/target/debug/ instead of app/target/debug/ (PowerShell: $env:CARGO_TARGET_DIR='${targetDir}'; cargo build --manifest-path app/Cargo.toml --package sweeper-desktop --locked).`);
+}
+
+function isolatedEnv(exePath, port) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sweeper-desktop-e2e-'));
   const appData = path.join(tempRoot, 'AppData', 'Roaming');
   const localAppData = path.join(tempRoot, 'AppData', 'Local');
@@ -148,180 +133,150 @@ async function main() {
   fs.mkdirSync(appData, { recursive: true });
   fs.mkdirSync(localAppData, { recursive: true });
   fs.mkdirSync(webViewUserData, { recursive: true });
+  const env = { ...process.env, SWEEPER_E2E_READ_ONLY: '1', WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`, WEBVIEW2_USER_DATA_FOLDER: webViewUserData, APPDATA: appData, LOCALAPPDATA: localAppData };
+  const child = spawn(exePath, [], { cwd: path.dirname(exePath), env, stdio: 'ignore', windowsHide: false });
+  return { child, tempRoot };
+}
 
-  const port = await getFreePort();
-  const child = spawn(exePath, [], {
-    cwd: path.dirname(exePath),
-    env: {
-      ...process.env,
-      SWEEPER_E2E_READ_ONLY: '1',
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
-      WEBVIEW2_USER_DATA_FOLDER: webViewUserData,
-      APPDATA: appData,
-      LOCALAPPDATA: localAppData,
-    },
-    stdio: 'ignore',
-    windowsHide: false,
+async function installPageErrorCollectors(page) {
+  const consoleErrors = []; const pageErrors = [];
+  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
+  page.on('pageerror', (err) => { pageErrors.push(String(err)); });
+  return { consoleErrors, pageErrors };
+}
+
+async function verifyBasicNavigation(page) {
+  await page.waitForLoadState('domcontentloaded', { timeout: 30_000 });
+  await page.getByRole('button', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Analyzer' }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
+  await page.getByText(/Standard \(Non-Elevated\)|Administrator \(Elevated\)/).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Scan & Clean' }).click();
+  await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Start Scan' }).waitFor({ timeout: 30_000 });
+}
+
+async function startUiProbe(page) {
+  await page.evaluate(() => {
+    const state = { maxDelta: 0, last: performance.now(), running: true, samples: 0 };
+    window.__sweeperUiProbe = state;
+    const tick = () => {
+      if (!state.running) return;
+      const now = performance.now();
+      const delta = now - state.last;
+      if (delta > state.maxDelta) state.maxDelta = delta;
+      state.last = now; state.samples += 1; requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   });
+}
 
-  let browser;
-  const consoleErrors = [];
-  const pageErrors = [];
-
+async function detectScanProgress(page) {
   try {
-    await waitForCdp(port, 30_000);
-    browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+    await page.locator('.scan-progress-notice, [aria-label="Scan target progress"]').first().waitFor({ timeout: 5_000 });
+    return true;
+  } catch { return false; }
+}
+
+async function waitForScanCompletion(page) {
+  await page.waitForFunction(() => {
+    const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
+    const hasResults = document.querySelectorAll('article.target-card').length > 0;
+    const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
+    const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
+    const progressVisible = !!document.querySelector('.scan-progress-notice');
+    const errorNotice = Array.from(document.querySelectorAll('[role="alert"]')).some((el) => /scan failed|session expired|invalid/i.test(el.textContent || ''));
+    return !progressVisible && !errorNotice && inspector && (hasResults || noTargets) && !readyVisible;
+  }, undefined, { timeout: 300_000 });
+}
+
+async function readScanState(page) {
+  return await page.evaluate(() => {
+    const hasResults = document.querySelectorAll('article.target-card').length > 0;
+    const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
+    const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
+    const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
+    return { hasResults, noTargets, inspector, readyVisible };
+  });
+}
+
+async function verifyStatePreserved(page, initialScanState) {
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: 'Scan & Clean' }).click();
+  await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
+  const preserved = await readScanState(page);
+  assert(preserved.hasResults === initialScanState.hasResults && preserved.noTargets === initialScanState.noTargets && preserved.inspector && !preserved.readyVisible, `Scan state was not preserved after navigating Settings -> Scan & Clean (initial=${JSON.stringify(initialScanState)}, preserved=${JSON.stringify(preserved)})`);
+}
+
+async function stopUiProbe(page) {
+  await delay(250);
+  try {
+    return await page.evaluate(() => {
+      const state = window.__sweeperUiProbe;
+      if (!state) return null;
+      state.running = false;
+      return { maxDelta: state.maxDelta, samples: state.samples };
+    });
+  } catch { return null; }
+}
+
+function assertProbeOk(probe, sawProgress) {
+  assert(probe && typeof probe.maxDelta === 'number', 'UI responsiveness probe did not run');
+  assert(probe.maxDelta < 2000, `UI responsiveness probe detected main-thread stall (max RAF delta ${probe.maxDelta.toFixed(1)}ms >= 2000ms, samples=${probe.samples}, sawProgress=${sawProgress})`);
+}
+
+async function verifyDesktopViews(page) {
+  await verifyBasicNavigation(page);
+  await startUiProbe(page);
+  await page.getByRole('button', { name: 'Start Scan' }).click();
+  const sawProgress = await detectScanProgress(page);
+  await waitForScanCompletion(page);
+  const initialScanState = await readScanState(page);
+  await verifyStatePreserved(page, initialScanState);
+  const probe = await stopUiProbe(page);
+  assertProbeOk(probe, sawProgress);
+  return sawProgress;
+}
+
+function assertNoRuntimeProblems(collectors) {
+  const runtimeProblems = [...collectors.consoleErrors.map((msg) => `console.error: ${msg}`), ...collectors.pageErrors.map((msg) => `pageerror: ${msg}`)];
+  const cspIsolationRuntimeProblems = runtimeProblems.filter((msg) => /csp|content security policy|isolation|runtime/i.test(msg));
+  assert(runtimeProblems.length === 0, `Unexpected WebView2 console/page errors:\n${runtimeProblems.join('\n')}`);
+  assert(cspIsolationRuntimeProblems.length === 0, `Unexpected CSP/isolation/runtime errors:\n${cspIsolationRuntimeProblems.join('\n')}`);
+}
+
+function successLine(args) {
+  return `desktop-e2e: ok (exe=${args.exePath}, pid=${args.pid}, cdpPort=${args.port}, consoleErrors=0, pageErrors=0, cspIsolationRuntimeErrors=0, sawProgress=${args.sawProgress})\n`;
+}
+
+async function runDesktopE2E(exePath, port, child) {
+  await waitForCdp(port, 30_000);
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  try {
     const page = await findSweeperPage(browser, 30_000);
-
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') {
-        consoleErrors.push(msg.text());
-      }
-    });
-    page.on('pageerror', (err) => {
-      pageErrors.push(String(err));
-    });
-
-    await page.waitForLoadState('domcontentloaded', { timeout: 30_000 });
-    await page.getByRole('button', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
-    await page.getByRole('button', { name: 'Analyzer' }).waitFor({ timeout: 30_000 });
-    await page.getByRole('button', { name: 'Settings' }).waitFor({ timeout: 30_000 });
-
-    // Real Tauri IPC + navigation: settings and elevation status load without IPC errors.
-    await page.getByRole('button', { name: 'Settings' }).click();
-    await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
-    await page.getByText(/Standard \(Non-Elevated\)|Administrator \(Elevated\)/).waitFor({ timeout: 30_000 });
-
-    await page.getByRole('button', { name: 'Scan & Clean' }).click();
-    await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
-    await page.getByRole('button', { name: 'Start Scan' }).waitFor({ timeout: 30_000 });
-
-    // UI responsiveness probe (Bug 1 guard): measure renderer responsiveness while Start Scan runs/completes.
-    await page.evaluate(() => {
-      const state = { maxDelta: 0, last: performance.now(), running: true, samples: 0 };
-      (window).__sweeperUiProbe = state;
-      const tick = () => {
-        if (!state.running) return;
-        const now = performance.now();
-        const delta = now - state.last;
-        if (delta > state.maxDelta) state.maxDelta = delta;
-        state.last = now;
-        state.samples += 1;
-        requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    });
-
-    let sawProgress = false;
-    try {
-      await page.getByRole('button', { name: 'Start Scan' }).click();
-
-      // Fast scans may complete before progress UI is observed; slower scans should show progress ticks/counts.
-      try {
-        await page.locator('.scan-progress-notice, [aria-label="Scan target progress"]').first().waitFor({ timeout: 5_000 });
-        sawProgress = true;
-      } catch {
-        sawProgress = false;
-      }
-
-      await page.waitForFunction(
-        () => {
-          const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
-          const hasResults = document.querySelectorAll('article.target-card').length > 0;
-          const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
-          const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
-          const progressVisible = !!document.querySelector('.scan-progress-notice');
-          const errorNotice = Array.from(document.querySelectorAll('[role="alert"]')).some((el) => /scan failed|session expired|invalid/i.test(el.textContent || ''));
-          const resultsReady = hasResults || noTargets;
-          return !progressVisible && !errorNotice && inspector && resultsReady && !readyVisible;
-        },
-        undefined,
-        // Debug-mode cold-cache scans on real disks can take several minutes.
-        { timeout: 300_000 },
-      );
-
-      const initialScanState = await page.evaluate(() => {
-        const hasResults = document.querySelectorAll('article.target-card').length > 0;
-        const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
-        const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
-        const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
-        return { hasResults, noTargets, inspector, readyVisible };
-      });
-
-      // Bug 4: navigating to Settings and back to Scan & Clean preserves scan results.
-      await page.getByRole('button', { name: 'Settings' }).click();
-      await page.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 30_000 });
-      await page.getByRole('button', { name: 'Scan & Clean' }).click();
-      await page.getByRole('heading', { name: 'Scan & Clean' }).waitFor({ timeout: 30_000 });
-      const preserved = await page.evaluate(() => {
-        const hasResults = document.querySelectorAll('article.target-card').length > 0;
-        const noTargets = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').trim() === 'No targets');
-        const inspector = Array.from(document.querySelectorAll('h3')).some((el) => (el.textContent || '').includes('Inspector'));
-        const readyVisible = Array.from(document.querySelectorAll('h3, p, span, div')).some((el) => (el.textContent || '').trim() === 'Ready to scan');
-        return { hasResults, noTargets, inspector, readyVisible };
-      });
-      assert(
-        preserved.hasResults === initialScanState.hasResults &&
-          preserved.noTargets === initialScanState.noTargets &&
-          preserved.inspector &&
-          !preserved.readyVisible,
-        `Scan state was not preserved after navigating Settings -> Scan & Clean (initial=${JSON.stringify(initialScanState)}, preserved=${JSON.stringify(preserved)})`,
-      );
-    } finally {
-      // Allow a brief tail sample so we catch stalls at completion boundary, then stop probe.
-      await delay(250);
-      const probe = await page
-        .evaluate(() => {
-          const state = /** @type {{ maxDelta: number; samples: number; running: boolean } | undefined} */ (window.__sweeperUiProbe);
-          if (!state) return null;
-          state.running = false;
-          return { maxDelta: state.maxDelta, samples: state.samples };
-        })
-        .catch(() => null);
-      assert(probe && typeof probe.maxDelta === 'number', 'UI responsiveness probe did not run');
-      assert(
-        probe.maxDelta < 2000,
-        `UI responsiveness probe detected main-thread stall (max RAF delta ${probe.maxDelta.toFixed(1)}ms >= 2000ms, samples=${probe.samples}, sawProgress=${sawProgress})`,
-      );
-    }
-
-    // Allow late async console/page errors from startup/scan IPC to surface.
+    const collectors = await installPageErrorCollectors(page);
+    const sawProgress = await verifyDesktopViews(page);
     await delay(1500);
-
-    assertSweeperWindowVisible(child.pid);
-
-    const runtimeProblems = [
-      ...consoleErrors.map((msg) => `console.error: ${msg}`),
-      ...pageErrors.map((msg) => `pageerror: ${msg}`),
-    ];
-    const cspIsolationRuntimeProblems = runtimeProblems.filter((msg) => /csp|content security policy|isolation|runtime/i.test(msg));
-    assert(
-      runtimeProblems.length === 0,
-      `Unexpected WebView2 console/page errors:\n${runtimeProblems.join('\n')}`,
-    );
-    assert(
-      cspIsolationRuntimeProblems.length === 0,
-      `Unexpected CSP/isolation/runtime errors:\n${cspIsolationRuntimeProblems.join('\n')}`,
-    );
-
-    process.stdout.write(
-      `desktop-e2e: ok (exe=${exePath}, pid=${child.pid}, cdpPort=${port}, consoleErrors=0, pageErrors=0, cspIsolationRuntimeErrors=0, sawProgress=${sawProgress})\n`,
-    );
+    await assertSweeperWindowVisible(child.pid);
+    assertNoRuntimeProblems(collectors);
+    process.stdout.write(successLine({ exePath, pid: child.pid, port, sawProgress }));
   } finally {
-    try {
-      if (browser) {
-        await browser.close();
-      }
-    } catch {
-      // Best-effort; process teardown follows.
-    }
+    try { await browser.close(); } catch { /* best effort */ }
+  }
+}
+
+async function main() {
+  const exePath = resolveDesktopExePath();
+  const port = await getFreePort();
+  const { child, tempRoot } = isolatedEnv(exePath, port);
+  try {
+    await runDesktopE2E(exePath, port, child);
+  } finally {
     killProcessTree(child.pid);
     await waitForExit(child, 10_000);
-    try {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-    } catch {
-      // Best-effort cleanup: WebView2 may briefly hold temp profile files on Windows.
-    }
+    try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }
 

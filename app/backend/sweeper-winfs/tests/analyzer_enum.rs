@@ -22,7 +22,7 @@ fn find_entry<'a>(
 
 #[test]
 fn find_first_file_ex_enumeration_accuracy_preserves_attrs_and_sizes() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     sandbox
         .write_file("alpha.txt", b"hello")
         .expect("write alpha");
@@ -60,7 +60,7 @@ fn find_first_file_ex_enumeration_accuracy_preserves_attrs_and_sizes() {
 
 #[test]
 fn link_points_are_reported_but_not_traversed_and_canary_excluded() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let outside = CanaryTree::seed_external("winfs-analyzer-enum").expect("outside canary");
 
     let inside_dir = sandbox.create_dir("inside").expect("inside dir");
@@ -130,7 +130,7 @@ fn cloud_placeholder_attribute_helpers_and_reparse_classification() {
 
 #[test]
 fn long_paths_over_260_are_enumerated() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let deep_rel = format!(
         "deep\\{}\\{}\\{}\\file.txt",
         "a".repeat(80),
@@ -160,7 +160,7 @@ fn long_paths_over_260_are_enumerated() {
 
 #[test]
 fn arabic_and_emoji_filenames_are_enumerated_correctly() {
-    let sandbox = Sandbox::new().expect("sandbox");
+    let sandbox = Sandbox::new();
     let arabic_dir = "مجلد عربي";
     let emoji_file = "rocket-🚀.txt";
     let mixed_file = "بيانات-😀.bin";

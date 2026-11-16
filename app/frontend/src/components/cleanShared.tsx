@@ -178,20 +178,7 @@ export function CleanSummaryBlock({ summary, onOpenLog }: { summary: ExecuteClea
   );
 }
 
-export function InfoTip({ label, children, align = 'left' }: { label: string; children: ReactNode; align?: 'left' | 'right' }) {
-  const [pinned, setPinned] = useState(false);
-  const [hovered, setHovered] = useState(false);
-  const [focused, setFocused] = useState(false);
-  const open = pinned || hovered || focused;
-  const tooltipId = useId();
-  const rootRef = useRef<HTMLSpanElement | null>(null);
-
-  const close = () => {
-    setPinned(false);
-    setHovered(false);
-    setFocused(false);
-  };
-
+function useInfoTipDismiss(open: boolean, rootRef: React.RefObject<HTMLSpanElement | null>, close: () => void) {
   useEffect(() => {
     if (!open) return;
     function onDocPointerDown(e: MouseEvent | PointerEvent) {
@@ -213,27 +200,27 @@ export function InfoTip({ label, children, align = 'left' }: { label: string; ch
       document.removeEventListener('keydown', onKey, true);
       window.removeEventListener('keydown', onKey);
     };
-  }, [open]);
+  }, [open, rootRef, close]);
+}
 
+export function InfoTip({ label, children, align = 'left' }: { label: string; children: ReactNode; align?: 'left' | 'right' }) {
+  const [pinned, setPinned] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const open = pinned || hovered || focused;
+  const tooltipId = useId();
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const close = () => { setPinned(false); setHovered(false); setFocused(false); };
+  useInfoTipDismiss(open, rootRef, close);
   return (
     <span
       ref={rootRef}
       className={`info-tip ${align === 'right' ? 'right' : ''}`}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => {
-        setHovered(false);
-      }}
+      onMouseLeave={() => setHovered(false)}
       onFocus={() => setFocused(true)}
-      onBlur={(e) => {
-        if (e.relatedTarget instanceof Node && rootRef.current?.contains(e.relatedTarget)) return;
-        setFocused(false);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          close();
-        }
-      }}
+      onBlur={(e) => { if (e.relatedTarget instanceof Node && rootRef.current?.contains(e.relatedTarget)) return; setFocused(false); }}
+      onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } }}
     >
       <button
         type="button"
@@ -241,13 +228,7 @@ export function InfoTip({ label, children, align = 'left' }: { label: string; ch
         aria-label={label}
         aria-expanded={open}
         aria-describedby={open ? tooltipId : undefined}
-        onClick={() => {
-          if (pinned) {
-            close();
-          } else {
-            setPinned(true);
-          }
-        }}
+        onClick={() => { if (pinned) close(); else setPinned(true); }}
       >
         <InfoIcon />
       </button>

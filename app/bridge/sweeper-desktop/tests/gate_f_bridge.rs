@@ -136,7 +136,13 @@ fn seed_session(state: &AppState<FixedClock>, root: &Path, file_path: &Path, mti
         .sessions
         .lock()
         .unwrap()
-        .create_test_session_with_items(1_800_000_000, settings_gen, "scan-test", results, items);
+        .create_test_session_with_items(sweeper_desktop::session::TestScanSessionSeed {
+            now: 1_800_000_000,
+            settings_generation: settings_gen,
+            session_id: "scan-test".to_string(),
+            results,
+            items,
+        });
 }
 
 fn sandbox_test_base() -> std::path::PathBuf {
@@ -245,125 +251,102 @@ fn execute_clean_without_preview_rejected() {
     );
 }
 
-#[test]
-fn preview_token_expired_tampered_double_use_and_session_invalidated_rejected() {
-    // Expired token (>10m)
+struct SeededScan {
+    state: AppState<FixedClock>,
+    _sandbox: Sandbox,
+}
+
+fn seeded_scan() -> SeededScan {
     let state = make_state();
     let sandbox = Sandbox::new();
     let root = sandbox.create_dir("Temp").unwrap();
     let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
     seed_session(&state, &root, &f, 1_700_000_000);
-    let preview = commands_impl::preview_clean(
-        &state,
+    SeededScan {
+        state,
+        _sandbox: sandbox,
+    }
+}
+
+fn preview_scan_token(state: &AppState<FixedClock>) -> String {
+    commands_impl::preview_clean(
+        state,
         "scan-test".to_string(),
         vec!["t1::1".to_string()],
         None,
     )
-    .unwrap();
-    state.clock.advance_secs(10 * 60 + 1);
-    let err = commands_impl::execute_clean(&state, preview.preview_token.clone(), None, |_| {})
-        .unwrap_err();
+    .unwrap()
+    .preview_token
+}
+
+#[test]
+fn preview_token_expired_rejected() {
+    let s = seeded_scan();
+    let token = preview_scan_token(&s.state);
+    s.state.clock.advance_secs(10 * 60 + 1);
+    let err = commands_impl::execute_clean(&s.state, token, None, |_| {}).unwrap_err();
     assert!(
         matches!(err, ContractError::PreviewTokenInvalid { .. }),
         "{err:?}"
     );
+}
 
-    // Tampered token
-    let state = make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").unwrap();
-    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
-    seed_session(&state, &root, &f, 1_700_000_000);
-    let _preview = commands_impl::preview_clean(
-        &state,
-        "scan-test".to_string(),
-        vec!["t1::1".to_string()],
-        None,
-    )
-    .unwrap();
+#[test]
+fn preview_token_tampered_rejected() {
+    let s = seeded_scan();
+    let _ = preview_scan_token(&s.state);
     let err =
-        commands_impl::execute_clean(&state, "preview-tampered-token".to_string(), None, |_| {})
+        commands_impl::execute_clean(&s.state, "preview-tampered-token".to_string(), None, |_| {})
             .unwrap_err();
     assert!(
         matches!(err, ContractError::PreviewTokenInvalid { .. }),
         "{err:?}"
     );
+}
 
-    // Double execute_clean rejected (single-use)
-    let state = make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").unwrap();
-    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
-    seed_session(&state, &root, &f, 1_700_000_000);
-    let preview = commands_impl::preview_clean(
-        &state,
-        "scan-test".to_string(),
-        vec!["t1::1".to_string()],
-        None,
-    )
-    .unwrap();
+#[test]
+fn preview_token_double_use_rejected() {
+    let s = seeded_scan();
+    let token = preview_scan_token(&s.state);
     let logs_dir = tempfile::tempdir().unwrap();
     let res = commands_impl::execute_clean(
-        &state,
-        preview.preview_token.clone(),
+        &s.state,
+        token.clone(),
         Some(logs_dir.path().to_path_buf()),
         |_| {},
     );
     assert!(res.is_ok(), "{res:?}");
-    let err = commands_impl::execute_clean(
-        &state,
-        preview.preview_token,
-        Some(logs_dir.path().to_path_buf()),
-        |_| {},
-    )
-    .unwrap_err();
+    let err =
+        commands_impl::execute_clean(&s.state, token, Some(logs_dir.path().to_path_buf()), |_| {})
+            .unwrap_err();
     assert!(
         matches!(err, ContractError::PreviewTokenInvalid { .. }),
         "{err:?}"
     );
+}
 
-    // Settings-invalidated session rejected by execute_clean
-    let state = make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").unwrap();
-    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
-    seed_session(&state, &root, &f, 1_700_000_000);
-    let preview = commands_impl::preview_clean(
-        &state,
-        "scan-test".to_string(),
-        vec!["t1::1".to_string()],
-        None,
-    )
-    .unwrap();
-    {
-        let mut settings = state.settings.lock().unwrap();
-        let mut s = settings.get();
-        s.min_age_hours = 10;
-        let _ = settings.update(s);
-    }
-    let err =
-        commands_impl::execute_clean(&state, preview.preview_token, None, |_| {}).unwrap_err();
+#[test]
+fn execute_clean_rejected_when_session_invalidated_by_settings() {
+    let s = seeded_scan();
+    let token = preview_scan_token(&s.state);
+    let mut settings = s.state.settings.lock().unwrap();
+    let mut cfg = settings.get();
+    cfg.min_age_hours = 10;
+    let _ = settings.update(cfg);
+    drop(settings);
+    let err = commands_impl::execute_clean(&s.state, token, None, |_| {}).unwrap_err();
     assert!(
         matches!(err, ContractError::SessionInvalid { .. }),
         "{err:?}"
     );
+}
 
-    // Expired ScanSession (>15m) rejected by execute_clean
-    let state = make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").unwrap();
-    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
-    seed_session(&state, &root, &f, 1_700_000_000);
-    let preview = commands_impl::preview_clean(
-        &state,
-        "scan-test".to_string(),
-        vec!["t1::1".to_string()],
-        None,
-    )
-    .unwrap();
-    state.clock.advance_secs(15 * 60 + 1);
-    let err =
-        commands_impl::execute_clean(&state, preview.preview_token, None, |_| {}).unwrap_err();
+#[test]
+fn execute_clean_rejected_when_scan_session_expired() {
+    let s = seeded_scan();
+    let token = preview_scan_token(&s.state);
+    s.state.clock.advance_secs(15 * 60 + 1);
+    let err = commands_impl::execute_clean(&s.state, token, None, |_| {}).unwrap_err();
     assert!(
         matches!(err, ContractError::SessionInvalid { .. })
             || matches!(err, ContractError::PreviewTokenInvalid { .. }),
@@ -407,6 +390,7 @@ fn valid_scan_preview_execute_clean_in_sentinel_sandbox_writes_log_and_preserves
     assert_eq!(resp.deleted_count, U64String(1));
     assert_eq!(resp.skipped_count, U64String(0));
     assert!(!resp.aborted, "abort_reason={:?}", resp.abort_reason);
+
     assert!(
         !file_path.exists(),
         "eligible file should be deleted in sandbox"
@@ -429,21 +413,40 @@ fn valid_scan_preview_execute_clean_in_sentinel_sandbox_writes_log_and_preserves
     );
 }
 
-#[test]
-fn tauri_config_capabilities_and_command_surface_snapshot() {
+fn read_tauri_json(file: &str) -> serde_json::Value {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let conf_path = root.join("tauri.conf.json");
-    let cap_path = root.join("capabilities").join("default.json");
-    let conf: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&conf_path).unwrap()).unwrap();
-    let cap: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&cap_path).unwrap()).unwrap();
+    let path = match file {
+        "cap" => root.join("capabilities").join("default.json"),
+        _ => root.join(file),
+    };
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
 
+fn assert_tauri_csp_and_security(conf: &serde_json::Value) {
     let csp = conf["app"]["security"]["csp"].as_str().unwrap();
     assert!(csp.contains("default-src 'self'"), "csp: {csp}");
     assert!(!csp.contains("unsafe-eval"), "csp: {csp}");
     assert!(!csp.contains("unsafe-inline"), "csp: {csp}");
+}
 
+fn assert_tauri_no_fs_shell(conf: &serde_json::Value, cap: &serde_json::Value) {
+    let conf_s = conf.to_string().to_lowercase();
+    let cap_s = cap.to_string().to_lowercase();
+    assert!(
+        !conf_s.contains("plugin-fs") && !conf_s.contains("plugin-shell"),
+        "config plugins"
+    );
+    assert!(
+        !cap_s.contains("fs:") && !cap_s.contains("shell:"),
+        "capability plugins"
+    );
+}
+
+#[test]
+fn tauri_config_security_and_bundle_snapshot() {
+    let conf = read_tauri_json("tauri.conf.json");
+    let cap = read_tauri_json("cap");
+    assert_tauri_csp_and_security(&conf);
     assert_eq!(
         conf["app"]["security"]["freezePrototype"],
         serde_json::json!(true)
@@ -452,44 +455,23 @@ fn tauri_config_capabilities_and_command_surface_snapshot() {
         conf["app"]["security"]["pattern"]["use"],
         serde_json::json!("isolation")
     );
+    assert_tauri_no_fs_shell(&conf, &cap);
 
-    let conf_s = conf.to_string().to_lowercase();
-    let cap_s = cap.to_string().to_lowercase();
+    assert_eq!(conf["bundle"]["active"], serde_json::json!(true));
+    let targets = conf["bundle"]["targets"].as_array().unwrap();
     assert!(
-        !conf_s.contains("plugin-fs")
-            && !conf_s.contains("plugin-shell")
-            && !conf_s.contains("\"fs\"")
-            && !conf_s.contains("\"shell\""),
-        "config must not reference fs/shell plugins"
+        targets.iter().any(|t| t.as_str() == Some("nsis")),
+        "{targets:?}"
     );
-    assert!(
-        !cap_s.contains("fs:")
-            && !cap_s.contains("shell:")
-            && !cap_s.contains("plugin-fs")
-            && !cap_s.contains("plugin-shell"),
-        "capabilities must not reference fs/shell plugins"
-    );
-
-    assert_eq!(
-        conf["bundle"]["active"],
-        serde_json::json!(true),
-        "bundle.active must be enabled for Windows packaging"
-    );
-    let bundle_targets = conf["bundle"]["targets"]
+    assert!(!conf["bundle"]["icon"]
         .as_array()
-        .expect("bundle.targets must be an array");
-    assert!(
-        bundle_targets.iter().any(|t| t.as_str() == Some("nsis")),
-        "bundle.targets must include nsis: {bundle_targets:?}"
-    );
-    assert!(
-        !conf["bundle"]["icon"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .is_empty(),
-        "bundle.icon must be configured"
-    );
+        .unwrap_or(&vec![])
+        .is_empty());
+}
 
+#[test]
+fn tauri_capability_command_surface_snapshot() {
+    let cap = read_tauri_json("cap");
     let mut cmds = cap["commands"]["allow"]
         .as_array()
         .unwrap()
@@ -595,14 +577,59 @@ fn start_analyzer_on_sandbox_returns_tree_marks_non_selectable_and_populates_ses
     assert!(!explained.description.is_empty());
 }
 
+fn assert_unknown_file_not_selectable(root_node: &sweeper_contract::AnalyzerNodeDto) {
+    let file_node = find_node_by_path_suffix(root_node, "\\StaleCache\\old.txt")
+        .expect("old.txt node in analyzer tree");
+    assert!(!file_node.selectable, "reason={:?}", file_node.reason);
+    assert_eq!(
+        file_node.reason.as_deref(),
+        Some("Unknown files are not selectable; only eligible directories can be selected"),
+        "{:?}",
+        file_node.reason
+    );
+}
+
+fn assert_stale_cache_dir_selectable(
+    root_node: &sweeper_contract::AnalyzerNodeDto,
+) -> sweeper_contract::AnalyzerNodeDto {
+    let node = find_node_by_path_suffix(root_node, "\\StaleCache").expect("StaleCache node");
+    assert!(node.is_dir, "StaleCache must be a directory node");
+    assert!(node.selectable, "reason={:?}", node.reason);
+    assert!(!node.display_only, "StaleCache must not be display_only");
+
+    let treated_as_custom = node.target_id.is_none() || node.risk == RiskDto::Unknown;
+    assert!(treated_as_custom, "{node:?}");
+    node.clone()
+}
+
+fn exec_analyzer_preview(
+    state: &AppState<FixedClock>,
+    session_id: &str,
+    node_id: String,
+) -> sweeper_contract::ExecuteCleanResponse {
+    let preview = commands_impl::preview_clean(
+        state,
+        session_id.to_string(),
+        vec![node_id],
+        Some(sweeper_contract::PreviewConfirmationsDto {
+            typed_confirmation: Some("DELETE".to_string()),
+        }),
+    )
+    .unwrap();
+    assert!(preview.total_selected_count.get() >= 1);
+    let logs_base = tempfile::tempdir().unwrap();
+    commands_impl::execute_clean(
+        state,
+        preview.preview_token,
+        Some(logs_base.path().to_path_buf()),
+        |_| {},
+    )
+    .unwrap()
+}
+
 #[test]
 fn analyzer_eligible_node_preview_and_execute_clean_in_sentinel_sandbox() {
-    // Custom-path sandbox nodes are Unknown. With allow_delete_unknown, eligible Unknown
-    // directories (Custom Path roots, contents-only, typed confirmation) are selectable, but
-    // individual Unknown files are intentionally not selectable.
-    let state = state_with_temp_settings(|s| {
-        s.allow_delete_unknown = true;
-    });
+    let state = state_with_temp_settings(|s| s.allow_delete_unknown = true);
     let canary = CanaryTree::seed_external("gate-f-analyzer-exec").unwrap();
     let sandbox = Sandbox::new();
     let root = sandbox.create_dir("CleanMe").unwrap();
@@ -620,161 +647,117 @@ fn analyzer_eligible_node_preview_and_execute_clean_in_sentinel_sandbox() {
     )
     .unwrap();
 
-    let root_node = resp.root.clone();
+    assert_unknown_file_not_selectable(&resp.root);
+    let stale_cache_node = assert_stale_cache_dir_selectable(&resp.root);
+    let exec = exec_analyzer_preview(&state, &resp.session_id, stale_cache_node.id);
 
-    // Regression guard: individual Unknown files are not selectable.
-    let file_node = find_node_by_path_suffix(&root_node, "\\StaleCache\\old.txt")
-        .expect("old.txt node in analyzer tree");
-    assert!(
-        !file_node.selectable,
-        "old.txt (Unknown file) must not be selectable: reason={:?}",
-        file_node.reason
-    );
-    assert_eq!(
-        file_node.reason.as_deref(),
-        Some("Unknown files are not selectable; only eligible directories can be selected"),
-        "unexpected non-selectable reason for Unknown file: {:?}",
-        file_node.reason
-    );
-
-    // Select the eligible Unknown directory node and route it through Preview/Clean.
-    let stale_cache_node = find_node_by_path_suffix(&root_node, "\\StaleCache")
-        .expect("StaleCache node in analyzer tree");
-    assert!(
-        stale_cache_node.is_dir,
-        "StaleCache must be a directory node"
-    );
-    assert!(
-        stale_cache_node.selectable,
-        "StaleCache should be selectable as an eligible Unknown directory: reason={:?}",
-        stale_cache_node.reason
-    );
-    assert!(
-        !stale_cache_node.display_only,
-        "StaleCache must not be display_only"
-    );
-    assert!(
-        stale_cache_node.target_id.is_none() || stale_cache_node.risk == RiskDto::Unknown,
-        "StaleCache should be treated as custom-path/Unknown selection: target_id={:?}, risk={:?}",
-        stale_cache_node.target_id,
-        stale_cache_node.risk
-    );
-
-    let preview = commands_impl::preview_clean(
-        &state,
-        resp.session_id.clone(),
-        vec![stale_cache_node.id.clone()],
-        Some(sweeper_contract::PreviewConfirmationsDto {
-            typed_confirmation: Some("DELETE".to_string()),
-        }),
-    )
-    .unwrap();
-    assert!(preview.total_selected_count.get() >= 1);
-
-    let logs_base = tempfile::tempdir().unwrap();
-    let exec = commands_impl::execute_clean(
-        &state,
-        preview.preview_token,
-        Some(logs_base.path().to_path_buf()),
-        |_| {},
-    )
-    .unwrap();
     assert!(!exec.aborted, "abort_reason={:?}", exec.abort_reason);
-    assert!(
-        exec.deleted_count.get() >= 1,
-        "expected at least one deleted item, got {:?}",
-        exec
-    );
+    assert!(exec.deleted_count.get() >= 1, "expected deleted: {exec:?}");
     canary.verify().unwrap();
-
-    // Contents-only semantics: selected directory root and its ancestors preserved, contents removed.
-    assert!(
-        !sandbox
-            .guarded_path("CleanMe\\StaleCache\\old.txt")
-            .exists(),
-        "eligible contents inside selected directory should be deleted"
-    );
+    assert!(!sandbox
+        .guarded_path("CleanMe\\StaleCache\\old.txt")
+        .exists());
     assert!(
         stale_cache_dir.exists(),
-        "selected custom-path directory root must be preserved"
+        "selected directory root must be preserved"
     );
     assert!(root.exists(), "analyzer root directory must be preserved");
-
-    let log_id = exec.log_id.expect("log id");
-    let logs =
-        commands_impl::list_logs_in_dir(Some(logs_base.path().join("logs").as_path())).unwrap();
-    assert!(logs.iter().any(|l| l.id == log_id));
 }
 
-#[test]
-fn analyzer_preview_rejects_invalid_nodes_and_session_rules_enforced() {
+struct AnalyzerRejectCtx {
+    state: AppState<FixedClock>,
+    _sandbox: Sandbox,
+    session_id: String,
+    root_id: String,
+    vhdx_id: Option<String>,
+    git_id: Option<String>,
+    link_id: Option<String>,
+}
+
+fn analyzer_reject_ctx() -> AnalyzerRejectCtx {
     let state = make_state();
     let sandbox = Sandbox::new();
     let root = sandbox.create_dir("R").unwrap();
-    let _f = sandbox.write_file("R\\ok.txt", b"ok").unwrap();
-    let _vhdx = sandbox.write_file("R\\disk.vhdx", b"x").unwrap();
-    let _git = sandbox.create_dir("R\\.git").unwrap();
+    let _ = sandbox.write_file("R\\ok.txt", b"ok").unwrap();
+    let _ = sandbox.write_file("R\\disk.vhdx", b"x").unwrap();
+    let _ = sandbox.create_dir("R\\.git").unwrap();
     let outside = sandbox.create_dir("outside").unwrap();
     let link = sandbox.guarded_path("R\\linkdir");
     let _ = sweeper_testkit::create_junction(&link, &outside);
-
     let resp = commands_impl::start_analyzer::<_, fn(sweeper_contract::AnalyzerProgressEvent)>(
         &state,
         Some(root.to_string_lossy().to_string()),
         None,
     )
     .unwrap();
+    AnalyzerRejectCtx {
+        session_id: resp.session_id.clone(),
+        root_id: resp.root.id.clone(),
+        vhdx_id: find_node_by_path_suffix(&resp.root, "\\disk.vhdx").map(|n| n.id.clone()),
+        git_id: find_node_by_path_suffix(&resp.root, "\\.git").map(|n| n.id.clone()),
+        link_id: find_node_by_path_suffix(&resp.root, "\\linkdir").map(|n| n.id.clone()),
+        state,
+        _sandbox: sandbox,
+    }
+}
 
-    if let Some(vhdx) = find_node_by_path_suffix(&resp.root, "\\disk.vhdx") {
+#[test]
+fn analyzer_preview_rejects_invalid_nodes() {
+    let ctx = analyzer_reject_ctx();
+    if let Some(id) = &ctx.vhdx_id {
         let err = commands_impl::preview_clean(
-            &state,
-            resp.session_id.clone(),
-            vec![vhdx.id.clone()],
+            &ctx.state,
+            ctx.session_id.clone(),
+            vec![id.clone()],
             None,
         )
         .unwrap_err();
         assert!(
             matches!(err, ContractError::InvalidInput { .. })
-                || matches!(err, ContractError::UnknownItem { .. })
-                || format!("{err:?}").contains("InvalidInput"),
+                || matches!(err, ContractError::UnknownItem { .. }),
             "{err:?}"
         );
     }
-    if let Some(git) = find_node_by_path_suffix(&resp.root, "\\.git") {
+    if let Some(id) = &ctx.git_id {
         let err = commands_impl::preview_clean(
-            &state,
-            resp.session_id.clone(),
-            vec![git.id.clone()],
+            &ctx.state,
+            ctx.session_id.clone(),
+            vec![id.clone()],
             None,
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
     }
-    if let Some(link_node) = find_node_by_path_suffix(&resp.root, "\\linkdir") {
+    if let Some(id) = &ctx.link_id {
         let err = commands_impl::preview_clean(
-            &state,
-            resp.session_id.clone(),
-            vec![link_node.id.clone()],
+            &ctx.state,
+            ctx.session_id.clone(),
+            vec![id.clone()],
             None,
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
     }
+}
 
-    // execute_clean directly with analyzer session_id (not preview token) rejected
-    let err =
-        commands_impl::execute_clean(&state, resp.session_id.clone(), None, |_| {}).unwrap_err();
+#[test]
+fn analyzer_session_id_not_accepted_as_preview_token() {
+    let ctx = analyzer_reject_ctx();
+    let err = commands_impl::execute_clean(&ctx.state, ctx.session_id, None, |_| {}).unwrap_err();
     assert!(
         matches!(err, ContractError::PreviewTokenInvalid { .. }),
         "{err:?}"
     );
+}
 
-    // expired analyzer session rejected
-    state.clock.advance_secs(15 * 60 + 1);
+#[test]
+fn analyzer_session_expired_rejected() {
+    let ctx = analyzer_reject_ctx();
+    ctx.state.clock.advance_secs(15 * 60 + 1);
     let err = commands_impl::preview_clean(
-        &state,
-        resp.session_id.clone(),
-        vec![resp.root.id.clone()],
+        &ctx.state,
+        ctx.session_id,
+        vec![ctx.root_id],
         Some(sweeper_contract::PreviewConfirmationsDto {
             typed_confirmation: Some("DELETE".into()),
         }),
@@ -819,19 +802,8 @@ fn analyzer_session_invalidated_by_settings_change_rejected() {
     );
 }
 
-#[test]
-fn analyzer_unknown_node_not_selectable_and_rejected_when_unknown_deletions_disabled() {
-    let state = make_state();
-    let settings_gen = {
-        let settings = state.settings.lock().unwrap();
-        assert!(
-            !settings.get().allow_delete_unknown,
-            "allow_delete_unknown must be false by default for this test"
-        );
-        settings.generation()
-    };
-
-    // Explicit Unknown-risk directory node (not selectable) in a synthetic analyzer session.
+fn seed_unknown_dir_session(state: &AppState<FixedClock>) -> String {
+    let settings_gen = state.settings.lock().unwrap().generation();
     let unknown_dir = sweeper_core::analyzer::AnalyzerNode {
         id: "node-unknown-dir".to_string(),
         path: r"C:\Users\Public\SweeperUnknownDir".to_string(),
@@ -868,7 +840,7 @@ fn analyzer_unknown_node_not_selectable_and_rejected_when_unknown_deletions_disa
         display_only: false,
         selectable: false,
         selection_reason: Some("Protected path is not selectable".to_string()),
-        children: vec![unknown_dir.clone()],
+        children: vec![unknown_dir],
     };
     state.sessions.lock().unwrap().insert_test_analyzer_session(
         sweeper_desktop::session::AnalyzerSessionInput {
@@ -883,18 +855,22 @@ fn analyzer_unknown_node_not_selectable_and_rejected_when_unknown_deletions_disa
             min_age_hours: 24,
         },
     );
+    "node-unknown-dir".to_string()
+}
 
+#[test]
+fn analyzer_unknown_node_not_selectable_and_rejected_when_unknown_deletions_disabled() {
+    let state = make_state();
+    assert!(!state.settings.lock().unwrap().get().allow_delete_unknown);
+    let node_id = seed_unknown_dir_session(&state);
     let err = commands_impl::preview_clean(
         &state,
         "analyzer-unknown-test".to_string(),
-        vec![unknown_dir.id.clone()],
+        vec![node_id],
         None,
     )
     .unwrap_err();
-    assert!(
-        matches!(err, ContractError::InvalidInput { .. }),
-        "non-selectable Unknown-risk directory node must be rejected by preview_clean: {err:?}"
-    );
+    assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
 }
 
 #[test]
@@ -980,15 +956,7 @@ fn tampered_settings_json_recovers_to_safe_defaults_with_warnings() {
     );
 }
 
-#[test]
-fn update_settings_increments_generation_and_invalidates_active_sessions() {
-    let state = make_state();
-    let sandbox = sweeper_testkit::Sandbox::new();
-    let root = sandbox.create_dir("Temp").unwrap();
-    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
-    seed_session(&state, &root, &f, 1_700_000_000);
-
-    // seed analyzer session too
+fn seed_simple_analyzer_session(state: &AppState<FixedClock>, root: &Path) {
     let settings_gen = state.settings.lock().unwrap().generation();
     state.sessions.lock().unwrap().insert_test_analyzer_session(
         sweeper_desktop::session::AnalyzerSessionInput {
@@ -1020,10 +988,18 @@ fn update_settings_increments_generation_and_invalidates_active_sessions() {
             min_age_hours: 24,
         },
     );
+}
+
+#[test]
+fn update_settings_increments_generation_and_invalidates_active_sessions() {
+    let state = make_state();
+    let sandbox = sweeper_testkit::Sandbox::new();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    seed_session(&state, &root, &f, 1_700_000_000);
+    seed_simple_analyzer_session(&state, &root);
 
     let mut s = commands_impl::get_settings(&state).unwrap();
-    s.custom_paths
-        .push(r"C:\Definitely\Not\A\Real\Valid\Path".to_string()); // will sanitize/drop but still represents change attempt; better change a real field
     s.stale_project_days = 45;
     let updated = commands_impl::update_settings(&state, s).unwrap();
     assert_eq!(updated.stale_project_days, 45);
@@ -1062,17 +1038,17 @@ fn tier3_default_off_and_opt_in_reflected_in_settings() {
     );
 }
 
-#[test]
-fn typed_confirmation_rejected_and_accepted_for_custom_path_scan_target() {
-    let state = make_state();
-    let settings_gen = state.settings.lock().unwrap().generation();
+struct CustomScanCtx {
+    state: AppState<FixedClock>,
+    item_id: String,
+    _sandbox: sweeper_testkit::Sandbox,
+}
 
-    // Custom Path scan target session
-    let sandbox_base = sandbox_test_base();
-    let sandbox = sweeper_testkit::Sandbox::new_in(&sandbox_base);
-    let root = sandbox.create_dir("CustomRoot").unwrap();
-    let file_path = sandbox.write_file("CustomRoot\\old.tmp", b"abc").unwrap();
-    let size = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(3);
+fn build_custom_scan_seed(
+    root: &Path,
+    file_path: &Path,
+) -> (ScanResultsDto, HashMap<String, StoredItem>, String) {
+    let size = fs::metadata(file_path).map(|m| m.len()).unwrap_or(3);
     let item = ScanItemDto {
         id: "custom-path-1::1".to_string(),
         target_id: "custom-path-1".to_string(),
@@ -1115,40 +1091,64 @@ fn typed_confirmation_rejected_and_accepted_for_custom_path_scan_target() {
             requires_typed_confirmation: true,
         },
     );
+    (results, items, item.id)
+}
+
+fn seed_custom_scan_session() -> CustomScanCtx {
+    let state = make_state();
+    let settings_gen = state.settings.lock().unwrap().generation();
+    let sandbox = sweeper_testkit::Sandbox::new_in(sandbox_test_base());
+    let root = sandbox.create_dir("CustomRoot").unwrap();
+    let file_path = sandbox.write_file("CustomRoot\\old.tmp", b"abc").unwrap();
+    let (results, items, item_id) = build_custom_scan_seed(&root, &file_path);
     state
         .sessions
         .lock()
         .unwrap()
-        .create_test_session_with_items(1_800_000_000, settings_gen, "scan-custom", results, items);
+        .create_test_session_with_items(sweeper_desktop::session::TestScanSessionSeed {
+            now: 1_800_000_000,
+            settings_generation: settings_gen,
+            session_id: "scan-custom".to_string(),
+            results,
+            items,
+        });
+    CustomScanCtx {
+        state,
+        item_id,
+        _sandbox: sandbox,
+    }
+}
 
+#[test]
+fn typed_confirmation_rejected_for_custom_path_scan_target() {
+    let ctx = seed_custom_scan_session();
     let err = commands_impl::preview_clean(
-        &state,
+        &ctx.state,
         "scan-custom".to_string(),
-        vec![item.id.clone()],
+        vec![ctx.item_id.clone()],
         None,
     )
     .unwrap_err();
-    assert!(
-        matches!(err, ContractError::InvalidInput { .. }),
-        "missing confirmation must be rejected: {err:?}"
-    );
+    assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
     let err = commands_impl::preview_clean(
-        &state,
+        &ctx.state,
         "scan-custom".to_string(),
-        vec![item.id.clone()],
+        vec![ctx.item_id],
         Some(sweeper_contract::PreviewConfirmationsDto {
             typed_confirmation: Some("WRONG".to_string()),
         }),
     )
     .unwrap_err();
-    assert!(
-        matches!(err, ContractError::InvalidInput { .. }),
-        "wrong confirmation must be rejected: {err:?}"
-    );
+    assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
+}
+
+#[test]
+fn typed_confirmation_accepted_for_custom_path_scan_target() {
+    let ctx = seed_custom_scan_session();
     let ok = commands_impl::preview_clean(
-        &state,
+        &ctx.state,
         "scan-custom".to_string(),
-        vec![item.id],
+        vec![ctx.item_id],
         Some(sweeper_contract::PreviewConfirmationsDto {
             typed_confirmation: Some("DELETE".to_string()),
         }),
@@ -1157,16 +1157,17 @@ fn typed_confirmation_rejected_and_accepted_for_custom_path_scan_target() {
     assert!(!ok.preview_token.is_empty());
 }
 
-#[test]
-fn typed_confirmation_rejected_and_accepted_for_unknown_analyzer_items() {
-    // Analyzer Unknown item requires exact typed confirmation (custom-path conversion seam)
-    let sandbox_base = sandbox_test_base();
-    let state2 = state_with_temp_settings(|s| {
-        s.allow_delete_unknown = true;
-    });
-    let settings_gen2 = state2.settings.lock().unwrap().generation();
-    let sandbox2 = sweeper_testkit::Sandbox::new_in(&sandbox_base);
-    let uroot = sandbox2.create_dir("UnknownRoot").unwrap();
+struct UnknownAnalyzerCtx {
+    state: AppState<FixedClock>,
+    node_id: String,
+    _sandbox: sweeper_testkit::Sandbox,
+}
+
+fn seed_unknown_analyzer_session() -> UnknownAnalyzerCtx {
+    let state = state_with_temp_settings(|s| s.allow_delete_unknown = true);
+    let settings_gen = state.settings.lock().unwrap().generation();
+    let sandbox = sweeper_testkit::Sandbox::new_in(sandbox_test_base());
+    let uroot = sandbox.create_dir("UnknownRoot").unwrap();
     let unknown_node = sweeper_core::analyzer::AnalyzerNode {
         id: "node-unknown-custom".to_string(),
         path: uroot.to_string_lossy().to_string(),
@@ -1185,6 +1186,7 @@ fn typed_confirmation_rejected_and_accepted_for_unknown_analyzer_items() {
         selection_reason: None,
         children: vec![],
     };
+    let node_id = unknown_node.id.clone();
     let tree_root = sweeper_core::analyzer::AnalyzerNode {
         id: "node-tree-root-u".to_string(),
         path: uroot.to_string_lossy().to_string(),
@@ -1201,41 +1203,50 @@ fn typed_confirmation_rejected_and_accepted_for_unknown_analyzer_items() {
         display_only: false,
         selectable: false,
         selection_reason: None,
-        children: vec![unknown_node.clone()],
+        children: vec![unknown_node],
     };
-    state2
-        .sessions
-        .lock()
-        .unwrap()
-        .insert_test_analyzer_session(sweeper_desktop::session::AnalyzerSessionInput {
+    state.sessions.lock().unwrap().insert_test_analyzer_session(
+        sweeper_desktop::session::AnalyzerSessionInput {
             id: "analyzer-unknown-ok".to_string(),
             created_at: 1_800_000_000,
-            settings_generation: settings_gen2,
+            settings_generation: settings_gen,
             result: sweeper_core::analyzer::AnalyzerResult {
                 root: tree_root,
                 progress: sweeper_core::analyzer::AnalyzerProgress::default(),
                 cancelled: false,
             },
             min_age_hours: 24,
-        });
+        },
+    );
+    UnknownAnalyzerCtx {
+        state,
+        node_id,
+        _sandbox: sandbox,
+    }
+}
 
+#[test]
+fn typed_confirmation_rejected_for_unknown_analyzer_items() {
+    let ctx = seed_unknown_analyzer_session();
     let err = commands_impl::preview_clean(
-        &state2,
+        &ctx.state,
         "analyzer-unknown-ok".to_string(),
-        vec![unknown_node.id.clone()],
+        vec![ctx.node_id],
         Some(sweeper_contract::PreviewConfirmationsDto {
             typed_confirmation: Some("wrong".to_string()),
         }),
     )
     .unwrap_err();
-    assert!(
-        matches!(err, ContractError::InvalidInput { .. }),
-        "wrong confirmation for Unknown analyzer selection must be rejected: {err:?}"
-    );
+    assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
+}
+
+#[test]
+fn typed_confirmation_accepted_for_unknown_analyzer_items() {
+    let ctx = seed_unknown_analyzer_session();
     let ok = commands_impl::preview_clean(
-        &state2,
+        &ctx.state,
         "analyzer-unknown-ok".to_string(),
-        vec![unknown_node.id.clone()],
+        vec![ctx.node_id],
         Some(sweeper_contract::PreviewConfirmationsDto {
             typed_confirmation: Some("DELETE".to_string()),
         }),
@@ -1244,40 +1255,41 @@ fn typed_confirmation_rejected_and_accepted_for_unknown_analyzer_items() {
     assert!(!ok.preview_token.is_empty());
 }
 
-#[test]
-fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute() {
-    let state = make_state();
-    let settings_gen = state.settings.lock().unwrap().generation();
+struct CustomRootCtx {
+    state: AppState<FixedClock>,
+    sandbox: Sandbox,
+    canary: CanaryTree,
+    root_path: std::path::PathBuf,
+    inside: std::path::PathBuf,
+    nested: std::path::PathBuf,
+    node_id: String,
+}
 
-    // Sentinel-guarded per-test sandbox (auto-cleaned on Drop) and external canary.
-    // Use CARGO_TARGET_DIR as base: custom-path validation rejects descendants of protected
-    // container roots (e.g. user profile/%TEMP%), but CARGO_TARGET_DIR is outside them.
-    let sandbox_base = sandbox_test_base();
-    let sandbox = Sandbox::new_in(&sandbox_base);
-    sandbox.assert_sentinel_present();
-    let canary = CanaryTree::seed_external("gate-f-analyzer-custom-root").unwrap();
-
+fn setup_custom_root_fs(
+    sandbox: &Sandbox,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     let root_path = sandbox.create_dir("CustomCleanRoot").unwrap();
     let inside = sandbox
         .write_file("CustomCleanRoot\\old.tmp", b"bye")
         .unwrap();
-    let _nested_dir = sandbox.create_dir("CustomCleanRoot\\nested").unwrap();
+    let _ = sandbox.create_dir("CustomCleanRoot\\nested").unwrap();
     let nested = sandbox
         .write_file("CustomCleanRoot\\nested\\x.tmp", b"x")
         .unwrap();
     assert!(root_path.exists() && inside.exists() && nested.exists());
-
     let verdict = sweeper_core::policy::validate_custom_path(&root_path.to_string_lossy());
     assert!(
         verdict.allowed,
-        "sandbox custom path root must be valid for this environment: {} ({})",
+        "{} ({})",
         root_path.display(),
         verdict.reason
     );
-    canary.verify().unwrap();
+    (root_path, inside, nested)
+}
 
+fn insert_custom_root_session(state: &AppState<FixedClock>, root_path: &Path) -> String {
+    let settings_gen = state.settings.lock().unwrap().generation();
     let root_str = root_path.to_string_lossy().to_string();
-    // Synthetic selectable custom-path-root directory node (target_id None => custom-path conversion seam).
     let custom_root_node = sweeper_core::analyzer::AnalyzerNode {
         id: "node-custom-root".to_string(),
         path: root_str.clone(),
@@ -1296,9 +1308,10 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
         selection_reason: None,
         children: Vec::new(),
     };
+    let node_id = custom_root_node.id.clone();
     let tree_root = sweeper_core::analyzer::AnalyzerNode {
         id: "node-tree-root".to_string(),
-        path: root_str.clone(),
+        path: root_str,
         name: "CustomCleanRoot".to_string(),
         is_dir: true,
         size_bytes: 4,
@@ -1312,7 +1325,7 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
         display_only: false,
         selectable: true,
         selection_reason: None,
-        children: vec![custom_root_node.clone()],
+        children: vec![custom_root_node],
     };
     state.sessions.lock().unwrap().insert_test_analyzer_session(
         sweeper_desktop::session::AnalyzerSessionInput {
@@ -1327,33 +1340,56 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
             min_age_hours: 24,
         },
     );
+    node_id
+}
 
-    // Custom-path-root analyzer nodes require typed confirmation.
+fn seed_custom_root_analyzer_ctx() -> CustomRootCtx {
+    let state = make_state();
+    let sandbox = Sandbox::new_in(sandbox_test_base());
+    sandbox.assert_sentinel_present();
+    let canary = CanaryTree::seed_external("gate-f-analyzer-custom-root").unwrap();
+    let (root_path, inside, nested) = setup_custom_root_fs(&sandbox);
+    canary.verify().unwrap();
+    let node_id = insert_custom_root_session(&state, &root_path);
+    CustomRootCtx {
+        state,
+        sandbox,
+        canary,
+        root_path,
+        inside,
+        nested,
+        node_id,
+    }
+}
+
+#[test]
+fn analyzer_custom_path_root_requires_confirmation() {
+    let ctx = seed_custom_root_analyzer_ctx();
     let err = commands_impl::preview_clean(
-        &state,
+        &ctx.state,
         "analyzer-custom-root-test".to_string(),
-        vec![custom_root_node.id.clone()],
+        vec![ctx.node_id],
         None,
     )
     .unwrap_err();
-    assert!(
-        matches!(err, ContractError::InvalidInput { .. }),
-        "custom-path-root selection must require typed confirmation: {err:?}"
-    );
+    assert!(matches!(err, ContractError::InvalidInput { .. }), "{err:?}");
+}
 
+#[test]
+fn analyzer_custom_path_root_preserved_on_execute() {
+    let ctx = seed_custom_root_analyzer_ctx();
     let preview = commands_impl::preview_clean(
-        &state,
+        &ctx.state,
         "analyzer-custom-root-test".to_string(),
-        vec![custom_root_node.id.clone()],
+        vec![ctx.node_id],
         Some(sweeper_contract::PreviewConfirmationsDto {
             typed_confirmation: Some("DELETE".to_string()),
         }),
     )
     .unwrap();
-
     let logs_base = tempfile::tempdir().unwrap();
     let exec = commands_impl::execute_clean(
-        &state,
+        &ctx.state,
         preview.preview_token,
         Some(logs_base.path().to_path_buf()),
         |_| {},
@@ -1361,16 +1397,18 @@ fn analyzer_custom_path_root_requires_confirmation_and_preserves_root_on_execute
     .unwrap();
     assert!(!exec.aborted, "abort_reason={:?}", exec.abort_reason);
 
-    // Custom-path root directory itself must survive; eligible contents cleaned.
-    sandbox.assert_sentinel_present();
+    ctx.sandbox.assert_sentinel_present();
     assert!(
-        root_path.exists(),
+        ctx.root_path.exists(),
         "custom-path root directory must be preserved"
     );
-    assert!(!inside.exists(), "root-level contents should be cleaned");
-    assert!(!nested.exists(), "nested contents should be cleaned");
     assert!(
-        canary.verify().is_ok(),
+        !ctx.inside.exists(),
+        "root-level contents should be cleaned"
+    );
+    assert!(!ctx.nested.exists(), "nested contents should be cleaned");
+    assert!(
+        ctx.canary.verify().is_ok(),
         "external canary must remain intact"
     );
 }
@@ -1577,15 +1615,13 @@ fn start_scan_emits_started_progress_completed_with_expected_session_and_decimal
 }
 
 #[test]
-fn session_store_lock_not_held_during_inflight_scan_and_execute_clean() {
+fn session_store_lock_not_held_during_inflight_scan() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
 
-    // Scan: try_lock must succeed from within progress callback while scan is running (sandbox-only).
     let sandbox_scan = Sandbox::new();
     let scan_dir = sandbox_scan.create_dir("ScanRoot").unwrap();
-    let _scan_file = sandbox_scan
+    let _ = sandbox_scan
         .write_file("ScanRoot\\locktest.tmp", b"lock-scan-data")
         .unwrap();
     let state = Arc::new(state_with_temp_settings(|s| {
@@ -1608,14 +1644,18 @@ fn session_store_lock_not_held_during_inflight_scan_and_execute_clean() {
     )
     .expect("start_scan should succeed");
     assert!(!resp.session_id.is_empty());
-    // Note: custom path may be rejected by policy in some environments; if so, this assertion
-    // is relaxed only in that case is not possible. We keep the original intent.
     assert!(
         try_lock_ok.load(Ordering::SeqCst),
         "sessions lock must be acquirable during in-flight scan progress callbacks"
     );
+}
 
-    // Execute clean: try_lock must succeed from within clean progress callback while removal is running.
+#[test]
+fn session_store_lock_not_held_during_inflight_execute_clean() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
     let state = Arc::new(make_state());
     let sandbox = Sandbox::new();
     let canary = CanaryTree::seed_external("gate-f-lock-clean").unwrap();
@@ -1643,7 +1683,6 @@ fn session_store_lock_not_held_during_inflight_scan_and_execute_clean() {
             if state_cb.sessions.try_lock().is_ok() {
                 try_lock_ok_cb.store(true, Ordering::SeqCst);
             }
-            // small pause to widen observation window
             std::thread::sleep(Duration::from_millis(1));
         },
     )

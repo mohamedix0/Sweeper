@@ -15,8 +15,97 @@ use sweeper_core::analyzer::{self, AnalyzerProgress};
 use sweeper_core::scanner::{self, ScanError, ScanProgress};
 
 use crate::clock::Clock;
-use crate::session::SessionStore;
+use crate::session::{AnalyzerFinishInput, ScanFinishInput, SessionStore, ValidatedCleanBatch};
 use crate::AppState;
+
+type SharedScanCb<F> = Arc<Mutex<F>>;
+
+fn lock_state_error() -> ContractError {
+    ContractError::Internal {
+        reason: "state unavailable".into(),
+    }
+}
+
+fn emit_scan_event<F>(shared: &Option<SharedScanCb<F>>, evt: ScanProgressEvent)
+where
+    F: FnMut(ScanProgressEvent),
+{
+    if let Some(cb) = shared {
+        if let Ok(mut g) = cb.lock() {
+            (*g)(evt);
+        }
+    }
+}
+
+fn build_scan_progress_cb<F>(
+    session_id: &str,
+    shared: &Option<SharedScanCb<F>>,
+) -> Option<scanner::ScanProgressCallback>
+where
+    F: FnMut(ScanProgressEvent) + Send + 'static,
+{
+    let cb = shared.as_ref()?.clone();
+    let sid = session_id.to_string();
+    Some(Arc::new(move |p: ScanProgress| {
+        if let Ok(mut g) = cb.lock() {
+            (*g)(ScanProgressEvent::Progress {
+                session_id: sid.clone(),
+                completed_targets: p.completed_targets,
+                total_targets: p.total_targets,
+                current_target_id: p.current_target_id,
+                current_target_name: p.current_target_name,
+                scanned_items: p.scanned_items.to_string(),
+                scanned_bytes: p.scanned_bytes.to_string(),
+            });
+        }
+    }) as scanner::ScanProgressCallback)
+}
+
+fn commit_scan_outcome<C: Clock>(
+    state: &AppState<C>,
+    session_id: &str,
+    prepared: &crate::session::PreparedScan,
+    report: scanner::ScanReport,
+) -> Result<(), ContractError> {
+    let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
+    let current_settings_gen = state
+        .settings
+        .lock()
+        .map_err(|_| lock_state_error())?
+        .generation();
+    sessions.finish_scan(
+        &state.clock,
+        ScanFinishInput {
+            session_id: session_id.to_string(),
+            settings_generation_at_start: prepared.settings_generation,
+            current_settings_generation: current_settings_gen,
+            effective_min_age_hours: prepared.effective_settings.min_age_hours,
+            report,
+        },
+    )
+}
+
+fn handle_scan_failure<C: Clock, F>(
+    state: &AppState<C>,
+    session_id: &str,
+    shared: &Option<SharedScanCb<F>>,
+    err: ContractError,
+) -> ContractError
+where
+    F: FnMut(ScanProgressEvent),
+{
+    if let Ok(mut sessions) = state.sessions.lock() {
+        sessions.abort_scan(session_id);
+    }
+    emit_scan_event(
+        shared,
+        ScanProgressEvent::Failed {
+            session_id: session_id.to_string(),
+            error: err.clone(),
+        },
+    );
+    err
+}
 
 /// `start_scan` implementation.
 ///
@@ -33,129 +122,92 @@ where
     F: FnMut(ScanProgressEvent) + Send + 'static,
 {
     let (settings, settings_gen) = {
-        let store = state.settings.lock().map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?;
+        let store = state.settings.lock().map_err(|_| lock_state_error())?;
         (store.core(), store.generation())
     };
-
     let prepared = {
-        let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?;
-        sessions.begin_scan(&state.clock, tiers, &settings, settings_gen)?
+        let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
+        sessions.begin_scan(
+            &state.clock,
+            crate::session::scan::ScanBeginRequest {
+                tiers,
+                settings,
+                settings_generation: settings_gen,
+            },
+        )?
     };
-
     let session_id = prepared.session_id.clone();
-    let shared_cb: Option<Arc<Mutex<F>>> = on_progress.map(|cb| Arc::new(Mutex::new(cb)));
-    let emit = |evt: ScanProgressEvent, shared: &Option<Arc<Mutex<F>>>| {
-        if let Some(cb) = shared {
-            if let Ok(mut g) = cb.lock() {
-                (*g)(evt);
-            }
-        }
-    };
-    emit(
+    let shared_cb = on_progress.map(|cb| Arc::new(Mutex::new(cb)));
+    emit_scan_event(
+        &shared_cb,
         ScanProgressEvent::Started {
             session_id: session_id.clone(),
         },
-        &shared_cb,
     );
-
-    let core_cb: Option<scanner::ScanProgressCallback> = shared_cb.as_ref().map(|cb| {
-        let sid = session_id.clone();
-        let cb = cb.clone();
-        Arc::new(move |p: ScanProgress| {
-            if let Ok(mut g) = cb.lock() {
-                (*g)(ScanProgressEvent::Progress {
-                    session_id: sid.clone(),
-                    completed_targets: p.completed_targets,
-                    total_targets: p.total_targets,
-                    current_target_id: p.current_target_id,
-                    current_target_name: p.current_target_name,
-                    scanned_items: p.scanned_items.to_string(),
-                    scanned_bytes: p.scanned_bytes.to_string(),
-                });
-            }
-        }) as scanner::ScanProgressCallback
-    });
-
+    let core_cb = build_scan_progress_cb(&session_id, &shared_cb);
     let scan_result = scanner::scan_with_settings_current_elevation_with_progress(
         &prepared.effective_settings,
         prepared.cancel.clone(),
         core_cb,
     );
+    finalize_scan(state, session_id, &prepared, &shared_cb, scan_result)
+}
 
+fn finalize_scan<C, F>(
+    state: &AppState<C>,
+    session_id: String,
+    prepared: &crate::session::PreparedScan,
+    shared_cb: &Option<SharedScanCb<F>>,
+    scan_result: Result<scanner::ScanReport, ScanError>,
+) -> Result<StartScanResponse, ContractError>
+where
+    C: Clock,
+    F: FnMut(ScanProgressEvent),
+{
     match scan_result {
         Ok(report) => {
-            let finish_result = {
-                let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-                    reason: "state unavailable".into(),
-                })?;
-                let current_settings_gen = state
-                    .settings
-                    .lock()
-                    .map_err(|_| ContractError::Internal {
-                        reason: "state unavailable".into(),
-                    })?
-                    .generation();
-                sessions.finish_scan(
-                    &state.clock,
-                    &session_id,
-                    prepared.settings_generation,
-                    current_settings_gen,
-                    prepared.effective_settings.min_age_hours,
-                    report,
-                )
-            };
-            if let Err(err) = finish_result {
-                emit(
-                    ScanProgressEvent::Failed {
-                        session_id: session_id.clone(),
-                        error: err.clone(),
-                    },
-                    &shared_cb,
-                );
-                return Err(err);
+            if let Err(err) = commit_scan_outcome(state, &session_id, prepared, report) {
+                return Err(handle_scan_failure(state, &session_id, shared_cb, err));
             }
-            emit(
+            emit_scan_event(
+                shared_cb,
                 ScanProgressEvent::Completed {
                     session_id: session_id.clone(),
                 },
-                &shared_cb,
             );
             Ok(StartScanResponse { session_id })
         }
-        Err(ScanError::Cancelled) => {
-            if let Ok(mut sessions) = state.sessions.lock() {
-                sessions.abort_scan(&session_id);
-            }
-            emit(
-                ScanProgressEvent::Cancelled {
-                    session_id: session_id.clone(),
-                },
-                &shared_cb,
-            );
-            Err(ContractError::Internal {
-                reason: "scan cancelled".to_string(),
-            })
-        }
-        Err(e) => {
-            if let Ok(mut sessions) = state.sessions.lock() {
-                sessions.abort_scan(&session_id);
-            }
-            let mapped = ContractError::Internal {
+        Err(ScanError::Cancelled) => Err(handle_scan_cancelled(state, &session_id, shared_cb)),
+        Err(e) => Err(handle_scan_failure(
+            state,
+            &session_id,
+            shared_cb,
+            ContractError::Internal {
                 reason: crate::session::sanitize_reason_pub(&e.to_string()),
-            };
-            emit(
-                ScanProgressEvent::Failed {
-                    session_id: session_id.clone(),
-                    error: mapped.clone(),
-                },
-                &shared_cb,
-            );
-            Err(mapped)
-        }
+            },
+        )),
+    }
+}
+
+fn handle_scan_cancelled<C: Clock, F>(
+    state: &AppState<C>,
+    session_id: &str,
+    shared_cb: &Option<SharedScanCb<F>>,
+) -> ContractError
+where
+    F: FnMut(ScanProgressEvent),
+{
+    if let Ok(mut sessions) = state.sessions.lock() {
+        sessions.abort_scan(session_id);
+    }
+    emit_scan_event(
+        shared_cb,
+        ScanProgressEvent::Cancelled {
+            session_id: session_id.to_string(),
+        },
+    );
+    ContractError::Internal {
+        reason: "scan cancelled".to_string(),
     }
 }
 
@@ -167,13 +219,9 @@ pub fn get_scan_results<C: Clock>(
     let settings_gen = state
         .settings
         .lock()
-        .map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?
+        .map_err(|_| lock_state_error())?
         .generation();
-    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-        reason: "state unavailable".into(),
-    })?;
+    let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
     sessions.get_scan_results(&state.clock, &session_id, settings_gen)
 }
 
@@ -187,19 +235,17 @@ pub fn preview_clean<C: Clock>(
     let settings_gen = state
         .settings
         .lock()
-        .map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?
+        .map_err(|_| lock_state_error())?
         .generation();
-    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-        reason: "state unavailable".into(),
-    })?;
+    let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
     sessions.preview_clean(
         &state.clock,
-        &session_id,
-        item_ids,
-        confirmations,
-        settings_gen,
+        crate::session::PreviewCleanRequest {
+            session_id,
+            item_ids,
+            confirmations,
+            current_settings_generation: settings_gen,
+        },
     )
 }
 
@@ -211,14 +257,30 @@ pub fn explain_item<C: Clock>(
     let settings_gen = state
         .settings
         .lock()
-        .map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?
+        .map_err(|_| lock_state_error())?
         .generation();
-    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-        reason: "state unavailable".into(),
-    })?;
+    let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
     sessions.explain_item(&state.clock, &item_id, settings_gen)
+}
+
+fn build_analyzer_progress_cb<F>(
+    session_id: &str,
+    on_progress: Option<F>,
+) -> Option<Arc<dyn Fn(AnalyzerProgress) + Send + Sync>>
+where
+    F: Fn(AnalyzerProgressEvent) + Send + Sync + 'static,
+{
+    let cb = on_progress?;
+    let sid = session_id.to_string();
+    Some(Arc::new(move |p: AnalyzerProgress| {
+        cb(AnalyzerProgressEvent {
+            session_id: sid.clone(),
+            scanned_dirs: U64String(p.scanned_dirs),
+            scanned_files: U64String(p.scanned_files),
+            scanned_bytes: U64String(p.scanned_bytes),
+            current_path: p.current_path,
+        });
+    }))
 }
 
 /// `start_analyzer` implementation.
@@ -235,36 +297,18 @@ where
     F: Fn(AnalyzerProgressEvent) + Send + Sync + 'static,
 {
     let (settings, settings_gen) = {
-        let s = state.settings.lock().map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?;
+        let s = state.settings.lock().map_err(|_| lock_state_error())?;
         (s.core(), s.generation())
     };
-
     let prepared = {
-        let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?;
+        let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
         sessions.begin_analyzer(&state.clock, settings_gen)?
     };
-
-    let sid_for_progress = prepared.session_id.clone();
-    let progress = on_progress.map(|cb| {
-        Arc::new(move |p: AnalyzerProgress| {
-            cb(AnalyzerProgressEvent {
-                session_id: sid_for_progress.clone(),
-                scanned_dirs: U64String(p.scanned_dirs),
-                scanned_files: U64String(p.scanned_files),
-                scanned_bytes: U64String(p.scanned_bytes),
-                current_path: p.current_path,
-            });
-        }) as Arc<dyn Fn(AnalyzerProgress) + Send + Sync>
-    });
+    let progress = build_analyzer_progress_cb(&prepared.session_id, on_progress);
     let options = analyzer::AnalyzerOptions {
         allow_unknown: settings.allow_delete_unknown,
         ..analyzer::AnalyzerOptions::default()
     };
-
     let result =
         match analyzer::analyze_path(root.as_deref(), prepared.cancel.clone(), progress, options) {
             Ok(r) => r,
@@ -275,36 +319,36 @@ where
                 return Err(crate::session::map_analyzer_error_pub(e));
             }
         };
+    commit_analyzer_outcome(state, &prepared, settings.min_age_hours, result)
+}
 
-    let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-        reason: "state unavailable".into(),
-    })?;
+fn commit_analyzer_outcome<C: Clock>(
+    state: &AppState<C>,
+    prepared: &crate::session::PreparedAnalyzer,
+    min_age_hours: u32,
+    result: analyzer::AnalyzerResult,
+) -> Result<StartAnalyzerResponse, ContractError> {
+    let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
     let current_settings_gen = state
         .settings
         .lock()
-        .map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?
+        .map_err(|_| lock_state_error())?
         .generation();
     sessions.finish_analyzer(
         &state.clock,
-        &prepared.session_id,
-        prepared.settings_generation,
-        current_settings_gen,
-        settings.min_age_hours,
-        result,
+        AnalyzerFinishInput {
+            session_id: prepared.session_id.clone(),
+            settings_generation_at_start: prepared.settings_generation,
+            current_settings_generation: current_settings_gen,
+            min_age_hours,
+            result,
+        },
     )
 }
 
 /// `get_settings` implementation.
 pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, ContractError> {
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?
-        .get();
+    let settings = state.settings.lock().map_err(|_| lock_state_error())?.get();
     Ok(settings)
 }
 
@@ -315,9 +359,7 @@ pub fn update_settings<C: Clock>(
     state: &AppState<C>,
     settings: SettingsDto,
 ) -> Result<SettingsDto, ContractError> {
-    let mut store = state.settings.lock().map_err(|_| ContractError::Internal {
-        reason: "state unavailable".into(),
-    })?;
+    let mut store = state.settings.lock().map_err(|_| lock_state_error())?;
     let prev_gen = store.generation();
     let updated = store.update(settings);
     let new_gen = store.generation();
@@ -490,26 +532,23 @@ where
     let settings_gen = state
         .settings
         .lock()
-        .map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?
+        .map_err(|_| lock_state_error())?
         .generation();
-
     // Atomic validation + consumption of preview token under lock (prevents double execute races).
     let (min_age_hours, validated_items, preview_estimated_bytes) = {
-        let mut sessions = state.sessions.lock().map_err(|_| ContractError::Internal {
-            reason: "state unavailable".into(),
-        })?;
+        let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
         sessions.consume_preview_token_for_execute(&state.clock, &preview_token, settings_gen)?
     };
 
     SessionStore::execute_validated_clean_batch(
         &state.clock,
-        &preview_token,
-        min_age_hours,
-        validated_items,
-        preview_estimated_bytes,
-        journal_base_dir,
+        ValidatedCleanBatch {
+            preview_token,
+            min_age_hours,
+            validated_items,
+            preview_estimated_bytes,
+            journal_base_dir,
+        },
         on_progress,
     )
 }
