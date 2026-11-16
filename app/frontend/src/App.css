@@ -6623,7 +6623,10 @@ input[type="checkbox"]:indeterminate {
   .scan-row,
   .scan-group-row,
   .scan-item-row {
-    grid-template-columns: minmax(320px, 1.5fr) minmax(120px, max-content) minmax(120px, max-content) 160px !important;
+    /* Fit the narrowest desktop scan pane (~589px at a 1101px viewport: 216px sidebar +
+       296px inspector). Keep ITEMS/SIZE readable via max-content, but let the flexible
+       ITEM track absorb the remaining width instead of forcing horizontal scroll. */
+    grid-template-columns: minmax(0, 1.5fr) minmax(88px, max-content) minmax(80px, max-content) minmax(96px, max-content) !important;
     gap: 8px !important;
   }
   .scan-group-row .scan-col-main { padding-right: 0 !important; }
