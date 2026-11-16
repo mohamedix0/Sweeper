@@ -76,7 +76,6 @@ function scanActivity(objs: Record<string, unknown>[]): ActivitySummary {
 }
 
 function legacyActivity(objs: Record<string, unknown>[], flags: Flags): ActivitySummary {
-  const rows = parseAuditRowsFromObjs(objs);
   const outcome = [...objs].reverse().find((o) => String(o.record ?? '') === 'outcome') ?? undefined;
   if (flags.isScan) {
     return {

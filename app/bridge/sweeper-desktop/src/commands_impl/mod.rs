@@ -9,6 +9,15 @@ mod shared;
 #[cfg(test)]
 mod tests;
 
+pub(crate) fn is_sandbox_path_hint(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("sweeper-sandbox")
+        || lower.contains(".sweeper-sentinel")
+        || lower.contains("sweeper-testkit")
+        || lower.contains("\\appdata\\local\\temp\\")
+        || lower.contains("/appdata/local/temp/")
+}
+
 pub use analyzer::{cancel_analyzer, start_analyzer};
 pub use clean::{execute_clean, execute_clean_default};
 pub use elevation::{get_elevation_status, relaunch_elevated};

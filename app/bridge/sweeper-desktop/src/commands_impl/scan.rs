@@ -59,15 +59,6 @@ fn commit_scan_outcome<C: Clock>(
     )
 }
 
-fn is_sandbox_path_hint(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("sweeper-sandbox")
-        || lower.contains(".sweeper-sentinel")
-        || lower.contains("sweeper-testkit")
-        || lower.contains("\\appdata\\local\\temp\\")
-        || lower.contains("/appdata/local/temp/")
-}
-
 fn is_sandbox_scan(
     settings: &sweeper_core::settings::SweeperSettings,
     report: &scanner::ScanReport,
@@ -81,12 +72,14 @@ fn is_sandbox_scan(
     if !settings
         .custom_paths
         .iter()
-        .all(|p| is_sandbox_path_hint(p))
+        .all(|p| super::is_sandbox_path_hint(p))
     {
         return false;
     }
     report.targets.iter().all(|t| {
-        t.resolved_paths.iter().all(|p| is_sandbox_path_hint(p))
+        t.resolved_paths
+            .iter()
+            .all(|p| super::is_sandbox_path_hint(p))
             && t.target_id.starts_with("custom-path")
     })
 }

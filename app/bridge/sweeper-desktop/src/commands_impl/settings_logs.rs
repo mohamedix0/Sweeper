@@ -78,15 +78,6 @@ pub fn list_logs<C: Clock>(_state: &AppState<C>) -> Result<Vec<LogMetadataDto>, 
     list_logs_in_dir_impl(default_logs_dir().as_deref(), true)
 }
 
-fn is_sandbox_log_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("sweeper-sandbox")
-        || lower.contains(".sweeper-sentinel")
-        || lower.contains("sweeper-testkit")
-        || lower.contains("\\appdata\\local\\temp\\")
-        || lower.contains("/appdata/local/temp/")
-}
-
 fn clean_log_phantom_reasons(path: &Path) -> (bool, bool) {
     let Ok(file) = fs::File::open(path) else {
         return (true, false);
@@ -119,13 +110,13 @@ fn clean_log_phantom_reasons(path: &Path) -> (bool, bool) {
         }
         if let Some(p) = value.get("path").and_then(|v| v.as_str()) {
             saw_path = true;
-            if !is_sandbox_log_path(p) {
+            if !super::is_sandbox_path_hint(p) {
                 all_sandbox = false;
             }
         }
         if let Some(target) = value.get("target_path").and_then(|v| v.as_str()) {
             saw_path = true;
-            if !is_sandbox_log_path(target) {
+            if !super::is_sandbox_path_hint(target) {
                 all_sandbox = false;
             }
         }

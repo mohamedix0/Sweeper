@@ -167,7 +167,6 @@ export function useLogsSelectionModel(args: { client: SweeperClient; focusLogId?
   const data = useLogData(client);
   useAutoOpen({ client, focusLogId, data });
   useFocusOpen({ client, focusLogId, onFocusConsumed, data });
-  const q = data.logs.length >= 0 ? '' : ''; // keep hook order stable if needed
   const ui = useLogsUiState(data.selected?.id);
   const query = ui.query.trim().toLowerCase();
   const filteredLogs = useMemo(() => data.logs.filter((l) => matchesLogFilter({ meta: l, content: contentForLog({ meta: l, selected: data.selected, contentById: data.contentById }), filter: ui.filter, query })), [data.logs, data.contentById, data.selected, ui.filter, query]);
@@ -175,6 +174,5 @@ export function useLogsSelectionModel(args: { client: SweeperClient; focusLogId?
   const effectiveSelected = data.selected && filteredLogs.some((l) => l.id === data.selected?.id) ? data.selected : null;
   const derived = useLogsDerived({ logs: data.logs, selected: effectiveSelected, outcomeFilter: ui.outcomeFilter });
   const actions = useLogActions({ data, selectedMetaName: derived.selectedMeta?.name, setCopied: ui.setCopied, setExpandedSkippedGroups: ui.setExpandedSkippedGroups });
-  void q;
   return { logs: data.logs, selected: effectiveSelected, mode: ui.mode, setMode: ui.setMode, error: data.error, copied: ui.copied, filter: ui.filter, setFilter: ui.setFilter, outcomeFilter: ui.outcomeFilter, setOutcomeFilter: ui.setOutcomeFilter, query: ui.query, setQuery: ui.setQuery, selectedMeta: derived.selectedMeta, auditRows: derived.auditRows, visibleAuditRows: derived.visibleAuditRows, selectedSummary: derived.selectedSummary, activitySummary: derived.activitySummary, filteredLogs, contentById: data.contentById, expandedSkippedGroups: ui.expandedSkippedGroups, openLog: data.openLog, copyLog: actions.copyLog, exportLog: actions.exportLog, toggleSkippedGroup: actions.toggleSkippedGroup };
 }
