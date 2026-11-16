@@ -573,16 +573,16 @@ description="x"
         fuzz_allowlist_bytes(valid.as_bytes());
     }
 
-    #[test]
-    fn lint_non_overlapping_utf8_wildcard_and_literal() {
-        let toml = r#"
+    fn utf8_overlap_toml(subpath_a: &str, subpath_b: &str) -> String {
+        format!(
+            r#"
 [[targets]]
 id="a"
 name="A"
 tier="Tier2"
 risk="Safe"
 known_folder="LocalAppData"
-relative_subpath='é*\Cache'
+relative_subpath='{subpath_a}'
 scope="contents"
 min_age_hours=24
 requires_elevation=false
@@ -594,129 +594,38 @@ name="B"
 tier="Tier2"
 risk="Safe"
 known_folder="LocalAppData"
-relative_subpath='aé\Cache'
+relative_subpath='{subpath_b}'
 scope="contents"
 min_age_hours=24
 requires_elevation=false
 description="y"
-"#;
-        assert!(lint_allowlist_toml(toml).is_ok());
+"#
+        )
+    }
+
+    #[test]
+    fn lint_non_overlapping_utf8_wildcard_and_literal() {
+        let toml = utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}\\Cache");
+        assert!(lint_allowlist_toml(&toml).is_ok());
     }
 
     #[test]
     fn lint_non_overlapping_utf8_wildcards() {
-        let toml = r#"
-[[targets]]
-id="a"
-name="A"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='é*\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="x"
-
-[[targets]]
-id="b"
-name="B"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='aé*\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="y"
-"#;
-        assert!(lint_allowlist_toml(toml).is_ok());
+        let toml = utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}*\\Cache");
+        assert!(lint_allowlist_toml(&toml).is_ok());
     }
 
     #[test]
     fn lint_overlapping_utf8_wildcard_and_literal() {
-        let toml = r#"
-[[targets]]
-id="a"
-name="A"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='é*\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="x"
-
-[[targets]]
-id="b"
-name="B"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='éx\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="y"
-"#;
-        let err = lint_allowlist_toml(toml).unwrap_err();
+        let toml = utf8_overlap_toml("\u{00E9}*\\Cache", "\u{00E9}x\\Cache");
+        let err = lint_allowlist_toml(&toml).unwrap_err();
         assert!(matches!(err, LintError::Overlap { .. }));
     }
 
     #[test]
     fn fuzz_allowlist_bytes_handles_utf8_overlap_pairs_without_panic() {
-        let pair1 = r#"
-[[targets]]
-id="a"
-name="A"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='é*\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="x"
-
-[[targets]]
-id="b"
-name="B"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='aé\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="y"
-"#;
-        let pair2 = r#"
-[[targets]]
-id="a"
-name="A"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='é*\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="x"
-
-[[targets]]
-id="b"
-name="B"
-tier="Tier2"
-risk="Safe"
-known_folder="LocalAppData"
-relative_subpath='aé*\Cache'
-scope="contents"
-min_age_hours=24
-requires_elevation=false
-description="y"
-"#;
-        fuzz_allowlist_bytes(pair1.as_bytes());
-        fuzz_allowlist_bytes(pair2.as_bytes());
+        fuzz_allowlist_bytes(utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}\\Cache").as_bytes());
+        fuzz_allowlist_bytes(utf8_overlap_toml("\u{00E9}*\\Cache", "a\u{00E9}*\\Cache").as_bytes());
+        fuzz_allowlist_bytes(utf8_overlap_toml("\u{00E9}*\\Cache", "\u{00E9}x\\Cache").as_bytes());
     }
 }
