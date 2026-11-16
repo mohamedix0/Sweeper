@@ -141,9 +141,29 @@ function clampWidths(args: { widths: number[]; available: number }) {
 }
 
 function legendLabel(s: AllocSeg) {
-  if (s.name !== 'Other') return formatSharePercent({ share: s.pct });
+  if (!s.isOther && s.name !== 'Other') return formatSharePercent({ share: s.pct });
   if (s.pct < 0.1) return '<0.1%';
   return formatSharePercent({ share: s.pct });
+}
+
+const LEGEND_CAP = 12;
+
+function cappedLegendSegments(segments: AllocSeg[]): AllocSeg[] {
+  if (segments.length <= LEGEND_CAP) return segments;
+  const top = segments.slice(0, LEGEND_CAP);
+  const rest = segments.slice(LEGEND_CAP);
+  const otherBytes = rest.reduce((a, s) => a + s.bytes, 0n);
+  const otherPct = rest.reduce((a, s) => a + s.pct, 0);
+  top.push({
+    id: 'alloc-legend-other-more',
+    name: `Other (${rest.length} more)`,
+    bytes: otherBytes,
+    pct: otherPct,
+    pctVisual: 0,
+    color: '#64748b',
+    isOther: true,
+  });
+  return top;
 }
 
 type AllocProps = {
@@ -246,7 +266,7 @@ export function AllocBar(props: AllocProps) {
         {renderSegments({ segments: props.segments, widths, layout, onFocus: props.onFocus })}
       </svg>
       <div className="alloc-legend">
-        {props.segments.map((s) => <AllocLegendItem key={s.id} seg={s} onFocus={props.onFocus} />)}
+        {cappedLegendSegments(props.segments).map((s) => <AllocLegendItem key={s.id} seg={s} onFocus={props.onFocus} />)}
       </div>
     </section>
   );

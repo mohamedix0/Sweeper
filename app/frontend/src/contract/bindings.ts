@@ -44,6 +44,14 @@ async startAnalyzer(root: string | null) : Promise<Result<{ sessionId: string; r
     else return { status: "error", error: e  as any };
 }
 },
+async cancelAnalyzer(sessionId: string) : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_analyzer", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: string; description: string; risk: RiskDto }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("explain_item", { itemId }) };

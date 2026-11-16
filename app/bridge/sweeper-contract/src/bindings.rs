@@ -171,6 +171,7 @@ fn analyzer_and_settings_commands(
                 ("root", None),
             ),
         )?,
+        cmd_cancel_analyzer(cfg, type_map)?,
         cmd_one::<ExplainItemResponse, String>(
             cfg,
             type_map,
@@ -360,6 +361,22 @@ fn cmd_preview_clean(
             ("confirmations", conf),
         ],
         &format!("Result<{ok}, {err}>"),
+    ))
+}
+
+fn cmd_cancel_analyzer(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn Error>> {
+    let err = ty::<ContractError>(cfg, type_map)?;
+    Ok(cmd_fn(
+        CmdSpec {
+            name: "cancelAnalyzer",
+            invoke: "cancel_analyzer",
+            arg_obj: Some("{ sessionId }"),
+        },
+        &[("session_id", "string".to_string())],
+        &format!("Result<null, {err}>"),
     ))
 }
 

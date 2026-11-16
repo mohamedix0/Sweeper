@@ -7,6 +7,7 @@
 //! - Cancellation and throttled progress reporting
 //! - Annotation and selection eligibility for safe integration with Preview/Clean flows
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -28,6 +29,12 @@ pub struct AnalyzerOptions {
     pub progress_interval: Duration,
     /// If `true`, allow `Unknown` items to be selectable in the conversion seam (Phase 5 policy seam; default false).
     pub allow_unknown: bool,
+    /// Maximum file entries retained per directory for tree display (totals remain exact). `0` uses default.
+    pub max_files_per_dir: usize,
+    /// Maximum child nodes emitted per directory in the returned tree (totals remain exact). `0` uses default.
+    pub max_children_per_dir: usize,
+    /// Maximum directory depth emitted in the returned tree. `0` uses default.
+    pub max_tree_depth: usize,
 }
 
 impl Default for AnalyzerOptions {
@@ -36,6 +43,9 @@ impl Default for AnalyzerOptions {
             worker_threads: 0,
             progress_interval: Duration::from_millis(100),
             allow_unknown: false,
+            max_files_per_dir: 64,
+            max_children_per_dir: 50,
+            max_tree_depth: 4096,
         }
     }
 }
@@ -196,48 +206,146 @@ pub fn analyze_validated_root(
         allow_unknown: options.allow_unknown,
         ..annotate::EligibilitySettings::default()
     };
+    let (max_files_per_dir, max_children_per_dir, max_tree_depth) = resolve_tree_limits(&options);
+    let walk = run_walker_with_progress(
+        &root,
+        WalkRun {
+            cancel: Arc::clone(&cancel),
+            progress,
+            options,
+            max_files_per_dir,
+        },
+    )?;
+    let tree = assemble_analyzer_result(
+        &root,
+        AssemblyInput {
+            records: &walk.records,
+            ctx: &ctx,
+            settings: &settings,
+            max_children_per_dir,
+            max_tree_depth,
+        },
+    )?;
+    Ok(AnalyzerResult {
+        root: tree,
+        progress: walk.progress,
+        cancelled: walk.cancelled,
+    })
+}
 
-    let workers = walker::effective_worker_count(options.worker_threads);
-    let state = Arc::new(walker::WalkState::new(root.as_str().to_string()));
-    state.enqueue_initial(root.as_str().to_string());
+fn resolve_tree_limits(options: &AnalyzerOptions) -> (usize, usize, usize) {
+    let max_files_per_dir = if options.max_files_per_dir == 0 {
+        64
+    } else {
+        options.max_files_per_dir
+    };
+    let max_children_per_dir = if options.max_children_per_dir == 0 {
+        50
+    } else {
+        options.max_children_per_dir
+    };
+    let max_tree_depth = if options.max_tree_depth == 0 {
+        4096
+    } else {
+        options.max_tree_depth
+    };
+    (max_files_per_dir, max_children_per_dir, max_tree_depth)
+}
 
-    let progress_state = Arc::new(walker::ProgressState::new(
-        progress,
-        options.progress_interval,
+struct WalkRun {
+    cancel: Arc<AtomicBool>,
+    progress: Option<Arc<dyn Fn(AnalyzerProgress) + Send + Sync>>,
+    options: AnalyzerOptions,
+    max_files_per_dir: usize,
+}
+
+struct WalkOutput {
+    progress: AnalyzerProgress,
+    records: HashMap<String, walker::DirRecord>,
+    cancelled: bool,
+}
+
+fn run_walker_with_progress(
+    root: &CanonicalPath,
+    run: WalkRun,
+) -> Result<WalkOutput, AnalyzerError> {
+    let state = Arc::new(walker::WalkState::new(
+        root.as_str().to_string(),
+        run.max_files_per_dir,
     ));
-    let mut handles = Vec::with_capacity(workers);
+    state.enqueue_initial(root.as_str().to_string());
+    let progress_state = Arc::new(walker::ProgressState::new(
+        run.progress,
+        run.options.progress_interval,
+    ));
+    let cancel = Arc::clone(&run.cancel);
+    spawn_and_join_walkers(
+        &state,
+        WalkExec {
+            cancel: run.cancel,
+            progress_state: Arc::clone(&progress_state),
+            worker_threads: run.options.worker_threads,
+        },
+    );
 
+    let cancelled = cancel.load(AtomicOrdering::Relaxed) || state.had_error();
+    progress_state.emit_final(&state);
+    if let Some(err) = state.take_error() {
+        return Err(AnalyzerError::Walk(err));
+    }
+    Ok(WalkOutput {
+        progress: progress_state.snapshot(&state),
+        records: state.into_records(),
+        cancelled,
+    })
+}
+
+struct WalkExec {
+    cancel: Arc<AtomicBool>,
+    progress_state: Arc<walker::ProgressState>,
+    worker_threads: usize,
+}
+
+fn spawn_and_join_walkers(state: &Arc<walker::WalkState>, exec: WalkExec) {
+    let workers = walker::effective_worker_count(exec.worker_threads);
+    let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
-        let state_cloned = Arc::clone(&state);
-        let cancel_cloned = Arc::clone(&cancel);
-        let progress_cloned = Arc::clone(&progress_state);
+        let state_cloned = Arc::clone(state);
+        let cancel_cloned = Arc::clone(&exec.cancel);
+        let progress_cloned = Arc::clone(&exec.progress_state);
         handles.push(std::thread::spawn(move || {
             walker::worker_loop(state_cloned, cancel_cloned, progress_cloned);
         }));
     }
-
     for h in handles {
         let _ = h.join();
     }
+}
 
-    let cancelled = cancel.load(AtomicOrdering::Relaxed) || state.had_error();
-    progress_state.emit_final(&state);
+struct AssemblyInput<'a> {
+    records: &'a HashMap<String, walker::DirRecord>,
+    ctx: &'a annotate::AnnotationContext,
+    settings: &'a annotate::EligibilitySettings,
+    max_children_per_dir: usize,
+    max_tree_depth: usize,
+}
 
-    if let Some(err) = state.take_error() {
-        return Err(AnalyzerError::Walk(err));
-    }
-
-    let final_progress = progress_state.snapshot(&state);
-    let records = state.into_records();
+fn assemble_analyzer_result(
+    root: &CanonicalPath,
+    input: AssemblyInput<'_>,
+) -> Result<AnalyzerNode, AnalyzerError> {
     let root_key = annotate::canonical_key(root.as_str());
-    let tree = annotate::build_tree(&records, &root_key, &ctx, &settings)
-        .ok_or_else(|| AnalyzerError::Walk("failed to build analyzer tree".to_string()))?;
-
-    Ok(AnalyzerResult {
-        root: tree,
-        progress: final_progress,
-        cancelled,
-    })
+    annotate::build_tree(
+        input.records,
+        &root_key,
+        input.ctx,
+        input.settings,
+        annotate::TreeBuildLimits {
+            max_children_per_dir: input.max_children_per_dir,
+            max_tree_depth: input.max_tree_depth,
+        },
+    )
+    .ok_or_else(|| AnalyzerError::Walk("failed to build analyzer tree".to_string()))
 }
 
 mod annotate;

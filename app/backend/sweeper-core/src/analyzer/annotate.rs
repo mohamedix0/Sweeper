@@ -53,183 +53,252 @@ pub(super) struct Annotation {
     selection_reason: Option<String>,
 }
 
-pub(super) fn build_tree(
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TreeBuildLimits {
+    pub(super) max_children_per_dir: usize,
+    pub(super) max_tree_depth: usize,
+}
+
+fn compute_directory_totals(
     records: &HashMap<String, DirRecord>,
     root_key: &str,
-    ctx: &AnnotationContext,
-    settings: &EligibilitySettings,
-) -> Option<AnalyzerNode> {
-    if !records.contains_key(root_key) {
-        return None;
-    }
-
-    // Iterative post-order to compute recursive totals (size_bytes, item_count) without recursion.
+) -> HashMap<String, (u64, u64)> {
     let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
     let mut stack: Vec<(String, bool)> = vec![(root_key.to_string(), false)];
     let mut visited_expand: HashSet<String> = HashSet::new();
 
     while let Some((key, expanded)) = stack.pop() {
         if expanded {
-            let mut size: u64 = 0;
-            let mut count: u64 = 0;
-            if let Some(rec) = records.get(&key) {
-                for f in &rec.files {
-                    if f.name.is_empty() {
-                        continue;
-                    }
-                    size = size.saturating_add(f.size);
-                    count = count.saturating_add(1);
-                }
-                let mut seen_child = HashSet::new();
-                for child_path in &rec.children_dirs {
-                    let ck = canonical_key(child_path);
-                    if !seen_child.insert(ck.clone()) {
-                        continue;
-                    }
-                    let (cs, cc) = totals.get(&ck).copied().unwrap_or((0, 0));
-                    size = size.saturating_add(cs);
-                    count = count.saturating_add(1).saturating_add(cc);
-                }
-            }
+            let (size, count) = directory_total_for(&key, records, &totals);
             totals.insert(key, (size, count));
             continue;
         }
-
         if totals.contains_key(&key) {
             continue;
         }
         if !visited_expand.insert(key.clone()) {
-            // Defensive cycle guard; treat as empty if revisited before completion.
             totals.entry(key).or_insert((0, 0));
             continue;
         }
-
         stack.push((key.clone(), true));
-        if let Some(rec) = records.get(&key) {
-            let mut seen_child = HashSet::new();
-            for child_path in &rec.children_dirs {
-                let ck = canonical_key(child_path);
-                if !seen_child.insert(ck.clone()) {
-                    continue;
-                }
-                if records.contains_key(&ck) && !totals.contains_key(&ck) {
-                    stack.push((ck, false));
-                }
-            }
+        push_uncomputed_children(&key, records, &totals, &mut stack);
+    }
+    totals
+}
+
+fn directory_total_for(
+    key: &str,
+    records: &HashMap<String, DirRecord>,
+    totals: &HashMap<String, (u64, u64)>,
+) -> (u64, u64) {
+    let mut size: u64 = 0;
+    let mut count: u64 = 0;
+    let Some(rec) = records.get(key) else {
+        return (0, 0);
+    };
+    size = size.saturating_add(rec.own_bytes);
+    count = count.saturating_add(rec.own_file_count);
+    let mut seen_child = HashSet::new();
+    for child_path in &rec.children_dirs {
+        let ck = canonical_key(child_path);
+        if !seen_child.insert(ck.clone()) {
+            continue;
+        }
+        let (cs, cc) = totals.get(&ck).copied().unwrap_or((0, 0));
+        size = size.saturating_add(cs);
+        count = count.saturating_add(1).saturating_add(cc);
+    }
+    (size, count)
+}
+
+fn push_uncomputed_children(
+    key: &str,
+    records: &HashMap<String, DirRecord>,
+    totals: &HashMap<String, (u64, u64)>,
+    stack: &mut Vec<(String, bool)>,
+) {
+    let Some(rec) = records.get(key) else {
+        return;
+    };
+    let mut seen_child = HashSet::new();
+    for child_path in &rec.children_dirs {
+        let ck = canonical_key(child_path);
+        if !seen_child.insert(ck.clone()) {
+            continue;
+        }
+        if records.contains_key(&ck) && !totals.contains_key(&ck) {
+            stack.push((ck, false));
         }
     }
+}
 
-    // Iterative post-order tree construction so children nodes exist before parents.
+fn build_file_node(
+    file: &FileInfo,
+    ctx: &AnnotationContext,
+    settings: &EligibilitySettings,
+) -> AnalyzerNode {
+    let file_ann = annotate_path(&file.path, false, Some(file), ctx, settings, None);
+    AnalyzerNode {
+        id: stable_node_id(&file.path),
+        path: file.path.clone(),
+        name: file.name.clone(),
+        is_dir: false,
+        size_bytes: file.size,
+        item_count: 1,
+        risk: file_ann.risk,
+        description: file_ann.description,
+        tier: file_ann.tier,
+        target_id: file_ann.target_id,
+        is_link_point: file_ann.is_link_point,
+        is_cloud_placeholder: file_ann.is_cloud_placeholder,
+        display_only: file_ann.display_only,
+        selectable: file_ann.selectable,
+        selection_reason: file_ann.selection_reason,
+        children: Vec::new(),
+    }
+}
+
+fn collect_directory_children(
+    rec: &DirRecord,
+    built: &mut HashMap<String, AnalyzerNode>,
+    ctx: &AnnotationContext,
+    settings: &EligibilitySettings,
+    max_children: usize,
+) -> Vec<AnalyzerNode> {
+    let mut children: Vec<AnalyzerNode> = Vec::new();
+    let mut seen_child = HashSet::new();
+    for child_path in &rec.children_dirs {
+        let ck = canonical_key(child_path);
+        if !seen_child.insert(ck.clone()) {
+            continue;
+        }
+        if let Some(child_node) = built.remove(&ck) {
+            children.push(child_node);
+        }
+    }
+    for f in &rec.files {
+        if f.name.is_empty() {
+            continue;
+        }
+        children.push(build_file_node(f, ctx, settings));
+    }
+    sort_and_truncate_children(&mut children, max_children);
+    children
+}
+
+fn sort_and_truncate_children(children: &mut Vec<AnalyzerNode>, max_children: usize) {
+    children.sort_by(|a, b| {
+        b.size_bytes
+            .cmp(&a.size_bytes)
+            .then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
+            .then_with(|| {
+                a.path
+                    .to_ascii_lowercase()
+                    .cmp(&b.path.to_ascii_lowercase())
+            })
+    });
+    if children.len() > max_children {
+        children.truncate(max_children);
+    }
+}
+
+fn build_directory_node(
+    rec: &DirRecord,
+    size_bytes: u64,
+    item_count: u64,
+    children: Vec<AnalyzerNode>,
+    ctx: &AnnotationContext,
+    settings: &EligibilitySettings,
+) -> AnalyzerNode {
+    let ann = annotate_path(&rec.path, true, None, ctx, settings, Some(rec));
+    AnalyzerNode {
+        id: stable_node_id(&rec.path),
+        path: rec.path.clone(),
+        name: if rec.name.is_empty() {
+            display_name(&rec.path)
+        } else {
+            rec.name.clone()
+        },
+        is_dir: true,
+        size_bytes,
+        item_count,
+        risk: ann.risk,
+        description: ann.description,
+        tier: ann.tier,
+        target_id: ann.target_id,
+        is_link_point: ann.is_link_point,
+        is_cloud_placeholder: ann.is_cloud_placeholder,
+        display_only: ann.display_only,
+        selectable: ann.selectable,
+        selection_reason: ann.selection_reason,
+        children,
+    }
+}
+
+fn push_build_children(
+    key: &str,
+    records: &HashMap<String, DirRecord>,
+    built: &HashMap<String, AnalyzerNode>,
+    stack: &mut Vec<(String, bool, usize)>,
+    depth: usize,
+) {
+    let Some(rec) = records.get(key) else {
+        return;
+    };
+    let mut seen_child = HashSet::new();
+    for child_path in &rec.children_dirs {
+        let ck = canonical_key(child_path);
+        if !seen_child.insert(ck.clone()) {
+            continue;
+        }
+        if records.contains_key(&ck) && !built.contains_key(&ck) {
+            stack.push((ck, false, depth + 1));
+        }
+    }
+}
+
+pub(super) fn build_tree(
+    records: &HashMap<String, DirRecord>,
+    root_key: &str,
+    ctx: &AnnotationContext,
+    settings: &EligibilitySettings,
+    limits: TreeBuildLimits,
+) -> Option<AnalyzerNode> {
+    if !records.contains_key(root_key) {
+        return None;
+    }
+    let totals = compute_directory_totals(records, root_key);
     let mut built: HashMap<String, AnalyzerNode> = HashMap::new();
-    let mut stack2: Vec<(String, bool)> = vec![(root_key.to_string(), false)];
-    let mut visited_build: HashSet<String> = HashSet::new();
+    let mut stack: Vec<(String, bool, usize)> = vec![(root_key.to_string(), false, 0)];
+    let mut visited: HashSet<String> = HashSet::new();
+    let max_children = limits.max_children_per_dir.max(1);
+    let max_depth = limits.max_tree_depth;
 
-    while let Some((key, expanded)) = stack2.pop() {
+    while let Some((key, expanded, depth)) = stack.pop() {
         if expanded {
-            let Some(rec) = records.get(&key) else {
-                continue;
-            };
+            let rec = records.get(&key)?;
             let (size_bytes, item_count) = totals.get(&key).copied().unwrap_or((0, 0));
-            let ann = annotate_path(&rec.path, true, None, ctx, settings, Some(rec));
-
-            let mut children: Vec<AnalyzerNode> = Vec::new();
-            let mut seen_child = HashSet::new();
-            for child_path in &rec.children_dirs {
-                let ck = canonical_key(child_path);
-                if !seen_child.insert(ck.clone()) {
-                    continue;
-                }
-                if let Some(child_node) = built.remove(&ck) {
-                    children.push(child_node);
-                }
-            }
-            for f in &rec.files {
-                if f.name.is_empty() {
-                    continue;
-                }
-                let file_ann = annotate_path(&f.path, false, Some(f), ctx, settings, None);
-                children.push(AnalyzerNode {
-                    id: stable_node_id(&f.path),
-                    path: f.path.clone(),
-                    name: f.name.clone(),
-                    is_dir: false,
-                    size_bytes: f.size,
-                    item_count: 1,
-                    risk: file_ann.risk,
-                    description: file_ann.description,
-                    tier: file_ann.tier,
-                    target_id: file_ann.target_id,
-                    is_link_point: file_ann.is_link_point,
-                    is_cloud_placeholder: file_ann.is_cloud_placeholder,
-                    display_only: file_ann.display_only,
-                    selectable: file_ann.selectable,
-                    selection_reason: file_ann.selection_reason,
-                    children: Vec::new(),
-                });
-            }
-
-            children.sort_by(|a, b| {
-                b.size_bytes
-                    .cmp(&a.size_bytes)
-                    .then_with(|| {
-                        a.name
-                            .to_ascii_lowercase()
-                            .cmp(&b.name.to_ascii_lowercase())
-                    })
-                    .then_with(|| {
-                        a.path
-                            .to_ascii_lowercase()
-                            .cmp(&b.path.to_ascii_lowercase())
-                    })
-            });
-
-            let node = AnalyzerNode {
-                id: stable_node_id(&rec.path),
-                path: rec.path.clone(),
-                name: if rec.name.is_empty() {
-                    display_name(&rec.path)
-                } else {
-                    rec.name.clone()
-                },
-                is_dir: true,
-                size_bytes,
-                item_count,
-                risk: ann.risk,
-                description: ann.description,
-                tier: ann.tier,
-                target_id: ann.target_id,
-                is_link_point: ann.is_link_point,
-                is_cloud_placeholder: ann.is_cloud_placeholder,
-                display_only: ann.display_only,
-                selectable: ann.selectable,
-                selection_reason: ann.selection_reason,
-                children,
+            let children = if depth < max_depth {
+                collect_directory_children(rec, &mut built, ctx, settings, max_children)
+            } else {
+                Vec::new()
             };
+            let node = build_directory_node(rec, size_bytes, item_count, children, ctx, settings);
             built.insert(key, node);
             continue;
         }
-
-        if built.contains_key(&key) {
+        if built.contains_key(&key) || !visited.insert(key.clone()) {
             continue;
         }
-        if !visited_build.insert(key.clone()) {
-            continue;
-        }
-        stack2.push((key.clone(), true));
-        if let Some(rec) = records.get(&key) {
-            let mut seen_child = HashSet::new();
-            for child_path in &rec.children_dirs {
-                let ck = canonical_key(child_path);
-                if !seen_child.insert(ck.clone()) {
-                    continue;
-                }
-                if records.contains_key(&ck) && !built.contains_key(&ck) {
-                    stack2.push((ck, false));
-                }
-            }
+        stack.push((key.clone(), true, depth));
+        if depth < max_depth {
+            push_build_children(&key, records, &built, &mut stack, depth);
         }
     }
-
     built.remove(root_key)
 }
 

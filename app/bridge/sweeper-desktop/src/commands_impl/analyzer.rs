@@ -9,6 +9,16 @@ use crate::AppState;
 
 use super::shared::{commit_async_outcome, lock_state_error, AsyncOutcomeCommit};
 
+/// `cancel_analyzer` implementation.
+pub fn cancel_analyzer<C: Clock>(
+    state: &AppState<C>,
+    session_id: String,
+) -> Result<(), ContractError> {
+    let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
+    sessions.cancel_analyzer(&session_id);
+    Ok(())
+}
+
 fn build_analyzer_progress_cb<F>(
     session_id: &str,
     on_progress: Option<F>,
@@ -51,6 +61,14 @@ where
         (prepared, settings)
     };
     let progress = build_analyzer_progress_cb(&prepared.session_id, on_progress);
+    if let Some(cb) = &progress {
+        cb(AnalyzerProgress {
+            scanned_dirs: 0,
+            scanned_files: 0,
+            scanned_bytes: 0,
+            current_path: root.clone().or_else(|| Some(r"C:\".to_string())),
+        });
+    }
     let options = analyzer::AnalyzerOptions {
         allow_unknown: settings.allow_delete_unknown,
         ..analyzer::AnalyzerOptions::default()

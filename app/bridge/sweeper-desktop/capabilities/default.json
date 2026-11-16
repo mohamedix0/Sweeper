@@ -13,6 +13,7 @@
       "preview_clean",
       "execute_clean",
       "start_analyzer",
+      "cancel_analyzer",
       "explain_item",
       "get_settings",
       "update_settings",

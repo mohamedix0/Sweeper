@@ -98,6 +98,17 @@ async fn start_analyzer(
 }
 
 #[tauri::command]
+async fn cancel_analyzer(
+    state: tauri::State<'_, AppState<SystemClock>>,
+    session_id: String,
+) -> Result<(), ContractError> {
+    run_blocking(state, move |s| {
+        commands_impl::cancel_analyzer(s, session_id)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn explain_item(
     state: tauri::State<'_, AppState<SystemClock>>,
     item_id: String,
@@ -180,6 +191,7 @@ fn main() {
             preview_clean,
             execute_clean,
             start_analyzer,
+            cancel_analyzer,
             explain_item,
             get_settings,
             update_settings,

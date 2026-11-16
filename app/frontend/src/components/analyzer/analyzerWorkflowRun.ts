@@ -19,8 +19,10 @@ type RunAnalyzerArgs = {
   setSessionId: (v: string | null) => void;
   setStartedAt: (v: number | null) => void;
   setAnalyzedPath: (v: string | null) => void;
+  setRunningSessionId: (v: string | null) => void;
   inspectNode: (input: { id: string }) => void;
   setError: (v: string | null) => void;
+  setInfo: (v: string | null) => void;
 };
 
 function targetPathOf(args: { pathOverride?: string; rootPath: string }): string {
@@ -60,12 +62,24 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
   args.clearRunState();
   args.setSelectedIds(new Set());
   args.setResult(null);
+  args.setSessionId(null);
+  args.setRunningSessionId(null);
   args.setExpanded(new Set());
   args.setShowAllAnalyzerNodes(new Set());
   args.setAnalyzing(true);
   args.setProgress(null);
   try {
-    const res = await args.client.startAnalyzer(targetPath, (p) => args.setProgress(p));
+    const res = await args.client.startAnalyzer(targetPath, (p) => {
+      args.setRunningSessionId(p.sessionId);
+      args.setProgress(p);
+    });
+    if (res.cancelled) {
+      args.setResult(null);
+      args.setSessionId(null);
+      args.setAnalyzedPath(null);
+      args.setInfo('Analysis stopped.');
+      return;
+    }
     args.setResult(res);
     args.setSessionId(res.sessionId);
     args.setStartedAt(Date.now());
@@ -76,5 +90,6 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
     args.setError(formatContractError(e));
   } finally {
     args.setAnalyzing(false);
+    args.setRunningSessionId(null);
   }
 }

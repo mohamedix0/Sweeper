@@ -663,3 +663,76 @@ fn wildcard_allowlist_annotation_best_effort() {
     }
     eprintln!("skipping wildcard_allowlist_annotation_best_effort: no matching wildcard target root found");
 }
+
+#[test]
+fn bounded_tree_capping_preserves_totals_and_truncates_children() {
+    let sb = Sandbox::new_in(sandbox_base_dir());
+    let mut created: Vec<String> = Vec::new();
+    for i in 0..10 {
+        let size = (10 - i) as u64;
+        let name = format!("f{i:02}.bin");
+        sb.write_file(&name, vec![b'x'; size as usize])
+            .expect("write file");
+        created.push(name);
+    }
+
+    let mut all_files: Vec<(String, u64)> = Vec::new();
+    let mut expected_bytes: u64 = 0;
+    for entry in fs::read_dir(sb.root()).expect("read sandbox root") {
+        let entry = entry.expect("dir entry");
+        let meta = entry.metadata().expect("metadata");
+        if meta.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let size = meta.len();
+            expected_bytes += size;
+            all_files.push((name, size));
+        }
+    }
+    let expected_files = all_files.len() as u64;
+    all_files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let expected_top: Vec<String> = all_files.iter().take(3).map(|(n, _)| n.clone()).collect();
+
+    let res = analyze_path(
+        Some(&sb.root().to_string_lossy()),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        AnalyzerOptions {
+            worker_threads: 2,
+            max_files_per_dir: 4,
+            max_children_per_dir: 3,
+            ..AnalyzerOptions::default()
+        },
+    )
+    .expect("analyze bounded");
+
+    assert_eq!(
+        res.progress.scanned_bytes, expected_bytes,
+        "total scanned bytes must remain exact"
+    );
+    assert_eq!(
+        res.progress.scanned_files, expected_files,
+        "total scanned file count must remain exact"
+    );
+    assert_eq!(
+        res.root.size_bytes, expected_bytes,
+        "root recursive bytes must remain exact"
+    );
+    assert_eq!(
+        res.root.item_count, expected_files,
+        "root recursive item count must remain exact"
+    );
+    assert_eq!(
+        res.root.children.len(),
+        3,
+        "children must be truncated to max_children_per_dir"
+    );
+    let child_names: Vec<String> = res.root.children.iter().map(|c| c.name.clone()).collect();
+    assert_eq!(
+        child_names, expected_top,
+        "truncated children should be the largest files by size"
+    );
+    assert!(
+        created.iter().any(|n| n == "f00.bin"),
+        "test fixture should include created files"
+    );
+}

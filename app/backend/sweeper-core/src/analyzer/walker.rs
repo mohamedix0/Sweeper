@@ -23,7 +23,12 @@ pub(super) struct DirRecord {
     pub(super) name: String,
     pub(super) parent: Option<String>,
     pub(super) children_dirs: Vec<String>,
+    /// Retained file entries for tree display (capped to top-N largest per directory).
     pub(super) files: Vec<FileInfo>,
+    /// Exact count of all direct file entries observed in this directory (including retained and omitted).
+    pub(super) own_file_count: u64,
+    /// Exact logical bytes of all direct file entries observed in this directory.
+    pub(super) own_bytes: u64,
     pub(super) scanned: bool,
 }
 
@@ -35,6 +40,8 @@ impl DirRecord {
             parent,
             children_dirs: Vec::new(),
             files: Vec::new(),
+            own_file_count: 0,
+            own_bytes: 0,
             scanned: false,
         }
     }
@@ -59,6 +66,7 @@ pub(super) struct WalkState {
     scanned_files: AtomicU64,
     scanned_bytes: AtomicU64,
     current_path: Mutex<Option<String>>,
+    max_files_per_dir: usize,
 }
 
 #[derive(Debug, Default)]
@@ -88,7 +96,7 @@ struct ScanDirOutput {
 }
 
 impl WalkState {
-    pub(super) fn new(root_path: String) -> Self {
+    pub(super) fn new(root_path: String, max_files_per_dir: usize) -> Self {
         let mut records = HashMap::new();
         let root_key = annotate::canonical_key(&root_path);
         let root_name = annotate::display_name(&root_path);
@@ -102,6 +110,7 @@ impl WalkState {
             scanned_files: AtomicU64::new(0),
             scanned_bytes: AtomicU64::new(0),
             current_path: Mutex::new(None),
+            max_files_per_dir: max_files_per_dir.max(1),
         }
     }
     pub(super) fn enqueue_initial(&self, dir_path: String) {
@@ -180,6 +189,8 @@ impl WalkState {
                     match child.kind {
                         ChildDirKind::Traverse => traverse_children.push(child.path),
                         ChildDirKind::Special(marker) => {
+                            r.own_file_count = 0;
+                            r.own_bytes = 0;
                             r.files = vec![marker];
                             r.children_dirs.clear();
                             r.scanned = true;
@@ -190,6 +201,8 @@ impl WalkState {
             if let Some(rec) = records.get_mut(&dir_key) {
                 rec.children_dirs.extend(new_children);
                 rec.files = files;
+                rec.own_file_count = file_count;
+                rec.own_bytes = byte_count;
                 rec.scanned = true;
                 if rec.name.is_empty() {
                     rec.name = annotate::display_name(dir_path);
@@ -232,6 +245,8 @@ impl Clone for DirRecord {
             parent: self.parent.clone(),
             children_dirs: self.children_dirs.clone(),
             files: self.files.clone(),
+            own_file_count: self.own_file_count,
+            own_bytes: self.own_bytes,
             scanned: self.scanned,
         }
     }
@@ -293,7 +308,7 @@ pub(super) fn worker_loop(
         let Some(dir_path) = state.wait_for_work(&cancel) else {
             return;
         };
-        match scan_directory(&dir_path, &cancel) {
+        match scan_directory(&dir_path, &cancel, state.max_files_per_dir) {
             Ok(out) => {
                 state.commit_directory_scan(
                     &dir_path,
@@ -317,7 +332,97 @@ pub(super) fn worker_loop(
     }
 }
 
-fn scan_directory(dir_path: &str, cancel: &AtomicBool) -> Result<ScanDirOutput, String> {
+fn retain_top_files(files: &mut Vec<FileInfo>, max_files: usize) {
+    if files.len() <= max_files {
+        return;
+    }
+    files.sort_by(|a, b| {
+        b.size.cmp(&a.size).then_with(|| {
+            a.path
+                .to_ascii_lowercase()
+                .cmp(&b.path.to_ascii_lowercase())
+        })
+    });
+    files.truncate(max_files);
+}
+
+#[derive(Debug, Default)]
+struct ScanAccum {
+    files: Vec<FileInfo>,
+    child_dirs: Vec<ChildDirEntry>,
+    file_count: u64,
+    byte_count: u64,
+}
+
+fn reparse_flags(class: &ReparseTagClass) -> (bool, bool, bool) {
+    match class {
+        ReparseTagClass::LinkPoint => (true, false, false),
+        ReparseTagClass::CloudPlaceholder => (false, true, false),
+        ReparseTagClass::OtherReparse(_) => (false, false, true),
+        ReparseTagClass::NotReparse => (false, false, false),
+    }
+}
+
+fn push_special_dir(
+    child_dirs: &mut Vec<ChildDirEntry>,
+    path_str: String,
+    flags: (bool, bool, bool),
+) {
+    child_dirs.push(ChildDirEntry {
+        path: path_str.clone(),
+        kind: ChildDirKind::Special(FileInfo {
+            name: String::new(),
+            path: path_str,
+            size: 0,
+            is_link_point: flags.0,
+            is_cloud_placeholder: flags.1,
+            reparse_other: flags.2,
+            is_vhdx: false,
+        }),
+    });
+}
+
+fn push_file_entry(
+    acc: &mut ScanAccum,
+    name: String,
+    path_str: String,
+    size: u64,
+    flags: (bool, bool, bool),
+    is_vhdx: bool,
+) {
+    acc.files.push(FileInfo {
+        name,
+        path: path_str,
+        size,
+        is_link_point: flags.0,
+        is_cloud_placeholder: flags.1,
+        reparse_other: flags.2,
+        is_vhdx,
+    });
+    acc.file_count += 1;
+    acc.byte_count = acc.byte_count.saturating_add(size);
+}
+
+fn handle_reparse_entry(
+    ent: &sweeper_winfs::DirEntry,
+    name: String,
+    path_str: String,
+    is_vhdx: bool,
+    acc: &mut ScanAccum,
+) {
+    let flags = reparse_flags(&ent.reparse);
+    if ent.is_dir {
+        push_special_dir(&mut acc.child_dirs, path_str, flags);
+    } else {
+        push_file_entry(acc, name, path_str, ent.size, flags, is_vhdx);
+    }
+}
+
+fn scan_directory(
+    dir_path: &str,
+    cancel: &AtomicBool,
+    max_files_per_dir: usize,
+) -> Result<ScanDirOutput, String> {
     if cancel.load(AtomicOrdering::Relaxed) {
         return Ok(ScanDirOutput {
             files: Vec::new(),
@@ -328,10 +433,7 @@ fn scan_directory(dir_path: &str, cancel: &AtomicBool) -> Result<ScanDirOutput, 
     }
     let entries =
         sweeper_winfs::read_dir_entries(Path::new(dir_path)).map_err(|e| e.to_string())?;
-    let mut files = Vec::new();
-    let mut child_dirs = Vec::new();
-    let mut file_count: u64 = 0;
-    let mut byte_count: u64 = 0;
+    let mut acc = ScanAccum::default();
     for ent in entries {
         if cancel.load(AtomicOrdering::Relaxed) {
             break;
@@ -339,119 +441,31 @@ fn scan_directory(dir_path: &str, cancel: &AtomicBool) -> Result<ScanDirOutput, 
         let name = ent.name.to_string_lossy().to_string();
         let path_str = ent.path.to_string_lossy().to_string();
         let is_vhdx = annotate::is_vhdx_path(&path_str);
-        match ent.reparse {
-            ReparseTagClass::LinkPoint => {
-                if ent.is_dir {
-                    child_dirs.push(ChildDirEntry {
-                        path: path_str.clone(),
-                        kind: ChildDirKind::Special(FileInfo {
-                            name: String::new(),
-                            path: path_str,
-                            size: 0,
-                            is_link_point: true,
-                            is_cloud_placeholder: false,
-                            reparse_other: false,
-                            is_vhdx: false,
-                        }),
-                    });
-                } else {
-                    files.push(FileInfo {
-                        name,
-                        path: path_str,
-                        size: ent.size,
-                        is_link_point: true,
-                        is_cloud_placeholder: false,
-                        reparse_other: false,
-                        is_vhdx,
-                    });
-                    file_count += 1;
-                    byte_count = byte_count.saturating_add(ent.size);
-                }
-                continue;
-            }
-            ReparseTagClass::CloudPlaceholder => {
-                if ent.is_dir {
-                    child_dirs.push(ChildDirEntry {
-                        path: path_str.clone(),
-                        kind: ChildDirKind::Special(FileInfo {
-                            name: String::new(),
-                            path: path_str,
-                            size: 0,
-                            is_link_point: false,
-                            is_cloud_placeholder: true,
-                            reparse_other: false,
-                            is_vhdx: false,
-                        }),
-                    });
-                } else {
-                    files.push(FileInfo {
-                        name,
-                        path: path_str,
-                        size: ent.size,
-                        is_link_point: false,
-                        is_cloud_placeholder: true,
-                        reparse_other: false,
-                        is_vhdx,
-                    });
-                    file_count += 1;
-                    byte_count = byte_count.saturating_add(ent.size);
-                }
-                continue;
-            }
-            ReparseTagClass::OtherReparse(_) => {
-                if ent.is_dir {
-                    child_dirs.push(ChildDirEntry {
-                        path: path_str.clone(),
-                        kind: ChildDirKind::Special(FileInfo {
-                            name: String::new(),
-                            path: path_str,
-                            size: 0,
-                            is_link_point: false,
-                            is_cloud_placeholder: false,
-                            reparse_other: true,
-                            is_vhdx: false,
-                        }),
-                    });
-                } else {
-                    files.push(FileInfo {
-                        name,
-                        path: path_str,
-                        size: ent.size,
-                        is_link_point: false,
-                        is_cloud_placeholder: false,
-                        reparse_other: true,
-                        is_vhdx,
-                    });
-                    file_count += 1;
-                    byte_count = byte_count.saturating_add(ent.size);
-                }
-                continue;
-            }
-            ReparseTagClass::NotReparse => {}
+        if !matches!(ent.reparse, ReparseTagClass::NotReparse) {
+            handle_reparse_entry(&ent, name, path_str, is_vhdx, &mut acc);
+            continue;
         }
         if ent.is_dir {
-            child_dirs.push(ChildDirEntry {
+            acc.child_dirs.push(ChildDirEntry {
                 path: path_str,
                 kind: ChildDirKind::Traverse,
             });
         } else {
-            files.push(FileInfo {
+            push_file_entry(
+                &mut acc,
                 name,
-                path: path_str,
-                size: ent.size,
-                is_link_point: false,
-                is_cloud_placeholder: false,
-                reparse_other: false,
+                path_str,
+                ent.size,
+                (false, false, false),
                 is_vhdx,
-            });
-            file_count += 1;
-            byte_count = byte_count.saturating_add(ent.size);
+            );
         }
     }
+    retain_top_files(&mut acc.files, max_files_per_dir);
     Ok(ScanDirOutput {
-        files,
-        child_dirs,
-        file_count,
-        byte_count,
+        files: acc.files,
+        child_dirs: acc.child_dirs,
+        file_count: acc.file_count,
+        byte_count: acc.byte_count,
     })
 }

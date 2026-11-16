@@ -56,12 +56,22 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
   function inspectNodeById(id: string) { void s.inspectNode({ itemId: id }); }
   function resetAnalyzerSession(msg?: string) {
     invalidatePreviewRequest();
-    s.resetInspection(); s.setSessionId(null); s.setStartedAt(null); s.setResult(null); s.setSelectedIds(new Set()); s.setExpanded(new Set()); s.setShowAllAnalyzerNodes(new Set());
+    s.resetInspection(); s.setSessionId(null); s.setRunningSessionId(null); s.setStartedAt(null); s.setResult(null); s.setSelectedIds(new Set()); s.setExpanded(new Set()); s.setShowAllAnalyzerNodes(new Set());
     p.setPreview(null); p.setConfirmText(''); p.setCleanProgress(null);
     if (msg) m.setInfo(msg);
   }
   async function runAnalyzer(run?: { path?: string }) {
-    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, inspectNode: ({ id }) => inspectNodeById(id), setError: m.setError });
+    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, setRunningSessionId: s.setRunningSessionId, inspectNode: ({ id }) => inspectNodeById(id), setError: m.setError, setInfo: m.setInfo });
+  }
+  async function stopAnalyzer() {
+    const sid = s.runningSessionId;
+    if (!sid) return;
+    try {
+      await args.client.cancelAnalyzer(sid);
+      m.setInfo('Stopping analysis…');
+    } catch (e) {
+      m.setError('Failed to stop analysis.');
+    }
   }
   function toggleSelect(node: AnalyzerNodeDto) {
     if (!isNodeSelectable({ node, allowDeleteUnknown })) { inspectNodeById(node.id); return; }
@@ -92,7 +102,7 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
     if (allOpen) { s.setExpanded(new Set()); return; }
     s.setExpanded(new Set(ids));
   }
-  return { invalidatePreviewRequest, inspectNodeById, resetAnalyzerSession, runAnalyzer, toggleSelect, selectSafeAnalyzer, runPreview, runClean, focusNode, toggleExpandCollapseAll };
+  return { invalidatePreviewRequest, inspectNodeById, resetAnalyzerSession, runAnalyzer, stopAnalyzer, toggleSelect, selectSafeAnalyzer, runPreview, runClean, focusNode, toggleExpandCollapseAll };
 }
 
 export function useAnalyzerWorkflow(args: WfArgs) {
@@ -109,7 +119,7 @@ export function useAnalyzerWorkflow(args: WfArgs) {
 
   return {
     rootPath: s.rootPath, setRootPath: s.setRootPath, analyzedPath: s.analyzedPath, analyzing: s.analyzing, progress: s.progress,
-    sessionId: s.sessionId, result: s.result, expanded: s.expanded, selectedIds: s.selectedIds, inspected: s.inspected,
+    sessionId: s.sessionId, runningSessionId: s.runningSessionId, result: s.result, expanded: s.expanded, selectedIds: s.selectedIds, inspected: s.inspected,
     preview: p.preview, previewLoading: p.previewLoading, confirmText: p.confirmText, setConfirmText: p.setConfirmText,
     cleaning: p.cleaning, cleanProgress: p.cleanProgress, cleanSummary: p.cleanSummary, error: m.error, info: m.info,
     query, setQuery, sort, setSort, statusFilter, setStatusFilter,
@@ -117,7 +127,7 @@ export function useAnalyzerWorkflow(args: WfArgs) {
     nodesById: d.nodesById, filteredRoot: d.filteredRoot, flatRows: d.flatRows, statusCounts: d.statusCounts,
     selectedNodes: d.selectedNodes, dedupedSelectedNodes: d.dedupedSelectedNodes, selectedBytes: d.selectedBytes,
     requiresConfirmation: d.requiresConfirmation, rootTotalBytes: d.rootTotalBytes, allowDeleteUnknown,
-    runAnalyzer: actions.runAnalyzer, toggleExpand: (node: AnalyzerNodeDto) => s.setExpanded((prev) => toggleExpandedId(prev, node)),
+    runAnalyzer: actions.runAnalyzer, stopAnalyzer: actions.stopAnalyzer, toggleExpand: (node: AnalyzerNodeDto) => s.setExpanded((prev) => toggleExpandedId(prev, node)),
     toggleSelect: actions.toggleSelect, selectSafeAnalyzer: actions.selectSafeAnalyzer, runPreview: actions.runPreview, runClean: actions.runClean, focusNode: actions.focusNode,
     cycleBrowsePath: () => s.setRootPath(nextBrowsePath(s.rootPath)), toggleExpandCollapseAll: actions.toggleExpandCollapseAll,
     inspectNode: (input: { id: string }) => actions.inspectNodeById(input.id),
