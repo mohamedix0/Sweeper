@@ -49,6 +49,9 @@ jobs:
       - name: cargo test (workspace, Gates B-F coverage)
         run: cargo test --manifest-path app/Cargo.toml --workspace --locked
 
+      - name: cargo check (locked fuzz targets)
+        run: cargo check --manifest-path app/fuzz/Cargo.toml --locked
+
       - name: Install cargo-audit and cargo-deny
         uses: taiki-e/install-action@v2
         with:
