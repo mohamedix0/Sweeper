@@ -242,6 +242,7 @@ fn run_mutex_owner_thread(
     if raw.is_null() {
         let _ = ready_tx.send(Err(WinfsError::Win32 {
             context: "CreateMutexW(single-instance mutex)",
+            // SAFETY: reads thread-local last-error state immediately after failed `CreateMutexW`.
             code: unsafe { GetLastError() },
         }));
         return;
@@ -259,6 +260,8 @@ fn run_mutex_owner_thread(
     };
     if ready_tx.send(Ok(())).is_err() {
         if held {
+            // SAFETY: `raw` is the mutex handle acquired by this owner thread; release once on the
+            // same thread before closing it if startup handshake cannot complete.
             let _ = unsafe { ReleaseMutex(raw) };
         }
         close_handle_raw(raw);
@@ -277,6 +280,7 @@ fn run_mutex_owner_thread(
                 if ok == 0 {
                     let _ = reply.send(Err(WinfsError::Win32 {
                         context: "ReleaseMutex(single-instance handoff)",
+                        // SAFETY: reads thread-local last-error state immediately after failed `ReleaseMutex`.
                         code: unsafe { GetLastError() },
                     }));
                 } else {
@@ -325,6 +329,7 @@ fn wait_for_mutex_handle(handle: HANDLE, timeout_ms: u32) -> Result<bool> {
     }
     Err(WinfsError::Win32 {
         context: "WaitForSingleObject(single-instance mutex)",
+        // SAFETY: reads thread-local last-error state after `WaitForSingleObject` reports failure.
         code: unsafe { GetLastError() },
     })
 }
