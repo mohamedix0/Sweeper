@@ -1102,6 +1102,9 @@ pub fn retire_sweeper_log_file(logs_dir: &Path, file_name: &str) -> Result<()> {
     // implement general `Clean` target deletion semantics.
     let ok = unsafe { DeleteFileW(wide.as_ptr()) };
     if ok == 0 {
+        // SAFETY: `GetLastError` is called immediately after a failed Win32 API call on this thread
+        // to retrieve its thread-local error code. No pointers are dereferenced and no invariants
+        // beyond the preceding FFI call's contract are relied on.
         let err = unsafe { GetLastError() };
         if is_not_found(err) {
             return Ok(());
