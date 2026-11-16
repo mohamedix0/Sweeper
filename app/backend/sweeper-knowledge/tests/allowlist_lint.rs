@@ -39,6 +39,10 @@ fn embedded_allowlist_passes_lint_and_has_expected_targets() {
         "windows-update-download-cache",
         "windows-prefetch",
         "programdata-package-cache",
+        "windows-delivery-optimization-cache",
+        "programdata-wer-report-archive",
+        "programdata-wer-report-queue",
+        "windows-defender-scan-history",
     ];
     for id in audited_elevated {
         assert!(targets.iter().any(|t| t.id == id), "missing {id}");
@@ -96,6 +100,10 @@ fn catalogs_and_knowledge_entries_present() {
         "windows-update-download-cache",
         "windows-prefetch",
         "programdata-package-cache",
+        "windows-delivery-optimization-cache",
+        "programdata-wer-report-archive",
+        "programdata-wer-report-queue",
+        "windows-defender-scan-history",
     ] {
         let entry = kb.iter().find(|e| {
             e.id == format!("kb-{id}")
@@ -106,6 +114,13 @@ fn catalogs_and_knowledge_entries_present() {
                 || (id == "windows-prefetch" && e.relative_pattern.eq_ignore_ascii_case("Prefetch"))
                 || (id == "programdata-package-cache"
                     && e.relative_pattern.contains("Package Cache"))
+                || (id == "windows-delivery-optimization-cache"
+                    && e.relative_pattern.contains("DeliveryOptimization"))
+                || (id == "programdata-wer-report-archive"
+                    && e.relative_pattern.contains("ReportArchive"))
+                || (id == "programdata-wer-report-queue"
+                    && e.relative_pattern.contains("ReportQueue"))
+                || (id == "windows-defender-scan-history" && e.relative_pattern.contains("Scans"))
         });
         let entry = entry.unwrap_or_else(|| panic!("missing knowledge entry for {id}"));
         assert_eq!(entry.risk, Risk::Caution, "{id}");
@@ -492,6 +507,26 @@ fn allows_only_audited_elevation_targets() {
         ),
         ("windows-prefetch", "Windows", "Prefetch"),
         ("programdata-package-cache", "ProgramData", "Package Cache"),
+        (
+            "windows-delivery-optimization-cache",
+            "Windows",
+            r"ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache",
+        ),
+        (
+            "programdata-wer-report-archive",
+            "ProgramData",
+            r"Microsoft\Windows\WER\ReportArchive",
+        ),
+        (
+            "programdata-wer-report-queue",
+            "ProgramData",
+            r"Microsoft\Windows\WER\ReportQueue",
+        ),
+        (
+            "windows-defender-scan-history",
+            "ProgramData",
+            r"Microsoft\Windows Defender\Scans\History\Results\Quick",
+        ),
     ];
     for (id, kf, rel) in cases {
         let toml = format!(

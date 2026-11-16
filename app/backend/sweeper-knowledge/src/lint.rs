@@ -257,6 +257,16 @@ fn is_audited_elevation_target(known_folder: &str, segments: &[String]) -> bool 
             | ("Windows", "softwaredistribution\\download")
             | ("Windows", "prefetch")
             | ("ProgramData", "package cache")
+            | (
+                "Windows",
+                "serviceprofiles\\networkservice\\appdata\\local\\microsoft\\windows\\deliveryoptimization\\cache"
+            )
+            | ("ProgramData", "microsoft\\windows\\wer\\reportarchive")
+            | ("ProgramData", "microsoft\\windows\\wer\\reportqueue")
+            | (
+                "ProgramData",
+                "microsoft\\windows defender\\scans\\history\\results\\quick"
+            )
     )
 }
 

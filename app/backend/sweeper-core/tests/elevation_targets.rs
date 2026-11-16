@@ -26,11 +26,15 @@ fn elevation_settings_default_and_sanitize() {
 
 #[test]
 fn elevation_target_exclusion_respects_elevation_and_setting_flags() {
-    const EXCLUDED: [&str; 4] = [
+    const EXCLUDED: [&str; 8] = [
         "windows-temp",
         "windows-update-download-cache",
         "windows-prefetch",
         "programdata-package-cache",
+        "windows-delivery-optimization-cache",
+        "programdata-wer-report-archive",
+        "programdata-wer-report-queue",
+        "windows-defender-scan-history",
     ];
     for (label, enable_elevation_targets, process_elevated) in [
         ("non-elevated+enabled", true, false),

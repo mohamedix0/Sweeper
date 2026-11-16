@@ -336,3 +336,413 @@ scope = "contents"
 min_age_hours = 24
 requires_elevation = true
 description = "Installer package cache under C:\\ProgramData\\Package Cache. Removing contents can affect repair, modify, or uninstall of installed applications. Requires administrator elevation."
+
+# --- Reference Cleaner parity expansion (WindowsCleaner-inspired, safe/leaf-scoped) ---
+
+[[targets]]
+id = "explorer-thumbcache-to-delete"
+name = "Explorer ThumbCacheToDelete"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Microsoft\\Windows\\Explorer\\ThumbCacheToDelete"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Windows Explorer staged thumbnail cache cleanup folder (ThumbCacheToDelete). Contents are temporary and regenerated as needed."
+
+[[targets]]
+id = "directx-shader-cache"
+name = "DirectX Shader Cache (D3DSCache)"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "D3DSCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "DirectX shader cache (D3DSCache). Recreated automatically by Windows/apps; clearing may cause temporary shader rebuild stutter."
+
+[[targets]]
+id = "nvidia-dx-cache"
+name = "NVIDIA DirectX Shader Cache"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "NVIDIA\\DXCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "NVIDIA DirectX shader cache. Recreated automatically by the graphics driver/apps."
+
+[[targets]]
+id = "nvidia-gl-cache"
+name = "NVIDIA OpenGL Shader Cache"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "NVIDIA\\GLCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "NVIDIA OpenGL shader cache. Recreated automatically by the graphics driver/apps."
+
+[[targets]]
+id = "amd-dx-cache"
+name = "AMD DirectX Shader Cache"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "AMD\\DxCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "AMD DirectX shader cache. Recreated automatically by the graphics driver/apps."
+
+[[targets]]
+id = "amd-vk-cache"
+name = "AMD Vulkan Shader Cache"
+tier = "Tier1"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "AMD\\VkCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "AMD Vulkan shader cache. Recreated automatically by the graphics driver/apps."
+
+[[targets]]
+id = "firefox-cache2"
+name = "Firefox Cache2 (Profiles)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Mozilla\\Firefox\\Profiles\\*\\cache2"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Firefox profile disk cache (cache2) for per-user profiles. Browser cache is regenerated automatically; profile data and settings are not targeted."
+
+[[targets]]
+id = "firefox-startup-cache"
+name = "Firefox Startup Cache (Profiles)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Mozilla\\Firefox\\Profiles\\*\\startupCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Firefox profile startup cache for per-user profiles. Regenerated automatically by Firefox."
+
+[[targets]]
+id = "brave-cache-default"
+name = "Brave Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "BraveSoftware\\Brave-Browser\\User Data\\Default\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Brave browser HTTP cache for the Default profile. Only the explicit Cache leaf folder is targeted."
+
+[[targets]]
+id = "brave-code-cache-default"
+name = "Brave Code Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "BraveSoftware\\Brave-Browser\\User Data\\Default\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Brave browser compiled/script code cache for the Default profile."
+
+[[targets]]
+id = "brave-gpu-cache-default"
+name = "Brave GPU Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "BraveSoftware\\Brave-Browser\\User Data\\Default\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Brave browser GPU cache for the Default profile."
+
+[[targets]]
+id = "brave-cache-profiles"
+name = "Brave Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "BraveSoftware\\Brave-Browser\\User Data\\Profile *\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Brave browser HTTP cache for additional profiles (Profile *). Only explicit cache leaf folders are targeted."
+
+[[targets]]
+id = "brave-code-cache-profiles"
+name = "Brave Code Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "BraveSoftware\\Brave-Browser\\User Data\\Profile *\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Brave browser compiled/script code cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "brave-gpu-cache-profiles"
+name = "Brave GPU Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "BraveSoftware\\Brave-Browser\\User Data\\Profile *\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Brave browser GPU cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "discord-cache"
+name = "Discord Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "discord\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Discord desktop app cache. Regenerated automatically by Discord."
+
+[[targets]]
+id = "discord-code-cache"
+name = "Discord Code Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "discord\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Discord desktop app code cache. Regenerated automatically by Discord."
+
+[[targets]]
+id = "discord-gpu-cache"
+name = "Discord GPU Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "discord\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Discord desktop app GPU cache. Regenerated automatically by Discord."
+
+[[targets]]
+id = "slack-cache"
+name = "Slack Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Slack\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Slack desktop app cache. Regenerated automatically by Slack."
+
+[[targets]]
+id = "slack-code-cache"
+name = "Slack Code Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Slack\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Slack desktop app code cache. Regenerated automatically by Slack."
+
+[[targets]]
+id = "slack-gpu-cache"
+name = "Slack GPU Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Slack\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Slack desktop app GPU cache. Regenerated automatically by Slack."
+
+[[targets]]
+id = "teams-classic-cache"
+name = "Microsoft Teams (Classic) Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Microsoft\\Teams\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Microsoft Teams (classic) cache folder. Regenerated automatically by Teams."
+
+[[targets]]
+id = "spotify-data-cache"
+name = "Spotify Data Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Spotify\\Data"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Spotify local data/cache folder. Cached data can be re-downloaded or rebuilt by Spotify."
+
+[[targets]]
+id = "steam-html-cache"
+name = "Steam HTML Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Steam\\htmlcache\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Steam embedded browser/HTML cache. Regenerated automatically by Steam."
+
+[[targets]]
+id = "steam-html-code-cache"
+name = "Steam HTML Code Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Steam\\htmlcache\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Steam embedded browser/HTML code cache. Regenerated automatically by Steam."
+
+[[targets]]
+id = "steam-html-gpu-cache"
+name = "Steam HTML GPU Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Steam\\htmlcache\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Steam embedded browser/HTML GPU cache. Regenerated automatically by Steam."
+
+[[targets]]
+id = "pnpm-cache"
+name = "pnpm Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "LocalAppData"
+relative_subpath = "pnpm-cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "pnpm package store/cache. Removing it frees space but may slow installs while packages are re-downloaded."
+
+[[targets]]
+id = "yarn-cache"
+name = "Yarn Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "LocalAppData"
+relative_subpath = "Yarn\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Yarn package cache. Removing it frees space but may slow installs while packages are re-downloaded."
+
+[[targets]]
+id = "uv-cache"
+name = "uv Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "LocalAppData"
+relative_subpath = "uv\\cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "uv package/cache directory. Removing it frees space but may slow future operations while data is rebuilt or re-downloaded."
+
+[[targets]]
+id = "bun-install-cache"
+name = "Bun Install Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "UserProfile"
+relative_subpath = ".bun\\install\\cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Bun install cache. Removing it frees space but may slow installs while packages are re-downloaded."
+
+[[targets]]
+id = "maven-repository-cache"
+name = "Maven Local Repository Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "UserProfile"
+relative_subpath = ".m2\\repository"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Maven local repository cache (~/.m2/repository). Removing it frees space but will force dependencies to be re-downloaded on future builds."
+
+[[targets]]
+id = "windows-delivery-optimization-cache"
+name = "Windows Delivery Optimization Cache"
+tier = "Tier3"
+risk = "Caution"
+known_folder = "Windows"
+relative_subpath = "ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = true
+description = "Windows Delivery Optimization cache. Clearing can reclaim space but may force Windows to re-download update/content data. Requires administrator elevation."
+
+[[targets]]
+id = "programdata-wer-report-archive"
+name = "Windows Error Reporting ReportArchive (System)"
+tier = "Tier3"
+risk = "Caution"
+known_folder = "ProgramData"
+relative_subpath = "Microsoft\\Windows\\WER\\ReportArchive"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = true
+description = "System-wide Windows Error Reporting archive under C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive. Removing contents deletes historical diagnostic reports. Requires administrator elevation."
+
+[[targets]]
+id = "programdata-wer-report-queue"
+name = "Windows Error Reporting ReportQueue (System)"
+tier = "Tier3"
+risk = "Caution"
+known_folder = "ProgramData"
+relative_subpath = "Microsoft\\Windows\\WER\\ReportQueue"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = true
+description = "System-wide Windows Error Reporting queue under C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportQueue. Removing contents deletes queued diagnostic reports. Requires administrator elevation."
+
+[[targets]]
+id = "windows-defender-scan-history"
+name = "Windows Defender Scan History (Quick)"
+tier = "Tier3"
+risk = "Caution"
+known_folder = "ProgramData"
+relative_subpath = "Microsoft\\Windows Defender\\Scans\\History\\Results\\Quick"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = true
+description = "Microsoft Defender quick-scan history results under C:\\ProgramData\\Microsoft\\Windows Defender\\Scans\\History\\Results\\Quick. Removes historical scan records only. Requires administrator elevation."
