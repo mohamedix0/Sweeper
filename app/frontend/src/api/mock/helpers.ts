@@ -1,9 +1,9 @@
 import type { AnalyzerNodeDto, PreviewTargetBreakdownDto, RiskDto, ScanItemDto, SkippedReasonDto, TargetScanResultDto, TierDto } from '../../contract/bindings';
 import type { ContractError, Settings } from '../client';
 
-export function err(code: ContractError['code'], reasonOrCount: string): never {
-  if (code === 'unknownItem') throw { code, details: { count: reasonOrCount } } satisfies ContractError;
-  throw { code, details: { reason: reasonOrCount } } as ContractError;
+export function err(input: { code: 'unknownItem'; count: string } | { code: Exclude<ContractError['code'], 'unknownItem'>; reason: string }): never {
+  if (input.code === 'unknownItem') throw { code: input.code, details: { count: input.count } } satisfies ContractError;
+  throw { code: input.code, details: { reason: input.reason } } as ContractError;
 }
 
 export function enabledTiers(settingsState: Settings, tiers: TierDto[] | null): Set<TierDto> {
@@ -15,16 +15,24 @@ export function normalizeMockPath(path: string): string {
   return path.replace(/[\\/]+$/, '').toLowerCase();
 }
 
-export function isAncestorMockPath(ancestorPath: string, descendantPath: string): boolean {
-  const a = normalizeMockPath(ancestorPath);
-  const d = normalizeMockPath(descendantPath);
-  if (!a || !d || a === d) return false;
+export function isAncestorMockPath(input: { ancestorPath: string; descendantPath: string }): boolean {
+  const a = normalizeMockPath(input.ancestorPath);
+  const d = normalizeMockPath(input.descendantPath);
+  if (!a) return false;
+  if (!d) return false;
+  if (a === d) return false;
   const prefix = a.endsWith('\\') ? a : `${a}\\`;
   return d.startsWith(prefix);
 }
 
 export function dedupeAnalyzerNodes(nodes: AnalyzerNodeDto[]): AnalyzerNodeDto[] {
-  return nodes.filter((node, _, all) => !all.some((other) => other.id !== node.id && isAncestorMockPath(other.path, node.path)));
+  return nodes.filter((node, _, all) => {
+    const ancestor = all.some((other) => {
+      if (other.id === node.id) return false;
+      return isAncestorMockPath({ ancestorPath: other.path, descendantPath: node.path });
+    });
+    return !ancestor;
+  });
 }
 
 export function analyzerBreakdown(selected: AnalyzerNodeDto[]): PreviewTargetBreakdownDto[] {

@@ -50,12 +50,34 @@ where
     }) as scanner::ScanProgressCallback)
 }
 
+pub(super) struct AsyncOutcomeCommit<P, R, F> {
+    pub session_id: String,
+    pub settings_generation_at_start: u64,
+    pub payload: P,
+    pub finish: F,
+    _marker: std::marker::PhantomData<fn() -> R>,
+}
+
+impl<P, R, F> AsyncOutcomeCommit<P, R, F> {
+    pub fn new(
+        session_id: String,
+        settings_generation_at_start: u64,
+        payload: P,
+        finish: F,
+    ) -> Self {
+        Self {
+            session_id,
+            settings_generation_at_start,
+            payload,
+            finish,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
 pub(super) fn commit_async_outcome<C, P, R, F>(
     state: &AppState<C>,
-    session_id: String,
-    settings_generation_at_start: u64,
-    payload: P,
-    finish: F,
+    req: AsyncOutcomeCommit<P, R, F>,
 ) -> Result<R, ContractError>
 where
     C: Clock,
@@ -64,13 +86,13 @@ where
     let settings = state.settings.lock().map_err(|_| lock_state_error())?;
     let current_settings_gen = settings.generation();
     let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
-    finish(
+    (req.finish)(
         &state.clock,
         &mut sessions,
-        session_id,
-        settings_generation_at_start,
+        req.session_id,
+        req.settings_generation_at_start,
         current_settings_gen,
-        payload,
+        req.payload,
     )
 }
 

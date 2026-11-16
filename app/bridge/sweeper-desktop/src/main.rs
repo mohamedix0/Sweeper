@@ -43,6 +43,12 @@ where
     move |payload: T| emit_event(&app, event, payload)
 }
 
+macro_rules! run_cmd {
+    ($state:expr, $s:ident => $body:expr) => {
+        run_blocking($state, move |$s| $body).await
+    };
+}
+
 #[tauri::command]
 async fn start_scan(
     app: tauri::AppHandle,
@@ -50,10 +56,7 @@ async fn start_scan(
     tiers: Option<Vec<TierDto>>,
 ) -> Result<StartScanResponse, ContractError> {
     let on_progress = event_cb::<ScanProgressEvent>(&app, "ScanProgressEvent");
-    run_blocking(state, move |s| {
-        commands_impl::start_scan(s, tiers, Some(on_progress))
-    })
-    .await
+    run_cmd!(state, s => commands_impl::start_scan(s, tiers, Some(on_progress)))
 }
 
 #[tauri::command]
@@ -61,10 +64,7 @@ async fn get_scan_results(
     state: tauri::State<'_, AppState<SystemClock>>,
     session_id: String,
 ) -> Result<ScanResultsDto, ContractError> {
-    run_blocking(state, move |s| {
-        commands_impl::get_scan_results(s, session_id)
-    })
-    .await
+    run_cmd!(state, s => commands_impl::get_scan_results(s, session_id))
 }
 
 #[tauri::command]
@@ -74,10 +74,7 @@ async fn preview_clean(
     item_ids: Vec<String>,
     confirmations: Option<PreviewConfirmationsDto>,
 ) -> Result<PreviewCleanResponse, ContractError> {
-    run_blocking(state, move |s| {
-        commands_impl::preview_clean(s, session_id, item_ids, confirmations)
-    })
-    .await
+    run_cmd!(state, s => commands_impl::preview_clean(s, session_id, item_ids, confirmations))
 }
 
 #[tauri::command]
@@ -87,10 +84,7 @@ async fn execute_clean(
     preview_token: String,
 ) -> Result<ExecuteCleanResponse, ContractError> {
     let on_progress = event_cb::<CleanProgressEvent>(&app, "CleanProgressEvent");
-    run_blocking(state, move |s| {
-        commands_impl::execute_clean(s, preview_token, None, on_progress)
-    })
-    .await
+    run_cmd!(state, s => commands_impl::execute_clean(s, preview_token, None, on_progress))
 }
 
 #[tauri::command]
@@ -100,10 +94,7 @@ async fn start_analyzer(
     root: Option<String>,
 ) -> Result<StartAnalyzerResponse, ContractError> {
     let on_progress = event_cb::<AnalyzerProgressEvent>(&app, "AnalyzerProgressEvent");
-    run_blocking(state, move |s| {
-        commands_impl::start_analyzer(s, root, Some(on_progress))
-    })
-    .await
+    run_cmd!(state, s => commands_impl::start_analyzer(s, root, Some(on_progress)))
 }
 
 #[tauri::command]

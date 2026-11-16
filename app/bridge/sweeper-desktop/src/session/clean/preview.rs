@@ -16,6 +16,14 @@ use super::super::{
 use super::{
     AnalyzerPreviewBuild, PreviewCleanRequest, PreviewRequest, ScanAssembly, ScanPreviewBuild,
 };
+
+struct TokenIssueRequest {
+    now: u64,
+    req: PreviewRequest,
+    validated_items: Vec<ValidatedItem>,
+    total_bytes: u64,
+    breakdown: Vec<PreviewTargetBreakdownDto>,
+}
 use crate::clock::Clock;
 
 impl SessionStore {
@@ -62,23 +70,12 @@ impl SessionStore {
         req: PreviewRequest,
     ) -> Result<PreviewCleanResponse, ContractError> {
         let now = clock.now_unix_secs();
-        let session = self
-            .get_valid_scan_session(clock, &req.session_id, req.settings_generation)?
-            .clone();
+        let lookup = super::SessionLookup::new(&req.session_id, req.settings_generation);
+        let session = self.get_valid_scan_session(clock, lookup)?.clone();
         let build = Self::build_scan_preview(&session, &req)?;
-        self.issue_scan_preview(now, req, build)
-    }
-
-    fn issue_scan_preview(
-        &mut self,
-        now: u64,
-        req: PreviewRequest,
-        build: ScanPreviewBuild,
-    ) -> Result<PreviewCleanResponse, ContractError> {
-        self.issue_preview_token(PreviewTokenSpec {
+        self.issue_token_from(TokenIssueRequest {
             now,
-            session_id: req.session_id,
-            item_ids: req.item_ids,
+            req,
             validated_items: build.validated_items,
             total_bytes: build.total_bytes,
             breakdown: build.breakdown,
@@ -282,26 +279,29 @@ impl SessionStore {
         req: PreviewRequest,
     ) -> Result<PreviewCleanResponse, ContractError> {
         let now = clock.now_unix_secs();
-        let session = self
-            .get_valid_analyzer_session(clock, &req.session_id, req.settings_generation)?
-            .clone();
+        let lookup = super::SessionLookup::new(&req.session_id, req.settings_generation);
+        let session = self.get_valid_analyzer_session(clock, lookup)?.clone();
         let build = Self::build_analyzer_preview(&session, &req)?;
-        self.issue_analyzer_preview(now, req, build)
-    }
-
-    fn issue_analyzer_preview(
-        &mut self,
-        now: u64,
-        req: PreviewRequest,
-        build: AnalyzerPreviewBuild,
-    ) -> Result<PreviewCleanResponse, ContractError> {
-        self.issue_preview_token(PreviewTokenSpec {
+        self.issue_token_from(TokenIssueRequest {
             now,
-            session_id: req.session_id,
-            item_ids: req.item_ids,
+            req,
             validated_items: build.validated_items,
             total_bytes: build.total_bytes,
             breakdown: build.breakdown,
+        })
+    }
+
+    fn issue_token_from(
+        &mut self,
+        spec: TokenIssueRequest,
+    ) -> Result<PreviewCleanResponse, ContractError> {
+        self.issue_preview_token(PreviewTokenSpec {
+            now: spec.now,
+            session_id: spec.req.session_id,
+            item_ids: spec.req.item_ids,
+            validated_items: spec.validated_items,
+            total_bytes: spec.total_bytes,
+            breakdown: spec.breakdown,
         })
     }
 

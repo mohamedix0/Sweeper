@@ -180,6 +180,29 @@ fn get_elevation_status_reports_provider_state() {
     assert!(got2.is_elevated);
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RelaunchExpectation {
+    calls: usize,
+    exited: bool,
+    exit_code: Option<i32>,
+    held: bool,
+}
+
+fn assert_relaunch_state(ctx: &common::ElevationTestState, expected: RelaunchExpectation) {
+    assert_eq!(
+        ctx.provider
+            .relaunch_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        expected.calls
+    );
+    assert_eq!(
+        ctx.exited.load(std::sync::atomic::Ordering::SeqCst),
+        expected.exited
+    );
+    assert_eq!(*ctx.exit_code.lock().unwrap(), expected.exit_code);
+    assert_eq!(ctx.si.is_held(), expected.held);
+}
+
 #[test]
 fn relaunch_elevated_when_already_elevated_returns_not_launched_without_side_effects() {
     let ctx = common::make_elevation_test_state(
@@ -188,14 +211,15 @@ fn relaunch_elevated_when_already_elevated_returns_not_launched_without_side_eff
     );
     let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
     assert!(!res.launched);
-    assert_eq!(
-        ctx.provider
-            .relaunch_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0
+    assert_relaunch_state(
+        &ctx,
+        RelaunchExpectation {
+            calls: 0,
+            exited: false,
+            exit_code: None,
+            held: true,
+        },
     );
-    assert!(!ctx.exited.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(ctx.exit_code.lock().unwrap().is_none());
 }
 
 #[test]
@@ -216,15 +240,15 @@ fn relaunch_elevated_success_releases_guard_invokes_launcher_returns_launched_an
     );
     let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
     assert!(res.launched);
-    assert_eq!(
-        ctx.provider
-            .relaunch_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1
+    assert_relaunch_state(
+        &ctx,
+        RelaunchExpectation {
+            calls: 1,
+            exited: true,
+            exit_code: Some(0),
+            held: false,
+        },
     );
-    assert!(ctx.exited.load(std::sync::atomic::Ordering::SeqCst));
-    assert_eq!(*ctx.exit_code.lock().unwrap(), Some(0));
-    assert!(!ctx.si.is_held());
 }
 
 #[test]

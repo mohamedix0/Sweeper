@@ -314,8 +314,8 @@ impl SessionStore {
         current_settings_generation: u64,
     ) -> Result<ScanResultsDto, ContractError> {
         self.cleanup(clock);
-        let session =
-            self.get_valid_scan_session(clock, session_id, current_settings_generation)?;
+        let lookup = super::clean::SessionLookup::new(session_id, current_settings_generation);
+        let session = self.get_valid_scan_session(clock, lookup)?;
         Ok(session.results.clone())
     }
 }

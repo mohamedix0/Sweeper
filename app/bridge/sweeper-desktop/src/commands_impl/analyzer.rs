@@ -7,7 +7,7 @@ use crate::clock::Clock;
 use crate::session::AnalyzerFinishInput;
 use crate::AppState;
 
-use super::shared::{commit_async_outcome, lock_state_error};
+use super::shared::{commit_async_outcome, lock_state_error, AsyncOutcomeCommit};
 
 fn build_analyzer_progress_cb<F>(
     session_id: &str,
@@ -76,20 +76,27 @@ fn commit_analyzer_outcome<C: Clock>(
 ) -> Result<StartAnalyzerResponse, ContractError> {
     commit_async_outcome(
         state,
-        prepared.session_id.clone(),
-        prepared.settings_generation,
-        (min_age_hours, result),
-        |clock, sessions, sid, start_gen, current_gen, payload| {
-            sessions.finish_analyzer(
-                clock,
-                AnalyzerFinishInput {
-                    session_id: sid,
-                    settings_generation_at_start: start_gen,
-                    current_settings_generation: current_gen,
-                    min_age_hours: payload.0,
-                    result: payload.1,
-                },
-            )
-        },
+        AsyncOutcomeCommit::new(
+            prepared.session_id.clone(),
+            prepared.settings_generation,
+            (min_age_hours, result),
+            |clock: &C,
+             sessions: &mut crate::session::SessionStore,
+             sid: String,
+             start_gen: u64,
+             current_gen: u64,
+             payload: (u32, analyzer::AnalyzerResult)| {
+                sessions.finish_analyzer(
+                    clock,
+                    AnalyzerFinishInput {
+                        session_id: sid,
+                        settings_generation_at_start: start_gen,
+                        current_settings_generation: current_gen,
+                        min_age_hours: payload.0,
+                        result: payload.1,
+                    },
+                )
+            },
+        ),
     )
 }

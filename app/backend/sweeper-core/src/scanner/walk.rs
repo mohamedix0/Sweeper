@@ -10,24 +10,26 @@ pub(super) struct ScanWalkCtx<'a> {
     progress: &'a mut ScanProgressRuntime,
 }
 
-pub(super) fn scan_one_root_iterative(
-    target: &TargetDefinition,
-    root: &CanonicalPath,
-    min_age: Duration,
-    now: SystemTime,
-    out: &mut TargetScanResult,
-    next_item_seq: &mut u64,
-    progress: &mut ScanProgressRuntime,
-) -> Result<(), ScanError> {
-    let mut stack: Vec<PathBuf> = vec![PathBuf::from(root.as_str())];
+pub(super) struct RootWalk<'a> {
+    pub target: &'a TargetDefinition,
+    pub root: &'a CanonicalPath,
+    pub min_age: Duration,
+    pub now: SystemTime,
+    pub out: &'a mut TargetScanResult,
+    pub next_item_seq: &'a mut u64,
+    pub progress: &'a mut ScanProgressRuntime,
+}
+
+pub(super) fn scan_one_root_iterative(req: &mut RootWalk<'_>) -> Result<(), ScanError> {
+    let mut stack: Vec<PathBuf> = vec![PathBuf::from(req.root.as_str())];
     let mut ctx = ScanWalkCtx {
-        target,
-        min_age,
-        now,
-        out,
+        target: req.target,
+        min_age: req.min_age,
+        now: req.now,
+        out: req.out,
         stack: &mut stack,
-        next_item_seq,
-        progress,
+        next_item_seq: req.next_item_seq,
+        progress: req.progress,
     };
     while let Some(dir) = ctx.stack.pop() {
         scan_directory_in_walk(&mut ctx, &dir)?;

@@ -11,7 +11,8 @@ use crate::session::ScanFinishInput;
 use crate::AppState;
 
 use super::shared::{
-    build_scan_progress_cb, commit_async_outcome, emit_scan_event, lock_state_error, SharedScanCb,
+    build_scan_progress_cb, commit_async_outcome, emit_scan_event, lock_state_error,
+    AsyncOutcomeCommit, SharedScanCb,
 };
 
 #[derive(Clone, Copy)]
@@ -32,28 +33,40 @@ fn commit_scan_outcome<C: Clock>(
 ) -> Result<(), ContractError> {
     commit_async_outcome(
         state,
-        session_id.to_string(),
-        prepared.settings_generation,
-        (prepared.effective_settings.min_age_hours, report),
-        |clock, sessions, sid, start_gen, current_gen, payload| {
-            sessions.finish_scan(
-                clock,
-                ScanFinishInput {
-                    session_id: sid,
-                    settings_generation_at_start: start_gen,
-                    current_settings_generation: current_gen,
-                    effective_min_age_hours: payload.0,
-                    report: payload.1,
-                },
-            )
-        },
+        AsyncOutcomeCommit::new(
+            session_id.to_string(),
+            prepared.settings_generation,
+            (prepared.effective_settings.min_age_hours, report),
+            |clock: &C,
+             sessions: &mut crate::session::SessionStore,
+             sid: String,
+             start_gen: u64,
+             current_gen: u64,
+             payload: (u32, scanner::ScanReport)| {
+                sessions.finish_scan(
+                    clock,
+                    ScanFinishInput {
+                        session_id: sid,
+                        settings_generation_at_start: start_gen,
+                        current_settings_generation: current_gen,
+                        effective_min_age_hours: payload.0,
+                        report: payload.1,
+                    },
+                )
+            },
+        ),
     )
 }
 
-fn handle_scan_failure<C: Clock, F>(
+enum ScanTerminal {
+    Cancelled,
+    Failed(ContractError),
+}
+
+fn handle_scan_terminal<C: Clock, F>(
     state: &AppState<C>,
     ctx: ScanRunCtx<'_, F>,
-    err: ContractError,
+    outcome: ScanTerminal,
 ) -> ContractError
 where
     F: FnMut(ScanProgressEvent),
@@ -61,13 +74,24 @@ where
     if let Ok(mut sessions) = state.sessions.lock() {
         sessions.abort_scan(ctx.session_id);
     }
-    emit_scan_event(
-        ctx.shared_cb,
-        ScanProgressEvent::Failed {
-            session_id: ctx.session_id.to_string(),
-            error: err.clone(),
-        },
-    );
+    let (event, err) = match outcome {
+        ScanTerminal::Cancelled => (
+            ScanProgressEvent::Cancelled {
+                session_id: ctx.session_id.to_string(),
+            },
+            ContractError::Internal {
+                reason: "scan cancelled".to_string(),
+            },
+        ),
+        ScanTerminal::Failed(err) => (
+            ScanProgressEvent::Failed {
+                session_id: ctx.session_id.to_string(),
+                error: err.clone(),
+            },
+            err,
+        ),
+    };
+    emit_scan_event(ctx.shared_cb, event);
     err
 }
 
@@ -135,7 +159,7 @@ where
     match scan_result {
         Ok(report) => {
             if let Err(err) = commit_scan_outcome(state, ctx.session_id, ctx.prepared, report) {
-                return Err(handle_scan_failure(state, ctx, err));
+                return Err(handle_scan_terminal(state, ctx, ScanTerminal::Failed(err)));
             }
             emit_scan_event(
                 ctx.shared_cb,
@@ -147,32 +171,14 @@ where
                 session_id: ctx.session_id.to_string(),
             })
         }
-        Err(ScanError::Cancelled) => Err(handle_scan_cancelled(state, ctx)),
-        Err(e) => Err(handle_scan_failure(
+        Err(ScanError::Cancelled) => Err(handle_scan_terminal(state, ctx, ScanTerminal::Cancelled)),
+        Err(e) => Err(handle_scan_terminal(
             state,
             ctx,
-            ContractError::Internal {
+            ScanTerminal::Failed(ContractError::Internal {
                 reason: crate::session::sanitize_reason_pub(crate::session::MsgRef(&e.to_string())),
-            },
+            }),
         )),
-    }
-}
-
-fn handle_scan_cancelled<C: Clock, F>(state: &AppState<C>, ctx: ScanRunCtx<'_, F>) -> ContractError
-where
-    F: FnMut(ScanProgressEvent),
-{
-    if let Ok(mut sessions) = state.sessions.lock() {
-        sessions.abort_scan(ctx.session_id);
-    }
-    emit_scan_event(
-        ctx.shared_cb,
-        ScanProgressEvent::Cancelled {
-            session_id: ctx.session_id.to_string(),
-        },
-    );
-    ContractError::Internal {
-        reason: "scan cancelled".to_string(),
     }
 }
 

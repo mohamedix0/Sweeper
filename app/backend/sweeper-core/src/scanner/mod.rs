@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg_attr(not(test), allow(unused_imports))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -15,11 +16,17 @@ use crate::policy;
 
 mod allowlist;
 mod custom_tier3;
+mod gate_e;
+mod report;
+mod runtime;
 #[cfg(test)]
 mod tests;
 mod walk;
 
 pub use allowlist::evaluate_redirected_temp_candidate;
+pub use gate_e::gate_e_violations;
+pub use report::format_report;
+pub(in crate::scanner) use runtime::ScanProgressRuntime;
 
 /// Reasons an entry is skipped during scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -226,73 +233,6 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides(
     )
 }
 
-struct ScanProgressRuntime {
-    pub(super) cancel: Arc<AtomicBool>,
-    pub(super) cb: Option<ScanProgressCallback>,
-    pub(super) completed_targets: u32,
-    pub(super) total_targets: u32,
-    pub(super) scanned_items: u64,
-    pub(super) scanned_bytes: u64,
-    pub(super) last_emit_at: Instant,
-    pub(super) last_emit_items: u64,
-}
-
-impl ScanProgressRuntime {
-    pub(super) fn new(
-        total_targets: u32,
-        cancel: Arc<AtomicBool>,
-        cb: Option<ScanProgressCallback>,
-    ) -> Self {
-        Self {
-            cancel,
-            cb,
-            completed_targets: 0,
-            total_targets,
-            scanned_items: 0,
-            scanned_bytes: 0,
-            last_emit_at: Instant::now(),
-            last_emit_items: 0,
-        }
-    }
-
-    pub(super) fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed)
-    }
-
-    pub(super) fn emit(
-        &mut self,
-        current_target_id: Option<&str>,
-        current_target_name: Option<&str>,
-    ) {
-        if let Some(cb) = &self.cb {
-            cb(ScanProgress {
-                completed_targets: self.completed_targets,
-                total_targets: self.total_targets,
-                current_target_id: current_target_id.map(ToOwned::to_owned),
-                current_target_name: current_target_name.map(ToOwned::to_owned),
-                scanned_items: self.scanned_items,
-                scanned_bytes: self.scanned_bytes,
-            });
-            self.last_emit_at = Instant::now();
-            self.last_emit_items = self.scanned_items;
-        }
-    }
-
-    pub(super) fn maybe_emit_throttled(
-        &mut self,
-        current_target_id: Option<&str>,
-        current_target_name: Option<&str>,
-    ) {
-        if self.cb.is_none() {
-            return;
-        }
-        let items_delta = self.scanned_items.saturating_sub(self.last_emit_items);
-        if items_delta >= 64 || self.last_emit_at.elapsed() >= Duration::from_millis(100) {
-            self.emit(current_target_id, current_target_name);
-        }
-    }
-}
-
 /// Scan a provided set of targets with optional overrides and cooperative cancellation/progress.
 pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
     targets: Vec<TargetDefinition>,
@@ -311,55 +251,6 @@ pub fn scan_targets_with_redirected_temp_and_elevation_overrides_with_progress(
             started_unix_secs,
         },
     )
-}
-
-pub fn format_report(report: &ScanReport) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "Sweeper read-only scan report (min_age_hours={})\n",
-        report.min_age_hours
-    ));
-    out.push_str(&format!(
-        "started_unix_secs={}\n\n",
-        report.started_unix_secs
-    ));
-    for t in &report.targets {
-        out.push_str(&format!(
-            "target_id={} tier={:?} risk={:?}\n",
-            t.target_id, t.tier, t.risk
-        ));
-        out.push_str(&format!("  name={}\n", t.target_name));
-        out.push_str(&format!("  scanned={}\n", t.scanned));
-        if let Some(r) = &t.status_reason {
-            out.push_str(&format!("  status={r}\n"));
-        }
-        if t.resolved_paths.is_empty() {
-            out.push_str("  resolved_paths=[]\n");
-        } else {
-            out.push_str("  resolved_paths:\n");
-            for p in &t.resolved_paths {
-                out.push_str(&format!("    - {p}\n"));
-            }
-        }
-        out.push_str(&format!(
-            "  total_bytes={} eligible_bytes={} file_count={} eligible_count={} skipped_count={}\n",
-            t.total_bytes, t.eligible_bytes, t.file_count, t.eligible_count, t.skipped_count
-        ));
-        if !t.skipped_reasons.is_empty() {
-            out.push_str("  skipped_reasons:\n");
-            for (k, v) in &t.skipped_reasons {
-                out.push_str(&format!("    - {k}: {v}\n"));
-            }
-        }
-        if !t.skipped_diagnostics.is_empty() {
-            out.push_str("  skipped_diagnostics:\n");
-            for d in &t.skipped_diagnostics {
-                out.push_str(&format!("    - {d}\n"));
-            }
-        }
-        out.push('\n');
-    }
-    out
 }
 
 #[derive(Debug, Clone)]
@@ -467,8 +358,13 @@ pub fn scan_with_settings_options_and_elevation_with_progress(
     let started_unix_secs = allowlist::system_time_to_unix_secs(now);
     let min_age = Duration::from_secs(u64::from(settings.min_age_hours) * 3600);
 
-    let elev_ok =
-        elevation.process_elevated && settings.enable_tier3 && settings.enable_elevation_targets;
+    let mut elev_ok = elevation.process_elevated;
+    if elev_ok {
+        elev_ok = settings.enable_tier3;
+    }
+    if elev_ok {
+        elev_ok = settings.enable_elevation_targets;
+    }
     let allowlisted_targets: Vec<TargetDefinition> = sweeper_knowledge::embedded_targets()
         .into_iter()
         .filter(|t| {
@@ -569,14 +465,6 @@ pub(super) fn empty_target_result(meta: TargetResultMeta) -> TargetScanResult {
     }
 }
 
-fn validate_target_definitions(targets: &[TargetDefinition]) -> Result<(), String> {
-    let lint_targets: Vec<sweeper_knowledge::LintTarget> = targets
-        .iter()
-        .map(target_definition_to_lint_target)
-        .collect();
-    sweeper_knowledge::lint_targets(&lint_targets).map_err(|e| e.to_string())
-}
-
 fn target_definition_to_lint_target(t: &TargetDefinition) -> sweeper_knowledge::LintTarget {
     sweeper_knowledge::LintTarget {
         id: t.id.clone(),
@@ -605,68 +493,4 @@ fn target_definition_to_lint_target(t: &TargetDefinition) -> sweeper_knowledge::
         description: t.description.clone(),
         requires_elevation: t.requires_elevation,
     }
-}
-
-/// Verify Gate E read-only invariants against a scan report produced from embedded Tier 1/2 targets.
-///
-/// Returns a list of violation messages (empty means pass).
-pub fn gate_e_violations(report: &ScanReport) -> Vec<String> {
-    let mut violations = Vec::new();
-    let mut seen_roots: Vec<(String, CanonicalPath)> = Vec::new();
-    for t in &report.targets {
-        if !t.scanned {
-            continue;
-        }
-        for p in &t.resolved_paths {
-            let canon = match CanonicalPath::from_existing_path(p) {
-                Ok(v) => v.into_canonical(),
-                Err(e) => {
-                    violations.push(format!(
-                        "target {} resolved path not resolvable: {} ({e})",
-                        t.target_id, p
-                    ));
-                    continue;
-                }
-            };
-            if policy::is_subtree_protected(&canon)
-                || policy::is_ancestor_of_subtree_protected(&canon)
-            {
-                violations.push(format!(
-                    "target {} overlaps subtree-protected path: {}",
-                    t.target_id, canon
-                ));
-            }
-            if policy::is_protected_container_root(&canon) {
-                violations.push(format!(
-                    "target {} targets protected container root: {}",
-                    t.target_id, canon
-                ));
-            }
-            match sweeper_winfs::open_for_inspection(Path::new(canon.as_str()))
-                .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
-            {
-                Ok(ReparseTagClass::LinkPoint) => violations.push(format!(
-                    "target {} resolved root is link point: {}",
-                    t.target_id, canon
-                )),
-                Ok(_) => {}
-                Err(e) => violations.push(format!(
-                    "target {} failed reparse inspection for {}: {e}",
-                    t.target_id, canon
-                )),
-            }
-            for (other_id, other) in &seen_roots {
-                if allowlist::paths_overlap(&canon, other) {
-                    violations.push(format!(
-                        "overlap between resolved targets: {} ({}) and {} ({})",
-                        t.target_id, canon, other_id, other
-                    ));
-                }
-            }
-            seen_roots.push((t.target_id.clone(), canon));
-        }
-        // Zero link points followed is enforced by scanner behavior; report includes skip accounting.
-        // We assert no impossible state here; scanner never traverses link points.
-    }
-    violations
 }

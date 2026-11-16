@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { formatContractError, type Settings, type SweeperClient } from '../../api/client';
 
 export type Theme = 'dark' | 'light';
@@ -11,39 +11,37 @@ function sameCustomPaths(a: string[], b: string[]): boolean {
   return a.every((p, i) => p === b[i]);
 }
 
+function fieldEqual(input: { a: Settings; b: Settings; key: keyof Settings }): boolean {
+  if (input.key === 'customPaths') return sameCustomPaths(input.a.customPaths, input.b.customPaths);
+  return input.a[input.key] === input.b[input.key];
+}
+
 function settingsEqual(a: Settings | null, b: Settings | null): boolean {
   if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.enableTier1 !== b.enableTier1) return false;
-  if (a.enableTier2 !== b.enableTier2) return false;
-  if (a.enableTier3 !== b.enableTier3) return false;
-  if (a.enableElevationTargets !== b.enableElevationTargets) return false;
-  if (a.minAgeHours !== b.minAgeHours) return false;
-  if (a.allowDeleteUnknown !== b.allowDeleteUnknown) return false;
-  if (a.staleProjectDays !== b.staleProjectDays) return false;
-  return sameCustomPaths(a.customPaths, b.customPaths);
+  if (!a) return false;
+  if (!b) return false;
+  const keys: (keyof Settings)[] = ['enableTier1', 'enableTier2', 'enableTier3', 'enableElevationTargets', 'minAgeHours', 'allowDeleteUnknown', 'staleProjectDays', 'customPaths'];
+  for (const key of keys) {
+    if (!fieldEqual({ a, b, key })) return false;
+  }
+  return true;
 }
 
-function mergeField<K extends keyof Settings>(args: { saved: Settings; submitted: Settings; after: Settings; key: K }): Settings[K] {
-  if (settingsEqualField(args.after, args.submitted, args.key)) return args.saved[args.key];
-  return args.after[args.key];
+function mergeField<K extends keyof Settings>(input: { saved: Settings; submitted: Settings; after: Settings; key: K }): Settings[K] {
+  if (fieldEqual({ a: input.after, b: input.submitted, key: input.key })) return input.saved[input.key];
+  return input.after[input.key];
 }
 
-function settingsEqualField(a: Settings, b: Settings, key: keyof Settings): boolean {
-  if (key !== 'customPaths') return a[key] === b[key];
-  return sameCustomPaths(a.customPaths, b.customPaths);
-}
-
-function mergePreservingEdits(args: { saved: Settings; submitted: Settings; after: Settings }): Settings {
+function mergePreservingEdits(input: { saved: Settings; submitted: Settings; after: Settings }): Settings {
   return {
-    enableTier1: mergeField({ ...args, key: 'enableTier1' }),
-    enableTier2: mergeField({ ...args, key: 'enableTier2' }),
-    enableTier3: mergeField({ ...args, key: 'enableTier3' }),
-    enableElevationTargets: mergeField({ ...args, key: 'enableElevationTargets' }),
-    minAgeHours: mergeField({ ...args, key: 'minAgeHours' }),
-    allowDeleteUnknown: mergeField({ ...args, key: 'allowDeleteUnknown' }),
-    customPaths: mergeField({ ...args, key: 'customPaths' }),
-    staleProjectDays: mergeField({ ...args, key: 'staleProjectDays' }),
+    enableTier1: mergeField({ ...input, key: 'enableTier1' }),
+    enableTier2: mergeField({ ...input, key: 'enableTier2' }),
+    enableTier3: mergeField({ ...input, key: 'enableTier3' }),
+    enableElevationTargets: mergeField({ ...input, key: 'enableElevationTargets' }),
+    minAgeHours: mergeField({ ...input, key: 'minAgeHours' }),
+    allowDeleteUnknown: mergeField({ ...input, key: 'allowDeleteUnknown' }),
+    customPaths: mergeField({ ...input, key: 'customPaths' }),
+    staleProjectDays: mergeField({ ...input, key: 'staleProjectDays' }),
   };
 }
 
@@ -52,80 +50,68 @@ function hasPrefill(value: string | null | undefined): value is string {
   return value !== '';
 }
 
-function consumePrefillFocus(args: { focusTarget?: SettingsFocusTarget; onFocusConsumed?: () => void }) {
-  if (args.focusTarget === 'allowDeleteUnknown') return;
-  args.onFocusConsumed?.();
+function hasDuplicatePath(input: { paths: string[]; normalized: string }): boolean {
+  return input.paths.some((p) => p.toLowerCase() === input.normalized.toLowerCase());
 }
 
-function focusAllowUnknownRow(row: HTMLDivElement | null, setHighlight: (v: boolean) => void) {
-  if (!row) return;
-  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  const focusable = row.querySelector('input, button, [tabindex]') as HTMLElement | null;
-  focusable?.focus();
-  setHighlight(true);
-}
-
-export function useSettingsController(args: {
+type ControllerArgs = {
   client: SweeperClient;
   settings: Settings | null;
   onSaved: (s: Settings) => void;
   focusTarget?: SettingsFocusTarget;
   onFocusConsumed?: () => void;
   prefillCustomPath?: string | null;
-}) {
-  const { client, settings, onSaved, focusTarget, onFocusConsumed, prefillCustomPath } = args;
+};
+
+type UiState = {
+  draft: Settings | null;
+  setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  loading: boolean;
+  setLoading: React.Dispatch<React.SetStateAction<boolean>>;
+  saving: boolean;
+  setSaving: React.Dispatch<React.SetStateAction<boolean>>;
+  error: string | null;
+  setError: React.Dispatch<React.SetStateAction<string | null>>;
+  info: string | null;
+  setInfo: React.Dispatch<React.SetStateAction<string | null>>;
+};
+
+function useUiState(settings: Settings | null): UiState {
   const [draft, setDraft] = useState<Settings | null>(settings);
   const [loading, setLoading] = useState(!settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-  const [customPathInput, setCustomPathInput] = useState('');
-  const [validatingPath, setValidatingPath] = useState(false);
-  const [relaunching, setRelaunching] = useState(false);
-  const [relaunchInfo, setRelaunchInfo] = useState<string | null>(null);
-  const [relaunchError, setRelaunchError] = useState<string | null>(null);
-  const [browseIndex, setBrowseIndex] = useState(0);
-  const [highlightAllowUnknown, setHighlightAllowUnknown] = useState(false);
-  const allowUnknownRowRef = useRef<HTMLDivElement | null>(null);
-  const draftRef = useRef<Settings | null>(settings);
-  const onSavedRef = useRef(onSaved);
-  const onFocusConsumedRef = useRef(onFocusConsumed);
-  onSavedRef.current = onSaved;
-  onFocusConsumedRef.current = onFocusConsumed;
+  return { draft, setDraft, loading, setLoading, saving, setSaving, error, setError, info, setInfo };
+}
 
-  useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
+function useControllerRefs(args: ControllerArgs) {
+  const draftRef = useRef<Settings | null>(args.settings);
+  const onSavedRef = useRef(args.onSaved);
+  const onFocusConsumedRef = useRef(args.onFocusConsumed);
+  onSavedRef.current = args.onSaved;
+  onFocusConsumedRef.current = args.onFocusConsumed;
+  return { draftRef, onSavedRef, onFocusConsumedRef };
+}
 
-  useEffect(() => {
-    if (!hasPrefill(prefillCustomPath)) return;
-    setCustomPathInput(prefillCustomPath);
-    consumePrefillFocus({ focusTarget, onFocusConsumed: onFocusConsumedRef.current });
-  }, [prefillCustomPath, focusTarget]);
-
-  useEffect(() => {
-    if (focusTarget !== 'allowDeleteUnknown') return;
-    focusAllowUnknownRow(allowUnknownRowRef.current, setHighlightAllowUnknown);
-    const t = window.setTimeout(() => setHighlightAllowUnknown(false), 1800);
-    onFocusConsumedRef.current?.();
-    return () => window.clearTimeout(t);
-  }, [focusTarget]);
-
+function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
+  const { settings, client } = args;
+  const { draft, setDraft, setLoading, setError } = ui;
+  useEffect(() => { refs.draftRef.current = draft; }, [refs, draft]);
   useEffect(() => {
     if (!settings) return;
     setDraft(settings);
     setLoading(false);
-  }, [settings]);
-
+  }, [setDraft, setLoading, settings]);
   useEffect(() => {
     if (settings) return;
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
         const s = await client.getSettings();
         if (cancelled) return;
         setDraft(s);
-        onSavedRef.current(s);
+        refs.onSavedRef.current(s);
       } catch (e) {
         if (!cancelled) setError(formatContractError(e));
       } finally {
@@ -133,40 +119,64 @@ export function useSettingsController(args: {
       }
     })();
     return () => { cancelled = true; };
-  }, [client, settings]);
+  }, [client, refs, setDraft, setError, setLoading, settings]);
+}
 
-  const isDirty = useMemo(() => !settingsEqual(draft, settings), [draft, settings]);
-  const deepDisabled = !!draft && !draft.enableTier3;
+function useFocusAndPrefill(args: ControllerArgs, refs: ReturnType<typeof useControllerRefs>, setCustomPathInput: (v: string) => void, allowUnknownRowRef: React.RefObject<HTMLDivElement>, setHighlight: (v: boolean) => void) {
+  const { prefillCustomPath, focusTarget } = args;
+  useEffect(() => {
+    if (!hasPrefill(prefillCustomPath)) return;
+    setCustomPathInput(prefillCustomPath);
+    if (focusTarget !== 'allowDeleteUnknown') refs.onFocusConsumedRef.current?.();
+  }, [focusTarget, prefillCustomPath, refs, setCustomPathInput]);
+  useEffect(() => {
+    if (focusTarget !== 'allowDeleteUnknown') return;
+    const row = allowUnknownRowRef.current;
+    if (!row) { refs.onFocusConsumedRef.current?.(); return; }
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const focusable = row.querySelector('input, button, [tabindex]') as HTMLElement | null;
+    focusable?.focus();
+    setHighlight(true);
+    const t = window.setTimeout(() => setHighlight(false), 1800);
+    refs.onFocusConsumedRef.current?.();
+    return () => window.clearTimeout(t);
+  }, [allowUnknownRowRef, focusTarget, refs, setHighlight]);
+}
 
-  async function save(next?: Settings) {
-    const toSave = next ?? draftRef.current;
+function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
+  const { setDraft, setError, setInfo, setSaving } = ui;
+  return useCallback(async (next?: Settings) => {
+    const toSave = next ?? refs.draftRef.current;
     if (!toSave) return;
     setSaving(true);
     setError(null);
     setInfo(null);
-    draftRef.current = toSave;
+    refs.draftRef.current = toSave;
     setDraft(toSave);
     try {
       const saved = await client.updateSettings(toSave);
-      const after = draftRef.current ?? saved;
+      const after = refs.draftRef.current ?? saved;
       const merged = mergePreservingEdits({ saved, submitted: toSave, after });
-      draftRef.current = merged;
+      refs.draftRef.current = merged;
       setDraft(merged);
-      onSavedRef.current(merged);
+      refs.onSavedRef.current(merged);
       setInfo('Settings saved. Active sessions may be invalidated when scan-affecting settings change.');
     } catch (e) {
       setError(formatContractError(e));
     } finally {
       setSaving(false);
     }
-  }
+  }, [client, refs, setDraft, setError, setInfo, setSaving]);
+}
 
-  function hasDuplicatePath(args: { paths: string[]; normalized: string }): boolean {
-    return args.paths.some((p) => p.toLowerCase() === args.normalized.toLowerCase());
-  }
-
-  async function addCustomPath() {
-    const base = draftRef.current;
+function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs: ReturnType<typeof useControllerRefs>; save: (next?: Settings) => Promise<void> }) {
+  const [customPathInput, setCustomPathInput] = useState('');
+  const [validatingPath, setValidatingPath] = useState(false);
+  const [browseIndex, setBrowseIndex] = useState(0);
+  const { client, ui, refs, save } = input;
+  const { setError, setInfo } = ui;
+  const addCustomPath = useCallback(async () => {
+    const base = refs.draftRef.current;
     if (!base) return;
     const raw = customPathInput.trim();
     if (!raw) return;
@@ -175,34 +185,35 @@ export function useSettingsController(args: {
     setInfo(null);
     try {
       const verdict = await client.validateCustomPath(raw);
-      if (!verdict.allowed) {
-        setError(`Custom Path rejected: ${verdict.reason}`);
-        return;
-      }
-      const current = draftRef.current ?? base;
+      if (!verdict.allowed) { setError('Custom Path rejected: ' + verdict.reason); return; }
+      const current = refs.draftRef.current ?? base;
       const normalized = verdict.path || raw;
-      if (hasDuplicatePath({ paths: current.customPaths, normalized })) {
-        setError('Custom Path already added.');
-        return;
-      }
-      const next = { ...current, customPaths: [...current.customPaths, normalized] };
+      if (hasDuplicatePath({ paths: current.customPaths, normalized })) { setError('Custom Path already added.'); return; }
       setCustomPathInput('');
-      await save(next);
+      await save({ ...current, customPaths: [...current.customPaths, normalized] });
     } catch (e) {
       setError(formatContractError(e));
     } finally {
       setValidatingPath(false);
     }
-  }
-
-  async function removeCustomPath(path: string) {
-    const base = draftRef.current;
+  }, [client, customPathInput, refs, save, setError, setInfo]);
+  const removeCustomPath = useCallback(async (path: string) => {
+    const base = refs.draftRef.current;
     if (!base) return;
-    const next = { ...base, customPaths: base.customPaths.filter((p) => p !== path) };
-    await save(next);
-  }
+    await save({ ...base, customPaths: base.customPaths.filter((p) => p !== path) });
+  }, [refs, save]);
+  const applyCustomPathPreset = useCallback(() => {
+    setCustomPathInput(CUSTOM_PATH_PRESETS[browseIndex % CUSTOM_PATH_PRESETS.length]);
+    setBrowseIndex((i) => i + 1);
+  }, [browseIndex]);
+  return { customPathInput, setCustomPathInput, validatingPath, addCustomPath, removeCustomPath, applyCustomPathPreset };
+}
 
-  async function runAsAdministrator() {
+function useRelaunchAction(client: SweeperClient) {
+  const [relaunching, setRelaunching] = useState(false);
+  const [relaunchInfo, setRelaunchInfo] = useState<string | null>(null);
+  const [relaunchError, setRelaunchError] = useState<string | null>(null);
+  const runAsAdministrator = useCallback(async () => {
     setRelaunching(true);
     setRelaunchInfo(null);
     setRelaunchError(null);
@@ -215,24 +226,29 @@ export function useSettingsController(args: {
     } finally {
       setRelaunching(false);
     }
-  }
+  }, [client]);
+  return { relaunching, relaunchInfo, relaunchError, runAsAdministrator };
+}
 
-  function applyCustomPathPreset() {
-    const suggestion = CUSTOM_PATH_PRESETS[browseIndex % CUSTOM_PATH_PRESETS.length];
-    setCustomPathInput(suggestion);
-    setBrowseIndex((i) => i + 1);
-  }
-
-  function resetDraft() {
-    if (settings) setDraft(settings);
-  }
-
+export function useSettingsController(args: ControllerArgs) {
+  const ui = useUiState(args.settings);
+  const [highlightAllowUnknown, setHighlightAllowUnknown] = useState(false);
+  const allowUnknownRowRef = useRef<HTMLDivElement | null>(null);
+  const refs = useControllerRefs(args);
+  useSettingsSync(args, ui, refs);
+  const save = useSaveHandler(args.client, ui, refs);
+  const paths = useCustomPathActions({ client: args.client, ui, refs, save });
+  useFocusAndPrefill(args, refs, paths.setCustomPathInput, allowUnknownRowRef, setHighlightAllowUnknown);
+  const relaunch = useRelaunchAction(args.client);
+  const isDirty = useMemo(() => !settingsEqual(ui.draft, args.settings), [ui.draft, args.settings]);
+  const deepDisabled = !!ui.draft && !ui.draft.enableTier3;
+  const { setDraft } = ui;
+  const resetDraft = useCallback(() => { if (args.settings) setDraft(args.settings); }, [args.settings, setDraft]);
   return {
-    draft, setDraft, loading, saving, error, info,
-    customPathInput, setCustomPathInput, validatingPath,
-    relaunching, relaunchInfo, relaunchError,
-    highlightAllowUnknown, allowUnknownRowRef,
-    isDirty, deepDisabled,
-    save, addCustomPath, removeCustomPath, runAsAdministrator, applyCustomPathPreset, resetDraft,
+    draft: ui.draft, setDraft: ui.setDraft, loading: ui.loading, saving: ui.saving, error: ui.error, info: ui.info,
+    customPathInput: paths.customPathInput, setCustomPathInput: paths.setCustomPathInput, validatingPath: paths.validatingPath,
+    relaunching: relaunch.relaunching, relaunchInfo: relaunch.relaunchInfo, relaunchError: relaunch.relaunchError,
+    highlightAllowUnknown, allowUnknownRowRef, isDirty, deepDisabled,
+    save, addCustomPath: paths.addCustomPath, removeCustomPath: paths.removeCustomPath, runAsAdministrator: relaunch.runAsAdministrator, applyCustomPathPreset: paths.applyCustomPathPreset, resetDraft,
   };
 }

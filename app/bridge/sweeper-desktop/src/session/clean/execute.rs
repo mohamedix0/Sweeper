@@ -76,8 +76,8 @@ impl SessionStore {
         settings_gen: u64,
     ) -> Result<u32, ContractError> {
         let now = clock.now_unix_secs();
-        let (created_at, min_age) =
-            self.get_valid_session_meta(clock, &t.session_id, settings_gen)?;
+        let lookup = super::SessionLookup::new(&t.session_id, settings_gen);
+        let (created_at, min_age) = self.get_valid_session_meta(clock, lookup)?;
         if now.saturating_sub(created_at) > SCAN_SESSION_TTL_SECS {
             return Err(ContractError::SessionInvalid {
                 reason: "session expired".to_string(),

@@ -108,19 +108,96 @@ fn render_commands(
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn Error>> {
     let commands = [
-        cmd_start_scan(cfg, type_map)?,
-        cmd_get_scan_results(cfg, type_map)?,
+        cmd_one::<StartScanResponse, Option<Vec<TierDto>>>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "startScan",
+                "start_scan",
+                Some("{ tiers }"),
+                ("tiers", None),
+            ),
+        )?,
+        cmd_one::<ScanResultsDto, String>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "getScanResults",
+                "get_scan_results",
+                Some("{ sessionId }"),
+                ("session_id", Some(ArgTy::Str)),
+            ),
+        )?,
         cmd_preview_clean(cfg, type_map)?,
-        cmd_execute_clean(cfg, type_map)?,
-        cmd_start_analyzer(cfg, type_map)?,
-        cmd_explain_item(cfg, type_map)?,
-        cmd_get_settings(cfg, type_map)?,
-        cmd_update_settings(cfg, type_map)?,
-        cmd_validate_custom_path(cfg, type_map)?,
-        cmd_list_logs(cfg, type_map)?,
-        cmd_read_log(cfg, type_map)?,
-        cmd_get_elevation_status(cfg, type_map)?,
-        cmd_relaunch_elevated(cfg, type_map)?,
+        cmd_one::<ExecuteCleanResponse, String>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "executeClean",
+                "execute_clean",
+                Some("{ previewToken }"),
+                ("preview_token", Some(ArgTy::Str)),
+            ),
+        )?,
+        cmd_one::<StartAnalyzerResponse, Option<String>>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "startAnalyzer",
+                "start_analyzer",
+                Some("{ root }"),
+                ("root", None),
+            ),
+        )?,
+        cmd_one::<ExplainItemResponse, String>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "explainItem",
+                "explain_item",
+                Some("{ itemId }"),
+                ("item_id", Some(ArgTy::Str)),
+            ),
+        )?,
+        cmd_noarg::<SettingsDto>(cfg, type_map, "getSettings", "get_settings")?,
+        cmd_one::<SettingsDto, SettingsDto>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "updateSettings",
+                "update_settings",
+                Some("{ settings }"),
+                ("settings", None),
+            ),
+        )?,
+        cmd_one::<ValidateCustomPathResponse, String>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "validateCustomPath",
+                "validate_custom_path",
+                Some("{ path }"),
+                ("path", Some(ArgTy::Str)),
+            ),
+        )?,
+        cmd_noarg::<Vec<LogMetadataDto>>(cfg, type_map, "listLogs", "list_logs")?,
+        cmd_one::<LogReadResponse, String>(
+            cfg,
+            type_map,
+            CmdOneSpec::new(
+                "readLog",
+                "read_log",
+                Some("{ logId }"),
+                ("log_id", Some(ArgTy::Str)),
+            ),
+        )?,
+        cmd_noarg::<ElevationStatusDto>(
+            cfg,
+            type_map,
+            "getElevationStatus",
+            "get_elevation_status",
+        )?,
+        cmd_noarg::<RelaunchResultDto>(cfg, type_map, "relaunchElevated", "relaunch_elevated")?,
     ];
     Ok(format!(
         "export const commands = {{\n{}\n}}",
@@ -155,37 +232,84 @@ fn ty<T: Type + 'static>(
     datatype_str(cfg, <T as Type>::inline(type_map, Generics::NONE), type_map)
 }
 
-fn cmd_start_scan(
+#[derive(Clone, Copy)]
+enum ArgTy {
+    Str,
+}
+
+struct CmdOneSpec<'a> {
+    name: &'a str,
+    invoke: &'a str,
+    arg_obj: Option<&'a str>,
+    arg: (&'a str, Option<ArgTy>),
+}
+
+impl<'a> CmdOneSpec<'a> {
+    const fn new(
+        name: &'a str,
+        invoke: &'a str,
+        arg_obj: Option<&'a str>,
+        arg: (&'a str, Option<ArgTy>),
+    ) -> Self {
+        Self {
+            name,
+            invoke,
+            arg_obj,
+            arg,
+        }
+    }
+}
+
+fn arg_type<A: Type + 'static>(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
+    kind: Option<ArgTy>,
 ) -> Result<String, Box<dyn Error>> {
-    let tiers = ty::<Option<Vec<TierDto>>>(cfg, type_map)?;
-    let ok = ty::<StartScanResponse>(cfg, type_map)?;
+    Ok(match kind {
+        Some(ArgTy::Str) => "string".to_string(),
+        None => ty::<A>(cfg, type_map)?,
+    })
+}
+
+fn cmd_noarg<R: Type + 'static>(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+    name: &'static str,
+    invoke: &'static str,
+) -> Result<String, Box<dyn Error>> {
     let err = ty::<ContractError>(cfg, type_map)?;
+    let ok = ty::<R>(cfg, type_map)?;
     Ok(cmd_fn(
         CmdSpec {
-            name: "startScan",
-            invoke: "start_scan",
-            arg_obj: Some("{ tiers }"),
+            name,
+            invoke,
+            arg_obj: None,
         },
-        &[("tiers", tiers)],
+        &[],
         &format!("Result<{ok}, {err}>"),
     ))
 }
 
-fn cmd_get_scan_results(
+fn cmd_one<R, A>(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<ScanResultsDto>(cfg, type_map)?;
+    spec: CmdOneSpec<'_>,
+) -> Result<String, Box<dyn Error>>
+where
+    R: Type + 'static,
+    A: Type + 'static,
+{
     let err = ty::<ContractError>(cfg, type_map)?;
+    let ok = ty::<R>(cfg, type_map)?;
+    let (arg_name, kind) = spec.arg;
+    let args = vec![(arg_name, arg_type::<A>(cfg, type_map, kind)?)];
     Ok(cmd_fn(
         CmdSpec {
-            name: "getScanResults",
-            invoke: "get_scan_results",
-            arg_obj: Some("{ sessionId }"),
+            name: spec.name,
+            invoke: spec.invoke,
+            arg_obj: spec.arg_obj,
         },
-        &[("session_id", "string".to_string())],
+        &args,
         &format!("Result<{ok}, {err}>"),
     ))
 }
@@ -209,178 +333,6 @@ fn cmd_preview_clean(
             ("item_ids", ids),
             ("confirmations", conf),
         ],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_execute_clean(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<ExecuteCleanResponse>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "executeClean",
-            invoke: "execute_clean",
-            arg_obj: Some("{ previewToken }"),
-        },
-        &[("preview_token", "string".to_string())],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_start_analyzer(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let root = ty::<Option<String>>(cfg, type_map)?;
-    let ok = ty::<StartAnalyzerResponse>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "startAnalyzer",
-            invoke: "start_analyzer",
-            arg_obj: Some("{ root }"),
-        },
-        &[("root", root)],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_explain_item(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<ExplainItemResponse>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "explainItem",
-            invoke: "explain_item",
-            arg_obj: Some("{ itemId }"),
-        },
-        &[("item_id", "string".to_string())],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_get_settings(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<SettingsDto>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "getSettings",
-            invoke: "get_settings",
-            arg_obj: None,
-        },
-        &[],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_update_settings(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let settings = ty::<SettingsDto>(cfg, type_map)?;
-    let ok = ty::<SettingsDto>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "updateSettings",
-            invoke: "update_settings",
-            arg_obj: Some("{ settings }"),
-        },
-        &[("settings", settings)],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_validate_custom_path(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<ValidateCustomPathResponse>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "validateCustomPath",
-            invoke: "validate_custom_path",
-            arg_obj: Some("{ path }"),
-        },
-        &[("path", "string".to_string())],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_list_logs(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let list = ty::<Vec<LogMetadataDto>>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "listLogs",
-            invoke: "list_logs",
-            arg_obj: None,
-        },
-        &[],
-        &format!("Result<{list}, {err}>"),
-    ))
-}
-
-fn cmd_read_log(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<LogReadResponse>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "readLog",
-            invoke: "read_log",
-            arg_obj: Some("{ logId }"),
-        },
-        &[("log_id", "string".to_string())],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_get_elevation_status(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<ElevationStatusDto>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "getElevationStatus",
-            invoke: "get_elevation_status",
-            arg_obj: None,
-        },
-        &[],
-        &format!("Result<{ok}, {err}>"),
-    ))
-}
-
-fn cmd_relaunch_elevated(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    let ok = ty::<RelaunchResultDto>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
-        CmdSpec {
-            name: "relaunchElevated",
-            invoke: "relaunch_elevated",
-            arg_obj: None,
-        },
-        &[],
         &format!("Result<{ok}, {err}>"),
     ))
 }

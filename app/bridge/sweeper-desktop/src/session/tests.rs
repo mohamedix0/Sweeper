@@ -127,31 +127,36 @@ fn start_scan_with_progress_emits_failed_terminal_event_on_finish_settings_misma
     );
 }
 
-struct StaleSessionSeed {
+struct CustomSessionSeed {
     session_id: String,
     item_id: String,
-    root_str: String,
+    target_id: String,
+    target_name: String,
+    path: String,
+    resolved_paths: Vec<String>,
+    tier: sweeper_contract::TierDto,
+    risk: sweeper_contract::RiskDto,
+    core_tier: sweeper_core::Tier,
+    core_risk: sweeper_core::Risk,
 }
 
-fn seed_stale_dir_session(store: &mut SessionStore, seed: StaleSessionSeed) {
+fn seed_custom_path_session(store: &mut SessionStore, seed: CustomSessionSeed) {
     use std::collections::HashMap;
-    use sweeper_contract::{
-        RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
-    };
+    use sweeper_contract::{ScanItemDto, ScanResultsDto, TargetScanResultDto, U64String};
     let item = ScanItemDto {
         id: seed.item_id.clone(),
-        target_id: "stale-rust-target".to_string(),
-        path: seed.root_str.clone(),
+        target_id: seed.target_id.clone(),
+        path: seed.path.clone(),
         size: U64String(3),
         mtime_unix_secs: U64String(1_700_000_000),
         age_eligible: true,
     };
     let target = TargetScanResultDto {
-        target_id: "stale-rust-target".to_string(),
-        target_name: "Stale Rust target/".to_string(),
-        tier: TierDto::Tier3,
-        risk: RiskDto::Caution,
-        resolved_paths: vec![seed.root_str.clone()],
+        target_id: seed.target_id.clone(),
+        target_name: seed.target_name.clone(),
+        tier: seed.tier,
+        risk: seed.risk,
+        resolved_paths: seed.resolved_paths,
         scanned: true,
         status_reason: None,
         total_bytes: U64String(3),
@@ -171,11 +176,11 @@ fn seed_stale_dir_session(store: &mut SessionStore, seed: StaleSessionSeed) {
     items.insert(
         item.id.clone(),
         super::StoredItem {
-            dto: item.clone(),
-            target_id: "stale-rust-target".to_string(),
-            target_name: "Stale Rust target/".to_string(),
-            tier: sweeper_core::Tier::Tier3,
-            risk: sweeper_core::Risk::Caution,
+            dto: item,
+            target_id: seed.target_id,
+            target_name: seed.target_name,
+            tier: seed.core_tier,
+            risk: seed.core_risk,
             age_eligible: true,
             requires_typed_confirmation: false,
         },
@@ -189,6 +194,38 @@ fn seed_stale_dir_session(store: &mut SessionStore, seed: StaleSessionSeed) {
     });
 }
 
+fn stale_seed(session_id: &str, item_id: &str, root: &str) -> CustomSessionSeed {
+    use sweeper_contract::{RiskDto, TierDto};
+    CustomSessionSeed {
+        session_id: session_id.to_string(),
+        item_id: item_id.to_string(),
+        target_id: "stale-rust-target".to_string(),
+        target_name: "Stale Rust target/".to_string(),
+        path: root.to_string(),
+        resolved_paths: vec![root.to_string()],
+        tier: TierDto::Tier3,
+        risk: RiskDto::Caution,
+        core_tier: sweeper_core::Tier::Tier3,
+        core_risk: sweeper_core::Risk::Caution,
+    }
+}
+
+fn bad_contents_seed() -> CustomSessionSeed {
+    use sweeper_contract::{RiskDto, TierDto};
+    CustomSessionSeed {
+        session_id: "scan-bad".to_string(),
+        item_id: "bad::1".to_string(),
+        target_id: "user-temp".to_string(),
+        target_name: "User Temp".to_string(),
+        path: r"C:\Other\file.tmp".to_string(),
+        resolved_paths: vec![r"C:\Users\X\AppData\Local\Temp".to_string()],
+        tier: TierDto::Tier1,
+        risk: RiskDto::Safe,
+        core_tier: sweeper_core::Tier::Tier1,
+        core_risk: sweeper_core::Risk::Safe,
+    }
+}
+
 #[test]
 fn preview_and_clean_stale_directory_item_equal_root() {
     let clock = FixedClock::new(1_800_000_000);
@@ -197,14 +234,14 @@ fn preview_and_clean_stale_directory_item_equal_root() {
     let root = tmp.path().join("target");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("junk.bin"), b"abc").unwrap();
-    seed_stale_dir_session(
-        &mut store,
-        StaleSessionSeed {
-            session_id: "scan-stale".to_string(),
-            item_id: "stale::1".to_string(),
-            root_str: root.to_string_lossy().to_string(),
-        },
-    );
+    let root_canon = std::fs::canonicalize(&root).unwrap();
+    let mut root_str = root_canon.to_string_lossy().to_string();
+    if let Some(stripped) = root_str.strip_prefix(r"\\?\UNC\") {
+        root_str = format!(r"\\{stripped}");
+    } else if let Some(stripped) = root_str.strip_prefix(r"\\?\") {
+        root_str = stripped.to_string();
+    }
+    seed_custom_path_session(&mut store, stale_seed("scan-stale", "stale::1", &root_str));
     let preview = store
         .preview_clean(
             &clock,
@@ -230,67 +267,11 @@ fn preview_and_clean_stale_directory_item_equal_root() {
     assert!(!exec.aborted, "{exec:?}");
 }
 
-fn seed_bad_contents_session(store: &mut SessionStore) {
-    use std::collections::HashMap;
-    use sweeper_contract::{
-        RiskDto, ScanItemDto, ScanResultsDto, TargetScanResultDto, TierDto, U64String,
-    };
-    let item = ScanItemDto {
-        id: "bad::1".to_string(),
-        target_id: "user-temp".to_string(),
-        path: r"C:\Other\file.tmp".to_string(),
-        size: U64String(1),
-        mtime_unix_secs: U64String(1_700_000_000),
-        age_eligible: true,
-    };
-    let target = TargetScanResultDto {
-        target_id: "user-temp".to_string(),
-        target_name: "User Temp".to_string(),
-        tier: TierDto::Tier1,
-        risk: RiskDto::Safe,
-        resolved_paths: vec![r"C:\Users\X\AppData\Local\Temp".to_string()],
-        scanned: true,
-        status_reason: None,
-        total_bytes: U64String(1),
-        eligible_bytes: U64String(1),
-        file_count: U64String(1),
-        eligible_count: U64String(1),
-        skipped_count: U64String(0),
-        items: vec![item.clone()],
-    };
-    let results = ScanResultsDto {
-        session_id: "scan-bad".to_string(),
-        started_unix_secs: U64String(1_800_000_000),
-        min_age_hours: 24,
-        targets: vec![target],
-    };
-    let mut items = HashMap::new();
-    items.insert(
-        item.id.clone(),
-        super::StoredItem {
-            dto: item.clone(),
-            target_id: "user-temp".to_string(),
-            target_name: "User Temp".to_string(),
-            tier: sweeper_core::Tier::Tier1,
-            risk: sweeper_core::Risk::Safe,
-            age_eligible: true,
-            requires_typed_confirmation: false,
-        },
-    );
-    store.create_test_session_with_items(super::TestScanSessionSeed {
-        now: 1_800_000_000,
-        settings_generation: 1,
-        session_id: "scan-bad".to_string(),
-        results,
-        items,
-    });
-}
-
 #[test]
 fn preview_rejects_non_descendant_contents_only_target() {
     let clock = FixedClock::new(1_800_000_000);
     let mut store = SessionStore::new();
-    seed_bad_contents_session(&mut store);
+    seed_custom_path_session(&mut store, bad_contents_seed());
     let err = store
         .preview_clean(
             &clock,
