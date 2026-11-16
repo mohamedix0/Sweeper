@@ -25,54 +25,38 @@ fn elevation_settings_default_and_sanitize() {
 }
 
 #[test]
-fn non_elevated_excludes_requires_elevation_targets_even_if_enabled() {
-    let settings = SweeperSettings {
-        enable_tier1: false,
-        enable_tier2: false,
-        enable_tier3: true,
-        enable_elevation_targets: true,
-        ..SweeperSettings::default()
-    };
-    let report = scanner::scan_with_settings_options_and_elevation_with_progress(
-        &settings,
-        ScanSettingsOptions::default(),
-        ScanElevationContext {
-            process_elevated: false,
-        },
-        scanner::ScanRunControl::default(),
-    )
-    .unwrap();
-    for t in &report.targets {
-        assert_ne!(t.target_id, "windows-temp");
-        assert_ne!(t.target_id, "windows-update-download-cache");
-        assert_ne!(t.target_id, "windows-prefetch");
-        assert_ne!(t.target_id, "programdata-package-cache");
-    }
-}
-
-#[test]
-fn elevated_without_elevation_targets_flag_excludes_requires_elevation_targets() {
-    let settings = SweeperSettings {
-        enable_tier1: false,
-        enable_tier2: false,
-        enable_tier3: true,
-        enable_elevation_targets: false,
-        ..SweeperSettings::default()
-    };
-    let report = scanner::scan_with_settings_options_and_elevation_with_progress(
-        &settings,
-        ScanSettingsOptions::default(),
-        ScanElevationContext {
-            process_elevated: true,
-        },
-        scanner::ScanRunControl::default(),
-    )
-    .unwrap();
-    for t in &report.targets {
-        assert_ne!(t.target_id, "windows-temp");
-        assert_ne!(t.target_id, "windows-update-download-cache");
-        assert_ne!(t.target_id, "windows-prefetch");
-        assert_ne!(t.target_id, "programdata-package-cache");
+fn elevation_target_exclusion_respects_elevation_and_setting_flags() {
+    const EXCLUDED: [&str; 4] = [
+        "windows-temp",
+        "windows-update-download-cache",
+        "windows-prefetch",
+        "programdata-package-cache",
+    ];
+    for (label, enable_elevation_targets, process_elevated) in [
+        ("non-elevated+enabled", true, false),
+        ("elevated+disabled", false, true),
+    ] {
+        let settings = SweeperSettings {
+            enable_tier1: false,
+            enable_tier2: false,
+            enable_tier3: true,
+            enable_elevation_targets,
+            ..SweeperSettings::default()
+        };
+        let report = scanner::scan_with_settings_options_and_elevation_with_progress(
+            &settings,
+            ScanSettingsOptions::default(),
+            ScanElevationContext { process_elevated },
+            scanner::ScanRunControl::default(),
+        )
+        .unwrap_or_else(|e| panic!("{label}: scan failed: {e}"));
+        for target in &report.targets {
+            assert!(
+                !EXCLUDED.contains(&target.target_id.as_str()),
+                "{label}: unexpected {}",
+                target.target_id
+            );
+        }
     }
 }
 
@@ -249,16 +233,11 @@ fn assert_elev_scan_items(
         .find(|i| i.path.to_ascii_lowercase().contains(&old_name))
         .expect("eligible old file discovered");
     assert!(old_item.age_eligible, "old file should be eligible");
-    let recent_eligible = elev
-        .items
-        .iter()
-        .any(|i| i.path.to_ascii_lowercase().contains(&recent_name));
-    assert!(recent_eligible || !recent_eligible, "recent file observed");
     assert!(
         !elev
             .items
             .iter()
-            .any(|i| { i.path.to_ascii_lowercase().contains(&recent_name) && i.age_eligible }),
+            .any(|i| i.path.to_ascii_lowercase().contains(&recent_name) && i.age_eligible),
         "recent file must be ineligible: {:?}",
         elev.items
     );
@@ -312,16 +291,25 @@ fn execute_elev_clean(
     .unwrap()
 }
 
-fn assert_clean_kept_state(clean: &sweeper_core::remover::CleanReport, fx: &ElevSandboxFixture) {
+fn assert_post_clean_state(clean: &sweeper_core::remover::CleanReport, fx: &ElevSandboxFixture) {
     assert!(!clean.aborted, "clean aborted: {:?}", clean.abort_reason);
-    assert!(fx.elevated_root.exists(), "target root must remain intact");
-    assert!(!fx.old_file.exists(), "eligible old file should be cleaned");
-}
-
-fn assert_remaining_files(fx: &ElevSandboxFixture) {
-    assert!(fx.recent_file.exists(), "recent file should remain");
-    assert!(fx.canary_file.exists(), "outside canary must remain");
-    assert!(fx.link_path.exists(), "link entry may remain");
+    for (path, expected_exists, msg) in [
+        (
+            fx.elevated_root.as_path(),
+            true,
+            "target root must remain intact",
+        ),
+        (
+            fx.old_file.as_path(),
+            false,
+            "eligible old file should be cleaned",
+        ),
+        (fx.recent_file.as_path(), true, "recent file should remain"),
+        (fx.canary_file.as_path(), true, "outside canary must remain"),
+        (fx.link_path.as_path(), true, "link entry may remain"),
+    ] {
+        assert_eq!(path.exists(), expected_exists, "{msg}");
+    }
 }
 
 #[test]
@@ -339,6 +327,5 @@ fn elevated_scan_discovers_and_cleans_sandboxed_elevation_target_contents_only()
     assert!(!validated.is_empty(), "expected eligible items");
 
     let clean = execute_elev_clean(&fx.sb, elev, validated);
-    assert_clean_kept_state(&clean, &fx);
-    assert_remaining_files(&fx);
+    assert_post_clean_state(&clean, &fx);
 }
