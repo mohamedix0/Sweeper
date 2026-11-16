@@ -205,48 +205,35 @@ pub fn analyze_validated_root(
         allow_unknown: options.allow_unknown,
         ..annotate::EligibilitySettings::default()
     };
+    let (max_files_per_dir, max_children_per_dir, max_tree_depth) = resolve_tree_limits(&options);
+    let (final_progress, records, cancelled) = run_walker_with_progress(
+        &root,
+        Arc::clone(&cancel),
+        progress,
+        &options,
+        max_files_per_dir,
+    )?;
+    let tree = assemble_analyzer_result(
+        &root,
+        &records,
+        &ctx,
+        &settings,
+        max_children_per_dir,
+        max_tree_depth,
+    )?;
+    Ok(AnalyzerResult {
+        root: tree,
+        progress: final_progress,
+        cancelled,
+    })
+}
 
-    let workers = walker::effective_worker_count(options.worker_threads);
+fn resolve_tree_limits(options: &AnalyzerOptions) -> (usize, usize, usize) {
     let max_files_per_dir = if options.max_files_per_dir == 0 {
         64
     } else {
         options.max_files_per_dir
     };
-    let state = Arc::new(walker::WalkState::new(
-        root.as_str().to_string(),
-        max_files_per_dir,
-    ));
-    state.enqueue_initial(root.as_str().to_string());
-
-    let progress_state = Arc::new(walker::ProgressState::new(
-        progress,
-        options.progress_interval,
-    ));
-    let mut handles = Vec::with_capacity(workers);
-
-    for _ in 0..workers {
-        let state_cloned = Arc::clone(&state);
-        let cancel_cloned = Arc::clone(&cancel);
-        let progress_cloned = Arc::clone(&progress_state);
-        handles.push(std::thread::spawn(move || {
-            walker::worker_loop(state_cloned, cancel_cloned, progress_cloned);
-        }));
-    }
-
-    for h in handles {
-        let _ = h.join();
-    }
-
-    let cancelled = cancel.load(AtomicOrdering::Relaxed) || state.had_error();
-    progress_state.emit_final(&state);
-
-    if let Some(err) = state.take_error() {
-        return Err(AnalyzerError::Walk(err));
-    }
-
-    let final_progress = progress_state.snapshot(&state);
-    let records = state.into_records();
-    let root_key = annotate::canonical_key(root.as_str());
     let max_children_per_dir = if options.max_children_per_dir == 0 {
         50
     } else {
@@ -257,23 +244,87 @@ pub fn analyze_validated_root(
     } else {
         options.max_tree_depth
     };
-    let tree = annotate::build_tree(
-        &records,
+    (max_files_per_dir, max_children_per_dir, max_tree_depth)
+}
+
+fn run_walker_with_progress(
+    root: &CanonicalPath,
+    cancel: Arc<AtomicBool>,
+    progress: Option<Arc<dyn Fn(AnalyzerProgress) + Send + Sync>>,
+    options: &AnalyzerOptions,
+    max_files_per_dir: usize,
+) -> Result<
+    (
+        AnalyzerProgress,
+        std::collections::HashMap<String, walker::DirRecord>,
+        bool,
+    ),
+    AnalyzerError,
+> {
+    let state = Arc::new(walker::WalkState::new(
+        root.as_str().to_string(),
+        max_files_per_dir,
+    ));
+    state.enqueue_initial(root.as_str().to_string());
+    let progress_state = Arc::new(walker::ProgressState::new(
+        progress,
+        options.progress_interval,
+    ));
+    spawn_and_join_walkers(&state, &cancel, &progress_state, options.worker_threads);
+
+    let cancelled = cancel.load(AtomicOrdering::Relaxed) || state.had_error();
+    progress_state.emit_final(&state);
+    if let Some(err) = state.take_error() {
+        return Err(AnalyzerError::Walk(err));
+    }
+    Ok((
+        progress_state.snapshot(&state),
+        state.into_records(),
+        cancelled,
+    ))
+}
+
+fn spawn_and_join_walkers(
+    state: &Arc<walker::WalkState>,
+    cancel: &Arc<AtomicBool>,
+    progress_state: &Arc<walker::ProgressState>,
+    worker_threads: usize,
+) {
+    let workers = walker::effective_worker_count(worker_threads);
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let state_cloned = Arc::clone(state);
+        let cancel_cloned = Arc::clone(cancel);
+        let progress_cloned = Arc::clone(progress_state);
+        handles.push(std::thread::spawn(move || {
+            walker::worker_loop(state_cloned, cancel_cloned, progress_cloned);
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+}
+
+fn assemble_analyzer_result(
+    root: &CanonicalPath,
+    records: &std::collections::HashMap<String, walker::DirRecord>,
+    ctx: &annotate::AnnotationContext,
+    settings: &annotate::EligibilitySettings,
+    max_children_per_dir: usize,
+    max_tree_depth: usize,
+) -> Result<AnalyzerNode, AnalyzerError> {
+    let root_key = annotate::canonical_key(root.as_str());
+    annotate::build_tree(
+        records,
         &root_key,
-        &ctx,
-        &settings,
+        ctx,
+        settings,
         annotate::TreeBuildLimits {
             max_children_per_dir,
             max_tree_depth,
         },
     )
-    .ok_or_else(|| AnalyzerError::Walk("failed to build analyzer tree".to_string()))?;
-
-    Ok(AnalyzerResult {
-        root: tree,
-        progress: final_progress,
-        cancelled,
-    })
+    .ok_or_else(|| AnalyzerError::Walk("failed to build analyzer tree".to_string()))
 }
 
 mod annotate;
