@@ -215,70 +215,16 @@ fn p(id: &str, kind: ProtectedPathKind, display: &str, notes: &str) -> Protected
 }
 
 fn builtin_knowledge_entries_impl() -> Vec<KnowledgeEntry> {
+    let mut entries = Vec::new();
+    entries.extend(protected_system_knowledge_entries());
+    entries.extend(user_and_temp_knowledge_entries());
+    entries.extend(browser_and_app_knowledge_entries());
+    entries.extend(developer_and_elevation_knowledge_entries());
+    entries
+}
+
+fn protected_system_knowledge_entries() -> Vec<KnowledgeEntry> {
     vec![
-        KnowledgeEntry {
-            id: "kb-windows-temp".to_string(),
-            title: "Windows Temp".to_string(),
-            description: "Windows system temporary files under C:\\Windows\\Temp. Contents can be recreated, but active installers or system tasks may still be using files.".to_string(),
-            risk: Risk::Caution,
-            known_folder: Some(KnownFolder::Windows),
-            relative_pattern: "Temp".to_string(),
-            notes: "Caution. Requires administrator elevation. Only this explicit audited subfolder is cleanable; C:\\Windows itself remains a Protected container root.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-windows-update-download-cache".to_string(),
-            title: "Windows Update Download Cache".to_string(),
-            description: "Downloaded Windows Update payloads in C:\\Windows\\SoftwareDistribution\\Download. Clearing can reclaim space but may require updates to be downloaded again.".to_string(),
-            risk: Risk::Caution,
-            known_folder: Some(KnownFolder::Windows),
-            relative_pattern: "SoftwareDistribution\\Download".to_string(),
-            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\Windows remains Protected.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-windows-prefetch".to_string(),
-            title: "Windows Prefetch".to_string(),
-            description: "Windows Prefetch data in C:\\Windows\\Prefetch used to optimize application startup. Removing contents is recoverable but may temporarily slow launches.".to_string(),
-            risk: Risk::Caution,
-            known_folder: Some(KnownFolder::Windows),
-            relative_pattern: "Prefetch".to_string(),
-            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\Windows remains Protected.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-programdata-package-cache".to_string(),
-            title: "ProgramData Package Cache".to_string(),
-            description: "Installer package cache in C:\\ProgramData\\Package Cache used by some installers for repair, modify, or uninstall operations.".to_string(),
-            risk: Risk::Caution,
-            known_folder: Some(KnownFolder::ProgramData),
-            relative_pattern: "Package Cache".to_string(),
-            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\ProgramData remains a Protected container root.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-local-programs".to_string(),
-            title: "Local Programs".to_string(),
-            description: "Per-user installed applications under LocalAppData\\Programs. Removing installed program files can break applications and their updaters.".to_string(),
-            risk: Risk::Protected,
-            known_folder: Some(KnownFolder::LocalAppData),
-            relative_pattern: "Programs".to_string(),
-            notes: "Display-only in Analyzer. Protected/Unknown-installed application content must not be cleaned by Sweeper unless explicitly allowlisted in a future, audited scope.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-rustup".to_string(),
-            title: "Rustup Toolchains".to_string(),
-            description: "Rust toolchains, targets, and components managed by rustup (compilers, stdlibs, and installed targets).".to_string(),
-            risk: Risk::Unknown,
-            known_folder: Some(KnownFolder::UserProfile),
-            relative_pattern: ".rustup".to_string(),
-            notes: "Display-only in Analyzer. Removing toolchains/components can break development environments and require re-download/reinstall; not an allowlisted clean target.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-msix-packages".to_string(),
-            title: "Microsoft Store / MSIX Packages".to_string(),
-            description: "Packaged app installation state and data under LocalAppData\\Packages used by Microsoft Store and MSIX/UWP apps.".to_string(),
-            risk: Risk::Unknown,
-            known_folder: Some(KnownFolder::LocalAppData),
-            relative_pattern: "Packages".to_string(),
-            notes: "Display-only in Analyzer. Package contents may contain app data/state and app registrations; not safe for generic cleaning.".to_string(),
-        },
         KnowledgeEntry {
             id: "kb-windows-root".to_string(),
             title: "Windows Directory".to_string(),
@@ -306,6 +252,38 @@ fn builtin_knowledge_entries_impl() -> Vec<KnowledgeEntry> {
             relative_pattern: "".to_string(),
             notes: "Protected container root in Analyzer. Personal folders and non-allowlisted descendants are not selectable; only explicitly allowlisted subfolders may be cleanable.".to_string(),
         },
+        KnowledgeEntry {
+            id: "kb-program-files".to_string(),
+            title: "Program Files".to_string(),
+            description: "Installed 64-bit (and system-native) applications managed by installers and Windows.".to_string(),
+            risk: Risk::Protected,
+            known_folder: None,
+            relative_pattern: r"C:\Program Files".to_string(),
+            notes: "Subtree-protected. Application binaries and shared components must not be removed by Sweeper.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-program-files-x86".to_string(),
+            title: "Program Files (x86)".to_string(),
+            description: "Installed 32-bit applications on 64-bit Windows systems.".to_string(),
+            risk: Risk::Protected,
+            known_folder: None,
+            relative_pattern: r"C:\Program Files (x86)".to_string(),
+            notes: "Subtree-protected. Application binaries and shared components must not be removed by Sweeper.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-local-programs".to_string(),
+            title: "Local Programs".to_string(),
+            description: "Per-user installed applications under LocalAppData\\Programs. Removing installed program files can break applications and their updaters.".to_string(),
+            risk: Risk::Protected,
+            known_folder: Some(KnownFolder::LocalAppData),
+            relative_pattern: "Programs".to_string(),
+            notes: "Display-only in Analyzer. Protected/Unknown-installed application content must not be cleaned by Sweeper unless explicitly allowlisted in a future, audited scope.".to_string(),
+        },
+    ]
+}
+
+fn user_and_temp_knowledge_entries() -> Vec<KnowledgeEntry> {
+    vec![
         KnowledgeEntry {
             id: "kb-user-desktop".to_string(),
             title: "Desktop".to_string(),
@@ -361,24 +339,6 @@ fn builtin_knowledge_entries_impl() -> Vec<KnowledgeEntry> {
             notes: "Personal user data. Subtree-protected and never selectable for Clean.".to_string(),
         },
         KnowledgeEntry {
-            id: "kb-program-files".to_string(),
-            title: "Program Files".to_string(),
-            description: "Installed 64-bit (and system-native) applications managed by installers and Windows.".to_string(),
-            risk: Risk::Protected,
-            known_folder: None,
-            relative_pattern: r"C:\Program Files".to_string(),
-            notes: "Subtree-protected. Application binaries and shared components must not be removed by Sweeper.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-program-files-x86".to_string(),
-            title: "Program Files (x86)".to_string(),
-            description: "Installed 32-bit applications on 64-bit Windows systems.".to_string(),
-            risk: Risk::Protected,
-            known_folder: None,
-            relative_pattern: r"C:\Program Files (x86)".to_string(),
-            notes: "Subtree-protected. Application binaries and shared components must not be removed by Sweeper.".to_string(),
-        },
-        KnowledgeEntry {
             id: "kb-wsl-docker-vhdx".to_string(),
             title: "WSL / Docker Virtual Disks (.vhdx)".to_string(),
             description: "Virtual disk image files used by WSL distributions and Docker Desktop backends to store Linux/container filesystems.".to_string(),
@@ -386,6 +346,88 @@ fn builtin_knowledge_entries_impl() -> Vec<KnowledgeEntry> {
             known_folder: None,
             relative_pattern: "*.vhdx".to_string(),
             notes: "Display-only in Analyzer. Sweeper v1 must never delete or compact .vhdx files (compaction is out of scope); selecting them for cleanup must be rejected by safety policy.".to_string(),
+        },
+    ]
+}
+
+fn browser_and_app_knowledge_entries() -> Vec<KnowledgeEntry> {
+    vec![
+        KnowledgeEntry {
+            id: "kb-gpu-shader-caches".to_string(),
+            title: "GPU and DirectX Shader Caches".to_string(),
+            description: "Compiled shader and pipeline caches created by DirectX, NVIDIA, and AMD graphics drivers/components (e.g. D3DSCache, DXCache, GLCache, VkCache).".to_string(),
+            risk: Risk::Safe,
+            known_folder: Some(KnownFolder::LocalAppData),
+            relative_pattern: r"D3DSCache; NVIDIA\DXCache; NVIDIA\GLCache; AMD\DxCache; AMD\VkCache".to_string(),
+            notes: "Safe, regenerable caches. Clearing may cause temporary stutter or longer load times while shaders are rebuilt.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-explorer-thumbcache-staging".to_string(),
+            title: "Windows Explorer Thumbnail Cache Staging".to_string(),
+            description: "Staged thumbnail cache cleanup data used by Windows Explorer (ThumbCacheToDelete).".to_string(),
+            risk: Risk::Safe,
+            known_folder: Some(KnownFolder::LocalAppData),
+            relative_pattern: r"Microsoft\Windows\Explorer\ThumbCacheToDelete".to_string(),
+            notes: "Safe. Windows Explorer regenerates thumbnail cache data as needed.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-browser-extra-caches".to_string(),
+            title: "Additional Browser Caches (Firefox, Brave)".to_string(),
+            description: "Regenerable browser cache locations for Firefox profiles (cache2, startupCache) and Brave Chromium cache leaf folders.".to_string(),
+            risk: Risk::Safe,
+            known_folder: Some(KnownFolder::LocalAppData),
+            relative_pattern: r"Mozilla\Firefox\Profiles\*\cache2; BraveSoftware\Brave-Browser\User Data\...\Cache".to_string(),
+            notes: "Safe. Only explicit cache leaf folders/profile cache locations are targeted; browser profile data, cookies, history, and settings are not targeted.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-app-runtime-caches".to_string(),
+            title: "Application Runtime Caches (Discord, Slack, Teams, Spotify, Steam)".to_string(),
+            description: "Regenerable cache data stored by desktop apps such as Discord, Slack, classic Teams, Spotify, and Steam's embedded browser.".to_string(),
+            risk: Risk::Safe,
+            known_folder: Some(KnownFolder::RoamingAppData),
+            relative_pattern: r"discord\Cache; Slack\Cache; Microsoft\Teams\Cache; Spotify\Data; Steam\htmlcache\Cache".to_string(),
+            notes: "Safe. Clearing app caches can free space and may require apps to rebuild cached assets on next launch.".to_string(),
+        },
+    ]
+}
+
+fn developer_and_elevation_knowledge_entries() -> Vec<KnowledgeEntry> {
+    vec![
+        KnowledgeEntry {
+            id: "kb-windows-temp".to_string(),
+            title: "Windows Temp".to_string(),
+            description: "Windows system temporary files under C:\\Windows\\Temp. Contents can be recreated, but active installers or system tasks may still be using files.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::Windows),
+            relative_pattern: "Temp".to_string(),
+            notes: "Caution. Requires administrator elevation. Only this explicit audited subfolder is cleanable; C:\\Windows itself remains a Protected container root.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-windows-update-download-cache".to_string(),
+            title: "Windows Update Download Cache".to_string(),
+            description: "Downloaded Windows Update payloads in C:\\Windows\\SoftwareDistribution\\Download. Clearing can reclaim space but may require updates to be downloaded again.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::Windows),
+            relative_pattern: "SoftwareDistribution\\Download".to_string(),
+            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\Windows remains Protected.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-windows-prefetch".to_string(),
+            title: "Windows Prefetch".to_string(),
+            description: "Windows Prefetch data in C:\\Windows\\Prefetch used to optimize application startup. Removing contents is recoverable but may temporarily slow launches.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::Windows),
+            relative_pattern: "Prefetch".to_string(),
+            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\Windows remains Protected.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-programdata-package-cache".to_string(),
+            title: "ProgramData Package Cache".to_string(),
+            description: "Installer package cache in C:\\ProgramData\\Package Cache used by some installers for repair, modify, or uninstall operations.".to_string(),
+            risk: Risk::Caution,
+            known_folder: Some(KnownFolder::ProgramData),
+            relative_pattern: "Package Cache".to_string(),
+            notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; C:\\ProgramData remains a Protected container root.".to_string(),
         },
         KnowledgeEntry {
             id: "kb-windows-delivery-optimization-cache".to_string(),
@@ -424,40 +466,22 @@ fn builtin_knowledge_entries_impl() -> Vec<KnowledgeEntry> {
             notes: "Caution. Requires administrator elevation. Explicitly audited Phase 6 target only; removes Defender quick-scan history results only.".to_string(),
         },
         KnowledgeEntry {
-            id: "kb-gpu-shader-caches".to_string(),
-            title: "GPU and DirectX Shader Caches".to_string(),
-            description: "Compiled shader and pipeline caches created by DirectX, NVIDIA, and AMD graphics drivers/components (e.g. D3DSCache, DXCache, GLCache, VkCache).".to_string(),
-            risk: Risk::Safe,
-            known_folder: Some(KnownFolder::LocalAppData),
-            relative_pattern: r"D3DSCache; NVIDIA\DXCache; NVIDIA\GLCache; AMD\DxCache; AMD\VkCache".to_string(),
-            notes: "Safe, regenerable caches. Clearing may cause temporary stutter or longer load times while shaders are rebuilt.".to_string(),
+            id: "kb-rustup".to_string(),
+            title: "Rustup Toolchains".to_string(),
+            description: "Rust toolchains, targets, and components managed by rustup (compilers, stdlibs, and installed targets).".to_string(),
+            risk: Risk::Unknown,
+            known_folder: Some(KnownFolder::UserProfile),
+            relative_pattern: ".rustup".to_string(),
+            notes: "Display-only in Analyzer. Removing toolchains/components can break development environments and require re-download/reinstall; not an allowlisted clean target.".to_string(),
         },
         KnowledgeEntry {
-            id: "kb-explorer-thumbcache-staging".to_string(),
-            title: "Windows Explorer Thumbnail Cache Staging".to_string(),
-            description: "Staged thumbnail cache cleanup data used by Windows Explorer (ThumbCacheToDelete).".to_string(),
-            risk: Risk::Safe,
+            id: "kb-msix-packages".to_string(),
+            title: "Microsoft Store / MSIX Packages".to_string(),
+            description: "Packaged app installation state and data under LocalAppData\\Packages used by Microsoft Store and MSIX/UWP apps.".to_string(),
+            risk: Risk::Unknown,
             known_folder: Some(KnownFolder::LocalAppData),
-            relative_pattern: r"Microsoft\Windows\Explorer\ThumbCacheToDelete".to_string(),
-            notes: "Safe. Windows Explorer regenerates thumbnail cache data as needed.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-browser-extra-caches".to_string(),
-            title: "Additional Browser Caches (Firefox, Brave)".to_string(),
-            description: "Regenerable browser cache locations for Firefox profiles (cache2, startupCache) and Brave Chromium cache leaf folders.".to_string(),
-            risk: Risk::Safe,
-            known_folder: Some(KnownFolder::LocalAppData),
-            relative_pattern: r"Mozilla\Firefox\Profiles\*\cache2; BraveSoftware\Brave-Browser\User Data\...\Cache".to_string(),
-            notes: "Safe. Only explicit cache leaf folders/profile cache locations are targeted; browser profile data, cookies, history, and settings are not targeted.".to_string(),
-        },
-        KnowledgeEntry {
-            id: "kb-app-runtime-caches".to_string(),
-            title: "Application Runtime Caches (Discord, Slack, Teams, Spotify, Steam)".to_string(),
-            description: "Regenerable cache data stored by desktop apps such as Discord, Slack, classic Teams, Spotify, and Steam's embedded browser.".to_string(),
-            risk: Risk::Safe,
-            known_folder: Some(KnownFolder::RoamingAppData),
-            relative_pattern: r"discord\Cache; Slack\Cache; Microsoft\Teams\Cache; Spotify\Data; Steam\htmlcache\Cache".to_string(),
-            notes: "Safe. Clearing app caches can free space and may require apps to rebuild cached assets on next launch.".to_string(),
+            relative_pattern: "Packages".to_string(),
+            notes: "Display-only in Analyzer. Package contents may contain app data/state and app registrations; not safe for generic cleaning.".to_string(),
         },
         KnowledgeEntry {
             id: "kb-developer-package-caches".to_string(),

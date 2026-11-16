@@ -1,6 +1,6 @@
 use sweeper_knowledge::{
     builtin_knowledge_entries, builtin_protected_path_catalog, embedded_targets,
-    lint_allowlist_toml, KnownFolder, ProtectedPathKind, Risk, Scope, Tier,
+    lint_allowlist_toml, KnowledgeEntry, KnownFolder, ProtectedPathKind, Risk, Scope, Tier,
 };
 
 #[test]
@@ -69,8 +69,7 @@ fn embedded_allowlist_passes_lint_and_has_expected_targets() {
         .any(|t| t.known_folder == KnownFolder::RoamingAppData));
 }
 
-#[test]
-fn catalogs_and_knowledge_entries_present() {
+fn assert_protected_catalog_present() {
     let prot = builtin_protected_path_catalog();
     assert!(prot
         .entries
@@ -86,6 +85,46 @@ fn catalogs_and_knowledge_entries_present() {
     assert!(prot.entries.iter().any(|e| {
         e.kind == ProtectedPathKind::ProtectedContainerRoot && e.display.contains("C:\\ProgramData")
     }));
+}
+
+fn find_kb_entry_for_target<'a>(kb: &'a [KnowledgeEntry], id: &str) -> &'a KnowledgeEntry {
+    kb.iter()
+        .find(|e| matches_elevation_kb_entry(e, id))
+        .unwrap_or_else(|| panic!("missing knowledge entry for {id}"))
+}
+
+fn matches_elevation_kb_entry(entry: &KnowledgeEntry, id: &str) -> bool {
+    if entry.id == format!("kb-{id}") || entry.id == id {
+        return true;
+    }
+    match id {
+        "windows-temp" => entry.relative_pattern.eq_ignore_ascii_case("Temp"),
+        "windows-update-download-cache" => entry.relative_pattern.contains("SoftwareDistribution"),
+        "windows-prefetch" => entry.relative_pattern.eq_ignore_ascii_case("Prefetch"),
+        "programdata-package-cache" => entry.relative_pattern.contains("Package Cache"),
+        "windows-delivery-optimization-cache" => {
+            entry.relative_pattern.contains("DeliveryOptimization")
+        }
+        "programdata-wer-report-archive" => entry.relative_pattern.contains("ReportArchive"),
+        "programdata-wer-report-queue" => entry.relative_pattern.contains("ReportQueue"),
+        "windows-defender-scan-history" => entry.relative_pattern.contains("Scans"),
+        _ => false,
+    }
+}
+
+fn assert_elevation_entry(entry: &KnowledgeEntry, id: &str) {
+    assert_eq!(entry.risk, Risk::Caution, "{id}");
+    let text =
+        format!("{} {} {}", entry.description, entry.notes, entry.title).to_ascii_lowercase();
+    assert!(
+        text.contains("administrator") || text.contains("elevation") || text.contains("elevated"),
+        "{id}: {text}"
+    );
+}
+
+#[test]
+fn catalogs_and_knowledge_entries_present() {
+    assert_protected_catalog_present();
 
     let kb = builtin_knowledge_entries();
     assert!(kb.iter().any(|e| e.relative_pattern.contains(".rustup")));
@@ -105,33 +144,8 @@ fn catalogs_and_knowledge_entries_present() {
         "programdata-wer-report-queue",
         "windows-defender-scan-history",
     ] {
-        let entry = kb.iter().find(|e| {
-            e.id == format!("kb-{id}")
-                || e.id == id
-                || e.relative_pattern.to_ascii_lowercase().contains("temp") && id == "windows-temp"
-                || (id == "windows-update-download-cache"
-                    && e.relative_pattern.contains("SoftwareDistribution"))
-                || (id == "windows-prefetch" && e.relative_pattern.eq_ignore_ascii_case("Prefetch"))
-                || (id == "programdata-package-cache"
-                    && e.relative_pattern.contains("Package Cache"))
-                || (id == "windows-delivery-optimization-cache"
-                    && e.relative_pattern.contains("DeliveryOptimization"))
-                || (id == "programdata-wer-report-archive"
-                    && e.relative_pattern.contains("ReportArchive"))
-                || (id == "programdata-wer-report-queue"
-                    && e.relative_pattern.contains("ReportQueue"))
-                || (id == "windows-defender-scan-history" && e.relative_pattern.contains("Scans"))
-        });
-        let entry = entry.unwrap_or_else(|| panic!("missing knowledge entry for {id}"));
-        assert_eq!(entry.risk, Risk::Caution, "{id}");
-        let text =
-            format!("{} {} {}", entry.description, entry.notes, entry.title).to_ascii_lowercase();
-        assert!(
-            text.contains("administrator")
-                || text.contains("elevation")
-                || text.contains("elevated"),
-            "{id}: {text}"
-        );
+        let entry = find_kb_entry_for_target(&kb, id);
+        assert_elevation_entry(entry, id);
     }
     assert!(kb.iter().any(|e| {
         e.risk == Risk::Protected
