@@ -27,7 +27,6 @@ import process from 'node:process';
 
 const IGNORED_ADVISORY_IDS = new Set(['GHSA-FC5Q-39XC-VJPF']);
 const BLOCKING_SEVERITIES = new Set(['high', 'critical']);
-const SEVERITY_ORDER = ['info', 'low', 'moderate', 'high', 'critical'];
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ADVISORY_URL_PREFIX = 'https://github.com/advisories/';
 
@@ -73,15 +72,6 @@ function normalizeGhsaId(value) {
   return match ? match[0].toUpperCase() : null;
 }
 
-function severityRank(severity) {
-  const index = SEVERITY_ORDER.indexOf(String(severity || '').toLowerCase());
-  return index === -1 ? 0 : index;
-}
-
-function isHigherSeverity(candidate, current) {
-  return severityRank(candidate) > severityRank(current);
-}
-
 function advisoryUrl(ids) {
   const id = ids[0];
   return id ? `${ADVISORY_URL_PREFIX}${id}` : '';
@@ -119,36 +109,63 @@ function extractV1Advisories(advisories) {
   return Object.entries(advisories).map(([key, raw]) => toV1Advisory(key, raw));
 }
 
-function viaId(entry) {
-  if (typeof entry === 'string') return normalizeGhsaId(entry);
-  return normalizeGhsaId(firstDefined(entry.url, entry.source, entry.id, ''));
+function isViaReference(entry) {
+  return typeof entry === 'string';
+}
+
+function unique(values) {
+  return [...new Set(values)];
+}
+
+function collectViaIds(entry) {
+  return unique([entry.url, entry.source, entry.id, entry.title].map(normalizeGhsaId).filter(Boolean));
 }
 
 function viaSeverity(entry) {
-  return typeof entry === 'string' ? null : entry.severity;
+  return String(firstDefined(entry.severity, 'unknown')).toLowerCase();
 }
 
-function pushViaId(state, entry) {
-  const id = viaId(entry);
-  if (id) state.ids.push(id);
+function toViaCause(entry) {
+  return {
+    allIds: collectViaIds(entry),
+    severity: viaSeverity(entry),
+    title: firstDefined(entry.title, '(untitled advisory)'),
+    moduleName: firstDefined(entry.name, '(unknown module)'),
+  };
 }
 
-function raiseViaSeverity(state, entry) {
-  const severity = viaSeverity(entry);
-  if (severity && isHigherSeverity(severity, state.severity)) {
-    state.severity = String(severity).toLowerCase();
+function toPackageCause(pkg, raw) {
+  return {
+    allIds: [],
+    severity: String(firstDefined(raw.severity, 'unknown')).toLowerCase(),
+    title: `Vulnerability in ${pkg}`,
+    moduleName: pkg,
+  };
+}
+
+/**
+ * Resolve one package's `via` list into individual advisory causes. Each
+ * object entry is one cause with its own ids and severity. A string entry is a
+ * reference to another vulnerability entry and is followed through
+ * `vulnerabilities`; the visited set makes cycles terminate.
+ */
+function resolveCauses(pkg, vulnerabilities, visited) {
+  if (visited.has(pkg)) return [];
+  visited.add(pkg);
+
+  const raw = vulnerabilities[pkg];
+  if (!isObject(raw)) return [];
+
+  const causes = [];
+  for (const entry of asArray(raw.via)) {
+    if (isViaReference(entry)) {
+      causes.push(...resolveCauses(entry, vulnerabilities, visited));
+    } else if (isObject(entry)) {
+      causes.push(toViaCause(entry));
+    }
   }
-}
 
-function applyViaEntry(state, entry) {
-  pushViaId(state, entry);
-  raiseViaSeverity(state, entry);
-}
-
-function collectViaData(via, initialSeverity) {
-  const state = { ids: [], severity: initialSeverity };
-  for (const entry of via) applyViaEntry(state, entry);
-  return state;
+  return causes.length > 0 ? causes : [toPackageCause(pkg, raw)];
 }
 
 function describeFix(fix, pkg) {
@@ -159,24 +176,26 @@ function describeFix(fix, pkg) {
   return 'none reported';
 }
 
-function toV2Advisory(pkg, raw) {
-  const via = asArray(raw.via);
-  const initialSeverity = String(firstDefined(raw.severity, '')).toLowerCase();
-  const { ids, severity } = collectViaData(via, initialSeverity);
+function toAdvisoryFromCause(pkg, raw, cause) {
   return {
     key: pkg,
-    id: primaryId(ids, pkg),
-    allIds: ids,
-    severity: severity || 'unknown',
-    title: `Vulnerability in ${pkg}`,
-    moduleName: pkg,
+    id: primaryId(cause.allIds, pkg),
+    allIds: cause.allIds,
+    severity: cause.severity,
+    title: cause.title,
+    moduleName: cause.moduleName,
     patchedVersions: describeFix(raw.fixAvailable, pkg),
-    url: advisoryUrl(ids),
+    url: advisoryUrl(cause.allIds),
   };
 }
 
 function extractV2Advisories(vulnerabilities) {
-  return Object.entries(vulnerabilities).map(([pkg, raw]) => toV2Advisory(pkg, raw));
+  const advisories = [];
+  for (const [pkg, raw] of Object.entries(vulnerabilities)) {
+    const causes = resolveCauses(pkg, vulnerabilities, new Set());
+    for (const cause of causes) advisories.push(toAdvisoryFromCause(pkg, raw, cause));
+  }
+  return advisories;
 }
 
 /**
@@ -190,6 +209,37 @@ function extractAdvisories(report) {
   if (isObject(report.advisories)) return extractV1Advisories(report.advisories);
   if (isObject(report.vulnerabilities)) return extractV2Advisories(report.vulnerabilities);
   return [];
+}
+
+// ---------------------------------------------------------------------------
+// Report validation (fail closed on registry errors / unsupported shapes)
+// ---------------------------------------------------------------------------
+
+function hasSupportedShape(report) {
+  return isObject(report.advisories) || isObject(report.vulnerabilities);
+}
+
+function describeReportError(report) {
+  if (!isObject(report.error)) return 'registry error object';
+  return firstDefined(report.error.message, report.error.summary, 'registry error object');
+}
+
+/**
+ * Fail closed for error objects and unknown shapes. A non-zero audit exit is
+ * expected whenever advisories exist, so validity is judged from the report
+ * itself: valid (even empty) reports pass through regardless of exit status.
+ */
+function validateReport(report) {
+  if (!isObject(report)) {
+    throw new Error('Unsupported audit report: expected a JSON object');
+  }
+  if (report.error !== undefined) {
+    throw new Error(`Audit reported an error: ${describeReportError(report)}`);
+  }
+  if (!hasSupportedShape(report)) {
+    throw new Error('Unsupported audit report shape: expected advisories or vulnerabilities');
+  }
+  return report;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +344,12 @@ function countBySeverity(advisories) {
   return counts;
 }
 
+/**
+ * The exception applies to individual advisory causes, never to a whole
+ * package. Each v2 `via` cause is normalized into its own advisory, so a
+ * package carrying both an excepted advisory and an unrelated one still
+ * produces a separate blocking advisory for the unrelated cause.
+ */
 function isIgnoredAdvisory(advisory) {
   return advisory.allIds.some((id) => IGNORED_ADVISORY_IDS.has(id.toUpperCase()));
 }
@@ -397,7 +453,7 @@ function reportResult(blocking) {
 }
 
 async function checkAudit() {
-  const report = await loadReport();
+  const report = validateReport(await loadReport());
   const advisories = extractAdvisories(report);
   const counts = countBySeverity(advisories);
   const groups = partitionAdvisories(advisories);
