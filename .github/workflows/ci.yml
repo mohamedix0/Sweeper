@@ -91,7 +91,15 @@ jobs:
 
       - name: pnpm audit (high)
         working-directory: app/frontend
-        run: pnpm audit --audit-level=high
+        # TEMPORARY EXCEPTION - remove once picomatch publishes a patched version.
+        # Ignored advisory: GHSA-fc5q-39xc-vjpf (CVE-2026-112366), picomatch <= 4.0.7 ReDoS.
+        # Why ignored: the GitHub Advisory Database lists NO patched version (advisory
+        # updated 2026-11-17); it is reachable only through devDependencies
+        # (@typescript-eslint -> tinyglobby -> picomatch) and never ships in the runtime bundle.
+        # The frontend audit script still fails on ANY other high/critical advisory.
+        # MUST be removed from scripts/check-audit.mjs once a patched version is released:
+        # https://github.com/mohamedix0/Sweeper/issues/49
+        run: node scripts/check-audit.mjs
 
       - name: Frontend typecheck
         working-directory: app/frontend
