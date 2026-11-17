@@ -15,6 +15,10 @@
  *   runtime bundle.
  *   REMOVE this id from IGNORED_ADVISORY_IDS as soon as picomatch publishes a
  *   patched version. Tracked in the GitHub issue referenced by ci.yml.
+ *
+ * The implementation is deliberately split into small single-purpose helpers:
+ * parsing, normalization, classification, and printing stay separate so each
+ * function has a single reason to change and shallow nesting.
  */
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
@@ -25,6 +29,40 @@ const IGNORED_ADVISORY_IDS = new Set(['GHSA-FC5Q-39XC-VJPF']);
 const BLOCKING_SEVERITIES = new Set(['high', 'critical']);
 const SEVERITY_ORDER = ['info', 'low', 'moderate', 'high', 'critical'];
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const ADVISORY_URL_PREFIX = 'https://github.com/advisories/';
+
+// ---------------------------------------------------------------------------
+// Generic value helpers
+// ---------------------------------------------------------------------------
+
+/** Return the first argument that is neither null nor undefined. */
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object';
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function primaryId(ids, fallback) {
+  return ids[0] ?? fallback;
+}
+
+function parseJson(text, source) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Invalid audit JSON from ${source}: ${error.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Identifier & severity helpers
+// ---------------------------------------------------------------------------
 
 /** Normalize any GHSA identifier we find into a comparable uppercase form. */
 function normalizeGhsaId(value) {
@@ -40,12 +78,105 @@ function severityRank(severity) {
   return index === -1 ? 0 : index;
 }
 
-function parseJson(text, source) {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw new Error(`Invalid audit JSON from ${source}: ${error.message}`);
+function isHigherSeverity(candidate, current) {
+  return severityRank(candidate) > severityRank(current);
+}
+
+function advisoryUrl(ids) {
+  const id = ids[0];
+  return id ? `${ADVISORY_URL_PREFIX}${id}` : '';
+}
+
+function severityBucket(advisory, counts) {
+  return advisory.severity in counts ? advisory.severity : 'unknown';
+}
+
+// ---------------------------------------------------------------------------
+// Audit report extraction (v1: advisories, v2: vulnerabilities)
+// ---------------------------------------------------------------------------
+
+function collectGhsaIds(raw) {
+  return [raw.github_advisory_id, raw.npm_advisory_id, raw.title]
+    .map(normalizeGhsaId)
+    .filter(Boolean);
+}
+
+function toV1Advisory(key, raw) {
+  const ids = collectGhsaIds(raw);
+  return {
+    key,
+    id: primaryId(ids, String(key)),
+    allIds: ids,
+    severity: String(firstDefined(raw.severity, 'unknown')).toLowerCase(),
+    title: firstDefined(raw.title, '(untitled advisory)'),
+    moduleName: firstDefined(raw.module_name, raw.module, '(unknown module)'),
+    patchedVersions: firstDefined(raw.patched_versions, 'unknown'),
+    url: firstDefined(raw.url, ''),
+  };
+}
+
+function extractV1Advisories(advisories) {
+  return Object.entries(advisories).map(([key, raw]) => toV1Advisory(key, raw));
+}
+
+function viaId(entry) {
+  if (typeof entry === 'string') return normalizeGhsaId(entry);
+  return normalizeGhsaId(firstDefined(entry.url, entry.source, entry.id, ''));
+}
+
+function viaSeverity(entry) {
+  return typeof entry === 'string' ? null : entry.severity;
+}
+
+function pushViaId(state, entry) {
+  const id = viaId(entry);
+  if (id) state.ids.push(id);
+}
+
+function raiseViaSeverity(state, entry) {
+  const severity = viaSeverity(entry);
+  if (severity && isHigherSeverity(severity, state.severity)) {
+    state.severity = String(severity).toLowerCase();
   }
+}
+
+function applyViaEntry(state, entry) {
+  pushViaId(state, entry);
+  raiseViaSeverity(state, entry);
+}
+
+function collectViaData(via, initialSeverity) {
+  const state = { ids: [], severity: initialSeverity };
+  for (const entry of via) applyViaEntry(state, entry);
+  return state;
+}
+
+function describeFix(fix, pkg) {
+  if (fix === true) return 'a fix is available';
+  if (fix && typeof fix === 'object') {
+    return `a fix is available (${firstDefined(fix.name, pkg)})`;
+  }
+  return 'none reported';
+}
+
+function toV2Advisory(pkg, raw) {
+  const via = asArray(raw.via);
+  const initialSeverity = String(firstDefined(raw.severity, '')).toLowerCase();
+  const { ids, severity } = collectViaData(via, initialSeverity);
+  return {
+    key: pkg,
+    id: primaryId(ids, pkg),
+    allIds: ids,
+    severity: severity || 'unknown',
+    title: `Vulnerability in ${pkg}`,
+    moduleName: pkg,
+    patchedVersions: describeFix(raw.fixAvailable, pkg),
+    url: advisoryUrl(ids),
+  };
+}
+
+function extractV2Advisories(vulnerabilities) {
+  return Object.entries(vulnerabilities).map(([pkg, raw]) => toV2Advisory(pkg, raw));
 }
 
 /**
@@ -55,67 +186,15 @@ function parseJson(text, source) {
  * We consume whichever shape is present so a single issue is never counted twice.
  */
 function extractAdvisories(report) {
-  const advisories = [];
-  if (!report || typeof report !== 'object') return advisories;
-
-  if (report.advisories && typeof report.advisories === 'object') {
-    for (const [key, raw] of Object.entries(report.advisories)) {
-      const ids = [raw.github_advisory_id, raw.npm_advisory_id, raw.title]
-        .map(normalizeGhsaId)
-        .filter(Boolean);
-      advisories.push({
-        key,
-        id: ids[0] ?? String(key),
-        allIds: ids,
-        severity: String(raw.severity ?? 'unknown').toLowerCase(),
-        title: raw.title ?? '(untitled advisory)',
-        moduleName: raw.module_name ?? raw.module ?? '(unknown module)',
-        patchedVersions: raw.patched_versions ?? 'unknown',
-        url: raw.url ?? '',
-      });
-    }
-    return advisories;
-  }
-
-  if (report.vulnerabilities && typeof report.vulnerabilities === 'object') {
-    for (const [pkg, raw] of Object.entries(report.vulnerabilities)) {
-      const via = Array.isArray(raw.via) ? raw.via : [];
-      const ids = [];
-      let severity = String(raw.severity ?? '').toLowerCase();
-      for (const entry of via) {
-        if (typeof entry === 'string') {
-          const id = normalizeGhsaId(entry);
-          if (id) ids.push(id);
-          continue;
-        }
-        const id = normalizeGhsaId(entry.url ?? entry.source ?? entry.id ?? '');
-        if (id) ids.push(id);
-        if (severityRank(entry.severity) > severityRank(severity)) {
-          severity = String(entry.severity).toLowerCase();
-        }
-      }
-      const fix = raw.fixAvailable;
-      const patchedVersions =
-        fix === true
-          ? 'a fix is available'
-          : typeof fix === 'object' && fix !== null
-            ? `a fix is available (${fix.name ?? pkg})`
-            : 'none reported';
-      advisories.push({
-        key: pkg,
-        id: ids[0] ?? pkg,
-        allIds: ids,
-        severity: severity || 'unknown',
-        title: `Vulnerability in ${pkg}`,
-        moduleName: pkg,
-        patchedVersions,
-        url: ids[0] ? `https://github.com/advisories/${ids[0]}` : '',
-      });
-    }
-  }
-
-  return advisories;
+  if (!isObject(report)) return [];
+  if (isObject(report.advisories)) return extractV1Advisories(report.advisories);
+  if (isObject(report.vulnerabilities)) return extractV2Advisories(report.vulnerabilities);
+  return [];
 }
+
+// ---------------------------------------------------------------------------
+// Report loading (stdin / piped input / live pnpm audit)
+// ---------------------------------------------------------------------------
 
 /** Read piped stdin, with an optional timeout to avoid hanging on an idle pipe. */
 function readStdin(timeoutMs = 0) {
@@ -180,99 +259,152 @@ function runAudit() {
   });
 }
 
+async function readForcedStdin() {
+  const text = await readStdin();
+  if (!text.trim()) {
+    throw new Error('--stdin was set but no JSON was provided on stdin');
+  }
+  return parseJson(text, 'stdin');
+}
+
+async function readPipedStdin() {
+  const text = await readStdin(300);
+  return text.trim() ? parseJson(text, 'stdin') : null;
+}
+
+async function loadFromPipe() {
+  if (process.stdin.isTTY) return null;
+  return readPipedStdin();
+}
+
 async function loadReport() {
-  const forceStdin = process.argv.includes('--stdin');
-  if (forceStdin) {
-    const text = await readStdin();
-    if (!text.trim()) {
-      throw new Error('--stdin was set but no JSON was provided on stdin');
-    }
-    return parseJson(text, 'stdin');
-  }
-  if (!process.stdin.isTTY) {
-    const text = await readStdin(300);
-    if (text.trim()) return parseJson(text, 'stdin');
-  }
+  if (process.argv.includes('--stdin')) return readForcedStdin();
+  const piped = await loadFromPipe();
+  if (piped) return piped;
   return runAudit();
 }
 
-async function checkAudit() {
-  const report = await loadReport();
-  const advisories = extractAdvisories(report);
+// ---------------------------------------------------------------------------
+// Classification
+// ---------------------------------------------------------------------------
 
+function countBySeverity(advisories) {
   const counts = { info: 0, low: 0, moderate: 0, high: 0, critical: 0, unknown: 0 };
-  for (const advisory of advisories) {
-    const severity = advisory.severity in counts ? advisory.severity : 'unknown';
-    counts[severity] += 1;
-  }
+  for (const advisory of advisories) counts[severityBucket(advisory, counts)] += 1;
+  return counts;
+}
 
-  const ignored = [];
-  const blocking = [];
-  const informational = [];
-  for (const advisory of advisories) {
-    if (advisory.allIds.some((id) => IGNORED_ADVISORY_IDS.has(id.toUpperCase()))) {
-      ignored.push(advisory);
-    } else if (BLOCKING_SEVERITIES.has(advisory.severity)) {
-      blocking.push(advisory);
-    } else {
-      informational.push(advisory);
-    }
-  }
+function isIgnoredAdvisory(advisory) {
+  return advisory.allIds.some((id) => IGNORED_ADVISORY_IDS.has(id.toUpperCase()));
+}
 
+function isBlockingAdvisory(advisory) {
+  return BLOCKING_SEVERITIES.has(advisory.severity);
+}
+
+function classifyAdvisory(advisory) {
+  if (isIgnoredAdvisory(advisory)) return 'ignored';
+  if (isBlockingAdvisory(advisory)) return 'blocking';
+  return 'informational';
+}
+
+function partitionAdvisories(advisories) {
+  const groups = { ignored: [], blocking: [], informational: [] };
+  for (const advisory of advisories) groups[classifyAdvisory(advisory)].push(advisory);
+  return groups;
+}
+
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+
+function printUrl(url, indent) {
+  if (url) console.log(`${indent}${url}`);
+}
+
+function printHeader(advisories, counts) {
   console.log('=== Frontend dependency audit (high/critical gate) ===');
   console.log(`Advisories reported: ${advisories.length}`);
   console.log(
     `  info=${counts.info} low=${counts.low} moderate=${counts.moderate} ` +
       `high=${counts.high} critical=${counts.critical}`,
   );
+  if (advisories.length === 0) console.log('No advisories reported by the audit.');
+}
 
-  if (advisories.length === 0) {
-    console.log('No advisories reported by the audit.');
-  }
+function printInformationalOne(advisory) {
+  console.log('');
+  console.log(`[${advisory.severity.toUpperCase()}] ${advisory.id} - ${advisory.moduleName}`);
+  console.log(`    ${advisory.title}`);
+  printUrl(advisory.url, '    ');
+}
 
-  for (const advisory of informational) {
-    console.log('');
-    console.log(`[${advisory.severity.toUpperCase()}] ${advisory.id} - ${advisory.moduleName}`);
-    console.log(`    ${advisory.title}`);
-    if (advisory.url) console.log(`    ${advisory.url}`);
-  }
+function printInformational(advisories) {
+  for (const advisory of advisories) printInformationalOne(advisory);
+}
 
-  for (const advisory of ignored) {
-    console.log('');
-    console.log(
-      `[IGNORED - TEMPORARY EXCEPTION] ${advisory.id} - ${advisory.moduleName} ` +
-        `(severity: ${advisory.severity})`,
-    );
-    console.log(`    Title: ${advisory.title}`);
-    console.log(`    Patched versions: ${advisory.patchedVersions || 'NONE'}`);
-    console.log('    Why ignored: NO patched version is available (advisory updated 2026-11-17).');
-    console.log('                 It is reachable only via devDependencies');
-    console.log('                 (@typescript-eslint -> tinyglobby -> picomatch) and never');
-    console.log('                 ships in the runtime bundle.');
-    console.log('    ACTION REQUIRED: remove this exception once a patched version is released.');
-    if (advisory.url) console.log(`    ${advisory.url}`);
-  }
+function printIgnoredOne(advisory) {
+  console.log('');
+  console.log(
+    `[IGNORED - TEMPORARY EXCEPTION] ${advisory.id} - ${advisory.moduleName} ` +
+      `(severity: ${advisory.severity})`,
+  );
+  console.log(`    Title: ${advisory.title}`);
+  console.log(`    Patched versions: ${advisory.patchedVersions || 'NONE'}`);
+  console.log('    Why ignored: NO patched version is available (advisory updated 2026-11-17).');
+  console.log('                 It is reachable only via devDependencies');
+  console.log('                 (@typescript-eslint -> tinyglobby -> picomatch) and never');
+  console.log('                 ships in the runtime bundle.');
+  console.log('    ACTION REQUIRED: remove this exception once a patched version is released.');
+  printUrl(advisory.url, '    ');
+}
 
+function printIgnored(advisories) {
+  for (const advisory of advisories) printIgnoredOne(advisory);
+}
+
+function printBlockingOne(advisory) {
+  console.log(
+    `  - ${advisory.id} - ${advisory.moduleName} (severity: ${advisory.severity}): ` +
+      advisory.title,
+  );
+  printUrl(advisory.url, '      ');
+}
+
+function printBlocking(blocking) {
+  console.log('');
+  console.log('BLOCKING high/critical advisories (not on the exception list):');
+  for (const advisory of blocking) printBlockingOne(advisory);
+  console.log('');
+  console.log('FAIL: high/critical advisory gate failed.');
+}
+
+function printPass() {
+  const ignoredLabel = [...IGNORED_ADVISORY_IDS].join(', ');
+  console.log('');
+  console.log(
+    `PASS: no high/critical advisories other than the documented exception (${ignoredLabel}).`,
+  );
+}
+
+function reportResult(blocking) {
   if (blocking.length > 0) {
-    console.log('');
-    console.log('BLOCKING high/critical advisories (not on the exception list):');
-    for (const advisory of blocking) {
-      console.log(
-        `  - ${advisory.id} - ${advisory.moduleName} (severity: ${advisory.severity}): ` +
-          advisory.title,
-      );
-      if (advisory.url) console.log(`      ${advisory.url}`);
-    }
-    console.log('');
-    console.log('FAIL: high/critical advisory gate failed.');
+    printBlocking(blocking);
     process.exitCode = 1;
-  } else {
-    const ignoredLabel = [...IGNORED_ADVISORY_IDS].join(', ');
-    console.log('');
-    console.log(
-      `PASS: no high/critical advisories other than the documented exception (${ignoredLabel}).`,
-    );
+    return;
   }
+  printPass();
+}
+
+async function checkAudit() {
+  const report = await loadReport();
+  const advisories = extractAdvisories(report);
+  const counts = countBySeverity(advisories);
+  const groups = partitionAdvisories(advisories);
+  printHeader(advisories, counts);
+  printInformational(groups.informational);
+  printIgnored(groups.ignored);
+  reportResult(groups.blocking);
 }
 
 try {
