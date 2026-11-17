@@ -12,13 +12,13 @@ function noticeMessage(text: string, prefix?: string): string {
   return text;
 }
 
-function Notice(props: { kind: 'error' | 'info'; role: 'alert' | 'status'; text: string | null; prefix?: string }) {
+function Notice(props: { kind: 'error' | 'warn' | 'info'; role: 'alert' | 'status'; text: string | null; prefix?: string }) {
   if (!props.text) return null;
   const msg = noticeMessage(props.text, props.prefix);
   return <div className={`notice ${props.kind}`} role={props.role}>{msg}</div>;
 }
 
-export function ScanNotices(props: { elevationError: string | null; relaunchInfo: string | null; relaunchError: string | null; error: string | null; info: string | null }) {
+export function ScanNotices(props: { elevationError: string | null; relaunchInfo: string | null; relaunchError: string | null; error: string | null; info: string | null; explanationWarning?: string | null }) {
   return (
     <>
       <Notice kind="error" role="alert" text={props.elevationError} prefix="Elevation status unavailable: " />
@@ -26,6 +26,7 @@ export function ScanNotices(props: { elevationError: string | null; relaunchInfo
       <Notice kind="error" role="alert" text={props.relaunchError} />
       <Notice kind="error" role="alert" text={props.error} />
       <Notice kind="info" role="status" text={props.info} />
+      <Notice kind="warn" role="alert" text={props.explanationWarning ?? null} />
     </>
   );
 }

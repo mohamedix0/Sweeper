@@ -6,6 +6,7 @@ import { AnalyzerTreeRow } from './AnalyzerTreeRow';
 import { AnalyzerToolbar } from './AnalyzerViewParts';
 import type { AnalyzerStatusFilter, FlatAnalyzerRow } from './analyzerHelpers';
 import type { ExplainState, PreviewResult } from '../cleanShared';
+import type { PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 
 type ResultsProps = {
   rows: FlatAnalyzerRow[];
@@ -27,6 +28,7 @@ type ResultsProps = {
   allVisibleSelectableSelected: boolean;
   inspected: ExplainState;
   inspectedNode: AnalyzerNodeDto | null;
+  selectionSources: readonly PreviewRiskCalloutSource[];
   requiresConfirmation: boolean;
   confirmText: string;
   preview: PreviewResult | null;
@@ -97,7 +99,7 @@ export function AnalyzerResults(props: ResultsProps) {
             </div>
           </div>
         </div>
-        <AnalyzerInspectorPanel inspected={props.inspected} inspectedNode={props.inspectedNode} allowDeleteUnknown={props.allowDeleteUnknown} requiresConfirmation={props.requiresConfirmation} confirmText={props.confirmText} onConfirmText={props.onConfirmText} preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.cleanProgressLabel} cleanSummary={props.cleanSummary} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
+        <AnalyzerInspectorPanel inspected={props.inspected} inspectedNode={props.inspectedNode} selectedIds={props.selectedIds} selectionSources={props.selectionSources} allowDeleteUnknown={props.allowDeleteUnknown} requiresConfirmation={props.requiresConfirmation} confirmText={props.confirmText} onConfirmText={props.onConfirmText} preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.cleanProgressLabel} cleanSummary={props.cleanSummary} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
       </section>
       <AnalyzerCleanPanel selectedCount={props.selectedCount} selectedBytes={props.selectedBytes} hasPreview={Boolean(props.preview)} hasSelectedRisky={props.hasSelectedRisky} cleaning={props.cleaning} previewLoading={props.previewLoading} canPreview={props.canPreview} canClean={props.canClean} onClear={props.onClear} onPreview={props.onPreview} onClean={props.onClean} />
     </>

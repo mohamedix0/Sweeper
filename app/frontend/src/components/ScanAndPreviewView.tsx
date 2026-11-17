@@ -1,8 +1,9 @@
-import { forwardRef, useImperativeHandle, useMemo, type ReactNode } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, type ReactNode } from 'react';
 import { type ElevationStatus, type Settings, type SweeperClient } from '../api/client';
-import type { TargetScanResultDto } from '../contract/bindings';
+import type { ScanItemDto, TargetScanResultDto } from '../contract/bindings';
 import { formatBytes } from '../utils/format';
-import { TYPED_CONFIRMATION_PHRASE } from './cleanShared';
+import { TYPED_CONFIRMATION_PHRASE, type PreviewResult } from './cleanShared';
+import type { PreviewRiskCalloutSource } from './PreviewRiskCallouts';
 import { ScanCleanBar } from './scan/ScanCleanBar';
 import { ScanResultsSection, ScanScanningLayout } from './scan/ScanResultsSection';
 import { ScanViewControls } from './scan/ScanViewControls';
@@ -25,10 +26,10 @@ type Props = {
   onOpenSettings?: (focus?: 'allowDeleteUnknown' | 'enableTier3' | null, prefillCustomPath?: string | null) => void;
 };
 
-function toggleSetId(prev: Set<string>, id: string): Set<string> {
-  const next = new Set(prev);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
+function toggleSetId(args: { prev: Set<string>; id: string }): Set<string> {
+  const next = new Set(args.prev);
+  if (next.has(args.id)) next.delete(args.id);
+  else next.add(args.id);
   return next;
 }
 
@@ -44,16 +45,16 @@ function inspectedMatches(args: { inspected: ReturnType<typeof useScanWorkflow>[
   return args.inspected.itemId === args.itemId;
 }
 
-function findItemInTarget(target: TargetScanResultDto, itemId: string) {
-  const item = target.items.find((i) => i.id === itemId);
+function findItemInTarget(args: { target: TargetScanResultDto; itemId: string }) {
+  const item = args.target.items.find((i) => i.id === args.itemId);
   if (!item) return null;
-  return { target, item };
+  return { target: args.target, item };
 }
 
 function findInspectedCtx(args: { focus: ReturnType<typeof useScanWorkflow>['focus']; inspected: ReturnType<typeof useScanWorkflow>['inspected']; targets: TargetScanResultDto[] }) {
   const itemId = focusItemId(args.focus);
   if (!inspectedMatches({ inspected: args.inspected, itemId })) return null;
-  const found = args.targets.map((target) => findItemInTarget(target, itemId!)).find((value) => value != null);
+  const found = args.targets.map((target) => findItemInTarget({ target, itemId: itemId! })).find((value) => value != null);
   return found ?? null;
 }
 
@@ -122,13 +123,13 @@ function StatusBlocks(props: { w: ReturnType<typeof useScanWorkflow>; d: ReturnT
   );
 }
 
-function ResultsBlocks(props: { client: SweeperClient; w: ReturnType<typeof useScanWorkflow>; d: ReturnType<typeof useScanDerived>; focusedGroup: TargetScanResultDto | null; inspectedCtx: ReturnType<typeof findInspectedCtx>; canPreview: boolean; canClean: boolean; onOpenLog: Props['onOpenLog']; onOpenSettings: Props['onOpenSettings']; onToggleCollapsed: (id: string) => void; onToggleShowAll: (id: string) => void; onToggleGroupSelect: (t: TargetScanResultDto) => void; cleanProgress: string | null }) {
+function ResultsBlocks(props: { client: SweeperClient; w: ReturnType<typeof useScanWorkflow>; d: ReturnType<typeof useScanDerived>; focusedGroup: TargetScanResultDto | null; inspectedCtx: ReturnType<typeof findInspectedCtx>; selectionSources: readonly PreviewRiskCalloutSource[]; canPreview: boolean; canClean: boolean; onOpenLog: Props['onOpenLog']; onOpenSettings: Props['onOpenSettings']; onToggleCollapsed: (id: string) => void; onToggleShowAll: (id: string) => void; onToggleGroupSelect: (t: TargetScanResultDto) => void; cleanProgress: string | null }) {
   if (!props.w.results) return null;
   const { w, d } = props;
   const masterIndeterminate = !d.allEligibleSelected && d.sel.size > 0;
   return (
     <>
-      <ScanResultsSection targets={d.targets} visibleTargets={w.visibleTargets} allow={d.allow} minAgeHours={w.effectiveMinAgeHours} selectedIds={d.sel} collapsedTargets={w.collapsedTargets} showAllGroups={w.showAllGroups} focus={w.focus} focusedGroup={props.focusedGroup} inspected={w.inspected} inspectedCtx={props.inspectedCtx} cleaning={w.cleaning} scanning={w.scanning} eligibleSafeIdsLength={d.eligibleSafeIds.length} allEligibleSelected={d.allEligibleSelected} masterIndeterminate={masterIndeterminate} requiresConfirmation={d.requiresConfirmation} confirmText={w.confirmText} preview={w.preview} cleanProgressLabel={props.cleanProgress} cleanSummary={w.cleanSummary} onToggleSelectAll={() => toggleSelectAllEligibleSafe({ w, allEligibleSelected: d.allEligibleSelected, eligibleSafeIds: d.eligibleSafeIds })} onFocusGroup={(targetId) => w.setFocus({ kind: 'group', targetId })} onToggleCollapsed={props.onToggleCollapsed} onToggleGroupSelect={props.onToggleGroupSelect} onToggleItem={(item, target) => toggleScanItem({ w, item, target, allow: d.allow })} onToggleShowAll={props.onToggleShowAll} onConfirmText={w.setConfirmText} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
+      <ScanResultsSection targets={d.targets} visibleTargets={w.visibleTargets} allow={d.allow} minAgeHours={w.effectiveMinAgeHours} selectedIds={d.sel} selectionSources={props.selectionSources} collapsedTargets={w.collapsedTargets} showAllGroups={w.showAllGroups} focus={w.focus} focusedGroup={props.focusedGroup} inspected={w.inspected} inspectedCtx={props.inspectedCtx} cleaning={w.cleaning} scanning={w.scanning} eligibleSafeIdsLength={d.eligibleSafeIds.length} allEligibleSelected={d.allEligibleSelected} masterIndeterminate={masterIndeterminate} requiresConfirmation={d.requiresConfirmation} confirmText={w.confirmText} preview={w.preview} cleanProgressLabel={props.cleanProgress} cleanSummary={w.cleanSummary} onToggleSelectAll={() => toggleSelectAllEligibleSafe({ w, allEligibleSelected: d.allEligibleSelected, eligibleSafeIds: d.eligibleSafeIds })} onFocusGroup={(targetId) => w.setFocus({ kind: 'group', targetId })} onToggleCollapsed={props.onToggleCollapsed} onToggleGroupSelect={props.onToggleGroupSelect} onToggleItem={(item, target) => toggleScanItem({ w, item, target, allow: d.allow })} onToggleShowAll={props.onToggleShowAll} onConfirmText={w.setConfirmText} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
       <ScanCleanBar selectedIdsCount={d.sel.size} selectedCategoryCount={d.selectedCategoryCount} selectedBytes={d.selectedBytes} cleaning={w.cleaning} previewLoading={w.previewLoading} hasPreview={!!w.preview} canPreview={props.canPreview} canClean={props.canClean} onClear={() => clearScanSelection({ w })} onPreview={() => void runScanPreview({ w, client: props.client, sel: d.sel, requiresConfirmation: d.requiresConfirmation, sessionId: w.sessionId!, confirmText: w.confirmText })} onClean={() => void runScanClean({ w, client: props.client })} />
     </>
   );
@@ -139,46 +140,200 @@ function focusedGroupFor(focus: ReturnType<typeof useScanWorkflow>['focus'], tar
   return targets.find((t) => t.targetId === focus.targetId) ?? null;
 }
 
+type ExplainedItem = Awaited<ReturnType<SweeperClient['explainItem']>>;
+type ItemContext = { target: TargetScanResultDto; item: ScanItemDto };
+type SelectionSourcesState = {
+  sources: readonly PreviewRiskCalloutSource[];
+  pending: boolean;
+  failedCount: number;
+};
+type ResolvedSelection = {
+  key: string;
+  preview: PreviewResult;
+  sources: readonly PreviewRiskCalloutSource[];
+  failedCount: number;
+};
+
+const EXPLANATION_UNAVAILABLE = 'Explanation unavailable for this item — showing its known identity and risk only.';
+const EMPTY_SELECTION_SOURCES: SelectionSourcesState = { sources: [], pending: false, failedCount: 0 };
+const PENDING_SELECTION_SOURCES: SelectionSourcesState = { sources: [], pending: true, failedCount: 0 };
+
+function buildItemContext(args: { targets: TargetScanResultDto[] }): Map<string, ItemContext> {
+  const byId = new Map<string, ItemContext>();
+  for (const target of args.targets) for (const item of target.items) byId.set(item.id, { target, item });
+  return byId;
+}
+
+function explainedSource(args: { explained: ExplainedItem; targetId: string | null }): PreviewRiskCalloutSource {
+  return {
+    itemId: args.explained.itemId,
+    title: args.explained.title,
+    description: args.explained.description,
+    risk: args.explained.risk,
+    targetId: args.targetId,
+  };
+}
+
+function fallbackRisk(args: { targetRisk: TargetScanResultDto['risk'] | undefined }): TargetScanResultDto['risk'] {
+  // Preserve the target's known Risk (Safe included); 'Unknown' is only for a
+  // genuinely unavailable Risk, never a substitute that invents a warning.
+  if (args.targetRisk != null) return args.targetRisk;
+  return 'Unknown';
+}
+
+function fallbackSource(args: { itemId: string; ctx: ItemContext | undefined }): PreviewRiskCalloutSource {
+  return {
+    itemId: args.itemId,
+    title: args.ctx?.item.path ?? args.itemId,
+    description: EXPLANATION_UNAVAILABLE,
+    risk: fallbackRisk({ targetRisk: args.ctx?.target.risk }),
+    targetId: args.ctx?.target.targetId ?? null,
+  };
+}
+
+function reportExplanationFailure(args: { itemId: string; error: unknown }): void {
+  console.warn(`Sweeper: explanation unavailable for selected item ${args.itemId}.`, args.error);
+}
+
+type ResolvedExplanation = { source: PreviewRiskCalloutSource; failed: boolean };
+
+/** Pure render-time gate: explanations must match both the selection and the current Preview generation. */
+function derivationPending(args: {
+  needs: boolean;
+  selectedKey: string;
+  preview: PreviewResult | null;
+  resolved: ResolvedSelection | null;
+}): boolean {
+  if (!args.needs) return false;
+  return args.resolved == null || args.resolved.key !== args.selectedKey || args.resolved.preview !== args.preview;
+}
+
+/** Resolves one item to a callout source, falling back to known identity on failure. */
+async function resolveItemExplanation(args: { client: SweeperClient; itemContext: Map<string, ItemContext>; itemId: string }): Promise<ResolvedExplanation> {
+  const ctx = args.itemContext.get(args.itemId);
+  try {
+    const explained = await args.client.explainItem(args.itemId);
+    return { source: explainedSource({ explained, targetId: ctx?.target.targetId ?? null }), failed: false };
+  } catch (error) {
+    reportExplanationFailure({ itemId: args.itemId, error });
+    return { source: fallbackSource({ itemId: args.itemId, ctx }), failed: true };
+  }
+}
+
+/** Resolves the whole selected set; a stale generation is ignored on arrival. */
+function resolveExplanations(args: {
+  client: SweeperClient;
+  selectedKey: string;
+  preview: PreviewResult;
+  allTargets: TargetScanResultDto[];
+  setResolved: (value: ResolvedSelection) => void;
+  isCurrent: () => boolean;
+}): void {
+  const ids = args.selectedKey === '' ? [] : args.selectedKey.split('\u0000');
+  if (ids.length === 0) return;
+  const itemContext = buildItemContext({ targets: args.allTargets });
+  void Promise.all(ids.map((itemId) => resolveItemExplanation({ client: args.client, itemContext, itemId }))).then((results) => {
+    if (!args.isCurrent()) return;
+    args.setResolved({
+      key: args.selectedKey,
+      preview: args.preview,
+      sources: results.map((result) => result.source),
+      failedCount: results.filter((result) => result.failed).length,
+    });
+  });
+}
+
+/**
+ * Resolve Knowledge Base explanations for the full selected set. Explanations
+ * are keyed by selection AND the current Preview, so reopening a Preview with
+ * the same selection re-gates Clean until the new explanations resolve.
+ */
+function useSelectionSources(args: {
+  client: SweeperClient;
+  selectedKey: string;
+  allTargets: TargetScanResultDto[];
+  preview: PreviewResult | null;
+}): SelectionSourcesState {
+  const { client, selectedKey, allTargets, preview } = args;
+  const [resolved, setResolved] = useState<ResolvedSelection | null>(null);
+  const needs = preview != null && selectedKey !== '';
+
+  useEffect(() => {
+    let cancelled = false;
+    if (preview != null && needs) {
+      resolveExplanations({ client, selectedKey, preview, allTargets, setResolved, isCurrent: () => !cancelled });
+    }
+    return () => { cancelled = true; };
+  }, [client, selectedKey, allTargets, preview, needs]);
+
+  if (!needs) return EMPTY_SELECTION_SOURCES;
+  if (derivationPending({ needs, selectedKey, preview, resolved })) return PENDING_SELECTION_SOURCES;
+  return { sources: resolved!.sources, pending: false, failedCount: resolved!.failedCount };
+}
+
+function explanationWarning(args: { failedCount: number }): string | null {
+  if (args.failedCount <= 0) return null;
+  return `Explanation unavailable for ${args.failedCount} selected item(s); showing known identity and risk only.`;
+}
+
+function collapseAllTargets(args: { targets: TargetScanResultDto[]; hasCollapsed: boolean }): Set<string> {
+  if (args.targets.length === 0) return new Set<string>();
+  if (args.hasCollapsed) return new Set<string>();
+  return new Set(args.targets.map((t) => t.targetId));
+}
+
+function isTypedConfirmSatisfied(args: { requiresConfirm: boolean; typedDelete: boolean }): boolean {
+  if (!args.requiresConfirm) return true;
+  return args.typedDelete;
+}
+
+function canCleanWithPreview(args: { hasPreview: boolean; idle: boolean }): boolean {
+  if (!args.hasPreview) return false;
+  return args.idle;
+}
+
+function anyTargetsCollapsed(args: { hasTargets: boolean; hasCollapsed: boolean }): boolean {
+  if (!args.hasTargets) return false;
+  return args.hasCollapsed;
+}
+
+function masterCheckboxIndeterminate(args: { allSelected: boolean; hasSelection: boolean }): boolean {
+  if (args.allSelected) return false;
+  return args.hasSelection;
+}
+
 export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(function ScanAndPreviewView(props, ref) {
   const { client, settings, settingsVersion, elevationError, onOpenLog, onOpenSettings } = props;
   const w = useScanWorkflow({ client, settings, settingsVersion });
   const d = useScanDerived(w, settingsVersion);
   const inspectedCtx = useMemo(() => findInspectedCtx({ focus: w.focus, inspected: w.inspected, targets: d.targets }), [w.focus, w.inspected, d.targets]);
   const focusedGroup = useMemo(() => focusedGroupFor(w.focus, d.targets), [w.focus, d.targets]);
+  const selectedKey = useMemo(() => [...d.sel].sort().join('\u0000'), [d.sel]);
+  const allTargets = useMemo(() => w.results?.targets ?? [], [w.results]);
+  const previewActive = w.preview != null;
+  const selectionState = useSelectionSources({ client, selectedKey, allTargets, preview: w.preview });
   const progress = cleanProgressLabel(w.cleanProgress);
   useImperativeHandle(ref, () => ({ runScan: w.runScan }), [w.runScan]);
-  const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId(prev, targetId));
-  const onToggleShowAll = (targetId: string) => w.setShowAllGroups((prev) => toggleSetId(prev, targetId));
+  const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId({ prev, id: targetId }));
+  const onToggleShowAll = (targetId: string) => w.setShowAllGroups((prev) => toggleSetId({ prev, id: targetId }));
   const hasTargets = d.targets.length > 0;
   const hasCollapsed = w.collapsedTargets.size > 0;
-  const collapseAllState = () => {
-    if (!hasTargets) return new Set<string>();
-    if (hasCollapsed) return new Set<string>();
-    return new Set(d.targets.map((t) => t.targetId));
-  };
-  const onToggleCollapseAll = () => w.setCollapsedTargets(collapseAllState());
+  const onToggleCollapseAll = () => w.setCollapsedTargets(collapseAllTargets({ targets: d.targets, hasCollapsed }));
   const onToggleGroupSelect = (target: TargetScanResultDto) => setTargetSelection({ w, target, select: !allSelectableSelected(target, { selectedIds: d.sel, allow: d.allow }), allow: d.allow });
-  const requiresConfirm = d.requiresConfirmation;
   const typedDelete = w.confirmText === TYPED_CONFIRMATION_PHRASE;
-  let confirmed = true;
-  if (requiresConfirm) confirmed = typedDelete;
+  const confirmed = isTypedConfirmSatisfied({ requiresConfirm: d.requiresConfirmation, typedDelete });
   const idle = idleState({ scanning: w.scanning, previewLoading: w.previewLoading, cleaning: w.cleaning });
   const previewOk = canPreview({ sessionId: w.sessionId, selected: d.sel.size, idle, expired: w.isSessionExpired, confirmed });
-  const hasPreview = w.preview != null;
-  let cleanOk = false;
-  if (hasPreview) cleanOk = idle;
-  let anyCollapsed = false;
-  if (hasTargets) anyCollapsed = hasCollapsed;
-  const hasSelectedCount = d.sel.size > 0;
-  let masterIndeterminate = hasSelectedCount;
-  if (d.allEligibleSelected) masterIndeterminate = false;
+  const cleanOk = canCleanWithPreview({ hasPreview: previewActive, idle }) && !selectionState.pending;
+  const anyCollapsed = anyTargetsCollapsed({ hasTargets, hasCollapsed });
+  const masterIndeterminate = masterCheckboxIndeterminate({ allSelected: d.allEligibleSelected, hasSelection: d.sel.size > 0 });
   return (
     <div className="view-stack view-stack-fill">
       <ScanViewHeader hasResults={!!w.results} heroReclaimable={d.heroReclaimable} tier1={w.tier1} tier2={w.tier2} scanning={w.scanning} cleaning={w.cleaning} settings={settings} settingsStale={d.settingsStale} hasActiveScope={w.hasActiveScanScope} onTier1={w.setTier1} onTier2={w.setTier2} onRunScan={() => void w.runScan()} onOpenSettings={onOpenSettings} />
-      <ScanNotices elevationError={elevationError} relaunchInfo={w.relaunchInfo} relaunchError={w.relaunchError} error={w.error} info={w.info} />
+      <ScanNotices elevationError={elevationError} relaunchInfo={w.relaunchInfo} relaunchError={w.relaunchError} error={w.error} info={w.info} explanationWarning={explanationWarning({ failedCount: selectionState.failedCount })} />
       <ScanViewControls toolbar={w.toolbar} targetsCount={d.targets.length} selectableCount={d.selectableCount} skippedCount={d.skippedCount} hasResults={!!w.results} cleaning={w.cleaning} anyCollapsed={anyCollapsed} isFilterActive={d.isFilterActive} selectSafeIdsLength={d.selectSafeIds.length} allSelectSafeSelected={d.allSelectSafeSelected} onToolbar={w.setToolbar} onToggleCollapseAll={onToggleCollapseAll} onSelectAllSafe={() => selectAllSafeIds({ w, selectSafeIds: d.selectSafeIds })} />
       <StatusBlocks w={w} d={d} masterIndeterminate={masterIndeterminate} />
-      <ResultsBlocks client={client} w={w} d={d} focusedGroup={focusedGroup} inspectedCtx={inspectedCtx} canPreview={previewOk} canClean={cleanOk} onOpenLog={onOpenLog} onOpenSettings={onOpenSettings} onToggleCollapsed={onToggleCollapsed} onToggleShowAll={onToggleShowAll} onToggleGroupSelect={onToggleGroupSelect} cleanProgress={progress} />
+      <ResultsBlocks client={client} w={w} d={d} focusedGroup={focusedGroup} inspectedCtx={inspectedCtx} selectionSources={selectionState.sources} canPreview={previewOk} canClean={cleanOk} onOpenLog={onOpenLog} onOpenSettings={onOpenSettings} onToggleCollapsed={onToggleCollapsed} onToggleShowAll={onToggleShowAll} onToggleGroupSelect={onToggleGroupSelect} cleanProgress={progress} />
     </div>
   );
 });

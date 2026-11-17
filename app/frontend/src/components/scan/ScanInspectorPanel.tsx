@@ -1,6 +1,8 @@
 import type { ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
 import type { ExecuteCleanResponse } from '../../api/client';
 import { CleanSummaryBlock, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, type ExplainState, type PreviewResult } from '../cleanShared';
+import { deriveCalloutItemsFromSelection, type PreviewRiskCalloutItem, type PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
+import { isCustomPathTargetId } from './scanHelpers';
 import { ScanGroupInspector } from './ScanGroupInspector';
 import { ScanItemInspector } from './ScanItemInspector';
 
@@ -12,6 +14,7 @@ interface PanelProps {
   allowDeleteUnknown: boolean;
   minAgeHours?: number | null;
   selectedIds: Set<string>;
+  selectionSources: readonly PreviewRiskCalloutSource[];
   requiresConfirmation: boolean;
   confirmText: string;
   onConfirmText: (v: string) => void;
@@ -33,9 +36,9 @@ function ConfirmationNotice(props: { show: boolean; confirmText: string; onConfi
   );
 }
 
-function PreviewSection(props: { preview: PreviewResult | null; cleaning: boolean; label: string | null }) {
+function PreviewSection(props: { preview: PreviewResult | null; cleaning: boolean; label: string | null; calloutItems: PreviewRiskCalloutItem[] }) {
   if (!props.preview) return null;
-  return <PreviewBreakdownBlock preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.label} />;
+  return <PreviewBreakdownBlock preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.label} calloutItems={props.calloutItems} />;
 }
 
 function SummarySection(props: { summary: ExecuteCleanResponse | null; onOpenLog: (id: string) => void }) {
@@ -61,13 +64,18 @@ function InspectorBody(props: PanelProps) {
 }
 
 export function ScanInspectorPanel(props: PanelProps) {
+  const calloutItems = deriveCalloutItemsFromSelection({
+    selectedIds: props.selectedIds,
+    sources: props.selectionSources,
+    isCustomPath: (targetId) => isCustomPathTargetId({ targetId }),
+  });
   return (
     <aside className="detail-pane selection-pane scan-inspector-pane" aria-labelledby="inspector-heading">
       <div className="pane-header"><h3 id="inspector-heading">Inspector</h3></div>
       <div className="detail-scroll">
         <div className="inspector-section" aria-label="Item inspector"><InspectorBody {...props} /></div>
         <ConfirmationNotice show={props.requiresConfirmation} confirmText={props.confirmText} onConfirmText={props.onConfirmText} cleaning={props.cleaning} />
-        <PreviewSection preview={props.preview} cleaning={props.cleaning} label={props.cleanProgressLabel} />
+        <PreviewSection preview={props.preview} cleaning={props.cleaning} label={props.cleanProgressLabel} calloutItems={calloutItems} />
         <SummarySection summary={props.cleanSummary} onOpenLog={props.onOpenLog} />
       </div>
     </aside>

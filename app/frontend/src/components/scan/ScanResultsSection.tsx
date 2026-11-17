@@ -1,6 +1,7 @@
 import type { ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
 import type { ExecuteCleanResponse } from '../../api/client';
 import type { ExplainState, PreviewResult } from '../cleanShared';
+import type { PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 import { ScanInspectorPanel } from './ScanInspectorPanel';
 import { ScanTargetCard } from './ScanTargetCard';
 import { isSelectableScanItem } from './scanHelpers';
@@ -14,6 +15,7 @@ interface Props {
   allow: boolean;
   minAgeHours?: number | null;
   selectedIds: Set<string>;
+  selectionSources: readonly PreviewRiskCalloutSource[];
   collapsedTargets: Set<string>;
   showAllGroups: Set<string>;
   focus: Focus;
@@ -139,7 +141,7 @@ export function ScanResultsSection(props: Props) {
           </div>
         </div>
       </div>
-      <ScanInspectorPanel focus={props.focus} focusedGroup={props.focusedGroup} inspected={props.inspected} inspectedCtx={props.inspectedCtx} allowDeleteUnknown={props.allow} minAgeHours={props.minAgeHours} selectedIds={props.selectedIds} requiresConfirmation={props.requiresConfirmation} confirmText={props.confirmText} onConfirmText={props.onConfirmText} cleaning={props.cleaning} preview={props.preview} cleanProgressLabel={props.cleanProgressLabel} cleanSummary={props.cleanSummary} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
+      <ScanInspectorPanel focus={props.focus} focusedGroup={props.focusedGroup} inspected={props.inspected} inspectedCtx={props.inspectedCtx} allowDeleteUnknown={props.allow} minAgeHours={props.minAgeHours} selectedIds={props.selectedIds} selectionSources={props.selectionSources} requiresConfirmation={props.requiresConfirmation} confirmText={props.confirmText} onConfirmText={props.onConfirmText} cleaning={props.cleaning} preview={props.preview} cleanProgressLabel={props.cleanProgressLabel} cleanSummary={props.cleanSummary} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
     </section>
   );
 }

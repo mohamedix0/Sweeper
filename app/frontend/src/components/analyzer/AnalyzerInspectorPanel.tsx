@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import { normalizeDisplayPath } from '../../utils/format';
 import { CleanSummaryBlock, InspectorMetaGrid, InspectorTitleRow, PathActions, PathWell, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, copyText, type ExplainState, type PreviewResult } from '../cleanShared';
+import { deriveCalloutItemsFromSelection, type PreviewRiskCalloutItem, type PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
+import { isCustomPathTargetId } from '../scan/scanHelpers';
 import { CloudIcon, DriveIcon, FileIcon, FolderIcon, HardDriveIcon, LinkIcon, ShieldIcon } from '../Icons';
 import { analyzerGuidance, analyzerStatusPill, analyzerStatusText, escapeVhdxPathForPowerShell, isDriveRoot, isNodeSelectable, isVhdxPath, nodeTypeTag } from './analyzerHelpers';
 import type { ExecuteCleanResponse } from '../../api/client';
@@ -24,6 +26,8 @@ function leadingInspectorIcon(node: AnalyzerNodeDto | null) {
 type AnalyzerInspectorProps = {
   inspected: ExplainState;
   inspectedNode: AnalyzerNodeDto | null;
+  selectedIds: ReadonlySet<string>;
+  selectionSources: readonly PreviewRiskCalloutSource[];
   allowDeleteUnknown: boolean;
   requiresConfirmation: boolean;
   confirmText: string;
@@ -133,9 +137,9 @@ function InspectorBodySlot(props: AnalyzerInspectorProps & { node: AnalyzerNodeD
   return <InspectorBody {...props} node={props.node} selectable={props.selectable} status={props.status} pill={props.pill} copiedVhdxCmd={props.copiedVhdxCmd} copyVhdxCommand={props.copyVhdxCommand} />;
 }
 
-function PreviewSlot(props: { preview: PreviewResult | null; cleaning: boolean; cleanProgressLabel: string | null }) {
+function PreviewSlot(props: { preview: PreviewResult | null; cleaning: boolean; cleanProgressLabel: string | null; calloutItems: PreviewRiskCalloutItem[] }) {
   if (!props.preview) return null;
-  return <PreviewBreakdownBlock preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.cleanProgressLabel} />;
+  return <PreviewBreakdownBlock preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.cleanProgressLabel} calloutItems={props.calloutItems} />;
 }
 
 function SummarySlot(props: { summary: ExecuteCleanResponse | null; onOpenLog: (id: string) => void }) {
@@ -160,6 +164,11 @@ export function AnalyzerInspectorPanel(props: AnalyzerInspectorProps) {
       window.setTimeout(() => setCopiedVhdxCmd(false), 1500);
     });
   }
+  const calloutItems = deriveCalloutItemsFromSelection({
+    selectedIds: props.selectedIds,
+    sources: props.selectionSources,
+    isCustomPath: (targetId) => isCustomPathTargetId({ targetId }),
+  });
   return (
     <aside className="detail-pane selection-pane scan-inspector-pane" aria-labelledby="analyzer-preview-heading">
       <div className="pane-header"><h3 id="analyzer-preview-heading">Inspector</h3></div>
@@ -168,7 +177,7 @@ export function AnalyzerInspectorPanel(props: AnalyzerInspectorProps) {
           <InspectorBodySlot {...props} node={node} selectable={selectable} status={status} pill={pill} copiedVhdxCmd={copiedVhdxCmd} copyVhdxCommand={copyVhdxCommand} />
         </div>
         <ConfirmationBlock show={props.requiresConfirmation} confirmText={props.confirmText} onConfirmText={props.onConfirmText} cleaning={props.cleaning} />
-        <PreviewSlot preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.cleanProgressLabel} />
+        <PreviewSlot preview={props.preview} cleaning={props.cleaning} cleanProgressLabel={props.cleanProgressLabel} calloutItems={calloutItems} />
         <SummarySlot summary={props.cleanSummary} onOpenLog={props.onOpenLog} />
       </div>
     </aside>

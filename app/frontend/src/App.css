@@ -275,6 +275,24 @@ input[type="checkbox"] { accent-color: var(--accent-primary); }
 .field label { font-size: var(--text-xs); color: var(--text-secondary); font-weight: 600; }
 .preview-breakdown { margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--border-divider); display: flex; flex-direction: column; gap: 8px; }
 .preview-breakdown-title { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
+
+/* Preview per-item Risk callouts (reuses existing Risk / danger design tokens). */
+.preview-risk-callouts { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--radius-md); background: var(--bg-inset); border: 1px solid var(--border-subtle); }
+.preview-risk-callouts-heading { margin: 0; color: var(--text-primary); }
+.preview-risk-callouts-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.preview-risk-callout { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-divider); border-left-width: 3px; background: var(--bg-surface-alt); }
+.preview-risk-callout:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.preview-risk-callout--caution { border-left-color: var(--risk-caution-text); }
+.preview-risk-callout--unknown { border-left-color: var(--risk-unknown-text); }
+.preview-risk-callout--custom { border-left-color: var(--color-danger); }
+.preview-risk-callout-head { display: flex; align-items: center; gap: 8px; }
+.preview-risk-callout-badge { font-size: 10px; }
+.risk-CustomPath { background: var(--color-danger-bg); color: var(--color-danger-text); border-color: var(--color-danger-border); }
+.preview-risk-callout-warning { font-size: var(--text-xs); font-weight: 600; color: var(--color-danger-text); }
+.preview-risk-callout-identity { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); overflow-wrap: anywhere; }
+.preview-risk-callout-identity-label { color: var(--text-muted); font-weight: 500; }
+.preview-risk-callout-explanation, .preview-risk-callout-consequence { margin: 0; font-size: var(--text-xs); line-height: 1.45; color: var(--text-secondary); }
+.preview-risk-callout-consequence { color: var(--color-danger-text); }
 .preview-total { margin: 0; color: var(--text-secondary); font-size: var(--text-xs); }
 .clean-footer { display: flex; flex-direction: column; gap: 6px; padding: 9px 10px; border-radius: var(--radius-md); background: var(--risk-caution-bg); border: 1px solid var(--risk-caution-border); }
 .clean-footer-warning { color: var(--risk-caution-text); line-height: 1.45; font-size: var(--text-xs); }
