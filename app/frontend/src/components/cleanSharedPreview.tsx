@@ -1,6 +1,7 @@
 import type { ExecuteCleanResponse } from '../api/client';
 import { formatBytes, pluralize } from '../utils/format';
 import type { PreviewResult } from './cleanSharedCore';
+import { PreviewRiskCallouts, type PreviewRiskCalloutItem } from './PreviewRiskCallouts';
 
 function previewTotalCount(args: { value: string }): number {
   return Number(args.value || '0');
@@ -64,12 +65,13 @@ function CleaningBlock(props: { cleaning: boolean; label: string | null }) {
   return <CleaningNotice label={props.label} />;
 }
 
-export function PreviewBreakdownBlock(props: { preview: PreviewResult; cleaning: boolean; cleanProgressLabel: string | null }) {
+export function PreviewBreakdownBlock(props: { preview: PreviewResult; cleaning: boolean; cleanProgressLabel: string | null; calloutItems?: PreviewRiskCalloutItem[] }) {
   const count = previewTotalCount({ value: props.preview.totalSelectedCount });
   return (
     <div aria-live="polite" className="preview-breakdown">
       <h4 className="preview-breakdown-title">Preview Breakdown</h4>
       <p className="preview-total"><strong>Total selected:</strong> {pluralize({ count, singular: 'item', plural: 'items' })}, <span className="num">{formatBytes({ bytes: props.preview.totalSelectedBytes })}</span></p>
+      <PreviewRiskCallouts items={props.calloutItems ?? []} />
       <PreviewTable breakdown={props.preview.breakdown} />
       <PreviewSkippedNotice skippedCount={props.preview.skippedCount} skippedReasons={props.preview.skippedReasons} />
       <div className="clean-footer" role="alert" aria-live="polite"><div className="clean-footer-warning"><strong>Permanent deletion (bypasses Recycle Bin):</strong> Cleaning removes the selected eligible items permanently. This cannot be undone.</div></div>
