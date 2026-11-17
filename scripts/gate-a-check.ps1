@@ -537,7 +537,19 @@ function Get-PrivacyRules() {
   # following sentence. End-of-text (not end-of-line) anchoring keeps prose at line ends from being
   # mistaken for a bare path segment.
   $firstSegmentPattern = '(?<seg>[^\\\r\n"''`<>{}:]+)(?=\\|(?:\r?\n)?$)'
-  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+' + $firstSegmentPattern
+  # A quoted bare path (e.g. a raw-string literal: a drive root with a single backslash and no
+  # trailing separator) has no backslash to satisfy the boundary; its closing quote would otherwise
+  # block the match and let a non-allowlisted root slip past the privacy scan. Accept a quote as a
+  # boundary ONLY for a single-backslash root (captured as "onebs"). Paths in ordinary strings use
+  # doubled, escaped backslashes and keep the original boundary, so documented prose such as a
+  # Windows system-root description is not over-blocked. (?(onebs)["'']|(?!)) enables the quote
+  # alternative only when the root had exactly one backslash; an empty negative lookahead never
+  # matches, disabling it otherwise. A real first segment also cannot begin with whitespace: this
+  # keeps prose descriptions (e.g. a drive-root explanation whose text follows a space) from being
+  # mistaken for a bare path when the quote boundary is enabled.
+  $singleSlashRootPattern = '(?:(?<onebs>\\(?!\\))|\\+)'
+  $quoteAwareSegmentPattern = '(?<seg>[A-Za-z0-9_.][^\\\r\n"''`<>{}:]*)(?=\\|(?(onebs)["'']|(?!))|(?:\r?\n)?$)'
+  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):' + $singleSlashRootPattern + $quoteAwareSegmentPattern
   # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
   # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
   # First-segment allowlisting alone would let such a path pass because it carries no workspace
@@ -1038,6 +1050,45 @@ function Test-SelfTestFullFirstSegmentAllowlist([ref]$ok) {
   }
 }
 
+function Test-SelfTestQuotedBareAbsolutePaths([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $quote = [char]34
+
+  # Regression for PR #48 thread 4607264274: a quoted bare absolute path has no trailing
+  # separator, so the closing quote must also satisfy the first-segment boundary. Otherwise
+  # the non-allowlisted root is captured but the match is discarded and slips past the scan.
+  $quotedBarePaths = @(
+    ('C' + ':' + $sep + 'Program Files Backup'),
+    ('C' + ':' + $sep + 'Private Folder')
+  )
+  foreach ($bare in $quotedBarePaths) {
+    $quoted = 'r' + $quote + $bare + $quote
+    $matches = @([regex]::Matches($quoted, $pattern))
+    Assert-SelfTest ($matches.Count -ge 1) "quoted bare path matches absolute-drive pattern: $bare" $ok
+    if ($matches.Count -ge 1) {
+      Assert-SelfTest ($matches[0].Groups['seg'].Value -ceq $bare.Substring(3)) "entire first segment captured for quoted bare path: $bare" $ok
+    }
+    $directHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $quoted $pattern $allowed)
+    Assert-SelfTest ($directHits.Count -ge 1) "quoted bare path flagged by direct detector: $bare" $ok
+    $wiredHits = @(Get-PrivacyHitsForFile 'fixture.txt' $quoted $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+    Assert-SelfTest ($wiredHits.Count -ge 1) "quoted bare path flagged through file-level privacy scan: $bare" $ok
+  }
+
+  # Legitimate quoted system paths must still pass the exact allowlist (no over-blocking).
+  $quotedSystemPaths = @(
+    ('C' + ':' + $sep + 'Windows' + $sep + 'System32'),
+    ('C' + ':' + $sep + 'Program Files' + $sep + 'NSIS')
+  )
+  foreach ($p in $quotedSystemPaths) {
+    $quoted = 'r' + $quote + $p + $quote
+    $hits = @(Get-PrivacyHitsForFile 'fixture.txt' $quoted $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+    Assert-SelfTest ($hits.Count -eq 0) "quoted legitimate system path must not be flagged: $p" $ok
+  }
+}
+
 function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
   $rules = Get-PrivacyRules
   $sep = [System.IO.Path]::DirectorySeparatorChar
@@ -1080,6 +1131,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestPrivacyRules $okRef
   Test-SelfTestAbsoluteDrivePaths $okRef
   Test-SelfTestFullFirstSegmentAllowlist $okRef
+  Test-SelfTestQuotedBareAbsolutePaths $okRef
   Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
