@@ -524,6 +524,12 @@ function Get-PrivacyRules() {
   # Common checkout-root names are covered, not just the current project's special folders.
   # The reserved Users root is covered by the placeholder-aware user-path rule above.
   $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?!Users\\)(?:[^\\\r\n"''<>]+\\)*(?:\b(?:workspaces?|worktrees?|checkouts?|projects?|repos?)\b|\.t3)(?:\\[^\\\r\n"''<>]+)*'
+  # Deny-by-default: flag ANY drive-letter absolute path unless its (drive, first segment) is an
+  # explicitly allowlisted, machine-neutral root. Capturing the first segment (rather than matching
+  # "checkout markers") closes the gap where arbitrary unmarked roots previously passed.
+  # Multi-word system roots are enumerated first; the generic token stops at a path separator so
+  # prose like "under C:\Windows\Temp." only contributes the segment "Windows".
+  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)'
   # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
   # shape is matched, never a literal identifier.
   $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
@@ -536,6 +542,8 @@ function Get-PrivacyRules() {
     ProjectFrag = $projectFrag
     LocalUserPathPattern = $localUserPathPattern
     MachineWorkspacePathPattern = $machineWorkspacePathPattern
+    AbsoluteDrivePathPattern = $absoluteDrivePathPattern
+    AllowedAbsolutePathRoots = @(Get-AllowedAbsolutePathRoots)
     InternalIdPattern = $internalIdPattern
     TokenPatterns = @('gh' + 'p_[A-Za-z0-9]{20,}', 'github' + '_pat_[A-Za-z0-9_]{20,}', 'BEGIN [A-Z ]*PRIVATE KEY')
   }
@@ -588,6 +596,44 @@ function Get-PrivacyHitsForUserName([string]$rel, [string]$text, [string]$userNa
   return @($hits)
 }
 
+function Get-AllowedAbsolutePathRoots() {
+  # Machine-neutral allowlist of (drive, first segment) roots that legitimately occur in tracked
+  # text: Windows/system roots, documented placeholders, and synthetic test fixtures shipped in the
+  # repo. This is deliberately data, not logic: no real username, machine path, or internal ID.
+  $system = @(
+    'c:\windows', 'c:\windows.', 'c:\windows.old', 'c:\windowsapps',
+    'c:\program files', 'c:\program files (x86)', 'c:\programdata',
+    'c:\recovery', 'c:\system volume information'
+  )
+  $placeholders = @(
+    'c:\temp', 'c:\temp.', 'c:\temp2', 'c:\cache', 'c:\users', 'c:\sandbox',
+    'c:\sweeper', 'c:\sweepernonexistentcustompathcancel', 'c:\sweepernonexistentrecyclebincancel',
+    'd:\sandbox', 'd:\sweepertest', 'd:\oldwork'
+  )
+  $fixtures = @(
+    'c:\0foo', 'c:\a', 'c:\bulk', 'c:\com', 'c:\con', 'c:\conx', 'c:\dev', 'c:\does',
+    'c:\foo', 'c:\hiberfil.sys', 'c:\logs', 'c:\lpt', 'c:\lpt1.txt', 'c:\missing',
+    'c:\mystery', 'c:\nonexistentbrowser', 'c:\nonexistentdepththree', 'c:\other',
+    'c:\pagefile.sys', 'c:\path', 'c:\progra~1', 'c:\safea', 'c:\safeb', 'c:\someapp',
+    'c:\swapfile.sys', 'c:\tools', 'c:\vms'
+  )
+  return @($system + $placeholders + $fixtures)
+}
+
+function Test-IsAllowedAbsolutePath([string]$key, [string[]]$allowedRoots) {
+  return ($allowedRoots -contains $key.ToLowerInvariant())
+}
+
+function Get-PrivacyHitsForAbsolutePaths([string]$rel, [string]$text, [string]$pattern, [string[]]$allowedRoots) {
+  $hits = @()
+  foreach ($m in [regex]::Matches($text, $pattern)) {
+    $key = ($m.Groups['drive'].Value + ':\' + $m.Groups['seg'].Value).ToLowerInvariant()
+    if (Test-IsAllowedAbsolutePath $key $allowedRoots) { continue }
+    $hits += "${rel}: forbidden absolute drive path detected: $($m.Value)"
+  }
+  return @($hits)
+}
+
 function Get-PrivacyHitsForMachineWorkspacePaths([string]$rel, [string]$text, [string]$pattern) {
   $hits = @()
   foreach ($m in [regex]::Matches($text, $pattern)) {
@@ -621,6 +667,7 @@ function Get-PrivacyHitsForFile([string]$rel, [string]$text, $rules) {
   $hits += Get-PrivacyHitsForUserName $rel $text $rules.UserNameContextPattern
   $hits += Get-PrivacyHitsForLocalPaths $rel $text $rules.LocalUserPathPattern
   $hits += Get-PrivacyHitsForMachineWorkspacePaths $rel $text $rules.MachineWorkspacePathPattern
+  $hits += Get-PrivacyHitsForAbsolutePaths $rel $text $rules.AbsoluteDrivePathPattern $rules.AllowedAbsolutePathRoots
   $hits += Get-PrivacyHitsForInternalIds $rel $text $rules.InternalIdPattern
   $hits += Get-PrivacyHitsForTokens $rel $text $rules.TokenPatterns
   return @($hits)
@@ -810,6 +857,51 @@ function Test-SelfTestPrivacyRules([ref]$ok) {
   Assert-SelfTest ($guidHits.Count -eq 0) "non-internal GUID must not match" $ok
 }
 
+function Test-SelfTestAbsoluteDrivePaths([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+
+  # CodeRabbit re-check thread 4606419932: both cases must now be flagged. Paths are assembled
+  # from neutral fragments so no real machine path is ever stored in this gate.
+  $caseOne = 'D' + ':' + $sep + 'Users' + $sep + 'fixture-person' + $sep + 'projects' + $sep + 'private-checkout' + $sep + 'app'
+  $caseOneHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $caseOne $pattern $allowed)
+  Assert-SelfTest ($caseOneHits.Count -ge 1) "foreign-drive Users checkout path must be detected" $ok
+
+  $caseTwo = 'D' + ':' + $sep + 'src' + $sep + 'private-app' + $sep + 'app'
+  $caseTwoHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $caseTwo $pattern $allowed)
+  Assert-SelfTest ($caseTwoHits.Count -ge 1) "foreign-drive unmarked checkout path must be detected" $ok
+
+  # Prove the rule is wired into the file-level privacy scan, not just callable in isolation.
+  $wiredOne = @(Get-PrivacyHitsForFile 'fixture.txt' $caseOne $rules | Where-Object { $_ -match 'absolute drive path' })
+  $wiredTwo = @(Get-PrivacyHitsForFile 'fixture.txt' $caseTwo $rules | Where-Object { $_ -match 'absolute drive path' })
+  Assert-SelfTest ($wiredOne.Count -ge 1) "case one flagged through file-level privacy scan" $ok
+  Assert-SelfTest ($wiredTwo.Count -ge 1) "case two flagged through file-level privacy scan" $ok
+
+  # Legitimate system paths and machine-neutral placeholders must never be flagged.
+  $systemPaths = @(
+    ('C' + ':' + $sep + 'Windows' + $sep + 'System32'),
+    ('C' + ':' + $sep + 'Windows' + $sep + 'Temp'),
+    ('C' + ':' + $sep + 'Program Files' + $sep + 'NSIS')
+  )
+  foreach ($p in $systemPaths) {
+    $hits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $p $pattern $allowed)
+    Assert-SelfTest ($hits.Count -eq 0) "system path must not be flagged: $p" $ok
+  }
+  $placeholders = @(
+    ('D' + ':' + $sep + 'OldWork' + $sep + 'OldRepo'),
+    ('C' + ':' + $sep + 'Users' + $sep + '<real-user>' + $sep + 'projects'),
+    ('C' + ':' + $sep + 'Users' + $sep + 'Alice'),
+    ('C' + ':' + $sep + 'Temp'),
+    ('C' + ':' + $sep + 'Cache')
+  )
+  foreach ($p in $placeholders) {
+    $hits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $p $pattern $allowed)
+    Assert-SelfTest ($hits.Count -eq 0) "placeholder must not be flagged: $p" $ok
+  }
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -821,6 +913,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestRawStrings $okRef
   Test-SelfTestCharLiterals $okRef
   Test-SelfTestPrivacyRules $okRef
+  Test-SelfTestAbsoluteDrivePaths $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
