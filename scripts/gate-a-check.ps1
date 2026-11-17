@@ -494,13 +494,21 @@ function Invoke-OptionalCargoGeiger([string]$root) {
   Invoke-CargoGeiger $root
 }
 
+function Test-IsMachineSpecificUser([string]$user) {
+  if ([string]::IsNullOrWhiteSpace($user)) { return $false }
+  if ($user.Length -lt 4) { return $false }
+  # Generic accounts are not machine-specific, so they must not become a derived fragment.
+  $genericUsers = @('runner', 'runneradmin', 'administrator', 'admin', 'user', 'test', 'guest', 'defaultuser', 'system')
+  $genericUserPattern = '(?i)^(' + ($genericUsers -join '|') + ')$'
+  return ($user -notmatch $genericUserPattern)
+}
+
 function Get-PrivacyRules() {
   $personalEmailPattern = '(?i)(@' + 'gmail\.com\b|@' + 'outlook\.com\b|@' + 'hotmail\.com\b|@' + 'yahoo\.com\b|@' + 'icloud\.com\b|@' + 'proton\.me\b|@' + 'protonmail\.com\b)'
   # Derive machine-specific fragments at runtime so this gate never stores a real username or path.
   $currentUser = [Environment]::UserName
   $userNameFrag = ''
-  if (-not [string]::IsNullOrWhiteSpace($currentUser) -and $currentUser.Length -ge 4 -and
-      $currentUser -notmatch '(?i)^(runner|runneradmin|administrator|admin|user|test|guest|defaultuser|system)$') {
+  if (Test-IsMachineSpecificUser $currentUser) {
     $userNameFrag = [regex]::Escape($currentUser)
   }
   # Use the absolute repo path (never a bare project name) so fresh clones named after the project do not self-match.
