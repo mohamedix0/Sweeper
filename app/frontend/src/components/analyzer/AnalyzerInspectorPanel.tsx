@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import { normalizeDisplayPath } from '../../utils/format';
 import { CleanSummaryBlock, InspectorMetaGrid, InspectorTitleRow, PathActions, PathWell, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, copyText, type ExplainState, type PreviewResult } from '../cleanShared';
-import { deriveCalloutItemsFromInspection, type PreviewRiskCalloutItem } from '../PreviewRiskCallouts';
+import { deriveCalloutItemsFromSelection, type PreviewRiskCalloutItem, type PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 import { isCustomPathTargetId } from '../scan/scanHelpers';
 import { CloudIcon, DriveIcon, FileIcon, FolderIcon, HardDriveIcon, LinkIcon, ShieldIcon } from '../Icons';
 import { analyzerGuidance, analyzerStatusPill, analyzerStatusText, escapeVhdxPathForPowerShell, isDriveRoot, isNodeSelectable, isVhdxPath, nodeTypeTag } from './analyzerHelpers';
@@ -26,6 +26,8 @@ function leadingInspectorIcon(node: AnalyzerNodeDto | null) {
 type AnalyzerInspectorProps = {
   inspected: ExplainState;
   inspectedNode: AnalyzerNodeDto | null;
+  selectedIds: ReadonlySet<string>;
+  selectionSources: readonly PreviewRiskCalloutSource[];
   allowDeleteUnknown: boolean;
   requiresConfirmation: boolean;
   confirmText: string;
@@ -162,9 +164,10 @@ export function AnalyzerInspectorPanel(props: AnalyzerInspectorProps) {
       window.setTimeout(() => setCopiedVhdxCmd(false), 1500);
     });
   }
-  const calloutItems = deriveCalloutItemsFromInspection({
-    inspected: props.inspected,
-    isCustomPath: isCustomPathTargetId({ targetId: node?.targetId ?? '' }),
+  const calloutItems = deriveCalloutItemsFromSelection({
+    selectedIds: props.selectedIds,
+    sources: props.selectionSources,
+    isCustomPath: (targetId) => isCustomPathTargetId({ targetId }),
   });
   return (
     <aside className="detail-pane selection-pane scan-inspector-pane" aria-labelledby="analyzer-preview-heading">

@@ -1,8 +1,9 @@
-import { forwardRef, useImperativeHandle, useMemo, type ReactNode } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, type ReactNode } from 'react';
 import { type ElevationStatus, type Settings, type SweeperClient } from '../api/client';
 import type { TargetScanResultDto } from '../contract/bindings';
 import { formatBytes } from '../utils/format';
 import { TYPED_CONFIRMATION_PHRASE } from './cleanShared';
+import type { PreviewRiskCalloutSource } from './PreviewRiskCallouts';
 import { ScanCleanBar } from './scan/ScanCleanBar';
 import { ScanResultsSection, ScanScanningLayout } from './scan/ScanResultsSection';
 import { ScanViewControls } from './scan/ScanViewControls';
@@ -122,13 +123,13 @@ function StatusBlocks(props: { w: ReturnType<typeof useScanWorkflow>; d: ReturnT
   );
 }
 
-function ResultsBlocks(props: { client: SweeperClient; w: ReturnType<typeof useScanWorkflow>; d: ReturnType<typeof useScanDerived>; focusedGroup: TargetScanResultDto | null; inspectedCtx: ReturnType<typeof findInspectedCtx>; canPreview: boolean; canClean: boolean; onOpenLog: Props['onOpenLog']; onOpenSettings: Props['onOpenSettings']; onToggleCollapsed: (id: string) => void; onToggleShowAll: (id: string) => void; onToggleGroupSelect: (t: TargetScanResultDto) => void; cleanProgress: string | null }) {
+function ResultsBlocks(props: { client: SweeperClient; w: ReturnType<typeof useScanWorkflow>; d: ReturnType<typeof useScanDerived>; focusedGroup: TargetScanResultDto | null; inspectedCtx: ReturnType<typeof findInspectedCtx>; selectionSources: readonly PreviewRiskCalloutSource[]; canPreview: boolean; canClean: boolean; onOpenLog: Props['onOpenLog']; onOpenSettings: Props['onOpenSettings']; onToggleCollapsed: (id: string) => void; onToggleShowAll: (id: string) => void; onToggleGroupSelect: (t: TargetScanResultDto) => void; cleanProgress: string | null }) {
   if (!props.w.results) return null;
   const { w, d } = props;
   const masterIndeterminate = !d.allEligibleSelected && d.sel.size > 0;
   return (
     <>
-      <ScanResultsSection targets={d.targets} visibleTargets={w.visibleTargets} allow={d.allow} minAgeHours={w.effectiveMinAgeHours} selectedIds={d.sel} collapsedTargets={w.collapsedTargets} showAllGroups={w.showAllGroups} focus={w.focus} focusedGroup={props.focusedGroup} inspected={w.inspected} inspectedCtx={props.inspectedCtx} cleaning={w.cleaning} scanning={w.scanning} eligibleSafeIdsLength={d.eligibleSafeIds.length} allEligibleSelected={d.allEligibleSelected} masterIndeterminate={masterIndeterminate} requiresConfirmation={d.requiresConfirmation} confirmText={w.confirmText} preview={w.preview} cleanProgressLabel={props.cleanProgress} cleanSummary={w.cleanSummary} onToggleSelectAll={() => toggleSelectAllEligibleSafe({ w, allEligibleSelected: d.allEligibleSelected, eligibleSafeIds: d.eligibleSafeIds })} onFocusGroup={(targetId) => w.setFocus({ kind: 'group', targetId })} onToggleCollapsed={props.onToggleCollapsed} onToggleGroupSelect={props.onToggleGroupSelect} onToggleItem={(item, target) => toggleScanItem({ w, item, target, allow: d.allow })} onToggleShowAll={props.onToggleShowAll} onConfirmText={w.setConfirmText} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
+      <ScanResultsSection targets={d.targets} visibleTargets={w.visibleTargets} allow={d.allow} minAgeHours={w.effectiveMinAgeHours} selectedIds={d.sel} selectionSources={props.selectionSources} collapsedTargets={w.collapsedTargets} showAllGroups={w.showAllGroups} focus={w.focus} focusedGroup={props.focusedGroup} inspected={w.inspected} inspectedCtx={props.inspectedCtx} cleaning={w.cleaning} scanning={w.scanning} eligibleSafeIdsLength={d.eligibleSafeIds.length} allEligibleSelected={d.allEligibleSelected} masterIndeterminate={masterIndeterminate} requiresConfirmation={d.requiresConfirmation} confirmText={w.confirmText} preview={w.preview} cleanProgressLabel={props.cleanProgress} cleanSummary={w.cleanSummary} onToggleSelectAll={() => toggleSelectAllEligibleSafe({ w, allEligibleSelected: d.allEligibleSelected, eligibleSafeIds: d.eligibleSafeIds })} onFocusGroup={(targetId) => w.setFocus({ kind: 'group', targetId })} onToggleCollapsed={props.onToggleCollapsed} onToggleGroupSelect={props.onToggleGroupSelect} onToggleItem={(item, target) => toggleScanItem({ w, item, target, allow: d.allow })} onToggleShowAll={props.onToggleShowAll} onConfirmText={w.setConfirmText} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
       <ScanCleanBar selectedIdsCount={d.sel.size} selectedCategoryCount={d.selectedCategoryCount} selectedBytes={d.selectedBytes} cleaning={w.cleaning} previewLoading={w.previewLoading} hasPreview={!!w.preview} canPreview={props.canPreview} canClean={props.canClean} onClear={() => clearScanSelection({ w })} onPreview={() => void runScanPreview({ w, client: props.client, sel: d.sel, requiresConfirmation: d.requiresConfirmation, sessionId: w.sessionId!, confirmText: w.confirmText })} onClean={() => void runScanClean({ w, client: props.client })} />
     </>
   );
@@ -145,6 +146,42 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(fu
   const d = useScanDerived(w, settingsVersion);
   const inspectedCtx = useMemo(() => findInspectedCtx({ focus: w.focus, inspected: w.inspected, targets: d.targets }), [w.focus, w.inspected, d.targets]);
   const focusedGroup = useMemo(() => focusedGroupFor(w.focus, d.targets), [w.focus, d.targets]);
+  const [selectionSources, setSelectionSources] = useState<readonly PreviewRiskCalloutSource[]>([]);
+  const selectedKey = useMemo(() => [...d.sel].sort().join('\u0000'), [d.sel]);
+  const allTargets = useMemo(() => w.results?.targets ?? [], [w.results]);
+  const previewActive = w.preview != null;
+  useEffect(() => {
+    let cancelled = false;
+    const ids = selectedKey === '' ? [] : selectedKey.split('\u0000');
+    if (!previewActive || ids.length === 0) {
+      setSelectionSources([]);
+      return;
+    }
+    const targetIdByItem = new Map<string, string>();
+    for (const t of allTargets) for (const i of t.items) targetIdByItem.set(i.id, t.targetId);
+    void Promise.all(ids.map(async (itemId) => {
+      try {
+        return await client.explainItem(itemId);
+      } catch {
+        return null;
+      }
+    })).then((explained) => {
+      if (cancelled) return;
+      const sources: PreviewRiskCalloutSource[] = [];
+      for (const e of explained) {
+        if (!e) continue;
+        sources.push({
+          itemId: e.itemId,
+          title: e.title,
+          description: e.description,
+          risk: e.risk,
+          targetId: targetIdByItem.get(e.itemId) ?? null,
+        });
+      }
+      setSelectionSources(sources);
+    });
+    return () => { cancelled = true; };
+  }, [client, selectedKey, allTargets, previewActive]);
   const progress = cleanProgressLabel(w.cleanProgress);
   useImperativeHandle(ref, () => ({ runScan: w.runScan }), [w.runScan]);
   const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId(prev, targetId));
@@ -178,7 +215,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(fu
       <ScanNotices elevationError={elevationError} relaunchInfo={w.relaunchInfo} relaunchError={w.relaunchError} error={w.error} info={w.info} />
       <ScanViewControls toolbar={w.toolbar} targetsCount={d.targets.length} selectableCount={d.selectableCount} skippedCount={d.skippedCount} hasResults={!!w.results} cleaning={w.cleaning} anyCollapsed={anyCollapsed} isFilterActive={d.isFilterActive} selectSafeIdsLength={d.selectSafeIds.length} allSelectSafeSelected={d.allSelectSafeSelected} onToolbar={w.setToolbar} onToggleCollapseAll={onToggleCollapseAll} onSelectAllSafe={() => selectAllSafeIds({ w, selectSafeIds: d.selectSafeIds })} />
       <StatusBlocks w={w} d={d} masterIndeterminate={masterIndeterminate} />
-      <ResultsBlocks client={client} w={w} d={d} focusedGroup={focusedGroup} inspectedCtx={inspectedCtx} canPreview={previewOk} canClean={cleanOk} onOpenLog={onOpenLog} onOpenSettings={onOpenSettings} onToggleCollapsed={onToggleCollapsed} onToggleShowAll={onToggleShowAll} onToggleGroupSelect={onToggleGroupSelect} cleanProgress={progress} />
+      <ResultsBlocks client={client} w={w} d={d} focusedGroup={focusedGroup} inspectedCtx={inspectedCtx} selectionSources={selectionSources} canPreview={previewOk} canClean={cleanOk} onOpenLog={onOpenLog} onOpenSettings={onOpenSettings} onToggleCollapsed={onToggleCollapsed} onToggleShowAll={onToggleShowAll} onToggleGroupSelect={onToggleGroupSelect} cleanProgress={progress} />
     </div>
   );
 });

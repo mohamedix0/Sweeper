@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { AllocBar } from './analyzer/analyzerAlloc';
 import { AnalyzerResults } from './analyzer/AnalyzerResults';
 import { AnalyzerHeader, AnalyzerLocationBar, AnalyzerProgressNotice } from './analyzer/AnalyzerViewParts';
@@ -5,6 +6,7 @@ import { buildAnalyzerResultsProps } from './analyzer/analyzerResultsProps';
 import { useAnalyzerViewModel } from './analyzer/useAnalyzerViewModel';
 import { useAnalyzerWorkflow } from './analyzer/useAnalyzerWorkflow';
 import type { Settings, SweeperClient } from '../api/client';
+import type { PreviewRiskCalloutSource } from './PreviewRiskCallouts';
 
 type ViewProps = { client: SweeperClient; settings: Settings | null; onOpenLog: (logId: string) => void; onOpenSettings?: (focus?: 'allowDeleteUnknown' | 'enableTier3' | null, prefillCustomPath?: string | null) => void };
 
@@ -24,9 +26,9 @@ function maybeProgress(input: { analyzing: boolean; scannedDirs?: string; scanne
   return <AnalyzerProgressNotice scannedDirs={input.scannedDirs} scannedFiles={input.scannedFiles} scannedBytes={input.scannedBytes} currentPath={input.currentPath} onStop={input.onStop} />;
 }
 
-function maybeResults(input: { hasResult: boolean; props: ReturnType<typeof buildAnalyzerResultsProps> }) {
+function maybeResults(input: { hasResult: boolean; props: ReturnType<typeof buildAnalyzerResultsProps>; selectionSources: readonly PreviewRiskCalloutSource[] }) {
   if (!input.hasResult) return null;
-  return <AnalyzerResults {...input.props} />;
+  return <AnalyzerResults {...input.props} selectionSources={input.selectionSources} />;
 }
 
 function maybeNotice(input: { text: string | null; kind: 'error' | 'info' }) {
@@ -48,6 +50,16 @@ export function AnalyzerView(props: ViewProps) {
     onDrill: (args: { path: string }) => { w.setRootPath(args.path); void w.runAnalyzer({ path: args.path }); },
   };
   const resultsProps = buildAnalyzerResultsProps({ w, vm, onOpenLog, onOpenSettings, handlers });
+  const selectionSources = useMemo<readonly PreviewRiskCalloutSource[]>(
+    () => w.selectedNodes.map((n) => ({
+      itemId: n.id,
+      title: n.name || n.path,
+      description: n.description,
+      risk: n.risk,
+      targetId: n.targetId,
+    })),
+    [w.selectedNodes],
+  );
   const showAlloc = showAllocOf({ hasResult: Boolean(w.result), segmentCount: vm.allocSegments.length });
   return (
     <div className="view-stack view-stack-fill">
@@ -57,7 +69,7 @@ export function AnalyzerView(props: ViewProps) {
       <AnalyzerLocationBar rootPath={w.rootPath} hasResult={vm.hasResult} analyzing={w.analyzing} cleaning={w.cleaning} onRootPath={w.setRootPath} onRun={(path) => void w.runAnalyzer({ path })} onCycleBrowse={w.cycleBrowsePath} />
       {maybeAllocBar({ showAlloc, w, vm })}
       {maybeProgress({ analyzing: w.analyzing, scannedDirs: w.progress?.scannedDirs, scannedFiles: w.progress?.scannedFiles, scannedBytes: w.progress?.scannedBytes, currentPath: vm.progressPath, onStop: () => void w.stopAnalyzer() })}
-      {maybeResults({ hasResult: Boolean(w.result), props: resultsProps })}
+      {maybeResults({ hasResult: Boolean(w.result), props: resultsProps, selectionSources })}
     </div>
   );
 }

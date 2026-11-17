@@ -16,26 +16,49 @@ export type PreviewRiskCalloutItem = {
 };
 
 /**
- * Derive the callout items for the item currently inspected in a panel.
+ * An explanation for one item that may be part of the Preview selection.
  *
- * The item identity, Risk and Knowledge Base explanation all come from the
- * existing `explainItem` result carried by `ExplainState`. Callers set
- * `isCustomPath` from the item's owning target so a Custom Path selection is
- * surfaced with the canonical Custom Path Risk. Safe and Protected items have
- * no callout copy and therefore produce no entry.
- *
- * This is a pure, per-render derivation: when the inspected selection changes
- * the caller recomputes it, so the rendered callout list follows the selection.
+ * It is the existing `explainItem` result (`ExplainState`, which already carries
+ * the Knowledge Base description and canonical Risk) plus the owning target id
+ * so a Custom Path target can be promoted to the canonical Custom Path Risk.
  */
-export function deriveCalloutItemsFromInspection(args: {
-  inspected: ExplainState;
-  isCustomPath?: boolean;
+export type PreviewRiskCalloutSource = NonNullable<ExplainState> & {
+  targetId?: string | null;
+};
+
+/**
+ * Derive one callout per elevated-Risk item in the FULL selected set.
+ *
+ * The derivation is driven by `selectedIds`, never by the single inspected
+ * item: a source is emitted only when its id is selected, so an inspected but
+ * unselected item never produces a callout, and every selected elevated-Risk
+ * item produces exactly one. Safe and Protected items have no callout copy and
+ * are skipped. A Custom Path target is promoted to the canonical Custom Path
+ * Risk via `isCustomPath`.
+ *
+ * This is a pure, per-render derivation: when the selection or the available
+ * explanations change the caller recomputes it, so the list follows the
+ * selection. No state is held and no IPC is issued here.
+ */
+export function deriveCalloutItemsFromSelection(args: {
+  selectedIds: ReadonlySet<string>;
+  sources: readonly PreviewRiskCalloutSource[];
+  isCustomPath?: (targetId: string) => boolean;
 }): PreviewRiskCalloutItem[] {
-  const { inspected } = args;
-  if (!inspected) return [];
-  const risk: PreviewCalloutRisk = args.isCustomPath ? 'Custom Path' : inspected.risk;
-  if (calloutCopyFor(risk) === null) return [];
-  return [{ id: inspected.itemId, identity: inspected.title, risk, explanation: inspected.description }];
+  const items: PreviewRiskCalloutItem[] = [];
+  for (const source of args.sources) {
+    if (!args.selectedIds.has(source.itemId)) continue;
+    const isCustomPath = Boolean(source.targetId && args.isCustomPath?.(source.targetId));
+    const risk: PreviewCalloutRisk = isCustomPath ? 'Custom Path' : source.risk;
+    if (calloutCopyFor(risk) === null) continue;
+    items.push({
+      id: source.itemId,
+      identity: source.title,
+      risk,
+      explanation: source.description,
+    });
+  }
+  return items;
 }
 
 /**

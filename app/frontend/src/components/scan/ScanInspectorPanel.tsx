@@ -1,7 +1,7 @@
 import type { ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
 import type { ExecuteCleanResponse } from '../../api/client';
 import { CleanSummaryBlock, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, type ExplainState, type PreviewResult } from '../cleanShared';
-import { deriveCalloutItemsFromInspection, type PreviewRiskCalloutItem } from '../PreviewRiskCallouts';
+import { deriveCalloutItemsFromSelection, type PreviewRiskCalloutItem, type PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 import { isCustomPathTargetId } from './scanHelpers';
 import { ScanGroupInspector } from './ScanGroupInspector';
 import { ScanItemInspector } from './ScanItemInspector';
@@ -14,6 +14,7 @@ interface PanelProps {
   allowDeleteUnknown: boolean;
   minAgeHours?: number | null;
   selectedIds: Set<string>;
+  selectionSources: readonly PreviewRiskCalloutSource[];
   requiresConfirmation: boolean;
   confirmText: string;
   onConfirmText: (v: string) => void;
@@ -63,9 +64,10 @@ function InspectorBody(props: PanelProps) {
 }
 
 export function ScanInspectorPanel(props: PanelProps) {
-  const calloutItems = deriveCalloutItemsFromInspection({
-    inspected: props.inspected,
-    isCustomPath: props.inspectedCtx ? isCustomPathTargetId({ targetId: props.inspectedCtx.target.targetId }) : false,
+  const calloutItems = deriveCalloutItemsFromSelection({
+    selectedIds: props.selectedIds,
+    sources: props.selectionSources,
+    isCustomPath: (targetId) => isCustomPathTargetId({ targetId }),
   });
   return (
     <aside className="detail-pane selection-pane scan-inspector-pane" aria-labelledby="inspector-heading">
