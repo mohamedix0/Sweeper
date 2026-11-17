@@ -529,12 +529,12 @@ function Get-PrivacyRules() {
   # "checkout markers") closes the gap where arbitrary unmarked roots previously passed.
   # Multi-word system roots are enumerated first; the generic token stops at a path separator so
   # prose like "under C:\Windows\Temp." only contributes the segment "Windows".
-  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)'
+  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?![A-Za-z0-9._~<>+\-])'
   # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
   # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
   # First-segment allowlisting alone would let such a path pass because it carries no workspace
   # keyword. The marker must be a complete path segment after the first (app/src/repo/crate).
-  $foreignCheckoutPathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?:\\+[^\\\r\n"''<>]+)+\\+(?:app|src|repo|crate)(?![A-Za-z0-9_\-.])'
+  $foreignCheckoutPathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?![A-Za-z0-9._~<>+\-])(?:\\+[^\\\r\n"''<>]+)+\\+(?:app|src|repo|crate)(?![A-Za-z0-9_\-.])'
   # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
   # shape is matched, never a literal identifier.
   $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
@@ -649,9 +649,13 @@ function Get-PrivacyHitsForAbsolutePaths([string]$rel, [string]$text, [string]$p
   return @($hits)
 }
 
-function Get-PrivacyHitsForMachineWorkspacePaths([string]$rel, [string]$text, [string]$pattern) {
+function Get-PrivacyHitsForMachineWorkspacePaths([string]$rel, [string]$text, [string]$pattern, [string[]]$systemRoots = @()) {
   $hits = @()
   foreach ($m in [regex]::Matches($text, $pattern)) {
+    # Mirror the absolute-path detectors: a path under a legitimate system root is not a
+    # foreign workspace even if a later segment happens to be named like a checkout.
+    $firstSegment = [regex]::Match($m.Value, '^[A-Za-z]:\\+[^\\/]+')
+    if ($firstSegment.Success -and (Test-IsAllowedAbsolutePath $firstSegment.Value $systemRoots)) { continue }
     $hits += "${rel}: forbidden absolute workspace path detected: $($m.Value)"
   }
   return @($hits)
@@ -675,6 +679,7 @@ function Get-PrivacyHitsForInternalIds([string]$rel, [string]$text, [string]$pat
   # Concatenated string-literal fragments (e.g. 'aaa' + '-bbb-...') are a common way to hide
   # an identifier, so join them before applying the context-aware token pattern.
   $normalized = [regex]::Replace($text, "'\s*\+\s*'", '')
+  $normalized = [regex]::Replace($normalized, '"\s*\+\s*"', '')
   $normalized = $normalized -replace "['`"]", ''
   foreach ($m in [regex]::Matches($normalized, $pattern)) {
     $hits += "${rel}: internal session/thread identifier detected"
@@ -694,7 +699,7 @@ function Get-PrivacyHitsForFile([string]$rel, [string]$text, $rules) {
   $hits += Get-PrivacyHitsForSimplePatterns $rel $text $rules
   $hits += Get-PrivacyHitsForUserName $rel $text $rules.UserNameContextPattern
   $hits += Get-PrivacyHitsForLocalPaths $rel $text $rules.LocalUserPathPattern
-  $hits += Get-PrivacyHitsForMachineWorkspacePaths $rel $text $rules.MachineWorkspacePathPattern
+  $hits += Get-PrivacyHitsForMachineWorkspacePaths $rel $text $rules.MachineWorkspacePathPattern $rules.SystemAbsolutePathRoots
   $hits += Get-PrivacyHitsForAbsolutePaths $rel $text $rules.AbsoluteDrivePathPattern $rules.AllowedAbsolutePathRoots
   $hits += Get-PrivacyHitsForForeignCheckoutPaths $rel $text $rules
   $hits += Get-PrivacyHitsForInternalIds $rel $text $rules.InternalIdPattern
@@ -869,6 +874,17 @@ function Test-SelfTestPrivacyRules([ref]$ok) {
   $placeholderHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $placeholder $rules.MachineWorkspacePathPattern)
   Assert-SelfTest ($placeholderHits.Count -eq 0) "machine-neutral user placeholder must not match" $ok
 
+  # Regression for PR #48 thread 4607041898: the workspace detector must honor the same
+  # system-root exemptions as the absolute-path detectors.
+  $sysWorkspace = 'C' + ':' + $sep + 'Windows' + $sep + 'Temp' + $sep + 'projects' + $sep + 'tool.exe'
+  $sysWorkspaceHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $sysWorkspace $rules.MachineWorkspacePathPattern $rules.SystemAbsolutePathRoots)
+  Assert-SelfTest ($sysWorkspaceHits.Count -eq 0) "system-root workspace path must not be flagged" $ok
+  $sysWorkspaceFileHits = @(Get-PrivacyHitsForFile 'fixture.txt' $sysWorkspace $rules)
+  Assert-SelfTest ($sysWorkspaceFileHits.Count -eq 0) "system-root workspace path must pass full privacy scan" $ok
+  $nonSysWorkspace = $drive + 'projects' + $sep + 'private-checkout' + $sep + 'app'
+  $nonSysHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $nonSysWorkspace $rules.MachineWorkspacePathPattern $rules.SystemAbsolutePathRoots)
+  Assert-SelfTest ($nonSysHits.Count -ge 1) "non-system workspace path must still be flagged" $ok
+
   # Internal session/thread identifiers must be detected in context, including concatenated literals.
   $uuid = '0a1b2c3d' + '-4e5f-4a6b-8c9d-0e1f2a3b4c5d'
   $tagged = 'threadId=' + $uuid
@@ -881,6 +897,10 @@ function Test-SelfTestPrivacyRules([ref]$ok) {
   $concatSource = 'threadId = ' + $quote + $fragA + $quote + $plus + $quote + $fragB + $quote
   $concatHits = @(Get-PrivacyHitsForInternalIds 'fixture.txt' $concatSource $rules.InternalIdPattern)
   Assert-SelfTest ($concatHits.Count -ge 1) "concatenated internal id literal must be detected" $ok
+  $dquote = [char]34
+  $concatDoubleSource = 'threadId = ' + $dquote + $fragA + $dquote + $plus + $dquote + $fragB + $dquote
+  $concatDoubleHits = @(Get-PrivacyHitsForInternalIds 'fixture.txt' $concatDoubleSource $rules.InternalIdPattern)
+  Assert-SelfTest ($concatDoubleHits.Count -ge 1) "double-quoted concatenated internal id literal must be detected" $ok
   $guidOnly = '{' + '12345678-1234-1234-1234-123456789abc' + '}.TM.blf'
   $guidHits = @(Get-PrivacyHitsForInternalIds 'fixture.txt' $guidOnly $rules.InternalIdPattern)
   Assert-SelfTest ($guidHits.Count -eq 0) "non-internal GUID must not match" $ok
@@ -908,6 +928,14 @@ function Test-SelfTestAbsoluteDrivePaths([ref]$ok) {
   Assert-SelfTest ($wiredOne.Count -ge 1) "case one flagged through file-level privacy scan" $ok
   Assert-SelfTest ($wiredTwo.Count -ge 1) "case two flagged through file-level privacy scan" $ok
 
+  # Regression for PR #48 thread 4607041892: an allowlisted multi-word system root must not be
+  # captured as a mere prefix of a longer first segment (e.g. "Program FilesBackup").
+  $prefixBypass = 'C' + ':' + $sep + 'Program FilesBackup' + $sep + 'private-data' + $sep + 'notes.txt'
+  $prefixHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $prefixBypass $pattern $allowed)
+  Assert-SelfTest ($prefixHits.Count -ge 1) "long segment starting with an allowlisted root must be detected" $ok
+  $prefixWired = @(Get-PrivacyHitsForFile 'fixture.txt' $prefixBypass $rules | Where-Object { $_ -match 'absolute drive path' })
+  Assert-SelfTest ($prefixWired.Count -ge 1) "long segment must be flagged through file-level privacy scan" $ok
+
   # Legitimate system paths and machine-neutral placeholders must never be flagged.
   $systemPaths = @(
     ('C' + ':' + $sep + 'Windows' + $sep + 'System32'),
@@ -929,6 +957,12 @@ function Test-SelfTestAbsoluteDrivePaths([ref]$ok) {
     $hits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $p $pattern $allowed)
     Assert-SelfTest ($hits.Count -eq 0) "placeholder must not be flagged: $p" $ok
   }
+
+  # Regression for PR #48 thread 4607041885: the transition guide writes forbidden-path
+  # examples as angle-bracket placeholders so its own Step 1 search cannot flag the guide.
+  $fictionalExample = '<drive>:\<old-root>\<old-repo>\node_modules'
+  $fictionalHits = @(Get-PrivacyHitsForFile 'TRANSITION.md' $fictionalExample $rules)
+  Assert-SelfTest ($fictionalHits.Count -eq 0) "fictional instructional example must not be flagged" $ok
 }
 
 function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
