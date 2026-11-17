@@ -522,9 +522,8 @@ function Get-PrivacyRules() {
   # Machine-neutral detection of absolute checkout/workspace paths from *other* checkouts.
   # No real drive letter or machine path is stored; the drive and intermediates are matched generically.
   # Common checkout-root names are covered, not just the current project's special folders.
-  $workspaceMarkers = '(?:workspaces?|worktrees?|checkouts?|projects?|repos?)'
   # The reserved Users root is covered by the placeholder-aware user-path rule above.
-  $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?!Users\\)(?:[^\\\r\n"''<>]+\\)*(?:\b' + $workspaceMarkers + '\b|\.t3)(?:\\[^\\\r\n"''<>]+)*'
+  $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?!Users\\)(?:[^\\\r\n"''<>]+\\)*(?:\b(?:workspaces?|worktrees?|checkouts?|projects?|repos?)\b|\.t3)(?:\\[^\\\r\n"''<>]+)*'
   # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
   # shape is matched, never a literal identifier.
   $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
