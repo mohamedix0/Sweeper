@@ -31,9 +31,9 @@ Run from the repository root and inspect every hit:
 
 ```powershell
 # Windows drive / real-user paths in tracked files
-git grep -n -I -E '(D:|C:)\\\\Users\\\\|D:\\\\OldProject|[A-Za-z]:\\\\OldProject' -- .
+git grep -n -I -E '(D:|C:)[\\]{1,2}Users[\\]{1,2}|D:[\\]{1,2}OldWork|[A-Za-z]:[\\]{1,2}OldWork' -- .
 # Absolute D:/C: drive roots in text files
-git grep -n -I -E '([A-Z]:)[/\\\\](Users|OldProject|Program|Temp)' -- .
+git grep -n -I -E '([A-Z]:)[/\\]{1,2}(Users|OldWork|Program|Temp)' -- .
 ```
 
 Rules:
