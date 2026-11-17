@@ -52,11 +52,21 @@ function Get-NumericVersion {
     try { return [version]$match.Value } catch { return $null }
 }
 
-function Test-ExactVersion {
+function Get-StableVersionToken {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $tokens = $Text -split '\s+'
+    if ($tokens.Count -lt 2) { return $null }
+    $token = $tokens[1]
+    if ($token -notmatch '^\d+\.\d+\.\d+$') { return $null }
+    return $token
+}
+
+function Test-ExactStableVersion {
     param([string]$Text, [string]$Expected)
-    if ([string]::IsNullOrEmpty($Text)) { return $false }
-    $version = Get-NumericVersion -Text $Text
-    return ($null -ne $version -and $version -eq [version]$Expected)
+    $token = Get-StableVersionToken -Text $Text
+    if ($null -eq $token) { return $false }
+    return ($token -eq $Expected)
 }
 
 function Test-MinimumMajorVersion {
@@ -82,8 +92,8 @@ function Test-GitIdentityOk {
 
 function Test-RustToolchainOk {
     param([string]$Rustc, [string]$Cargo)
-    if (-not (Test-ExactVersion -Text $Rustc -Expected '1.99.1')) { return $false }
-    return (Test-ExactVersion -Text $Cargo -Expected '1.99.1')
+    if (-not (Test-ExactStableVersion -Text $Rustc -Expected '1.99.1')) { return $false }
+    return (Test-ExactStableVersion -Text $Cargo -Expected '1.99.1')
 }
 
 function Get-GitConfigValue {
