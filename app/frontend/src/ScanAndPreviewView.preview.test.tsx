@@ -203,6 +203,42 @@ describe('ScanAndPreviewView callout explanation gating', () => {
     expect(within(group).getByText('Cache entry')).toBeInTheDocument();
   });
 
+  it('ScanAndPreviewView re-gates Clean on a second Preview with the same selection while its explanation is delayed', async () => {
+    let delayExplain = false;
+    let resolveSecond!: (value: any) => void;
+    let secondExplain: Promise<any> | null = null;
+    const client = previewClient({
+      sessionId: 'scan-second-preview',
+      explainItem: (itemId: any) => {
+        if (!delayExplain) return Promise.resolve({ itemId, title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
+        if (!secondExplain) secondExplain = new Promise((resolve) => { resolveSecond = resolve; });
+        return secondExplain;
+      },
+    });
+    const user = await openScan({ client });
+    await selectElevatedItem(user);
+
+    await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+
+    // Clear the Preview and reopen it with the same selection. The resolved
+    // explanations from the first Preview must not carry over to the second.
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await selectElevatedItem(user);
+    delayExplain = true;
+    await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+    await waitFor(() => expect(secondExplain).not.toBeNull());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled());
+    expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond({ itemId: 'i-elevated', title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
+      await secondExplain!;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+    expect(screen.getByRole('group', { name: CALLOUT_GROUP })).toBeInTheDocument();
+  });
+
   it('ScanAndPreviewView keeps a fallback callout and reports a rejected explanation before re-enabling Clean', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

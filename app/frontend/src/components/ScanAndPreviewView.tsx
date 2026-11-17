@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, type Rea
 import { type ElevationStatus, type Settings, type SweeperClient } from '../api/client';
 import type { ScanItemDto, TargetScanResultDto } from '../contract/bindings';
 import { formatBytes } from '../utils/format';
-import { TYPED_CONFIRMATION_PHRASE } from './cleanShared';
+import { TYPED_CONFIRMATION_PHRASE, type PreviewResult } from './cleanShared';
 import type { PreviewRiskCalloutSource } from './PreviewRiskCallouts';
 import { ScanCleanBar } from './scan/ScanCleanBar';
 import { ScanResultsSection, ScanScanningLayout } from './scan/ScanResultsSection';
@@ -149,6 +149,7 @@ type SelectionSourcesState = {
 };
 type ResolvedSelection = {
   key: string;
+  preview: PreviewResult;
   sources: readonly PreviewRiskCalloutSource[];
   failedCount: number;
 };
@@ -194,49 +195,77 @@ function reportExplanationFailure(args: { itemId: string; error: unknown }): voi
 
 type ResolvedExplanation = { source: PreviewRiskCalloutSource; failed: boolean };
 
+/** Pure render-time gate: explanations must match both the selection and the current Preview generation. */
+function derivationPending(args: {
+  needs: boolean;
+  selectedKey: string;
+  preview: PreviewResult | null;
+  resolved: ResolvedSelection | null;
+}): boolean {
+  if (!args.needs) return false;
+  return args.resolved == null || args.resolved.key !== args.selectedKey || args.resolved.preview !== args.preview;
+}
+
+/** Resolves one item to a callout source, falling back to known identity on failure. */
+async function resolveItemExplanation(args: { client: SweeperClient; itemContext: Map<string, ItemContext>; itemId: string }): Promise<ResolvedExplanation> {
+  const ctx = args.itemContext.get(args.itemId);
+  try {
+    const explained = await args.client.explainItem(args.itemId);
+    return { source: explainedSource({ explained, targetId: ctx?.target.targetId ?? null }), failed: false };
+  } catch (error) {
+    reportExplanationFailure({ itemId: args.itemId, error });
+    return { source: fallbackSource({ itemId: args.itemId, ctx }), failed: true };
+  }
+}
+
+/** Resolves the whole selected set; a stale generation is ignored on arrival. */
+function resolveExplanations(args: {
+  client: SweeperClient;
+  selectedKey: string;
+  preview: PreviewResult;
+  allTargets: TargetScanResultDto[];
+  setResolved: (value: ResolvedSelection) => void;
+  isCurrent: () => boolean;
+}): void {
+  const ids = args.selectedKey === '' ? [] : args.selectedKey.split('\u0000');
+  if (ids.length === 0) return;
+  const itemContext = buildItemContext({ targets: args.allTargets });
+  void Promise.all(ids.map((itemId) => resolveItemExplanation({ client: args.client, itemContext, itemId }))).then((results) => {
+    if (!args.isCurrent()) return;
+    args.setResolved({
+      key: args.selectedKey,
+      preview: args.preview,
+      sources: results.map((result) => result.source),
+      failedCount: results.filter((result) => result.failed).length,
+    });
+  });
+}
+
 /**
- * Resolve Knowledge Base explanations for the full selected set. `pending` is
- * derived from the selection key during render, so Clean stays gated from the
- * first Preview render instead of waiting for an effect to flip a boolean.
+ * Resolve Knowledge Base explanations for the full selected set. Explanations
+ * are keyed by selection AND the current Preview, so reopening a Preview with
+ * the same selection re-gates Clean until the new explanations resolve.
  */
 function useSelectionSources(args: {
   client: SweeperClient;
   selectedKey: string;
   allTargets: TargetScanResultDto[];
-  previewActive: boolean;
+  preview: PreviewResult | null;
 }): SelectionSourcesState {
-  const { client, selectedKey, allTargets, previewActive } = args;
+  const { client, selectedKey, allTargets, preview } = args;
   const [resolved, setResolved] = useState<ResolvedSelection | null>(null);
-  const needsExplanations = previewActive && selectedKey !== '';
-  const pending = needsExplanations && resolved?.key !== selectedKey;
+  const needs = preview != null && selectedKey !== '';
 
   useEffect(() => {
     let cancelled = false;
-    const ids = selectedKey === '' ? [] : selectedKey.split('\u0000');
-    if (!previewActive || ids.length === 0) return;
-    const itemContext = buildItemContext({ targets: allTargets });
-    void Promise.all(ids.map(async (itemId): Promise<ResolvedExplanation> => {
-      const ctx = itemContext.get(itemId);
-      try {
-        const explained = await client.explainItem(itemId);
-        return { source: explainedSource({ explained, targetId: ctx?.target.targetId ?? null }), failed: false };
-      } catch (error) {
-        reportExplanationFailure({ itemId, error });
-        return { source: fallbackSource({ itemId, ctx }), failed: true };
-      }
-    })).then((results) => {
-      if (cancelled) return;
-      setResolved({
-        key: selectedKey,
-        sources: results.map((result) => result.source),
-        failedCount: results.filter((result) => result.failed).length,
-      });
-    });
+    if (preview != null && needs) {
+      resolveExplanations({ client, selectedKey, preview, allTargets, setResolved, isCurrent: () => !cancelled });
+    }
     return () => { cancelled = true; };
-  }, [client, selectedKey, allTargets, previewActive]);
+  }, [client, selectedKey, allTargets, preview, needs]);
 
-  if (!needsExplanations) return EMPTY_SELECTION_SOURCES;
-  if (pending) return PENDING_SELECTION_SOURCES;
+  if (!needs) return EMPTY_SELECTION_SOURCES;
+  if (derivationPending({ needs, selectedKey, preview, resolved })) return PENDING_SELECTION_SOURCES;
   return { sources: resolved!.sources, pending: false, failedCount: resolved!.failedCount };
 }
 
@@ -280,7 +309,7 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(fu
   const selectedKey = useMemo(() => [...d.sel].sort().join('\u0000'), [d.sel]);
   const allTargets = useMemo(() => w.results?.targets ?? [], [w.results]);
   const previewActive = w.preview != null;
-  const selectionState = useSelectionSources({ client, selectedKey, allTargets, previewActive });
+  const selectionState = useSelectionSources({ client, selectedKey, allTargets, preview: w.preview });
   const progress = cleanProgressLabel(w.cleanProgress);
   useImperativeHandle(ref, () => ({ runScan: w.runScan }), [w.runScan]);
   const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId({ prev, id: targetId }));
