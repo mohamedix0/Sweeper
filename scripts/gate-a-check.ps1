@@ -657,14 +657,14 @@ function Get-PrivacyHitsForMachineWorkspacePaths([string]$rel, [string]$text, [s
   return @($hits)
 }
 
-function Get-PrivacyHitsForForeignCheckoutPaths([string]$rel, [string]$text, [string]$pattern, [string[]]$allowedRoots, [string[]]$systemRoots) {
+function Get-PrivacyHitsForForeignCheckoutPaths([string]$rel, [string]$text, $rules) {
   $hits = @()
-  foreach ($m in [regex]::Matches($text, $pattern)) {
+  foreach ($m in [regex]::Matches($text, $rules.ForeignCheckoutPathPattern)) {
     $key = ($m.Groups['drive'].Value + ':\' + $m.Groups['seg'].Value).ToLowerInvariant()
     # Only relevant when the first segment is otherwise allowlisted but is not a system root:
     # a fixture/placeholder root must not silently hide a foreign source checkout.
-    if (-not (Test-IsAllowedAbsolutePath $key $allowedRoots)) { continue }
-    if (Test-IsAllowedAbsolutePath $key $systemRoots) { continue }
+    if (-not (Test-IsAllowedAbsolutePath $key $rules.AllowedAbsolutePathRoots)) { continue }
+    if (Test-IsAllowedAbsolutePath $key $rules.SystemAbsolutePathRoots) { continue }
     $hits += "${rel}: forbidden foreign checkout path under allowlisted root: $($m.Value)"
   }
   return @($hits)
@@ -696,7 +696,7 @@ function Get-PrivacyHitsForFile([string]$rel, [string]$text, $rules) {
   $hits += Get-PrivacyHitsForLocalPaths $rel $text $rules.LocalUserPathPattern
   $hits += Get-PrivacyHitsForMachineWorkspacePaths $rel $text $rules.MachineWorkspacePathPattern
   $hits += Get-PrivacyHitsForAbsolutePaths $rel $text $rules.AbsoluteDrivePathPattern $rules.AllowedAbsolutePathRoots
-  $hits += Get-PrivacyHitsForForeignCheckoutPaths $rel $text $rules.ForeignCheckoutPathPattern $rules.AllowedAbsolutePathRoots $rules.SystemAbsolutePathRoots
+  $hits += Get-PrivacyHitsForForeignCheckoutPaths $rel $text $rules
   $hits += Get-PrivacyHitsForInternalIds $rel $text $rules.InternalIdPattern
   $hits += Get-PrivacyHitsForTokens $rel $text $rules.TokenPatterns
   return @($hits)
