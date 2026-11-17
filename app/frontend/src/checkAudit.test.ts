@@ -49,29 +49,70 @@ function expectPassed(report: unknown): void {
 }
 
 describe('check-audit.mjs gate (synthetic reports)', () => {
-  it('fails closed when an excepted cause is combined with a cycle', () => {
-    expectBlocked(
-      {
+  // Table-driven exception-regression cases: each row keeps its descriptive
+  // title, exact synthetic report, and the original assertion verbatim.
+  it.each([
+    {
+      name: 'blocks an unrelated high advisory alongside the exception',
+      report: {
+        vulnerabilities: {
+          picomatch: highVuln([
+            exceptedPicomatchCause(),
+            {
+              source: 456,
+              name: 'picomatch',
+              title: 'Unrelated high advisory',
+              url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
+              severity: 'high',
+            },
+          ]),
+        },
+      },
+      assert: (report: unknown) => expectBlocked(report),
+    },
+    {
+      name: 'fails closed when an excepted cause is combined with a cycle',
+      report: {
         vulnerabilities: {
           picomatch: highVuln([exceptedPicomatchCause()]),
           tinyglobby: highVuln(['tinyglobby']),
           parentpkg: highVuln(['picomatch', 'tinyglobby']),
         },
       },
-      'Unresolved audit reference: tinyglobby (cycle)',
-    );
-  });
-
-  it('fails closed when an excepted cause is combined with a missing reference', () => {
-    expectBlocked(
-      {
+      assert: (report: unknown) =>
+        expectBlocked(report, 'Unresolved audit reference: tinyglobby (cycle)'),
+    },
+    {
+      name: 'fails closed when an excepted cause is combined with a missing reference',
+      report: {
         vulnerabilities: {
           picomatch: highVuln([exceptedPicomatchCause()]),
           parentpkg: highVuln(['picomatch', 'does-not-exist']),
         },
       },
-      'Unresolved audit reference: does-not-exist (missing)',
-    );
+      assert: (report: unknown) =>
+        expectBlocked(report, 'Unresolved audit reference: does-not-exist (missing)'),
+    },
+    {
+      name: 'passes an unrelated low advisory alongside the exception',
+      report: {
+        vulnerabilities: {
+          picomatch: highVuln([
+            exceptedPicomatchCause(),
+            {
+              source: 456,
+              name: 'other',
+              title: 'Unrelated low advisory',
+              url: 'https://github.com/advisories/GHSA-dddd-eeee-ffff',
+              severity: 'low',
+            },
+          ]),
+        },
+      },
+      assert: (report: unknown) => expectPassed(report),
+    },
+  ])('$name', ({ report, assert: assertAudit }) => {
+    assertAudit(report);
   });
 
   it('passes a plain inherited picomatch exception with no cycle', () => {
@@ -91,39 +132,5 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
     const result = runGate({ advisories: [] });
     expect(result.status).toBeGreaterThan(0);
     expect(result.output).toContain('Unsupported audit report shape');
-  });
-
-  it('blocks an unrelated high advisory alongside the exception', () => {
-    expectBlocked({
-      vulnerabilities: {
-        picomatch: highVuln([
-          exceptedPicomatchCause(),
-          {
-            source: 456,
-            name: 'picomatch',
-            title: 'Unrelated high advisory',
-            url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
-            severity: 'high',
-          },
-        ]),
-      },
-    });
-  });
-
-  it('passes an unrelated low advisory alongside the exception', () => {
-    expectPassed({
-      vulnerabilities: {
-        picomatch: highVuln([
-          exceptedPicomatchCause(),
-          {
-            source: 456,
-            name: 'other',
-            title: 'Unrelated low advisory',
-            url: 'https://github.com/advisories/GHSA-dddd-eeee-ffff',
-            severity: 'low',
-          },
-        ]),
-      },
-    });
   });
 });
