@@ -175,7 +175,9 @@ function explainedSource(args: { explained: ExplainedItem; targetId: string | nu
 }
 
 function fallbackRisk(args: { targetRisk: TargetScanResultDto['risk'] | undefined }): TargetScanResultDto['risk'] {
-  if (args.targetRisk === 'Caution' || args.targetRisk === 'Unknown') return args.targetRisk;
+  // Preserve the target's known Risk (Safe included); 'Unknown' is only for a
+  // genuinely unavailable Risk, never a substitute that invents a warning.
+  if (args.targetRisk != null) return args.targetRisk;
   return 'Unknown';
 }
 

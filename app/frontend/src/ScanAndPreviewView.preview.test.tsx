@@ -276,4 +276,36 @@ describe('ScanAndPreviewView callout explanation gating', () => {
       warnSpy.mockRestore();
     }
   });
+
+  it('ScanAndPreviewView keeps a Safe-only Preview callout-free when an explanation is rejected, while still showing the failure notice', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const client = {
+        startScan: async () => ({ sessionId: 'scan-safe-rejected-explain' }),
+        getScanResults: async () => scanResults({ sessionId: 'scan-safe-rejected-explain' }),
+        explainItem: () => Promise.reject(new Error('explainItem failed')),
+        previewClean: async () => ({
+          sessionId: 'scan-safe-rejected-explain', previewToken: 'tok', issuedAtUnixSecs: '1710000000', expiresAtUnixSecs: '1710000600',
+          totalBytes: '200', totalItems: '2', requiresConfirmation: false, requiresElevation: false, perTarget: [],
+          breakdown: [{ targetId: 't-safe', targetName: 'User Temp', selectedCount: '2', selectedBytes: '200' }],
+          totalSelectedCount: '2', totalSelectedBytes: '200',
+        }),
+      } as unknown as SweeperClient;
+      const user = await openScan({ client });
+      await selectBoth({ user });
+      await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+
+      // The rejected explanation resolves (Clean is re-enabled) but the known
+      // Safe Risk is preserved, so no elevated-Risk callout is invented.
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+      expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Unknown risk:/)).not.toBeInTheDocument();
+
+      // The explanation-failure notice is reported separately and stays visible.
+      expect(screen.getByText(/Explanation unavailable for 2 selected item/)).toBeInTheDocument();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
