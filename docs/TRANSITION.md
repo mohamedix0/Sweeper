@@ -76,6 +76,7 @@ The script prints `MISSING` with an exact remediation command for each failed ch
 $env:CARGO_TARGET_DIR = (Join-Path (git rev-parse --show-toplevel) "target")
 powershell -ExecutionPolicy Bypass -File scripts/gate-a-check.ps1
 cargo fmt --manifest-path app/Cargo.toml --all -- --check
+pnpm --dir app/frontend install --frozen-lockfile
 pnpm --dir app/frontend run typecheck
 pnpm --dir app/frontend run test
 pnpm --dir app/frontend run test:e2e      # msedge, no browser download

@@ -1,6 +1,6 @@
 # Sweeper
 
-> **MANDATORY FIRST READ — NEW MACHINE TRANSITION:** Before any action on a freshly relocated checkout, read [docs/TRANSITION.md](docs/TRANSITION.md) in full and complete its Steps 0–3 (clean/latest state, zero absolute machine paths, verified toolchain via `scripts/bootstrap-new-machine.ps1`). Do not read, write, test, delegate, or start any phase until that file's gates pass. This overrides every other instruction below until completed.
+> **MANDATORY FIRST READ — NEW MACHINE TRANSITION:** Before any action on a freshly relocated checkout, read [docs/TRANSITION.md](docs/TRANSITION.md) in full and complete its Steps 0–3 (clean/latest state, zero absolute machine paths, verified toolchain via `scripts/bootstrap-new-machine.ps1`). Do not read, write, test, delegate, or start any phase until that file's gates pass. Narrow exception: the inspection, sub-agent-delegated machine-path repairs, and validation strictly required to complete Steps 0–3 are permitted before the gates pass; all other work stays blocked until they do. This overrides every other instruction below until completed.
 
 Safety-first Windows desktop disk cleaner (Tauri 2 + Rust + React/TypeScript) that discovers reclaimable space on `C:`, explains every item's purpose, size, and `Risk`, and permanently removes only what the user confirms.
 
