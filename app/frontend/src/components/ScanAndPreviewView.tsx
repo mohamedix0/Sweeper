@@ -26,10 +26,10 @@ type Props = {
   onOpenSettings?: (focus?: 'allowDeleteUnknown' | 'enableTier3' | null, prefillCustomPath?: string | null) => void;
 };
 
-function toggleSetId(prev: Set<string>, id: string): Set<string> {
-  const next = new Set(prev);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
+function toggleSetId(args: { prev: Set<string>; id: string }): Set<string> {
+  const next = new Set(args.prev);
+  if (next.has(args.id)) next.delete(args.id);
+  else next.add(args.id);
   return next;
 }
 
@@ -45,16 +45,16 @@ function inspectedMatches(args: { inspected: ReturnType<typeof useScanWorkflow>[
   return args.inspected.itemId === args.itemId;
 }
 
-function findItemInTarget(target: TargetScanResultDto, itemId: string) {
-  const item = target.items.find((i) => i.id === itemId);
+function findItemInTarget(args: { target: TargetScanResultDto; itemId: string }) {
+  const item = args.target.items.find((i) => i.id === args.itemId);
   if (!item) return null;
-  return { target, item };
+  return { target: args.target, item };
 }
 
 function findInspectedCtx(args: { focus: ReturnType<typeof useScanWorkflow>['focus']; inspected: ReturnType<typeof useScanWorkflow>['inspected']; targets: TargetScanResultDto[] }) {
   const itemId = focusItemId(args.focus);
   if (!inspectedMatches({ inspected: args.inspected, itemId })) return null;
-  const found = args.targets.map((target) => findItemInTarget(target, itemId!)).find((value) => value != null);
+  const found = args.targets.map((target) => findItemInTarget({ target, itemId: itemId! })).find((value) => value != null);
   return found ?? null;
 }
 
@@ -147,51 +147,57 @@ type SelectionSourcesState = {
   pending: boolean;
   failedCount: number;
 };
+type ResolvedSelection = {
+  key: string;
+  sources: readonly PreviewRiskCalloutSource[];
+  failedCount: number;
+};
 
 const EXPLANATION_UNAVAILABLE = 'Explanation unavailable for this item — showing its known identity and risk only.';
 const EMPTY_SELECTION_SOURCES: SelectionSourcesState = { sources: [], pending: false, failedCount: 0 };
+const PENDING_SELECTION_SOURCES: SelectionSourcesState = { sources: [], pending: true, failedCount: 0 };
 
-function buildItemContext(targets: TargetScanResultDto[]): Map<string, ItemContext> {
+function buildItemContext(args: { targets: TargetScanResultDto[] }): Map<string, ItemContext> {
   const byId = new Map<string, ItemContext>();
-  for (const target of targets) for (const item of target.items) byId.set(item.id, { target, item });
+  for (const target of args.targets) for (const item of target.items) byId.set(item.id, { target, item });
   return byId;
 }
 
-function explainedSource(explained: ExplainedItem, targetId: string | null): PreviewRiskCalloutSource {
+function explainedSource(args: { explained: ExplainedItem; targetId: string | null }): PreviewRiskCalloutSource {
   return {
-    itemId: explained.itemId,
-    title: explained.title,
-    description: explained.description,
-    risk: explained.risk,
-    targetId,
+    itemId: args.explained.itemId,
+    title: args.explained.title,
+    description: args.explained.description,
+    risk: args.explained.risk,
+    targetId: args.targetId,
   };
 }
 
-function fallbackRisk(targetRisk: TargetScanResultDto['risk'] | undefined): TargetScanResultDto['risk'] {
-  if (targetRisk === 'Caution' || targetRisk === 'Unknown') return targetRisk;
+function fallbackRisk(args: { targetRisk: TargetScanResultDto['risk'] | undefined }): TargetScanResultDto['risk'] {
+  if (args.targetRisk === 'Caution' || args.targetRisk === 'Unknown') return args.targetRisk;
   return 'Unknown';
 }
 
-function fallbackSource(itemId: string, ctx: ItemContext | undefined): PreviewRiskCalloutSource {
+function fallbackSource(args: { itemId: string; ctx: ItemContext | undefined }): PreviewRiskCalloutSource {
   return {
-    itemId,
-    title: ctx?.item.path ?? itemId,
+    itemId: args.itemId,
+    title: args.ctx?.item.path ?? args.itemId,
     description: EXPLANATION_UNAVAILABLE,
-    risk: fallbackRisk(ctx?.target.risk),
-    targetId: ctx?.target.targetId ?? null,
+    risk: fallbackRisk({ targetRisk: args.ctx?.target.risk }),
+    targetId: args.ctx?.target.targetId ?? null,
   };
 }
 
-function reportExplanationFailure(itemId: string, error: unknown): void {
-  console.warn(`Sweeper: explanation unavailable for selected item ${itemId}.`, error);
+function reportExplanationFailure(args: { itemId: string; error: unknown }): void {
+  console.warn(`Sweeper: explanation unavailable for selected item ${args.itemId}.`, args.error);
 }
 
 type ResolvedExplanation = { source: PreviewRiskCalloutSource; failed: boolean };
 
 /**
- * Resolve Knowledge Base explanations for the full selected set. Clean stays
- * gated while requests are pending; a failed explanation keeps a callout built
- * from the scanned item's identity and known Risk instead of being dropped.
+ * Resolve Knowledge Base explanations for the full selected set. `pending` is
+ * derived from the selection key during render, so Clean stays gated from the
+ * first Preview render instead of waiting for an effect to flip a boolean.
  */
 function useSelectionSources(args: {
   client: SweeperClient;
@@ -200,67 +206,69 @@ function useSelectionSources(args: {
   previewActive: boolean;
 }): SelectionSourcesState {
   const { client, selectedKey, allTargets, previewActive } = args;
-  const [state, setState] = useState<SelectionSourcesState>(EMPTY_SELECTION_SOURCES);
+  const [resolved, setResolved] = useState<ResolvedSelection | null>(null);
+  const needsExplanations = previewActive && selectedKey !== '';
+  const pending = needsExplanations && resolved?.key !== selectedKey;
+
   useEffect(() => {
     let cancelled = false;
     const ids = selectedKey === '' ? [] : selectedKey.split('\u0000');
-    if (!previewActive || ids.length === 0) {
-      setState(EMPTY_SELECTION_SOURCES);
-      return;
-    }
-    const itemContext = buildItemContext(allTargets);
-    setState({ sources: [], pending: true, failedCount: 0 });
+    if (!previewActive || ids.length === 0) return;
+    const itemContext = buildItemContext({ targets: allTargets });
     void Promise.all(ids.map(async (itemId): Promise<ResolvedExplanation> => {
       const ctx = itemContext.get(itemId);
       try {
         const explained = await client.explainItem(itemId);
-        return { source: explainedSource(explained, ctx?.target.targetId ?? null), failed: false };
+        return { source: explainedSource({ explained, targetId: ctx?.target.targetId ?? null }), failed: false };
       } catch (error) {
-        reportExplanationFailure(itemId, error);
-        return { source: fallbackSource(itemId, ctx), failed: true };
+        reportExplanationFailure({ itemId, error });
+        return { source: fallbackSource({ itemId, ctx }), failed: true };
       }
-    })).then((resolved) => {
+    })).then((results) => {
       if (cancelled) return;
-      setState({
-        sources: resolved.map((result) => result.source),
-        pending: false,
-        failedCount: resolved.filter((result) => result.failed).length,
+      setResolved({
+        key: selectedKey,
+        sources: results.map((result) => result.source),
+        failedCount: results.filter((result) => result.failed).length,
       });
     });
     return () => { cancelled = true; };
   }, [client, selectedKey, allTargets, previewActive]);
-  return state;
+
+  if (!needsExplanations) return EMPTY_SELECTION_SOURCES;
+  if (pending) return PENDING_SELECTION_SOURCES;
+  return { sources: resolved!.sources, pending: false, failedCount: resolved!.failedCount };
 }
 
-function explanationWarning(failedCount: number): string | null {
-  if (failedCount <= 0) return null;
-  return `Explanation unavailable for ${failedCount} selected item(s); showing known identity and risk only.`;
+function explanationWarning(args: { failedCount: number }): string | null {
+  if (args.failedCount <= 0) return null;
+  return `Explanation unavailable for ${args.failedCount} selected item(s); showing known identity and risk only.`;
 }
 
-function collapseAllTargets(targets: TargetScanResultDto[], hasCollapsed: boolean): Set<string> {
-  if (targets.length === 0) return new Set<string>();
-  if (hasCollapsed) return new Set<string>();
-  return new Set(targets.map((t) => t.targetId));
+function collapseAllTargets(args: { targets: TargetScanResultDto[]; hasCollapsed: boolean }): Set<string> {
+  if (args.targets.length === 0) return new Set<string>();
+  if (args.hasCollapsed) return new Set<string>();
+  return new Set(args.targets.map((t) => t.targetId));
 }
 
-function isTypedConfirmSatisfied(requiresConfirm: boolean, typedDelete: boolean): boolean {
-  if (!requiresConfirm) return true;
-  return typedDelete;
+function isTypedConfirmSatisfied(args: { requiresConfirm: boolean; typedDelete: boolean }): boolean {
+  if (!args.requiresConfirm) return true;
+  return args.typedDelete;
 }
 
-function canCleanWithPreview(hasPreview: boolean, idle: boolean): boolean {
-  if (!hasPreview) return false;
-  return idle;
+function canCleanWithPreview(args: { hasPreview: boolean; idle: boolean }): boolean {
+  if (!args.hasPreview) return false;
+  return args.idle;
 }
 
-function anyTargetsCollapsed(hasTargets: boolean, hasCollapsed: boolean): boolean {
-  if (!hasTargets) return false;
-  return hasCollapsed;
+function anyTargetsCollapsed(args: { hasTargets: boolean; hasCollapsed: boolean }): boolean {
+  if (!args.hasTargets) return false;
+  return args.hasCollapsed;
 }
 
-function masterCheckboxIndeterminate(allSelected: boolean, hasSelection: boolean): boolean {
-  if (allSelected) return false;
-  return hasSelection;
+function masterCheckboxIndeterminate(args: { allSelected: boolean; hasSelection: boolean }): boolean {
+  if (args.allSelected) return false;
+  return args.hasSelection;
 }
 
 export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(function ScanAndPreviewView(props, ref) {
@@ -275,23 +283,23 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(fu
   const selectionState = useSelectionSources({ client, selectedKey, allTargets, previewActive });
   const progress = cleanProgressLabel(w.cleanProgress);
   useImperativeHandle(ref, () => ({ runScan: w.runScan }), [w.runScan]);
-  const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId(prev, targetId));
-  const onToggleShowAll = (targetId: string) => w.setShowAllGroups((prev) => toggleSetId(prev, targetId));
+  const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId({ prev, id: targetId }));
+  const onToggleShowAll = (targetId: string) => w.setShowAllGroups((prev) => toggleSetId({ prev, id: targetId }));
   const hasTargets = d.targets.length > 0;
   const hasCollapsed = w.collapsedTargets.size > 0;
-  const onToggleCollapseAll = () => w.setCollapsedTargets(collapseAllTargets(d.targets, hasCollapsed));
+  const onToggleCollapseAll = () => w.setCollapsedTargets(collapseAllTargets({ targets: d.targets, hasCollapsed }));
   const onToggleGroupSelect = (target: TargetScanResultDto) => setTargetSelection({ w, target, select: !allSelectableSelected(target, { selectedIds: d.sel, allow: d.allow }), allow: d.allow });
   const typedDelete = w.confirmText === TYPED_CONFIRMATION_PHRASE;
-  const confirmed = isTypedConfirmSatisfied(d.requiresConfirmation, typedDelete);
+  const confirmed = isTypedConfirmSatisfied({ requiresConfirm: d.requiresConfirmation, typedDelete });
   const idle = idleState({ scanning: w.scanning, previewLoading: w.previewLoading, cleaning: w.cleaning });
   const previewOk = canPreview({ sessionId: w.sessionId, selected: d.sel.size, idle, expired: w.isSessionExpired, confirmed });
-  const cleanOk = canCleanWithPreview(previewActive, idle) && !selectionState.pending;
-  const anyCollapsed = anyTargetsCollapsed(hasTargets, hasCollapsed);
-  const masterIndeterminate = masterCheckboxIndeterminate(d.allEligibleSelected, d.sel.size > 0);
+  const cleanOk = canCleanWithPreview({ hasPreview: previewActive, idle }) && !selectionState.pending;
+  const anyCollapsed = anyTargetsCollapsed({ hasTargets, hasCollapsed });
+  const masterIndeterminate = masterCheckboxIndeterminate({ allSelected: d.allEligibleSelected, hasSelection: d.sel.size > 0 });
   return (
     <div className="view-stack view-stack-fill">
       <ScanViewHeader hasResults={!!w.results} heroReclaimable={d.heroReclaimable} tier1={w.tier1} tier2={w.tier2} scanning={w.scanning} cleaning={w.cleaning} settings={settings} settingsStale={d.settingsStale} hasActiveScope={w.hasActiveScanScope} onTier1={w.setTier1} onTier2={w.setTier2} onRunScan={() => void w.runScan()} onOpenSettings={onOpenSettings} />
-      <ScanNotices elevationError={elevationError} relaunchInfo={w.relaunchInfo} relaunchError={w.relaunchError} error={w.error} info={w.info} explanationWarning={explanationWarning(selectionState.failedCount)} />
+      <ScanNotices elevationError={elevationError} relaunchInfo={w.relaunchInfo} relaunchError={w.relaunchError} error={w.error} info={w.info} explanationWarning={explanationWarning({ failedCount: selectionState.failedCount })} />
       <ScanViewControls toolbar={w.toolbar} targetsCount={d.targets.length} selectableCount={d.selectableCount} skippedCount={d.skippedCount} hasResults={!!w.results} cleaning={w.cleaning} anyCollapsed={anyCollapsed} isFilterActive={d.isFilterActive} selectSafeIdsLength={d.selectSafeIds.length} allSelectSafeSelected={d.allSelectSafeSelected} onToolbar={w.setToolbar} onToggleCollapseAll={onToggleCollapseAll} onSelectAllSafe={() => selectAllSafeIds({ w, selectSafeIds: d.selectSafeIds })} />
       <StatusBlocks w={w} d={d} masterIndeterminate={masterIndeterminate} />
       <ResultsBlocks client={client} w={w} d={d} focusedGroup={focusedGroup} inspectedCtx={inspectedCtx} selectionSources={selectionState.sources} canPreview={previewOk} canClean={cleanOk} onOpenLog={onOpenLog} onOpenSettings={onOpenSettings} onToggleCollapsed={onToggleCollapsed} onToggleShowAll={onToggleShowAll} onToggleGroupSelect={onToggleGroupSelect} cleanProgress={progress} />

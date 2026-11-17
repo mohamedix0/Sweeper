@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { Profiler } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { ScanAndPreviewView } from './components/ScanAndPreviewView';
 import type { ScanResults, SweeperClient } from './api/client';
@@ -133,7 +134,46 @@ async function selectElevatedItem(user: Awaited<ReturnType<typeof openScan>>) {
   if (!cb.checked) await user.click(cb);
 }
 
+/**
+ * Profiler.onRender runs during the commit phase, after DOM mutations but
+ * before passive effects. That captures the very first render where the Clean
+ * button exists, before the explanation requests are even started.
+ */
+function renderViewWithProbe(input: { client: SweeperClient; record: (disabled: boolean | null) => void }) {
+  return render(
+    <Profiler id="view" onRender={() => {
+      const button = screen.queryByRole('button', { name: 'Clean Permanently' }) as HTMLButtonElement | null;
+      input.record(button ? button.disabled : null);
+    }}>
+      <ScanAndPreviewView client={input.client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />
+    </Profiler>,
+  );
+}
+
 describe('ScanAndPreviewView callout explanation gating', () => {
+  it('ScanAndPreviewView disables Clean on the first Preview render before explanations resolve', async () => {
+    let resolveExplain!: (value: any) => void;
+    const explainPromise = new Promise<any>((resolve) => { resolveExplain = resolve; });
+    const client = previewClient({ sessionId: 'scan-first-preview', explainItem: () => explainPromise });
+    const samples: Array<boolean | null> = [];
+    const user = userEvent.setup();
+    renderViewWithProbe({ client, record: (disabled) => samples.push(disabled) });
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await screen.findByRole('heading', { name: 'Inspector' });
+    await selectElevatedItem(user);
+    await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+
+    await waitFor(() => expect(samples.some((value) => value !== null)).toBe(true));
+    expect(samples.find((value) => value !== null)).toBe(true);
+    expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled();
+
+    await act(async () => {
+      resolveExplain({ itemId: 'i-elevated', title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
+      await explainPromise;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+  });
+
   it('ScanAndPreviewView keeps Clean disabled until a delayed explanation resolves, then shows the callout', async () => {
     let calloutMode = false;
     let resolveCallout!: (value: any) => void;
