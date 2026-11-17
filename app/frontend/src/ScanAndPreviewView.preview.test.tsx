@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ScanAndPreviewView } from './components/ScanAndPreviewView';
 import type { ScanResults, SweeperClient } from './api/client';
 
@@ -100,5 +100,104 @@ describe('ScanAndPreviewView preview stale handling', () => {
 
   it('ScanAndPreviewView clears previewLoading when selection changes during in-flight previewClean', async () => {
     await runClearsLoadingCase();
+  });
+});
+
+const CALLOUT_GROUP = 'Elevated risk in this selection';
+
+function elevatedScanResults(sessionId: string): ScanResults {
+  return {
+    sessionId, startedUnixSecs: '1710000000', minAgeHours: 24,
+    targets: [{ targetId: 't-caution', targetName: 'Browser Cache', tier: 'Tier1', risk: 'Caution', resolvedPaths: ['C:\\Cache'], scanned: true, statusReason: null, totalBytes: '100', eligibleBytes: '100', fileCount: '1', eligibleCount: '1', skippedCount: '0', items: [
+      { id: 'i-elevated', targetId: 't-caution', path: 'C:\\Cache\\entry.tmp', size: '100', mtimeUnixSecs: '1700000000', ageEligible: true },
+    ] }],
+  } as ScanResults;
+}
+
+function previewClient(input: { sessionId: string; explainItem: (itemId: any) => Promise<any> }): SweeperClient {
+  return {
+    startScan: async () => ({ sessionId: input.sessionId }),
+    getScanResults: async () => elevatedScanResults(input.sessionId),
+    explainItem: input.explainItem,
+    previewClean: async () => ({
+      sessionId: input.sessionId, previewToken: 'tok', issuedAtUnixSecs: '1710000000', expiresAtUnixSecs: '1710000600',
+      totalBytes: '100', totalItems: '1', requiresConfirmation: false, requiresElevation: false, perTarget: [],
+      breakdown: [{ targetId: 't-caution', targetName: 'Browser Cache', selectedCount: '1', selectedBytes: '100' }],
+      totalSelectedCount: '1', totalSelectedBytes: '100',
+    }),
+  } as unknown as SweeperClient;
+}
+
+async function selectElevatedItem(user: Awaited<ReturnType<typeof openScan>>) {
+  const cb = screen.getByLabelText('Select C:\\Cache\\entry.tmp') as HTMLInputElement;
+  if (!cb.checked) await user.click(cb);
+}
+
+describe('ScanAndPreviewView callout explanation gating', () => {
+  it('ScanAndPreviewView keeps Clean disabled until a delayed explanation resolves, then shows the callout', async () => {
+    let calloutMode = false;
+    let resolveCallout!: (value: any) => void;
+    let calloutPromise: Promise<any> | null = null;
+    const client = previewClient({
+      sessionId: 'scan-delayed-explain',
+      explainItem: (itemId: any) => {
+        if (!calloutMode) return Promise.resolve({ itemId, title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
+        if (!calloutPromise) calloutPromise = new Promise((resolve) => { resolveCallout = resolve; });
+        return calloutPromise;
+      },
+    });
+    const user = await openScan({ client });
+    await selectElevatedItem(user);
+    calloutMode = true;
+    await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+    await waitFor(() => expect(calloutPromise).not.toBeNull());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled());
+    expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveCallout({ itemId: 'i-elevated', title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
+      await calloutPromise!;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+    const group = screen.getByRole('group', { name: CALLOUT_GROUP });
+    expect(within(group).getByText('Cache entry')).toBeInTheDocument();
+  });
+
+  it('ScanAndPreviewView keeps a fallback callout and reports a rejected explanation before re-enabling Clean', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let calloutMode = false;
+      let rejectCallout!: (reason?: any) => void;
+      let calloutPromise: Promise<any> | null = null;
+      const client = previewClient({
+        sessionId: 'scan-rejected-explain',
+        explainItem: (itemId: any) => {
+          if (!calloutMode) return Promise.resolve({ itemId, title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
+          if (!calloutPromise) calloutPromise = new Promise((_resolve, reject) => { rejectCallout = reject; });
+          return calloutPromise;
+        },
+      });
+      const user = await openScan({ client });
+      await selectElevatedItem(user);
+      calloutMode = true;
+      await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+      await waitFor(() => expect(calloutPromise).not.toBeNull());
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled());
+      expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
+
+      await act(async () => {
+        rejectCallout(new Error('explainItem failed'));
+        await calloutPromise!.catch(() => {});
+      });
+      const group = await screen.findByRole('group', { name: CALLOUT_GROUP });
+      expect(within(group).getByText('C:\\Cache\\entry.tmp')).toBeInTheDocument();
+      expect(within(group).getByText('Caution')).toBeInTheDocument();
+      expect(within(group).getByText(/Explanation unavailable/)).toBeInTheDocument();
+      expect(screen.getByText(/Explanation unavailable for 1 selected item/)).toBeInTheDocument();
+      expect(warnSpy).toHaveBeenCalled();
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
