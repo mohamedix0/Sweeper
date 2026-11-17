@@ -1,6 +1,6 @@
 # MANDATORY — New Machine Transition (read before ANY autonomous work)
 
-> This file is the **first gate** on a freshly relocated checkout. Before reading, writing, testing, delegating, or starting any phase, an agent MUST read this file completely and complete every step below. Do not skip steps because "the code looks fine". A new laptop has **no installed toolchain** and no configured credentials; assumptions from the previous machine are invalid.
+> This file is the **first gate** on a freshly relocated checkout. Before reading, writing, testing, delegating, or starting any phase, an agent MUST read this file completely and complete every step below. Do not skip steps because "the code looks fine". A new laptop has **no installed toolchain** and no configured credentials; assumptions from the previous machine are invalid. Narrow exception: the inspection, sub-agent-delegated machine-path repairs, and validation strictly required to complete Steps 0–3 are permitted before those gates pass; all other work stays blocked until they do.
 
 ## Why this exists
 
