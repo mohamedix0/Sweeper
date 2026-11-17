@@ -529,12 +529,17 @@ function Get-PrivacyRules() {
   # "checkout markers") closes the gap where arbitrary unmarked roots previously passed.
   # Multi-word system roots are enumerated first; the generic token stops at a path separator so
   # prose like "under C:\Windows\Temp." only contributes the segment "Windows".
-  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?![A-Za-z0-9._~<>+\-])'
+  # The first segment is captured whole (internal spaces included) and must end at a real path
+  # separator or end-of-path. A whitespace-only boundary let "Program Files Backup" be read as the
+  # allowlisted "Program Files" root (CodeRabbit reply 4607145526, thread 4607041892).
+  # Explicit multi-word roots stay first so legitimate system paths remain allowlisted.
+  $firstSegmentPattern = '(?<seg>(?:Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?=\\|$)|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\- ]*[A-Za-z0-9._~<>+\-](?=\\))'
+  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+' + $firstSegmentPattern
   # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
   # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
   # First-segment allowlisting alone would let such a path pass because it carries no workspace
   # keyword. The marker must be a complete path segment after the first (app/src/repo/crate).
-  $foreignCheckoutPathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?![A-Za-z0-9._~<>+\-])(?:\\+[^\\\r\n"''<>]+)+\\+(?:app|src|repo|crate)(?![A-Za-z0-9_\-.])'
+  $foreignCheckoutPathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+' + $firstSegmentPattern + '(?:\\+[^\\\r\n"''<>]+)+\\+(?:app|src|repo|crate)(?![A-Za-z0-9_\-.])'
   # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
   # shape is matched, never a literal identifier.
   $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
@@ -935,6 +940,18 @@ function Test-SelfTestAbsoluteDrivePaths([ref]$ok) {
   Assert-SelfTest ($prefixHits.Count -ge 1) "long segment starting with an allowlisted root must be detected" $ok
   $prefixWired = @(Get-PrivacyHitsForFile 'fixture.txt' $prefixBypass $rules | Where-Object { $_ -match 'absolute drive path' })
   Assert-SelfTest ($prefixWired.Count -ge 1) "long segment must be flagged through file-level privacy scan" $ok
+
+  # CodeRabbit reply 4607145526 (thread 4607041892): a longer first segment that begins with an
+  # allowlisted root but contains a space ("Program Files Backup") must be captured whole. The
+  # boundary is a real path separator, never whitespace, so the root prefix cannot hide it.
+  $spaceSegment = 'C' + ':' + $sep + 'Program Files Backup' + $sep + 'private-data' + $sep + 'notes.txt'
+  $spaceSegmentHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $spaceSegment $pattern $allowed)
+  Assert-SelfTest ($spaceSegmentHits.Count -ge 1) "space-containing longer first segment must match absolute-drive pattern" $ok
+  $foreignSpaceSegment = 'C' + ':' + $sep + 'Program Files Backup' + $sep + 'private-app' + $sep + 'app'
+  $foreignSegmentMatches = @([regex]::Matches($foreignSpaceSegment, $rules.ForeignCheckoutPathPattern))
+  Assert-SelfTest ($foreignSegmentMatches.Count -ge 1) "space-containing longer first segment must match foreign-checkout pattern" $ok
+  $spaceSegmentWired = @(Get-PrivacyHitsForFile 'fixture.txt' $spaceSegment $rules | Where-Object { $_ -match 'absolute drive path' })
+  Assert-SelfTest ($spaceSegmentWired.Count -ge 1) "space-containing longer first segment must be flagged through file-level privacy scan" $ok
 
   # Legitimate system paths and machine-neutral placeholders must never be flagged.
   $systemPaths = @(
