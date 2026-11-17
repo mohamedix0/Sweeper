@@ -39,8 +39,9 @@ function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null);
 }
 
+/** Plain objects only: arrays are never valid audit reports or containers. */
 function isObject(value) {
-  return value !== null && typeof value === 'object';
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function asArray(value) {
@@ -143,23 +144,42 @@ function toPackageCause(pkg, raw) {
   };
 }
 
+/** A broken reference becomes an unexemptable blocking cause. */
+function toBrokenReferenceCause(pkg, reason) {
+  return {
+    allIds: [],
+    severity: 'high',
+    title: `Unresolved audit reference: ${pkg} (${reason})`,
+    moduleName: pkg,
+  };
+}
+
+/** Copy the current reference chain and append one package. */
+function childPath(path, pkg) {
+  const next = new Set(path);
+  next.add(pkg);
+  return next;
+}
+
 /**
  * Resolve one package's `via` list into individual advisory causes. Each
  * object entry is one cause with its own ids and severity. A string entry is a
  * reference to another vulnerability entry and is followed through
- * `vulnerabilities`; the visited set makes cycles terminate.
+ * `vulnerabilities`. Missing references and cycles produce a blocking cause
+ * with no exemptable ids, so they can never be masked by an excepted cause.
+ * `path` is the current chain, copied per branch so shared but non-cyclic
+ * references are not mistaken for cycles.
  */
-function resolveCauses(pkg, vulnerabilities, visited) {
-  if (visited.has(pkg)) return [];
-  visited.add(pkg);
+function resolveCauses(pkg, vulnerabilities, path) {
+  if (path.has(pkg)) return [toBrokenReferenceCause(pkg, 'cycle')];
 
   const raw = vulnerabilities[pkg];
-  if (!isObject(raw)) return [];
+  if (!isObject(raw)) return [toBrokenReferenceCause(pkg, 'missing')];
 
   const causes = [];
   for (const entry of asArray(raw.via)) {
     if (isViaReference(entry)) {
-      causes.push(...resolveCauses(entry, vulnerabilities, visited));
+      causes.push(...resolveCauses(entry, vulnerabilities, childPath(path, pkg)));
     } else if (isObject(entry)) {
       causes.push(toViaCause(entry));
     }
