@@ -530,6 +530,11 @@ function Get-PrivacyRules() {
   # Multi-word system roots are enumerated first; the generic token stops at a path separator so
   # prose like "under C:\Windows\Temp." only contributes the segment "Windows".
   $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)'
+  # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
+  # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
+  # First-segment allowlisting alone would let such a path pass because it carries no workspace
+  # keyword. The marker must be a complete path segment after the first (app/src/repo/crate).
+  $foreignCheckoutPathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+(?<seg>Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?:\\+[^\\\r\n"''<>]+)+\\+(?:app|src|repo|crate)(?![A-Za-z0-9_\-.])'
   # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
   # shape is matched, never a literal identifier.
   $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
@@ -543,7 +548,9 @@ function Get-PrivacyRules() {
     LocalUserPathPattern = $localUserPathPattern
     MachineWorkspacePathPattern = $machineWorkspacePathPattern
     AbsoluteDrivePathPattern = $absoluteDrivePathPattern
+    ForeignCheckoutPathPattern = $foreignCheckoutPathPattern
     AllowedAbsolutePathRoots = @(Get-AllowedAbsolutePathRoots)
+    SystemAbsolutePathRoots = @(Get-SystemAbsolutePathRoots)
     InternalIdPattern = $internalIdPattern
     TokenPatterns = @('gh' + 'p_[A-Za-z0-9]{20,}', 'github' + '_pat_[A-Za-z0-9_]{20,}', 'BEGIN [A-Z ]*PRIVATE KEY')
   }
@@ -596,15 +603,23 @@ function Get-PrivacyHitsForUserName([string]$rel, [string]$text, [string]$userNa
   return @($hits)
 }
 
-function Get-AllowedAbsolutePathRoots() {
-  # Machine-neutral allowlist of (drive, first segment) roots that legitimately occur in tracked
-  # text: Windows/system roots, documented placeholders, and synthetic test fixtures shipped in the
-  # repo. This is deliberately data, not logic: no real username, machine path, or internal ID.
-  $system = @(
+function Get-SystemAbsolutePathRoots() {
+  # Legitimate Windows/system roots. These stay allowlisted at any depth so real system paths
+  # (e.g. deeply nested Windows or Program Files subtrees) are never over-blocked.
+  return @(
     'c:\windows', 'c:\windows.', 'c:\windows.old', 'c:\windowsapps',
     'c:\program files', 'c:\program files (x86)', 'c:\programdata',
     'c:\recovery', 'c:\system volume information'
   )
+}
+
+function Get-AllowedAbsolutePathRoots() {
+  # Machine-neutral allowlist of (drive, first segment) roots that legitimately occur in tracked
+  # text: Windows/system roots, documented placeholders, and synthetic test fixtures shipped in the
+  # repo. This is deliberately data, not logic: no real username, machine path, or internal ID.
+  # Fixture/placeholder exceptions are bounded by the foreign-checkout rule: a first segment here
+  # is not a blanket pass for an arbitrary source checkout buried underneath it.
+  $system = @(Get-SystemAbsolutePathRoots)
   $placeholders = @(
     'c:\temp', 'c:\temp.', 'c:\temp2', 'c:\cache', 'c:\users', 'c:\sandbox',
     'c:\sweeper', 'c:\sweepernonexistentcustompathcancel', 'c:\sweepernonexistentrecyclebincancel',
@@ -642,6 +657,19 @@ function Get-PrivacyHitsForMachineWorkspacePaths([string]$rel, [string]$text, [s
   return @($hits)
 }
 
+function Get-PrivacyHitsForForeignCheckoutPaths([string]$rel, [string]$text, [string]$pattern, [string[]]$allowedRoots, [string[]]$systemRoots) {
+  $hits = @()
+  foreach ($m in [regex]::Matches($text, $pattern)) {
+    $key = ($m.Groups['drive'].Value + ':\' + $m.Groups['seg'].Value).ToLowerInvariant()
+    # Only relevant when the first segment is otherwise allowlisted but is not a system root:
+    # a fixture/placeholder root must not silently hide a foreign source checkout.
+    if (-not (Test-IsAllowedAbsolutePath $key $allowedRoots)) { continue }
+    if (Test-IsAllowedAbsolutePath $key $systemRoots) { continue }
+    $hits += "${rel}: forbidden foreign checkout path under allowlisted root: $($m.Value)"
+  }
+  return @($hits)
+}
+
 function Get-PrivacyHitsForInternalIds([string]$rel, [string]$text, [string]$pattern) {
   $hits = @()
   # Concatenated string-literal fragments (e.g. 'aaa' + '-bbb-...') are a common way to hide
@@ -668,6 +696,7 @@ function Get-PrivacyHitsForFile([string]$rel, [string]$text, $rules) {
   $hits += Get-PrivacyHitsForLocalPaths $rel $text $rules.LocalUserPathPattern
   $hits += Get-PrivacyHitsForMachineWorkspacePaths $rel $text $rules.MachineWorkspacePathPattern
   $hits += Get-PrivacyHitsForAbsolutePaths $rel $text $rules.AbsoluteDrivePathPattern $rules.AllowedAbsolutePathRoots
+  $hits += Get-PrivacyHitsForForeignCheckoutPaths $rel $text $rules.ForeignCheckoutPathPattern $rules.AllowedAbsolutePathRoots $rules.SystemAbsolutePathRoots
   $hits += Get-PrivacyHitsForInternalIds $rel $text $rules.InternalIdPattern
   $hits += Get-PrivacyHitsForTokens $rel $text $rules.TokenPatterns
   return @($hits)
@@ -902,6 +931,35 @@ function Test-SelfTestAbsoluteDrivePaths([ref]$ok) {
   }
 }
 
+function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+
+  # File-level regression for PR #48 thread 4606741541: a checkout-style path beneath an
+  # allowlisted fixture root must be flagged even though it carries no workspace keyword.
+  # Built from neutral fragments so no real machine path is ever stored in this gate.
+  $foreignUnderFixtureRoot = 'C' + ':' + $sep + 'Dev' + $sep + 'private-app' + $sep + 'app'
+  $foreignHits = @(Get-PrivacyHitsForFile 'fixture.txt' $foreignUnderFixtureRoot $rules | Where-Object { $_ -match 'foreign checkout path under allowlisted root' })
+  Assert-SelfTest ($foreignHits.Count -ge 1) "checkout under allowlisted fixture root must be flagged at file level" $ok
+
+  # The same shape under a documented placeholder root must also be flagged.
+  $foreignUnderPlaceholder = 'C' + ':' + $sep + 'Temp' + $sep + 'private-app' + $sep + 'app'
+  $placeholderRootHits = @(Get-PrivacyHitsForFile 'fixture.txt' $foreignUnderPlaceholder $rules | Where-Object { $_ -match 'foreign checkout path under allowlisted root' })
+  Assert-SelfTest ($placeholderRootHits.Count -ge 1) "checkout under allowlisted placeholder root must be flagged at file level" $ok
+
+  # Legitimate fixtures and system paths must remain allowed (no over-blocking).
+  $legit = @(
+    ('C' + ':' + $sep + 'Dev'),
+    ('C' + ':' + $sep + 'A' + $sep + 'B' + $sep + 'C'),
+    ('C' + ':' + $sep + 'Windows' + $sep + 'System32'),
+    ('C' + ':' + $sep + 'Program Files' + $sep + 'NSIS')
+  )
+  foreach ($p in $legit) {
+    $hits = @(Get-PrivacyHitsForFile 'fixture.txt' $p $rules)
+    Assert-SelfTest ($hits.Count -eq 0) "legitimate fixture/system path must not be flagged: $p" $ok
+  }
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -914,6 +972,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestCharLiterals $okRef
   Test-SelfTestPrivacyRules $okRef
   Test-SelfTestAbsoluteDrivePaths $okRef
+  Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
