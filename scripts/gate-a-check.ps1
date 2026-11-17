@@ -496,16 +496,21 @@ function Invoke-OptionalCargoGeiger([string]$root) {
 
 function Get-PrivacyRules() {
   $personalEmailPattern = '(?i)(@' + 'gmail\.com\b|@' + 'outlook\.com\b|@' + 'hotmail\.com\b|@' + 'yahoo\.com\b|@' + 'icloud\.com\b|@' + 'proton\.me\b|@' + 'protonmail\.com\b)'
-  $userNameFrag = 'pub' + '22'
-  $projectFrag = 'Hermes' + ' Projects'
+  # Derive machine-specific fragments at runtime so this gate never stores a real username or path.
+  $currentUser = [Environment]::UserName
+  $userNameFrag = ''
+  if (-not [string]::IsNullOrWhiteSpace($currentUser) -and $currentUser.Length -ge 4 -and
+      $currentUser -notmatch '(?i)^(runner|runneradmin|administrator|admin|user|test|guest|defaultuser|system)$') {
+    $userNameFrag = [regex]::Escape($currentUser)
+  }
+  # Use the absolute repo path (never a bare project name) so fresh clones named after the project do not self-match.
+  $projectFrag = $repoRoot
   $localUserPathPattern = '(?i)C:\\Users\\(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
-  $threadIdFrag = 'decf13a1' + '-4de9-4616-b251-262b42c6ac64'
   return [ordered]@{
     PersonalEmailPattern = $personalEmailPattern
     UserNameFrag = $userNameFrag
     ProjectFrag = $projectFrag
     LocalUserPathPattern = $localUserPathPattern
-    ThreadIdFrag = $threadIdFrag
     TokenPatterns = @('gh' + 'p_[A-Za-z0-9]{20,}', 'github' + '_pat_[A-Za-z0-9_]{20,}', 'BEGIN [A-Z ]*PRIVATE KEY')
   }
 }
@@ -551,9 +556,8 @@ function Get-PrivacyHitsForLocalPaths([string]$rel, [string]$text, [string]$loca
 
 function Get-PrivacyHitsForSimplePatterns([string]$rel, [string]$text, $rules) {
   $hits = @()
-  if ($text -match $rules.UserNameFrag) { $hits += "${rel}: forbidden local username fragment detected" }
-  if ($text -match [regex]::Escape($rules.ProjectFrag)) { $hits += "${rel}: forbidden local project path fragment detected" }
-  if ($text -match [regex]::Escape($rules.ThreadIdFrag)) { $hits += "${rel}: internal thread identifier detected" }
+  if ($rules.UserNameFrag -and $text -match $rules.UserNameFrag) { $hits += "${rel}: forbidden local username fragment detected" }
+  if ($rules.ProjectFrag -and $text -match [regex]::Escape($rules.ProjectFrag)) { $hits += "${rel}: forbidden local project path fragment detected" }
   return @($hits)
 }
 

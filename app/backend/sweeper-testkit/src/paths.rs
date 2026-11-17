@@ -257,7 +257,7 @@ mod tests {
             r"C:\Temp\SHORT~1\AppData\Local\Temp"
         )));
         assert!(is_safe_sandbox_base(Path::new(
-            r"D:\work\target\sweeper-test-sandboxes"
+            r"D:\SweeperTest\target\sandboxes"
         )));
     }
 
