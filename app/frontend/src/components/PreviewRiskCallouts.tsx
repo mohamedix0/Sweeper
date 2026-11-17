@@ -3,6 +3,7 @@ import {
   PREVIEW_RISK_CALLOUT_STRINGS,
   type PreviewCalloutRisk,
 } from './previewRiskCalloutStrings';
+import type { ExplainState } from './cleanSharedCore';
 
 export type { PreviewCalloutRisk } from './previewRiskCalloutStrings';
 
@@ -13,6 +14,29 @@ export type PreviewRiskCalloutItem = {
   risk: PreviewCalloutRisk;
   explanation: string;
 };
+
+/**
+ * Derive the callout items for the item currently inspected in a panel.
+ *
+ * The item identity, Risk and Knowledge Base explanation all come from the
+ * existing `explainItem` result carried by `ExplainState`. Callers set
+ * `isCustomPath` from the item's owning target so a Custom Path selection is
+ * surfaced with the canonical Custom Path Risk. Safe and Protected items have
+ * no callout copy and therefore produce no entry.
+ *
+ * This is a pure, per-render derivation: when the inspected selection changes
+ * the caller recomputes it, so the rendered callout list follows the selection.
+ */
+export function deriveCalloutItemsFromInspection(args: {
+  inspected: ExplainState;
+  isCustomPath?: boolean;
+}): PreviewRiskCalloutItem[] {
+  const { inspected } = args;
+  if (!inspected) return [];
+  const risk: PreviewCalloutRisk = args.isCustomPath ? 'Custom Path' : inspected.risk;
+  if (calloutCopyFor(risk) === null) return [];
+  return [{ id: inspected.itemId, identity: inspected.title, risk, explanation: inspected.description }];
+}
 
 /**
  * Pure presentation of one callout per elevated-Risk item in the current
