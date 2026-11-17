@@ -521,7 +521,10 @@ function Get-PrivacyRules() {
   $localUserPathPattern = '(?i)C:\\Users\\(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
   # Machine-neutral detection of absolute checkout/workspace paths from *other* checkouts.
   # No real drive letter or machine path is stored; the drive and intermediates are matched generically.
-  $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?:[^\\\r\n"''<>]+\\)*(?:workspace|worktrees|checkouts|\.t3)(?:\\[^\\\r\n"''<>]+)*'
+  # Common checkout-root names are covered, not just the current project's special folders.
+  $workspaceMarkers = '(?:workspaces?|worktrees?|checkouts?|projects?|repos?)'
+  # The reserved Users root is covered by the placeholder-aware user-path rule above.
+  $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?!Users\\)(?:[^\\\r\n"''<>]+\\)*(?:\b' + $workspaceMarkers + '\b|\.t3)(?:\\[^\\\r\n"''<>]+)*'
   # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
   # shape is matched, never a literal identifier.
   $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
@@ -777,6 +780,19 @@ function Test-SelfTestPrivacyRules([ref]$ok) {
   $systemPath = 'C' + ':' + '\Windows\System32'
   $sysHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $systemPath $rules.MachineWorkspacePathPattern)
   Assert-SelfTest ($sysHits.Count -eq 0) "ordinary system path must not match" $ok
+
+  # Regression for PR #48 thread 4606419932: checkout roots outside the original marker list.
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $foreignDrive = 'D' + ':' + $sep
+  $missedExample = $foreignDrive + 'projects' + $sep + 'private-checkout' + $sep + 'app'
+  $missedHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $missedExample $rules.MachineWorkspacePathPattern)
+  Assert-SelfTest ($missedHits.Count -ge 1) "foreign projects/private-checkout path must be detected" $ok
+  $foreignCheckout = $foreignDrive + 'agent' + $sep + 'checkout'
+  $checkoutHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $foreignCheckout $rules.MachineWorkspacePathPattern)
+  Assert-SelfTest ($checkoutHits.Count -ge 1) "foreign agent/checkout path must be detected" $ok
+  $placeholder = 'C' + ':' + $sep + 'Users' + $sep + '<real-user>' + $sep + 'projects'
+  $placeholderHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $placeholder $rules.MachineWorkspacePathPattern)
+  Assert-SelfTest ($placeholderHits.Count -eq 0) "machine-neutral user placeholder must not match" $ok
 
   # Internal session/thread identifiers must be detected in context, including concatenated literals.
   $uuid = '0a1b2c3d' + '-4e5f-4a6b-8c9d-0e1f2a3b4c5d'
