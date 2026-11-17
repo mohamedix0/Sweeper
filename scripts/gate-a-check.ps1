@@ -496,9 +496,9 @@ function Invoke-OptionalCargoGeiger([string]$root) {
 
 function Test-IsMachineSpecificUser([string]$user) {
   if ([string]::IsNullOrWhiteSpace($user)) { return $false }
-  if ($user.Length -lt 4) { return $false }
-  # Generic accounts are not machine-specific, so they must not become a derived fragment.
-  $genericUsers = @('runner', 'runneradmin', 'administrator', 'admin', 'user', 'test', 'guest', 'defaultuser', 'system')
+  # Length is not a validity signal: short real accounts can be disclosures too.
+  # Generic/service accounts are excluded explicitly; everything else is treated as machine-specific.
+  $genericUsers = @('runner', 'runneradmin', 'administrator', 'admin', 'user', 'test', 'guest', 'defaultuser', 'system', 'build')
   $genericUserPattern = '(?i)^(' + ($genericUsers -join '|') + ')$'
   return ($user -notmatch $genericUserPattern)
 }
@@ -508,17 +508,33 @@ function Get-PrivacyRules() {
   # Derive machine-specific fragments at runtime so this gate never stores a real username or path.
   $currentUser = [Environment]::UserName
   $userNameFrag = ''
+  $userNameContextPattern = ''
   if (Test-IsMachineSpecificUser $currentUser) {
     $userNameFrag = [regex]::Escape($currentUser)
+    # Account-context matching avoids false positives on ordinary text (e.g. a 'build' account
+    # appearing in '[build-dependencies]') while still catching real username disclosures.
+    $userAccountKeys = '(?:user|username|owner|account|login|author|committer)'
+    $userNameContextPattern = '(?i)(?:\b' + $userAccountKeys + '\b["'']?\s*[:=]\s*["'']?' + $userNameFrag + '\b|C:\\Users\\' + $userNameFrag + '\b|\b' + $userNameFrag + '@)'
   }
   # Use the absolute repo path (never a bare project name) so fresh clones named after the project do not self-match.
   $projectFrag = $repoRoot
   $localUserPathPattern = '(?i)C:\\Users\\(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
+  # Machine-neutral detection of absolute checkout/workspace paths from *other* checkouts.
+  # No real drive letter or machine path is stored; the drive and intermediates are matched generically.
+  $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?:[^\\\r\n"''<>]+\\)*(?:workspace|worktrees|checkouts|\.t3)(?:\\[^\\\r\n"''<>]+)*'
+  # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
+  # shape is matched, never a literal identifier.
+  $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
+  $internalIdToken = '(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{16}|ses[0-9a-f]{16,})'
+  $internalIdPattern = '(?i)(?:' + $internalIdContext + '[^\r\n]{0,60}?\b' + $internalIdToken + '\b|\b' + $internalIdToken + '\b[^\r\n]{0,60}?' + $internalIdContext + ')'
   return [ordered]@{
     PersonalEmailPattern = $personalEmailPattern
     UserNameFrag = $userNameFrag
+    UserNameContextPattern = $userNameContextPattern
     ProjectFrag = $projectFrag
     LocalUserPathPattern = $localUserPathPattern
+    MachineWorkspacePathPattern = $machineWorkspacePathPattern
+    InternalIdPattern = $internalIdPattern
     TokenPatterns = @('gh' + 'p_[A-Za-z0-9]{20,}', 'github' + '_pat_[A-Za-z0-9_]{20,}', 'BEGIN [A-Z ]*PRIVATE KEY')
   }
 }
@@ -562,9 +578,36 @@ function Get-PrivacyHitsForLocalPaths([string]$rel, [string]$text, [string]$loca
   return @($hits)
 }
 
+function Get-PrivacyHitsForUserName([string]$rel, [string]$text, [string]$userNameContextPattern) {
+  $hits = @()
+  if ($userNameContextPattern -and $text -match $userNameContextPattern) {
+    $hits += "${rel}: forbidden local username disclosure detected in account context"
+  }
+  return @($hits)
+}
+
+function Get-PrivacyHitsForMachineWorkspacePaths([string]$rel, [string]$text, [string]$pattern) {
+  $hits = @()
+  foreach ($m in [regex]::Matches($text, $pattern)) {
+    $hits += "${rel}: forbidden absolute workspace path detected: $($m.Value)"
+  }
+  return @($hits)
+}
+
+function Get-PrivacyHitsForInternalIds([string]$rel, [string]$text, [string]$pattern) {
+  $hits = @()
+  # Concatenated string-literal fragments (e.g. 'aaa' + '-bbb-...') are a common way to hide
+  # an identifier, so join them before applying the context-aware token pattern.
+  $normalized = [regex]::Replace($text, "'\s*\+\s*'", '')
+  $normalized = $normalized -replace "['`"]", ''
+  foreach ($m in [regex]::Matches($normalized, $pattern)) {
+    $hits += "${rel}: internal session/thread identifier detected"
+  }
+  return @($hits)
+}
+
 function Get-PrivacyHitsForSimplePatterns([string]$rel, [string]$text, $rules) {
   $hits = @()
-  if ($rules.UserNameFrag -and $text -match $rules.UserNameFrag) { $hits += "${rel}: forbidden local username fragment detected" }
   if ($rules.ProjectFrag -and $text -match [regex]::Escape($rules.ProjectFrag)) { $hits += "${rel}: forbidden local project path fragment detected" }
   return @($hits)
 }
@@ -573,7 +616,10 @@ function Get-PrivacyHitsForFile([string]$rel, [string]$text, $rules) {
   $hits = @()
   $hits += Get-PrivacyHitsForEmails $rel $text $rules.PersonalEmailPattern
   $hits += Get-PrivacyHitsForSimplePatterns $rel $text $rules
+  $hits += Get-PrivacyHitsForUserName $rel $text $rules.UserNameContextPattern
   $hits += Get-PrivacyHitsForLocalPaths $rel $text $rules.LocalUserPathPattern
+  $hits += Get-PrivacyHitsForMachineWorkspacePaths $rel $text $rules.MachineWorkspacePathPattern
+  $hits += Get-PrivacyHitsForInternalIds $rel $text $rules.InternalIdPattern
   $hits += Get-PrivacyHitsForTokens $rel $text $rules.TokenPatterns
   return @($hits)
 }
@@ -704,6 +750,51 @@ function Test-SelfTestCharLiterals([ref]$ok) {
   Assert-SelfTest ($unsafeCount -eq 1) "real unsafe after char literal quote must still be reported" $ok
 }
 
+function Test-SelfTestPrivacyRules([ref]$ok) {
+  $rules = Get-PrivacyRules
+
+  # Short real accounts must not be exempted by length, and must be caught in account context.
+  Assert-SelfTest (Test-IsMachineSpecificUser 'eve') "short account must not be exempted by length" $ok
+  $shortFrag = [regex]::Escape('eve')
+  $shortPattern = '(?i)(?:\b(?:user|username|owner|account|login|author|committer)\b["'']?\s*[:=]\s*["'']?' + $shortFrag + '\b)'
+  $shortHits = @(Get-PrivacyHitsForUserName 'fixture.txt' 'owner=eve' $shortPattern)
+  Assert-SelfTest ($shortHits.Count -eq 1) "short username in owner context must produce a privacy hit" $ok
+
+  # Generic service accounts must be excluded, and a bare section header must not match.
+  Assert-SelfTest (-not (Test-IsMachineSpecificUser 'build')) "generic build account must be excluded" $ok
+  $buildFrag = [regex]::Escape('build')
+  $buildPattern = '(?i)(?:\b(?:user|username|owner|account|login|author|committer)\b["'']?\s*[:=]\s*["'']?' + $buildFrag + '\b|C:\\Users\\' + $buildFrag + '\b|\b' + $buildFrag + '@)'
+  $depHits = @(Get-PrivacyHitsForUserName 'Cargo.toml' '[build-dependencies]' $buildPattern)
+  Assert-SelfTest ($depHits.Count -eq 0) "generic account in section header must not match" $ok
+  $buildHits = @(Get-PrivacyHitsForUserName 'fixture.txt' 'owner=build' $buildPattern)
+  Assert-SelfTest ($buildHits.Count -eq 1) "account-context username must still be detected" $ok
+
+  # Absolute workspace paths from another checkout must be detected; system paths must not.
+  $drive = 'D' + ':' + '\'
+  $otherCheckout = $drive + 'workspace\Sweeper\src\main.rs'
+  $pathHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $otherCheckout $rules.MachineWorkspacePathPattern)
+  Assert-SelfTest ($pathHits.Count -ge 1) "other-checkout workspace path must be detected" $ok
+  $systemPath = 'C' + ':' + '\Windows\System32'
+  $sysHits = @(Get-PrivacyHitsForMachineWorkspacePaths 'fixture.txt' $systemPath $rules.MachineWorkspacePathPattern)
+  Assert-SelfTest ($sysHits.Count -eq 0) "ordinary system path must not match" $ok
+
+  # Internal session/thread identifiers must be detected in context, including concatenated literals.
+  $uuid = '0a1b2c3d' + '-4e5f-4a6b-8c9d-0e1f2a3b4c5d'
+  $tagged = 'threadId=' + $uuid
+  $idHits = @(Get-PrivacyHitsForInternalIds 'fixture.txt' $tagged $rules.InternalIdPattern)
+  Assert-SelfTest ($idHits.Count -ge 1) "internal thread id in context must be detected" $ok
+  $quote = [char]39
+  $plus = ' + '
+  $fragA = '0a1b2c3d'
+  $fragB = '-4e5f-4a6b-8c9d-0e1f2a3b4c5d'
+  $concatSource = 'threadId = ' + $quote + $fragA + $quote + $plus + $quote + $fragB + $quote
+  $concatHits = @(Get-PrivacyHitsForInternalIds 'fixture.txt' $concatSource $rules.InternalIdPattern)
+  Assert-SelfTest ($concatHits.Count -ge 1) "concatenated internal id literal must be detected" $ok
+  $guidOnly = '{' + '12345678-1234-1234-1234-123456789abc' + '}.TM.blf'
+  $guidHits = @(Get-PrivacyHitsForInternalIds 'fixture.txt' $guidOnly $rules.InternalIdPattern)
+  Assert-SelfTest ($guidHits.Count -eq 0) "non-internal GUID must not match" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -714,6 +805,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestNestedBlockComments $okRef
   Test-SelfTestRawStrings $okRef
   Test-SelfTestCharLiterals $okRef
+  Test-SelfTestPrivacyRules $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
