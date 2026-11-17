@@ -525,15 +525,18 @@ function Get-PrivacyRules() {
   # The reserved Users root is covered by the placeholder-aware user-path rule above.
   $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?!Users\\)(?:[^\\\r\n"''<>]+\\)*(?:\b(?:workspaces?|worktrees?|checkouts?|projects?|repos?)\b|\.t3)(?:\\[^\\\r\n"''<>]+)*'
   # Deny-by-default: flag ANY drive-letter absolute path unless its (drive, first segment) is an
-  # explicitly allowlisted, machine-neutral root. Capturing the first segment (rather than matching
-  # "checkout markers") closes the gap where arbitrary unmarked roots previously passed.
-  # Multi-word system roots are enumerated first; the generic token stops at a path separator so
-  # prose like "under C:\Windows\Temp." only contributes the segment "Windows".
-  # The first segment is captured whole (internal spaces included) and must end at a real path
-  # separator or end-of-path. A whitespace-only boundary let "Program Files Backup" be read as the
-  # allowlisted "Program Files" root (CodeRabbit reply 4607145526, thread 4607041892).
-  # Explicit multi-word roots stay first so legitimate system paths remain allowlisted.
-  $firstSegmentPattern = '(?<seg>(?:Program Files \(x86\)|Program Files|System Volume Information|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\-]*)(?=\\|$)|[A-Za-z0-9_<>][A-Za-z0-9._~<>+\- ]*[A-Za-z0-9._~<>+\-](?=\\))'
+  # explicitly allowlisted, machine-neutral root. The ENTIRE first segment is captured as ONE group,
+  # from after the drive root up to the next path separator or the end of the text (an optional
+  # trailing newline is allowed). The allowlist is then an exact, case-insensitive comparison of
+  # that full captured segment: no prefix matching, no special-casing of spaces or parentheses, no
+  # whitespace boundary rule. Consequently "Program FilesBackup", "Program Files Backup" and
+  # "Program Files (x86)Backup" are each captured whole and rejected because none equals an
+  # allowlisted root, which closes the whole boundary-variant class instead of enumerating variants.
+  # Characters that cannot belong to a path root in tracked text (quotes, backticks, angle brackets,
+  # braces, colon) terminate the capture so prose such as "C:\Windows, C:\Users" cannot swallow the
+  # following sentence. End-of-text (not end-of-line) anchoring keeps prose at line ends from being
+  # mistaken for a bare path segment.
+  $firstSegmentPattern = '(?<seg>[^\\\r\n"''`<>{}:]+)(?=\\|(?:\r?\n)?$)'
   $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+' + $firstSegmentPattern
   # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
   # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
@@ -631,6 +634,9 @@ function Get-AllowedAbsolutePathRoots() {
     'd:\sandbox', 'd:\sweepertest', 'd:\oldwork'
   )
   $fixtures = @(
+    # Exact full-segment entries for synthetic adversarial fixtures whose first segment is "." /
+    # ".." or carries a trailing space (e.g. C:\Temp \x). Exact comparison only, never a prefix.
+    'c:\.', 'c:\..', 'c:\temp ',
     'c:\0foo', 'c:\a', 'c:\bulk', 'c:\com', 'c:\con', 'c:\conx', 'c:\dev', 'c:\does',
     'c:\foo', 'c:\hiberfil.sys', 'c:\logs', 'c:\lpt', 'c:\lpt1.txt', 'c:\missing',
     'c:\mystery', 'c:\nonexistentbrowser', 'c:\nonexistentdepththree', 'c:\other',
@@ -982,6 +988,56 @@ function Test-SelfTestAbsoluteDrivePaths([ref]$ok) {
   Assert-SelfTest ($fictionalHits.Count -eq 0) "fictional instructional example must not be flagged" $ok
 }
 
+function Test-SelfTestFullFirstSegmentAllowlist([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+
+  # Root-cause regression: every first segment is captured WHOLE, then compared exactly against the
+  # allowlist. Assert both the captured text and the resulting verdict for every cited variant.
+  $variants = @(
+    @{ Name = 'Program FilesBackup'; Text = ('C' + ':' + $sep + 'Program FilesBackup' + $sep + 'private-data' + $sep + 'notes.txt'); Segment = 'Program FilesBackup' }
+    @{ Name = 'Program Files Backup with trailing separator'; Text = ('C' + ':' + $sep + 'Program Files Backup' + $sep + 'private-data' + $sep + 'notes.txt'); Segment = 'Program Files Backup' }
+    @{ Name = 'bare Program Files Backup at end of text'; Text = ('C' + ':' + $sep + 'Program Files Backup'); Segment = 'Program Files Backup' }
+    @{ Name = 'Program Files (x86)Backup'; Text = ('C' + ':' + $sep + 'Program Files (x86)Backup' + $sep + 'private-data' + $sep + 'notes.txt'); Segment = 'Program Files (x86)Backup' }
+  )
+  foreach ($v in $variants) {
+    $matches = @([regex]::Matches($v.Text, $pattern))
+    Assert-SelfTest ($matches.Count -ge 1) "full-segment pattern matches: $($v.Name)" $ok
+    if ($matches.Count -ge 1) {
+      Assert-SelfTest ($matches[0].Groups['seg'].Value -ceq $v.Segment) "entire first segment captured for: $($v.Name)" $ok
+    }
+    $directHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $v.Text $pattern $allowed)
+    Assert-SelfTest ($directHits.Count -ge 1) "exact allowlist rejects: $($v.Name)" $ok
+    $wiredHits = @(Get-PrivacyHitsForFile 'fixture.txt' $v.Text $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+    Assert-SelfTest ($wiredHits.Count -ge 1) "file-level privacy scan flags: $($v.Name)" $ok
+  }
+
+  # A bare segment at the very end of a CRLF file is still an end-of-text occurrence.
+  $crlfText = 'next line' + "`r`n" + ('C' + ':' + $sep + 'Program Files Backup') + "`r`n"
+  $crlfMatches = @([regex]::Matches($crlfText, $pattern))
+  Assert-SelfTest ($crlfMatches.Count -ge 1) "full-segment pattern matches bare segment at CRLF end of text" $ok
+  if ($crlfMatches.Count -ge 1) {
+    Assert-SelfTest ($crlfMatches[0].Groups['seg'].Value -ceq 'Program Files Backup') "entire first segment captured at CRLF end of text" $ok
+  }
+
+  # Legitimate system roots must still match the pattern but pass the exact allowlist at file level.
+  $controls = @(
+    ('C' + ':' + $sep + 'Program Files' + $sep + 'NSIS'),
+    ('C' + ':' + $sep + 'Program Files (x86)' + $sep + 'Internet Explorer' + $sep + 'iexplore.exe'),
+    ('C' + ':' + $sep + 'Windows' + $sep + 'System32')
+  )
+  foreach ($p in $controls) {
+    $matches = @([regex]::Matches($p, $pattern))
+    Assert-SelfTest ($matches.Count -ge 1) "full-segment pattern matches legitimate control: $p" $ok
+    $directHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $p $pattern $allowed)
+    Assert-SelfTest ($directHits.Count -eq 0) "exact allowlist accepts legitimate control: $p" $ok
+    $wiredHits = @(Get-PrivacyHitsForFile 'fixture.txt' $p $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+    Assert-SelfTest ($wiredHits.Count -eq 0) "file-level privacy scan accepts legitimate control: $p" $ok
+  }
+}
+
 function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
   $rules = Get-PrivacyRules
   $sep = [System.IO.Path]::DirectorySeparatorChar
@@ -1023,6 +1079,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestCharLiterals $okRef
   Test-SelfTestPrivacyRules $okRef
   Test-SelfTestAbsoluteDrivePaths $okRef
+  Test-SelfTestFullFirstSegmentAllowlist $okRef
   Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
