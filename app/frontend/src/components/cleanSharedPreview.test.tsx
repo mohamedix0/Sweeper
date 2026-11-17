@@ -26,17 +26,6 @@ function calloutItem(overrides: Partial<PreviewRiskCalloutItem> = {}): PreviewRi
 }
 
 function renderPreview(items: PreviewRiskCalloutItem[], previewOverrides: Partial<PreviewResult> = {}) {
-  return render(
-    <PreviewBreakdownBlock
-      preview={preview(previewOverrides)}
-      cleaning={false}
-      cleanProgressLabel={null}
-      calloutItems={items}
-    />,
-  );
-}
-
-function renderPreviewWith(items: PreviewRiskCalloutItem[], previewOverrides: Partial<PreviewResult> = {}) {
   return (
     <PreviewBreakdownBlock
       preview={preview(previewOverrides)}
@@ -75,7 +64,7 @@ describe('PreviewBreakdownBlock skipped preview items', () => {
 
 describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   it('renders no callout and leaves the breakdown layout unchanged for a Safe-only selection', () => {
-    renderPreview([calloutItem({ risk: 'Safe', identity: 'User Temp' })]);
+    render(renderPreview([calloutItem({ risk: 'Safe', identity: 'User Temp' })]));
 
     expect(screen.queryByRole('note')).not.toBeInTheDocument();
     expect(screen.queryByText('Review elevated risk before confirming')).not.toBeInTheDocument();
@@ -84,7 +73,7 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   });
 
   it('renders one callout with identity, Risk badge, explanation and one consequence for a Caution item', () => {
-    renderPreview([calloutItem()]);
+    render(renderPreview([calloutItem()]));
 
     const notes = screen.getAllByRole('note');
     expect(notes).toHaveLength(1);
@@ -98,7 +87,7 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   });
 
   it('renders a callout for an Unknown item', () => {
-    renderPreview([calloutItem({ id: 'i-u', risk: 'Unknown', identity: 'Unrecognised folder' })]);
+    render(renderPreview([calloutItem({ id: 'i-u', risk: 'Unknown', identity: 'Unrecognised folder' })]));
 
     const note = screen.getByRole('note', { name: 'Unknown risk: Unrecognised folder' });
     expect(within(note).getByText('Unknown')).toBeInTheDocument();
@@ -106,7 +95,7 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   });
 
   it('renders a callout for a Custom Path item', () => {
-    renderPreview([calloutItem({ id: 'i-cp', risk: 'Custom Path', identity: 'My added folder' })]);
+    render(renderPreview([calloutItem({ id: 'i-cp', risk: 'Custom Path', identity: 'My added folder' })]));
 
     const note = screen.getByRole('note', { name: 'Custom Path risk: My added folder' });
     expect(within(note).getByText('Custom Path')).toBeInTheDocument();
@@ -114,11 +103,13 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   });
 
   it('renders callouts only for elevated-Risk items in a mixed selection and never for Protected items', () => {
-    renderPreview([
-      calloutItem({ id: 'i-s', risk: 'Safe', identity: 'Safe temp' }),
-      calloutItem({ id: 'i-c', risk: 'Caution', identity: 'Caution cache' }),
-      calloutItem({ id: 'i-p', risk: 'Protected', identity: 'Protected system folder' }),
-    ]);
+    render(
+      renderPreview([
+        calloutItem({ id: 'i-s', risk: 'Safe', identity: 'Safe temp' }),
+        calloutItem({ id: 'i-c', risk: 'Caution', identity: 'Caution cache' }),
+        calloutItem({ id: 'i-p', risk: 'Protected', identity: 'Protected system folder' }),
+      ]),
+    );
 
     expect(screen.getAllByRole('note')).toHaveLength(1);
     expect(screen.getByRole('note', { name: 'Caution risk: Caution cache' })).toBeInTheDocument();
@@ -127,9 +118,11 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   });
 
   it('keeps the skipped-item notice visible without duplicating it as a callout', () => {
-    renderPreview(
-      [calloutItem({ id: 'i-c', risk: 'Caution', identity: 'Caution cache' })],
-      { skippedCount: '1', skippedReasons: ['selected item no longer exists'] },
+    render(
+      renderPreview(
+        [calloutItem({ id: 'i-c', risk: 'Caution', identity: 'Caution cache' })],
+        { skippedCount: '1', skippedReasons: ['selected item no longer exists'] },
+      ),
     );
 
     const skipped = screen.getByRole('status', { name: 'Preview skipped items' });
@@ -139,14 +132,14 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   });
 
   it('updates the callout list immediately when the current selection changes', () => {
-    const { rerender } = renderPreview([calloutItem({ risk: 'Safe' })]);
+    const { rerender } = render(renderPreview([calloutItem({ risk: 'Safe' })]));
     expect(screen.queryByRole('note')).not.toBeInTheDocument();
 
-    rerender(renderPreviewWith([calloutItem({ id: 'i-u', risk: 'Unknown', identity: 'Now selected' })]));
+    rerender(renderPreview([calloutItem({ id: 'i-u', risk: 'Unknown', identity: 'Now selected' })]));
     expect(screen.getAllByRole('note')).toHaveLength(1);
     expect(screen.getByRole('note', { name: 'Unknown risk: Now selected' })).toBeInTheDocument();
 
-    rerender(renderPreviewWith([]));
+    rerender(renderPreview([]));
     expect(screen.queryByRole('note')).not.toBeInTheDocument();
   });
 
@@ -154,7 +147,7 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
     render(
       <>
         <input aria-label="Typed confirmation" autoFocus />
-        {renderPreviewWith([calloutItem()])}
+        {renderPreview([calloutItem()])}
       </>,
     );
 
@@ -167,7 +160,7 @@ describe('PreviewBreakdownBlock per-item Risk callouts', () => {
   });
 
   it('renders the callout group above the breakdown table in document order', () => {
-    renderPreview([calloutItem()]);
+    render(renderPreview([calloutItem()]));
 
     const group = screen.getByRole('group', { name: 'Elevated risk in this selection' });
     const table = screen.getByRole('table', { name: 'Preview breakdown by Target' });
