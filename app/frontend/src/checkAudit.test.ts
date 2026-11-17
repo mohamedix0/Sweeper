@@ -12,9 +12,15 @@ interface GateResult {
   output: string;
 }
 
-/** Run the real audit gate in a child process against a synthetic report. */
-function runGate(report: unknown): GateResult {
-  const result = spawnSync(process.execPath, [SCRIPT_PATH, '--stdin'], {
+/**
+ * Run the real audit gate in a child process against a synthetic report.
+ * By default the report is fed via `--stdin`; `piped: true` omits that flag so
+ * the script's piped-stdin path is exercised (with a non-TTY pipe it parses
+ * whatever JSON was supplied instead of running a live audit).
+ */
+function runGate(report: unknown, options: { piped?: boolean } = {}): GateResult {
+  const args = options.piped ? [SCRIPT_PATH] : [SCRIPT_PATH, '--stdin'];
+  const result = spawnSync(process.execPath, args, {
     input: JSON.stringify(report),
     encoding: 'utf8',
   });
@@ -111,6 +117,47 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
       },
       assert: (report: unknown) => expectPassed(report),
     },
+    {
+      name: 'blocks a high advisory whose title names the exception but whose url does not (v2)',
+      report: {
+        vulnerabilities: {
+          other: highVuln([
+            {
+              source: 789,
+              name: 'other',
+              title: `ReDoS via ${EXCEPTED_ID}`,
+              url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
+              severity: 'high',
+            },
+          ]),
+        },
+      },
+      assert: (report: unknown) => expectBlocked(report),
+    },
+    {
+      name: 'blocks a high advisory whose title names the exception but whose id does not (v1)',
+      report: {
+        advisories: {
+          'GHSA-aaaa-bbbb-cccc': {
+            github_advisory_id: 'GHSA-aaaa-bbbb-cccc',
+            npm_advisory_id: 'GHSA-aaaa-bbbb-cccc',
+            title: `ReDoS via ${EXCEPTED_ID}`,
+            severity: 'high',
+            module_name: 'other',
+          },
+        },
+      },
+      assert: (report: unknown) => expectBlocked(report),
+    },
+    {
+      name: 'passes the excepted advisory identified by its own url',
+      report: {
+        vulnerabilities: {
+          picomatch: highVuln([exceptedPicomatchCause()]),
+        },
+      },
+      assert: (report: unknown) => expectPassed(report),
+    },
   ])('$name', ({ report, assert: assertAudit }) => {
     assertAudit(report);
   });
@@ -132,5 +179,17 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
     const result = runGate({ advisories: [] });
     expect(result.status).toBeGreaterThan(0);
     expect(result.output).toContain('Unsupported audit report shape');
+  });
+
+  // Piped falsy JSON must be forwarded to validateReport and rejected, not
+  // mistaken for "no input" and silently replaced by a live audit.
+  it.each([
+    { label: 'false', value: false },
+    { label: 'zero', value: 0 },
+    { label: 'null', value: null },
+  ])('rejects falsy piped stdin ($label) instead of running a live audit', ({ value }) => {
+    const result = runGate(value, { piped: true });
+    expect(result.status).toBe(2);
+    expect(result.output).toContain('Unsupported audit report');
   });
 });

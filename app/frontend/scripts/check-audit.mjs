@@ -29,6 +29,10 @@ const IGNORED_ADVISORY_IDS = new Set(['GHSA-FC5Q-39XC-VJPF']);
 const BLOCKING_SEVERITIES = new Set(['high', 'critical']);
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ADVISORY_URL_PREFIX = 'https://github.com/advisories/';
+// Distinct "nothing was piped" marker. Using a unique sentinel instead of a
+// falsy value lets every parsed JSON value (including false/0/null) reach
+// validateReport, where unsupported input is rejected.
+const NO_STDIN_INPUT = Symbol('no-stdin-input');
 
 // ---------------------------------------------------------------------------
 // Generic value helpers
@@ -86,8 +90,10 @@ function severityBucket(advisory, counts) {
 // Audit report extraction (v1: advisories, v2: vulnerabilities)
 // ---------------------------------------------------------------------------
 
+// Only identifier fields count as identity. A title is free text for display
+// only and must never be able to create an exemption.
 function collectGhsaIds(raw) {
-  return [raw.github_advisory_id, raw.npm_advisory_id, raw.title]
+  return [raw.github_advisory_id, raw.npm_advisory_id]
     .map(normalizeGhsaId)
     .filter(Boolean);
 }
@@ -118,8 +124,11 @@ function unique(values) {
   return [...new Set(values)];
 }
 
+// Identity comes only from identifier/URL fields. `entry.title` is deliberately
+// excluded: a high advisory whose title merely mentions the excepted GHSA must
+// not be mistaken for that advisory and exempted.
 function collectViaIds(entry) {
-  return unique([entry.url, entry.source, entry.id, entry.title].map(normalizeGhsaId).filter(Boolean));
+  return unique([entry.url, entry.source, entry.id].map(normalizeGhsaId).filter(Boolean));
 }
 
 function viaSeverity(entry) {
@@ -339,18 +348,18 @@ async function readForcedStdin() {
 
 async function readPipedStdin() {
   const text = await readStdin(300);
-  return text.trim() ? parseJson(text, 'stdin') : null;
+  return text.trim() ? parseJson(text, 'stdin') : NO_STDIN_INPUT;
 }
 
 async function loadFromPipe() {
-  if (process.stdin.isTTY) return null;
+  if (process.stdin.isTTY) return NO_STDIN_INPUT;
   return readPipedStdin();
 }
 
 async function loadReport() {
   if (process.argv.includes('--stdin')) return readForcedStdin();
   const piped = await loadFromPipe();
-  if (piped) return piped;
+  if (piped !== NO_STDIN_INPUT) return piped;
   return runAudit();
 }
 
