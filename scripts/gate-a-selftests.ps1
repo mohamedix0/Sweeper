@@ -98,7 +98,7 @@ function Test-SelfTestPrivacyRules([ref]$ok) {
   Assert-SelfTest (Test-IsMachineSpecificUser 'eve') "short account must not be exempted by length" $ok
   $shortFrag = [regex]::Escape('eve')
   $shortPattern = '(?i)(?:\b(?:user|username|owner|account|login|author|committer)\b["'']?\s*[:=]\s*["'']?' + $shortFrag + '\b)'
-  $shortHits = @(Get-PrivacyHitsForUserName 'fixture.txt' 'owner=eve' $shortPattern)
+  $shortHits = @(Get-PrivacyHitsForUserName 'fixture.txt' ('owner=' + 'eve') $shortPattern)
   Assert-SelfTest ($shortHits.Count -eq 1) "short username in owner context must produce a privacy hit" $ok
 
   # Generic service accounts must be excluded, and a bare section header must not match.
