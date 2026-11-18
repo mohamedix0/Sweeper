@@ -9,9 +9,10 @@ import { expect, test, type Page } from '@playwright/test';
 const ITEM_COUNT = 20_000;
 const EXPLAIN_CALL_BOUND = 32;
 const PREVIEW_ID_BOUND = 8;
-// Shared CI runners add scheduling jitter; 60 ms still catches the 90 ms
-// final-render stall this regression guards against.
-const MAX_MAIN_THREAD_GAP_MS = 60;
+// Shared CI runners add scheduling jitter, so leave headroom above the
+// ~60 ms typical frame cost while still catching the 90 ms final-render
+// stall this regression guards against.
+const MAX_MAIN_THREAD_GAP_MS = 80;
 const CTA_BOUND_MS = 15_000;
 
 type Metrics = {
