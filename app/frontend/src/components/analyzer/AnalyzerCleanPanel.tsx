@@ -1,4 +1,5 @@
 ﻿import { formatBytes, pluralize } from '../../utils/format';
+import { deleteActionLabel } from '../cleanActionLabel';
 
 interface AnalyzerCleanPanelProps {
   selectedCount: number;
@@ -32,9 +33,14 @@ function reviewLabel(args: AnalyzerCleanPanelProps): string {
   return `Review & Clean (${formatBytes({ bytes: args.selectedBytes })})`;
 }
 
-function cleanLabel(args: { cleaning: boolean }): string {
-  if (args.cleaning) return 'Cleaning…';
-  return 'Clean Permanently';
+function cleanLabel(args: { cleaning: boolean; count: number; size: string }): string {
+  return deleteActionLabel({
+    count: args.count,
+    size: args.size,
+    cleaning: args.cleaning,
+    singular: 'item',
+    plural: 'items',
+  });
 }
 
 function reviewClassName(args: { selected: boolean }): string {
@@ -44,7 +50,7 @@ function reviewClassName(args: { selected: boolean }): string {
 
 function UnselectAllButton(props: { selected: number; cleaning: boolean; onClear: () => void }) {
   if (props.selected <= 0) return null;
-  return <button type="button" className="btn small subtle-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
+  return <button type="button" className="btn small subtle-btn cleanup-deselect-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
 }
 
 function RiskyHint(props: { risky: boolean }) {
@@ -54,7 +60,7 @@ function RiskyHint(props: { risky: boolean }) {
 
 function ActionButton(props: AnalyzerCleanPanelProps) {
   if (props.hasPreview) {
-    return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean} aria-label="Clean Permanently">{cleanLabel(props)}</button>;
+    return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean} aria-label="Clean Permanently">{cleanLabel({ cleaning: props.cleaning, count: props.selectedCount, size: formatBytes({ bytes: props.selectedBytes }) })}</button>;
   }
   const cls = reviewClassName({ selected: props.selectedCount > 0 });
   return <button className={cls} onClick={props.onPreview} disabled={!props.canPreview} aria-label="Review & Clean">{reviewLabel(props)}</button>;
