@@ -6,6 +6,16 @@ import { ScanInspectorPanel } from './ScanInspectorPanel';
 import { ScanTargetCard } from './ScanTargetCard';
 import { isSelectableScanItem } from './scanHelpers';
 
+/** Contextual end-of-results hint shown when a Scan returns only a few Targets (spec #58 R2). */
+export const SCAN_RESULTS_HINT_TEXT = "That's everything found — review your selection below";
+
+/** A result set with no more than this many visible Targets is considered sparse. */
+const SPARSE_RESULT_LIMIT = 8;
+
+function shouldShowCompletionHint(visibleTargetCount: number): boolean {
+  return visibleTargetCount > 0 && visibleTargetCount <= SPARSE_RESULT_LIMIT;
+}
+
 type Focus = { kind: 'item'; itemId: string } | { kind: 'group'; targetId: string } | null;
 type VisibleTarget = { target: TargetScanResultDto; items: ScanItemDto[] };
 
@@ -138,6 +148,12 @@ export function ScanResultsSection(props: Props) {
                 onOpenSettings={props.onOpenSettings}
               />
             ))}
+            {shouldShowCompletionHint(props.visibleTargets.length) && (
+              <div className="scan-results-completion-hint" role="status" aria-label="Scan results complete">
+                <span className="scan-results-completion-hint__mark" aria-hidden="true">✓</span>
+                <span className="scan-results-completion-hint__text">{SCAN_RESULTS_HINT_TEXT}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
