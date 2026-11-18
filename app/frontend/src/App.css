@@ -6778,3 +6778,34 @@ input[type="checkbox"]:indeterminate {
     animation: none !important;
   }
 }
+
+/* Ticket #60 (spec #58 R2): contextual end-of-results hint for sparse Scans.
+   Additive styling for a new element only — the verified full-height chain
+   (app-shell / main-content / view-panel / master-detail / scan-results-shell)
+   is intentionally left untouched. */
+.scan-results-completion-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 16px 24px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface-alt);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.scan-results-completion-hint__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--bg-inset-hover);
+  color: var(--accent-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
