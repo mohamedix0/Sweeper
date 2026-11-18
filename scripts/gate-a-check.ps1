@@ -192,207 +192,10 @@ function Get-ForbidUnsafeTargets([string]$root) {
   return @($targets)
 }
 
-function Test-RustNewline([char]$c) {
-  return ($c -eq "`r") -or ($c -eq "`n")
-}
 
-function Get-RustScanState([string]$text) {
-  $out = $text.ToCharArray()
-  return @{ Out = $out; Len = $out.Length; Index = 0; Depth = 0; InString = $false; InLine = $false; RawHashes = -1 }
-}
-
-function Step-RustBlock([hashtable]$state) {
-  $i = $state.Index
-  $j = $i + 1
-  $open = (($state.Out[$i] -eq '/') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '*'))
-  if ($open) {
-    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth++; $state.Index = $i + 2; return
-  }
-  $close = (($state.Out[$i] -eq '*') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '/'))
-  if ($close) {
-    $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth--; $state.Index = $i + 2; return
-  }
-  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
-  $state.Index = $i + 1
-}
-
-function Step-RustLineComment([hashtable]$state) {
-  $i = $state.Index
-  $isNl = Test-RustNewline $state.Out[$i]
-  if ($isNl) { $state.InLine = $false; $state.Index = $i + 1; return }
-  $state.Out[$i] = ' '; $state.Index = $i + 1
-}
-
-function Step-RustString([hashtable]$state) {
-  $i = $state.Index
-  $j = $i + 1
-  $esc = (($state.Out[$i] -eq '\') -and ($j -lt $state.Len))
-  if ($esc) {
-    if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
-    if (-not (Test-RustNewline $state.Out[$j])) { $state.Out[$j] = ' ' }
-    $state.Index = $i + 2; return
-  }
-  if ($state.Out[$i] -eq '"') {
-    $state.Out[$i] = ' '; $state.InString = $false; $state.Index = $i + 1; return
-  }
-  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
-  $state.Index = $i + 1
-}
-
-function Test-RustRawHashesAt([hashtable]$state, [int]$i) {
-  $j = $i
-  while (($j -lt $state.Len) -and ($state.Out[$j] -eq '#')) { $j++ }
-  $ok = (($j -lt $state.Len) -and ($state.Out[$j] -eq '"'))
-  if (-not $ok) { return -1 }
-  return ($j - $i)
-}
-
-function Get-RustRawPrefixStart([hashtable]$state) {
-  $i = $state.Index
-  if ($state.Out[$i] -eq 'r') { return $i }
-  $j = $i + 1
-  $isB = (($state.Out[$i] -eq 'b') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq 'r'))
-  if ($isB) { return $j }
-  $isC = (($state.Out[$i] -eq 'c') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq 'r'))
-  if ($isC) { return $j }
-  return -1
-}
-
-function Try-StartRustRawString([hashtable]$state) {
-  $rIdx = Get-RustRawPrefixStart $state
-  if ($rIdx -lt 0) { return $false }
-  $prev = $state.Index - 1
-  $ident = (($prev -ge 0) -and ($state.Out[$prev] -match '[A-Za-z0-9_]'))
-  if ($ident) { return $false }
-  $hashes = Test-RustRawHashesAt $state ($rIdx + 1)
-  if ($hashes -lt 0) { return $false }
-  $end = $rIdx + 1 + $hashes
-  for ($k = $state.Index; $k -le $end; $k++) { $state.Out[$k] = ' ' }
-  $state.RawHashes = $hashes; $state.Index = $end + 1; return $true
-}
-
-function Test-RustRawCloseAt([hashtable]$state) {
-  $i = $state.Index
-  if ($state.Out[$i] -ne '"') { return $false }
-  for ($k = 0; $k -lt $state.RawHashes; $k++) {
-    $j = $i + 1 + $k
-    $inBounds = ($j -lt $state.Len)
-    if (-not $inBounds) { return $false }
-    if ($state.Out[$j] -ne '#') { return $false }
-  }
-  return $true
-}
-
-function Complete-RustRawClose([hashtable]$state) {
-  $i = $state.Index
-  $end = $i + $state.RawHashes
-  for ($k = $i + 1; $k -le $end; $k++) { $state.Out[$k] = ' ' }
-  $state.RawHashes = -1
-  $state.Index = $end + 1
-}
-
-function Step-RustRawString([hashtable]$state) {
-  $isClose = Test-RustRawCloseAt $state
-  $i = $state.Index
-  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
-  if ($isClose) { Complete-RustRawClose $state; return }
-  $state.Index = $i + 1
-}
-
-function Try-StartRustLineComment([hashtable]$state) {
-  $i = $state.Index
-  $j = $i + 1
-  $isLine = (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq '/'))
-  if (-not $isLine) { return $false }
-  $state.Out[$i] = ' '; $state.Out[$j] = ' '
-  $state.InLine = $true; $state.Index = $i + 2
-  return $true
-}
-
-function Try-StartRustBlockComment([hashtable]$state) {
-  $i = $state.Index
-  $j = $i + 1
-  $isBlock = (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq '*'))
-  if (-not $isBlock) { return $false }
-  $state.Out[$i] = ' '; $state.Out[$j] = ' '
-  $state.Depth = 1; $state.Index = $i + 2
-  return $true
-}
-
-function Try-StartRustQuoteString([hashtable]$state) {
-  $i = $state.Index
-  if ($state.Out[$i] -ne '"') { return $false }
-  $state.Out[$i] = ' '; $state.InString = $true
-  $state.Index = $i + 1
-  return $true
-}
-
-function Try-BlankRustSimpleChar([hashtable]$state) {
-  $i = $state.Index
-  $len = $state.Len
-  if (($i + 2) -ge $len) { return $false }
-  $c1 = $state.Out[$i + 1]
-  $isBad = (($c1 -eq '\') -or ($c1 -eq "'") -or ($c1 -eq "`r") -or ($c1 -eq "`n"))
-  if ($isBad) { return $false }
-  if ($state.Out[$i + 2] -ne "'") { return $false }
-  $state.Out[$i] = ' '; $state.Out[$i + 1] = ' '; $state.Out[$i + 2] = ' '
-  $state.Index = $i + 3
-  return $true
-}
-
-function Find-RustEscapedCharEnd([hashtable]$state) {
-  $i = $state.Index
-  $max = [Math]::Min($state.Len - 1, $i + 12)
-  $j = $i + 3
-  while ($j -le $max) {
-    $c = $state.Out[$j]
-    if (($c -eq "`r") -or ($c -eq "`n")) { return -1 }
-    if ($c -eq "'") { return $j }
-    $j++
-  }
-  return -1
-}
-
-function Try-BlankRustEscapedChar([hashtable]$state) {
-  $i = $state.Index
-  $len = $state.Len
-  if (($i + 2) -ge $len) { return $false }
-  if ($state.Out[$i + 1] -ne '\') { return $false }
-  $endIdx = Find-RustEscapedCharEnd $state
-  if ($endIdx -lt 0) { return $false }
-  for ($k = $i; $k -le $endIdx; $k++) { $state.Out[$k] = ' ' }
-  $state.Index = $endIdx + 1
-  return $true
-}
-
-function Try-SkipRustCharLiteral([hashtable]$state) {
-  if ($state.Out[$state.Index] -ne "'") { return $false }
-  if (Try-BlankRustSimpleChar $state) { return $true }
-  return (Try-BlankRustEscapedChar $state)
-}
-
-function Step-RustNormal([hashtable]$state) {
-  if (Try-StartRustRawString $state) { return }
-  if (Try-SkipRustCharLiteral $state) { return }
-  if (Try-StartRustLineComment $state) { return }
-  if (Try-StartRustBlockComment $state) { return }
-  if (Try-StartRustQuoteString $state) { return }
-  $state.Index = $state.Index + 1
-}
-
-function Step-RustScan([hashtable]$state) {
-  if ($state.RawHashes -ge 0) { Step-RustRawString $state; return }
-  if ($state.Depth -gt 0) { Step-RustBlock $state; return }
-  if ($state.InLine) { Step-RustLineComment $state; return }
-  if ($state.InString) { Step-RustString $state; return }
-  Step-RustNormal $state
-}
-
-function Get-RustScanText([string]$text) {
-  $state = Get-RustScanState $text
-  while ($state.Index -lt $state.Len) { Step-RustScan $state }
-  return -join $state.Out
-}
+# Cohesive helpers live in sibling modules so each file stays small and focused.
+. (Join-Path $PSScriptRoot 'gate-a-rust-scan.ps1')
+. (Join-Path $PSScriptRoot 'gate-a-selftests.ps1')
 
 function Test-HasActiveForbidUnsafe([string]$text) {
   $scan = Get-RustScanText $text
@@ -494,18 +297,90 @@ function Invoke-OptionalCargoGeiger([string]$root) {
   Invoke-CargoGeiger $root
 }
 
+function Test-IsMachineSpecificUser([string]$user) {
+  if ([string]::IsNullOrWhiteSpace($user)) { return $false }
+  # Length is not a validity signal: short real accounts can be disclosures too.
+  # Generic/service accounts are excluded explicitly; everything else is treated as machine-specific.
+  $genericUsers = @('runner', 'runneradmin', 'administrator', 'admin', 'user', 'test', 'guest', 'defaultuser', 'system', 'build')
+  $genericUserPattern = '(?i)^(' + ($genericUsers -join '|') + ')$'
+  return ($user -notmatch $genericUserPattern)
+}
+
 function Get-PrivacyRules() {
   $personalEmailPattern = '(?i)(@' + 'gmail\.com\b|@' + 'outlook\.com\b|@' + 'hotmail\.com\b|@' + 'yahoo\.com\b|@' + 'icloud\.com\b|@' + 'proton\.me\b|@' + 'protonmail\.com\b)'
-  $userNameFrag = 'pub' + '22'
-  $projectFrag = 'Hermes' + ' Projects'
-  $localUserPathPattern = '(?i)C:\\Users\\(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
-  $threadIdFrag = 'decf13a1' + '-4de9-4616-b251-262b42c6ac64'
+  # Derive machine-specific fragments at runtime so this gate never stores a real username or path.
+  $currentUser = [Environment]::UserName
+  $userNameFrag = ''
+  $userNameContextPattern = ''
+  if (Test-IsMachineSpecificUser $currentUser) {
+    $userNameFrag = [regex]::Escape($currentUser)
+    # Account-context matching avoids false positives on ordinary text (e.g. a 'build' account
+    # appearing in '[build-dependencies]') while still catching real username disclosures.
+    $userAccountKeys = '(?:user|username|owner|account|login|author|committer)'
+    $userNameContextPattern = '(?i)(?:\b' + $userAccountKeys + '\b["'']?\s*[:=]\s*["'']?' + $userNameFrag + '\b|C:\\Users\\' + $userNameFrag + '\b|\b' + $userNameFrag + '@)'
+  }
+  # Use the absolute repo path (never a bare project name) so fresh clones named after the project do not self-match.
+  $projectFrag = $repoRoot
+  # Separators accept one OR more backslashes so ordinary string literals with doubled, escaped
+  # backslashes are covered as well as single-backslash text. The placeholder/generic-account
+  # negative lookahead is unchanged, so documented placeholders and build accounts are excluded.
+  $localUserPathPattern = '(?i)C:\\+Users\\+(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
+  # Machine-neutral detection of absolute checkout/workspace paths from *other* checkouts.
+  # No real drive letter or machine path is stored; the drive and intermediates are matched generically.
+  # Common checkout-root names are covered, not just the current project's special folders.
+  # The reserved Users root is covered by the placeholder-aware user-path rule above.
+  $machineWorkspacePathPattern = '(?i)[A-Za-z]:\\(?!Users\\)(?:[^\\\r\n"''<>]+\\)*(?:\b(?:workspaces?|worktrees?|checkouts?|projects?|repos?)\b|\.t3)(?:\\[^\\\r\n"''<>]+)*'
+  # Deny-by-default: flag ANY drive-letter absolute path unless its (drive, first segment) is an
+  # explicitly allowlisted, machine-neutral root. The ENTIRE first segment is captured as ONE group,
+  # from after the drive root up to the next path separator or the end of the text (an optional
+  # trailing newline is allowed). The allowlist is then an exact, case-insensitive comparison of
+  # that full captured segment: no prefix matching, no special-casing of spaces or parentheses, no
+  # whitespace boundary rule. Consequently "Program FilesBackup", "Program Files Backup" and
+  # "Program Files (x86)Backup" are each captured whole and rejected because none equals an
+  # allowlisted root, which closes the whole boundary-variant class instead of enumerating variants.
+  # Characters that cannot belong to a path root in tracked text (quotes, backticks, angle brackets,
+  # braces, colon) terminate the capture so prose such as "C:\Windows, C:\Users" cannot swallow the
+  # following sentence. End-of-text (not end-of-line) anchoring keeps prose at line ends from being
+  # mistaken for a bare path segment.
+  $firstSegmentPattern = '(?<seg>[^\\\r\n"''`<>{}:]+)(?=\\|(?:\r?\n)?$)'
+  # A quoted bare path has no trailing path separator, so its closing quote must also satisfy the
+  # first-segment boundary or a non-allowlisted root slips past the privacy scan. Accept a quote as
+  # a boundary for ANY backslash-root form: a raw-string literal (single backslash) and an ordinary
+  # string literal with doubled, escaped backslashes. Gating the quote on a single-backslash-only
+  # capture left escaped strings undetected even though that is the normal form in TS/C#/JSON config
+  # files. The match is still anchored to a real path root (one or more backslashes after the drive)
+  # and the first segment must start with a path-root character, so leading-whitespace prose cannot
+  # be mistaken for a bare path. The exact full-segment allowlist comparison is unchanged; no
+  # leading-token suppression is used, so a one-word allowlisted prefix cannot hide a non-allowlisted
+  # root. Escaped-string matches receive an additional string-literal guard in the hit helper below.
+  $rootSeparatorPattern = '\\+'
+  # The first character of a segment may be ANY legal Windows filename character, including
+  # non-ASCII letters (e.g. "equipe" with an accent). Only whitespace and path/quote delimiters
+  # are excluded, so leading-whitespace prose still cannot be mistaken for a bare path.
+  $quoteAwareSegmentPattern = '(?<seg>[^\s\\\r\n"''`<>{}:][^\\\r\n"''`<>{}:]*)(?=\\|["'']|(?:\r?\n)?$)'
+  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):' + $rootSeparatorPattern + $quoteAwareSegmentPattern
+  # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
+  # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
+  # First-segment allowlisting alone would let such a path pass because it carries no workspace
+  # keyword. The marker must be a complete path segment after the first (app/src/repo/crate).
+  $foreignCheckoutPathPattern = '(?i)\b(?<drive>[A-Za-z]):\\+' + $firstSegmentPattern + '(?:\\+[^\\\r\n"''<>]+)+\\+(?:app|src|repo|crate)(?![A-Za-z0-9_\-.])'
+  # Machine-neutral, context-aware detection of internal session/thread identifiers. The token
+  # shape is matched, never a literal identifier.
+  $internalIdContext = '(?:(?:internal[\s_-]*)?(?:session|thread|childthread|t3|ses)[\s_-]*(?:id|identifier)?)'
+  $internalIdToken = '(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}-[0-9a-f]{16}|ses[0-9a-f]{16,})'
+  $internalIdPattern = '(?i)(?:' + $internalIdContext + '[^\r\n]{0,60}?\b' + $internalIdToken + '\b|\b' + $internalIdToken + '\b[^\r\n]{0,60}?' + $internalIdContext + ')'
   return [ordered]@{
     PersonalEmailPattern = $personalEmailPattern
     UserNameFrag = $userNameFrag
+    UserNameContextPattern = $userNameContextPattern
     ProjectFrag = $projectFrag
     LocalUserPathPattern = $localUserPathPattern
-    ThreadIdFrag = $threadIdFrag
+    MachineWorkspacePathPattern = $machineWorkspacePathPattern
+    AbsoluteDrivePathPattern = $absoluteDrivePathPattern
+    ForeignCheckoutPathPattern = $foreignCheckoutPathPattern
+    AllowedAbsolutePathRoots = @(Get-AllowedAbsolutePathRoots)
+    SystemAbsolutePathRoots = @(Get-SystemAbsolutePathRoots)
+    InternalIdPattern = $internalIdPattern
     TokenPatterns = @('gh' + 'p_[A-Za-z0-9]{20,}', 'github' + '_pat_[A-Za-z0-9_]{20,}', 'BEGIN [A-Z ]*PRIVATE KEY')
   }
 }
@@ -517,7 +392,10 @@ function Test-SkippablePrivacyExt([string]$rel) {
 }
 
 function Get-PrivacyFileText([string]$full) {
-  try { return Get-Content -LiteralPath $full -Raw -ErrorAction Stop } catch { return $null }
+  # Tracked text files are UTF-8. Reading with the Windows PowerShell 5.1 ANSI default silently
+  # mojibakes multi-byte characters (e.g. U+FF0F becomes three Latin-1 chars), which both hides
+  # real machine paths and breaks the narrow malformed-path exemption. Decode as UTF-8 explicitly.
+  try { return [System.IO.File]::ReadAllText($full, [System.Text.Encoding]::UTF8) } catch { return $null }
 }
 
 function Get-PrivacyHitsForEmails([string]$rel, [string]$text, [string]$personalEmailPattern) {
@@ -549,11 +427,166 @@ function Get-PrivacyHitsForLocalPaths([string]$rel, [string]$text, [string]$loca
   return @($hits)
 }
 
+function Get-PrivacyHitsForUserName([string]$rel, [string]$text, [string]$userNameContextPattern) {
+  $hits = @()
+  if ($userNameContextPattern -and $text -match $userNameContextPattern) {
+    $hits += "${rel}: forbidden local username disclosure detected in account context"
+  }
+  return @($hits)
+}
+
+function Get-SystemAbsolutePathRoots() {
+  # Legitimate Windows/system roots. These stay allowlisted at any depth so real system paths
+  # (e.g. deeply nested Windows or Program Files subtrees) are never over-blocked.
+  return @(
+    'c:\windows', 'c:\windows.', 'c:\windows.old', 'c:\windowsapps',
+    'c:\program files', 'c:\program files (x86)', 'c:\programdata',
+    'c:\recovery', 'c:\system volume information'
+  )
+}
+
+function Get-AllowedAbsolutePathRoots() {
+  # Machine-neutral allowlist of (drive, first segment) roots that legitimately occur in tracked
+  # text: Windows/system roots, documented placeholders, and synthetic test fixtures shipped in the
+  # repo. This is deliberately data, not logic: no real username, machine path, or internal ID.
+  # Fixture/placeholder exceptions are bounded by the foreign-checkout rule: a first segment here
+  # is not a blanket pass for an arbitrary source checkout buried underneath it.
+  $system = @(Get-SystemAbsolutePathRoots)
+  $placeholders = @(
+    'c:\temp', 'c:\temp.', 'c:\temp2', 'c:\cache', 'c:\users', 'c:\sandbox',
+    'c:\sweeper', 'c:\sweepernonexistentcustompathcancel', 'c:\sweepernonexistentrecyclebincancel',
+    'd:\sandbox', 'd:\sweepertest', 'd:\oldwork'
+  )
+  $fixtures = @(
+    # Exact full-segment entries for synthetic adversarial fixtures whose first segment is "." /
+    # ".." or carries a trailing space (e.g. C:\Temp \x). Exact comparison only, never a prefix.
+    'c:\.', 'c:\..', 'c:\temp ',
+    'c:\0foo', 'c:\a', 'c:\bulk', 'c:\com', 'c:\con', 'c:\conx', 'c:\dev', 'c:\does',
+    'c:\foo', 'c:\hiberfil.sys', 'c:\logs', 'c:\lpt', 'c:\lpt1.txt', 'c:\missing',
+    'c:\mystery', 'c:\nonexistentbrowser', 'c:\nonexistentdepththree', 'c:\other',
+    'c:\pagefile.sys', 'c:\path', 'c:\progra~1', 'c:\safea', 'c:\safeb', 'c:\someapp',
+    'c:\swapfile.sys', 'c:\tools', 'c:\vms'
+  )
+  return @($system + $placeholders + $fixtures)
+}
+
+function Test-IsAllowedAbsolutePath([string]$key, [string[]]$allowedRoots) {
+  return ($allowedRoots -contains $key.ToLowerInvariant())
+}
+
+
+function Test-IsEscapedPathRoot([string]$text, $match) {
+  if ($match.Value.Length -lt 4) { return $false }
+  return ($match.Value.Substring(2, 2) -ceq '\\')
+}
+
+function Test-IsQuotedPathRoot([string]$text, $match) {
+  if ($match.Index -eq 0) { return $true }
+  $prev = $text[$match.Index - 1]
+  return (($prev -eq [char]34) -or ($prev -eq [char]39))
+}
+
+function Test-IsSyntheticMalformedFixture([string]$key) {
+  # The ONLY intentionally exempt malformed path in the repo's adversarial fixtures is the
+  # synthetic Temp + U+FF0F + foo literal under an allowlisted root. U+FF0F is a legal Windows
+  # filename character, so a real path using it must stay reportable. Match the exact fixture by
+  # its full case-folded key; never exempt a slash lookalike by character class. Paths here are
+  # assembled from fragments at runtime so this gate never stores an absolute machine path.
+  return ($key -ieq ('c:\temp' + [char]0xFF0F + 'foo'))
+}
+
+function Test-HasNestedPathSeparator([string]$text, $match) {
+  $end = $match.Index + $match.Value.Length
+  if ($end -ge $text.Length) { return $false }
+  return ($text[$end] -eq '\')
+}
+
+function Test-IsEscapedProseSegment([string]$seg, [string]$drive, [string[]]$allowedRoots) {
+  # Escaped-string prose names an allowlisted root followed by an ordinary lower-case sentence
+  # (e.g. "Users must be rejected by sandbox safety validation"). A genuine path segment such as
+  # "Windows confidential files" uses a path-segment noun instead. Require the continuation to
+  # OPEN with an action/auxiliary verb - the subject-plus-verb shape of a sentence - so multi-word
+  # path names are no longer mistaken for prose. Copular "to be" forms are excluded because they
+  # double as ordinary path-segment words (e.g. a "Windows is private" continuation is a path).
+  # System-root controls are allowlisted before this guard.
+  $lead = [regex]::Match($seg, '^(\S+)\s+(.+)')
+  if (-not $lead.Success) { return $false }
+  $leadKey = ($drive + ':\' + $lead.Groups[1].Value).ToLowerInvariant()
+  if (-not (Test-IsAllowedAbsolutePath $leadKey $allowedRoots)) { return $false }
+  $continuation = $lead.Groups[2].Value
+  if ($continuation -cnotmatch '[a-z]') { return $false }
+  $firstWord = ([regex]::Match($continuation, '^[A-Za-z]+')).Value.ToLowerInvariant()
+  $proseVerbs = @('must','remains','can','could','will','would','shall','should','may','might',
+                  'has','have','had','does','do','did','needs','need','seems','appears',
+                  'becomes','continues','stays')
+  return ($proseVerbs -contains $firstWord)
+}
+
+function Test-ShouldSkipAbsolutePathMatch([string]$text, $match, [string[]]$allowedRoots) {
+  $seg = $match.Groups['seg'].Value
+  $drive = $match.Groups['drive'].Value
+  $key = ($drive + ':\' + $seg).ToLowerInvariant()
+  if (Test-IsAllowedAbsolutePath $key $allowedRoots) { return $true }
+  if (-not (Test-IsEscapedPathRoot $text $match)) { return $false }
+  if (-not (Test-IsQuotedPathRoot $text $match)) { return $true }
+  # A following path separator makes this a real descendant path, so it must be reported even
+  # when its first segment is the synthetic malformed fixture. Check nesting before the fixture
+  # exemption so only the bare fixture stays exempt.
+  if (Test-HasNestedPathSeparator $text $match) { return $false }
+  if (Test-IsSyntheticMalformedFixture $key) { return $true }
+  return (Test-IsEscapedProseSegment $seg $drive $allowedRoots)
+}
+
+function Get-PrivacyHitsForAbsolutePaths([string]$rel, [string]$text, [string]$pattern, [string[]]$allowedRoots) {
+  $hits = @()
+  foreach ($m in [regex]::Matches($text, $pattern)) {
+    if (Test-ShouldSkipAbsolutePathMatch $text $m $allowedRoots) { continue }
+    $hits += "${rel}: forbidden absolute drive path detected: $($m.Value)"
+  }
+  return @($hits)
+}
+
+function Get-PrivacyHitsForMachineWorkspacePaths([string]$rel, [string]$text, [string]$pattern, [string[]]$systemRoots = @()) {
+  $hits = @()
+  foreach ($m in [regex]::Matches($text, $pattern)) {
+    # Mirror the absolute-path detectors: a path under a legitimate system root is not a
+    # foreign workspace even if a later segment happens to be named like a checkout.
+    $firstSegment = [regex]::Match($m.Value, '^[A-Za-z]:\\+[^\\/]+')
+    if ($firstSegment.Success -and (Test-IsAllowedAbsolutePath $firstSegment.Value $systemRoots)) { continue }
+    $hits += "${rel}: forbidden absolute workspace path detected: $($m.Value)"
+  }
+  return @($hits)
+}
+
+function Get-PrivacyHitsForForeignCheckoutPaths([string]$rel, [string]$text, $rules) {
+  $hits = @()
+  foreach ($m in [regex]::Matches($text, $rules.ForeignCheckoutPathPattern)) {
+    $key = ($m.Groups['drive'].Value + ':\' + $m.Groups['seg'].Value).ToLowerInvariant()
+    # Only relevant when the first segment is otherwise allowlisted but is not a system root:
+    # a fixture/placeholder root must not silently hide a foreign source checkout.
+    if (-not (Test-IsAllowedAbsolutePath $key $rules.AllowedAbsolutePathRoots)) { continue }
+    if (Test-IsAllowedAbsolutePath $key $rules.SystemAbsolutePathRoots) { continue }
+    $hits += "${rel}: forbidden foreign checkout path under allowlisted root: $($m.Value)"
+  }
+  return @($hits)
+}
+
+function Get-PrivacyHitsForInternalIds([string]$rel, [string]$text, [string]$pattern) {
+  $hits = @()
+  # Concatenated string-literal fragments (e.g. 'aaa' + '-bbb-...') are a common way to hide
+  # an identifier, so join them before applying the context-aware token pattern.
+  $normalized = [regex]::Replace($text, "'\s*\+\s*'", '')
+  $normalized = [regex]::Replace($normalized, '"\s*\+\s*"', '')
+  $normalized = $normalized -replace "['`"]", ''
+  foreach ($m in [regex]::Matches($normalized, $pattern)) {
+    $hits += "${rel}: internal session/thread identifier detected"
+  }
+  return @($hits)
+}
+
 function Get-PrivacyHitsForSimplePatterns([string]$rel, [string]$text, $rules) {
   $hits = @()
-  if ($text -match $rules.UserNameFrag) { $hits += "${rel}: forbidden local username fragment detected" }
-  if ($text -match [regex]::Escape($rules.ProjectFrag)) { $hits += "${rel}: forbidden local project path fragment detected" }
-  if ($text -match [regex]::Escape($rules.ThreadIdFrag)) { $hits += "${rel}: internal thread identifier detected" }
+  if ($rules.ProjectFrag -and $text -match [regex]::Escape($rules.ProjectFrag)) { $hits += "${rel}: forbidden local project path fragment detected" }
   return @($hits)
 }
 
@@ -561,7 +594,12 @@ function Get-PrivacyHitsForFile([string]$rel, [string]$text, $rules) {
   $hits = @()
   $hits += Get-PrivacyHitsForEmails $rel $text $rules.PersonalEmailPattern
   $hits += Get-PrivacyHitsForSimplePatterns $rel $text $rules
+  $hits += Get-PrivacyHitsForUserName $rel $text $rules.UserNameContextPattern
   $hits += Get-PrivacyHitsForLocalPaths $rel $text $rules.LocalUserPathPattern
+  $hits += Get-PrivacyHitsForMachineWorkspacePaths $rel $text $rules.MachineWorkspacePathPattern $rules.SystemAbsolutePathRoots
+  $hits += Get-PrivacyHitsForAbsolutePaths $rel $text $rules.AbsoluteDrivePathPattern $rules.AllowedAbsolutePathRoots
+  $hits += Get-PrivacyHitsForForeignCheckoutPaths $rel $text $rules
+  $hits += Get-PrivacyHitsForInternalIds $rel $text $rules.InternalIdPattern
   $hits += Get-PrivacyHitsForTokens $rel $text $rules.TokenPatterns
   return @($hits)
 }
@@ -603,112 +641,6 @@ function Invoke-GateAChecks {
   Write-Host "GATE-A checks passed." -ForegroundColor Green
 }
 
-function Assert-SelfTest([bool]$condition, [string]$name, [ref]$ok) {
-  if ($condition) {
-    Write-Host "SELFTEST PASS: $name"
-    return
-  }
-  Write-Host "SELFTEST FAIL: $name" -ForegroundColor Red
-  $ok.Value = $false
-}
-
-function Test-SelfTestForbidUnsafe([ref]$ok) {
-  $commented = "// #![forbid(unsafe_code)]`nfn main() {}"
-  $inString = "const X: &str = `"#![forbid(unsafe_code)]`";`nfn main() {}"
-  $active = "#![forbid(unsafe_code)]`nfn main() {}"
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $commented)) "forbid-unsafe commented out must fail" $ok
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $inString)) "forbid-unsafe in string literal must fail" $ok
-  Assert-SelfTest (Test-HasActiveForbidUnsafe $active) "forbid-unsafe active attribute must pass" $ok
-}
-
-function Get-UnsafeIssueCount([string]$path, [string]$content) {
-  $issues = @(Get-WinfsUnsafeIssuesForText $content $path)
-  return $issues.Count
-}
-
-function Test-SelfTestSharedSafety([ref]$ok) {
-  $content = "// SAFETY: first block only`nunsafe { first(); }`nunsafe { second(); }`n"
-  $count = Get-UnsafeIssueCount 'shared_safety.rs' $content
-  Assert-SelfTest ($count -eq 1) "second unsafe block without its own SAFETY must be reported" $ok
-}
-
-function Test-SelfTestUnsafeBlockComment([ref]$ok) {
-  $bad = "unsafe /* FFI */ { GetLastError() }`n"
-  $good = "// SAFETY: ffi call`nunsafe /* FFI */ { GetLastError() }`n"
-  $badCount = Get-UnsafeIssueCount 'inline_block_comment.rs' $bad
-  $goodCount = Get-UnsafeIssueCount 'inline_block_comment_ok.rs' $good
-  Assert-SelfTest ($badCount -eq 1) "unsafe with block comment and no SAFETY must fail" $ok
-  Assert-SelfTest ($goodCount -eq 0) "unsafe with block comment and SAFETY must pass" $ok
-}
-
-function Test-SelfTestUnsafeMultiline([ref]$ok) {
-  $bad = "unsafe`n{`n  GetLastError()`n}`n"
-  $good = "// SAFETY: multiline block`nunsafe`n{`n  GetLastError()`n}`n"
-  $badCount = Get-UnsafeIssueCount 'multiline_unsafe.rs' $bad
-  $goodCount = Get-UnsafeIssueCount 'multiline_unsafe_ok.rs' $good
-  Assert-SelfTest ($badCount -eq 1) "multiline unsafe without SAFETY must fail" $ok
-  Assert-SelfTest ($goodCount -eq 0) "multiline unsafe with SAFETY must pass" $ok
-}
-
-function Test-SelfTestNestedBlockComments([ref]$ok) {
-  $nestedForbid = "/* outer comment`n   /* nested comment */`n#![forbid(unsafe_code)]`n*/`nfn main() {}`n"
-  $strBlock = "const X: &str = `"/*`";`n#![forbid(unsafe_code)]`nfn main() {}`n"
-  $unsafeNested = "unsafe /* outer /* inner */ */ { GetLastError() }`n"
-  $safeNested = "// SAFETY: nested comment in unsafe`nunsafe /* outer /* inner */ */ { GetLastError() }`n"
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $nestedForbid)) "forbid-unsafe in nested block comment must fail" $ok
-  Assert-SelfTest (Test-HasActiveForbidUnsafe $strBlock) "forbid-unsafe after string containing block opener must pass" $ok
-  $unsafeCount = Get-UnsafeIssueCount 'nested_unsafe.rs' $unsafeNested
-  $safeCount = Get-UnsafeIssueCount 'nested_unsafe_ok.rs' $safeNested
-  Assert-SelfTest ($unsafeCount -eq 1) "unsafe with nested block comment and no SAFETY must fail" $ok
-  Assert-SelfTest ($safeCount -eq 0) "unsafe with nested block comment and SAFETY must pass" $ok
-}
-
-function Test-SelfTestRawStrings([ref]$ok) {
-  $cr = "const X: &str = r#`"`n`"`n#![forbid(unsafe_code)]`n`"#;`nfn main() {}`n"
-  $hashes = "const Y: &str = r##`" `"# #![forbid(unsafe_code)] `"##;`nfn main() {}`n"
-  $br = "const Z: &[u8] = br#`"/* `"#;`n#![forbid(unsafe_code)]`nfn main() {}`n"
-  $unsafe = "const U: &str = r`"unsafe { x() }`";`nunsafe { y(); }`n"
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $cr)) "raw string with embedded quote must ignore forbid" $ok
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $hashes)) "r## raw string must ignore forbid" $ok
-  Assert-SelfTest (Test-HasActiveForbidUnsafe $br) "active forbid after br# raw string must pass" $ok
-  $unsafeCount = Get-UnsafeIssueCount 'raw_unsafe.rs' $unsafe
-  Assert-SelfTest ($unsafeCount -eq 1) "unsafe in raw string ignored, real unsafe checked" $ok
-}
-
-function Test-SelfTestCharLiterals([ref]$ok) {
-  $quoteFixture = "const QUOTE: char = '`"';`nconst TEXT: &str = `"`n#![forbid(unsafe_code)]`n`";`n"
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $quoteFixture)) "char literal quote before string must ignore forbid in string" $ok
-
-  $esc = "const ESC: char = '\'';`nconst T: &str = `"`n#![forbid(unsafe_code)]`n`";`n"
-  $byteQuote = "const B: u8 = b'`"';`nconst T: &str = `"`n#![forbid(unsafe_code)]`n`";`n"
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $esc)) "escaped char literal must not open string" $ok
-  Assert-SelfTest (-not (Test-HasActiveForbidUnsafe $byteQuote)) "byte char literal quote must not open string" $ok
-
-  $active = "#![forbid(unsafe_code)]`nfn f<'a>(_x: &'a str) {}`nconst QUOTE: char = '`"';`n"
-  Assert-SelfTest (Test-HasActiveForbidUnsafe $active) "active forbid with lifetimes and char literal must pass" $ok
-
-  $unsafeFixture = "const Q: char = '`"';`nfn main() {`n  unsafe { GetLastError() }`n}`n"
-  $unsafeCount = Get-UnsafeIssueCount 'char_unsafe.rs' $unsafeFixture
-  Assert-SelfTest ($unsafeCount -eq 1) "real unsafe after char literal quote must still be reported" $ok
-}
-
-function Invoke-GateASelfTests {
-  $ok = $true
-  $okRef = [ref]$ok
-  Test-SelfTestForbidUnsafe $okRef
-  Test-SelfTestSharedSafety $okRef
-  Test-SelfTestUnsafeBlockComment $okRef
-  Test-SelfTestUnsafeMultiline $okRef
-  Test-SelfTestNestedBlockComments $okRef
-  Test-SelfTestRawStrings $okRef
-  Test-SelfTestCharLiterals $okRef
-  if ($ok) {
-    Write-Host "GATE-A self-tests passed." -ForegroundColor Green
-    return
-  }
-  Write-Host "GATE-A self-tests failed." -ForegroundColor Red
-  exit 1
-}
 
 function Invoke-GateAMain {
   if ($SelfTest) {

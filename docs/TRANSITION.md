@@ -6,7 +6,7 @@
 
 The project was moved to a new Windows machine that did not inherit the old environment. Two classes of failure must be eliminated before work resumes:
 
-1. **Absolute machine-specific paths** committed into tracked files (e.g. `D:\OldWork\OldRepo\node_modules`, `C:\Users\<real-user>\...`). These break on a different drive/user and leak machine data. Paths must be relative, env-var based, or derived from `git rev-parse --show-toplevel`.
+1. **Absolute machine-specific paths** committed into tracked files (e.g. a former checkout like `<drive>:\<old-root>\<old-repo>\node_modules` or a user profile like `<drive>:\Users\<real-user>\...`). These break on a different drive/user and leak machine data. Paths must be relative, env-var based, or derived from `git rev-parse --show-toplevel`.
 2. **Missing or mismatched toolchain** (Rust, Tauri, Node/pnpm, Edge for Playwright, `gh`, GitHub PR checks, CodeScene, CodeRabbit). All release gates in `docs/RELEASE_READINESS.md` assume these exist.
 
 ## Step 0 — Verify you are on the latest, clean state
@@ -31,14 +31,14 @@ Run from the repository root and inspect every hit:
 
 ```powershell
 # Windows drive / real-user paths in tracked files
-git grep -n -I -E '(D:|C:)\\\\Users\\\\|D:\\\\OldProject|[A-Za-z]:\\\\OldProject' -- .
+git grep -n -I -E '(D:|C:)[\\]{1,2}Users[\\]{1,2}|D:[\\]{1,2}OldWork|[A-Za-z]:[\\]{1,2}OldWork' -- .
 # Absolute D:/C: drive roots in text files
-git grep -n -I -E '([A-Z]:)[/\\\\](Users|OldProject|Program|Temp)' -- .
+git grep -n -I -E '([A-Z]:)[/\\]{1,2}(Users|OldWork|Program|Temp)' -- .
 ```
 
 Rules:
-- **Allowed (synthetic fixtures):** `C:\Users\Alice\...`, `C:\Temp\...`, `C:\Cache\...` used only in tests as fake paths — but verify they are clearly fictional and never a real username.
-- **Forbidden:** any path containing the previous machine's user name, `D:\OldWork\OldRepo\...`, or an absolute drive-root that is not obviously a synthetic fixture.
+- **Allowed (synthetic fixtures):** clearly fictional test-only paths such as `<drive>:\Users\Alice\...`, `<drive>:\Temp\...`, `<drive>:\Cache\...` used only in tests as fake paths — but verify they are clearly fictional and never a real username.
+- **Forbidden:** any path containing the previous machine's user name, `<drive>:\<old-root>\<old-repo>\...`, or an absolute drive-root that is not obviously a synthetic fixture.
 - **Fix pattern:** replace with a relative path, `%LOCALAPPDATA%`, `$env:TEMP`, or compute the repo root with `(git rev-parse --show-toplevel)`. Never hardcode the checkout location.
 - Check at minimum: `docs/**`, `AGENTS.md`, `scripts/**`, `.github/workflows/**`, `app/frontend/**` (including `playwright.config.ts`, `vite.config.ts`, `tsconfig*`, `package.json`, `e2e/**`), `app/backend/**`, `Cargo.toml`/`.cargo/**`, `.vscode/**`, `.agents/**`, `GLOSSARY.md`, `README*`.
 - If any real machine path is found, **delegate the fix to a sub-agent** (the Orchestrator never edits implementation code directly), run the relevant gates, and publish via the normal PR flow. Do not proceed to feature work with known machine paths remaining.

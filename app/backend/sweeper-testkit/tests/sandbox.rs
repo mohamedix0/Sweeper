@@ -210,7 +210,7 @@ fn is_safe_sandbox_base_rejects_protected_container_roots_and_users_paths() {
 
     // Non-protected, long-name path should remain acceptable (subject to filesystem context).
     assert!(
-        is_safe_sandbox_base(Path::new(r"D:\work\target\sweeper-test-sandboxes")),
+        is_safe_sandbox_base(Path::new(r"D:\SweeperTest\target\sandboxes")),
         "non-protected target path should be considered a safe sandbox base"
     );
 }
