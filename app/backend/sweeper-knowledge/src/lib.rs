@@ -393,9 +393,12 @@ fn browser_and_app_knowledge_entries() -> Vec<KnowledgeEntry> {
             title: "Vivaldi and Opera Browser Caches".to_string(),
             description: "Regenerable cache locations for the Vivaldi and Opera browsers: HTTP Cache, Code Cache, and GPUCache leaves under Vivaldi User Data profiles and Opera channel profiles.".to_string(),
             risk: Risk::Safe,
+            // Anchors the HTTP-cache leaves listed in `relative_pattern` (all LocalAppData).
+            // Opera's Code Cache and GPUCache leaves are separate targets anchored to
+            // RoamingAppData (the Roaming Opera profile tree).
             known_folder: Some(KnownFolder::LocalAppData),
-            relative_pattern: r"Vivaldi\User Data\Default\Cache; Vivaldi\User Data\Profile *\Cache; Opera Software\Opera *\Cache".to_string(),
-            notes: "Safe. Only explicit cache leaf folders are targeted; browser profile data (history, cookies, bookmarks, settings) is not targeted.".to_string(),
+            relative_pattern: r"Vivaldi\User Data\Default\Cache; Vivaldi\User Data\Profile *\Cache; Opera Software\Opera *\Cache; Opera Software\Opera *\Default\Cache".to_string(),
+            notes: "Safe. Only explicit cache leaf folders are targeted; browser profile data (history, cookies, bookmarks, settings) is not targeted. Opera HTTP Cache lives under LocalAppData; Opera Code Cache and GPUCache live under the RoamingAppData Opera profile tree.".to_string(),
         },
         KnowledgeEntry {
             id: "kb-app-runtime-caches".to_string(),

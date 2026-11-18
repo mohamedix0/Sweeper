@@ -591,31 +591,43 @@ relative_subpath = "Opera Software\\Opera *\\Cache"
 scope = "contents"
 min_age_hours = 24
 requires_elevation = false
-description = "Opera browser HTTP cache across Opera channel profiles (Opera *). Only the explicit Cache leaf folder is targeted; profile data is not targeted."
+description = "Opera browser HTTP cache across Opera channel profiles (Opera *), legacy layout. Only the explicit Cache leaf folder is targeted; profile data is not targeted."
+
+[[targets]]
+id = "opera-default-cache"
+name = "Opera Cache (Default profile)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Opera Software\\Opera *\\Default\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Opera browser HTTP cache for the Default profile layout (Opera One 104+ / Opera GX 119+). Only the explicit Cache leaf folder is targeted; profile data is not targeted."
 
 [[targets]]
 id = "opera-code-cache"
 name = "Opera Code Cache"
 tier = "Tier2"
 risk = "Safe"
-known_folder = "LocalAppData"
+known_folder = "RoamingAppData"
 relative_subpath = "Opera Software\\Opera *\\Code Cache"
 scope = "contents"
 min_age_hours = 24
 requires_elevation = false
-description = "Opera browser compiled/script code cache across Opera channel profiles (Opera *). Regenerated automatically."
+description = "Opera browser compiled/script code cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera profile tree. Regenerated automatically."
 
 [[targets]]
 id = "opera-gpu-cache"
 name = "Opera GPU Cache"
 tier = "Tier2"
 risk = "Safe"
-known_folder = "LocalAppData"
+known_folder = "RoamingAppData"
 relative_subpath = "Opera Software\\Opera *\\GPUCache"
 scope = "contents"
 min_age_hours = 24
 requires_elevation = false
-description = "Opera browser GPU cache across Opera channel profiles (Opera *). Regenerated automatically."
+description = "Opera browser GPU cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera profile tree. Regenerated automatically."
 
 [[targets]]
 id = "discord-cache"

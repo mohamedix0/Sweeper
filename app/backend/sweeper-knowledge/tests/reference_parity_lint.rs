@@ -10,48 +10,72 @@ use sweeper_knowledge::{
     builtin_knowledge_entries, embedded_targets, KnownFolder, Risk, Scope, Tier,
 };
 
-/// (target id, expected `relative_subpath`) pairs for the Vivaldi/Opera leaf-cache targets.
-const VIVALDI_OPERA_LEAF_TARGETS: &[(&str, &str)] = &[
-    ("vivaldi-cache-default", r"Vivaldi\User Data\Default\Cache"),
+/// (target id, expected `relative_subpath`, expected `known_folder`) for the Vivaldi/Opera
+/// leaf-cache targets. Opera's HTTP cache leaves live under `LocalAppData`, while its Code Cache
+/// and GPUCache leaves live under the Roaming Opera profile tree (`RoamingAppData`).
+const VIVALDI_OPERA_LEAF_TARGETS: &[(&str, &str, KnownFolder)] = &[
+    (
+        "vivaldi-cache-default",
+        r"Vivaldi\User Data\Default\Cache",
+        KnownFolder::LocalAppData,
+    ),
     (
         "vivaldi-code-cache-default",
         r"Vivaldi\User Data\Default\Code Cache",
+        KnownFolder::LocalAppData,
     ),
     (
         "vivaldi-gpu-cache-default",
         r"Vivaldi\User Data\Default\GPUCache",
+        KnownFolder::LocalAppData,
     ),
     (
         "vivaldi-cache-profiles",
         r"Vivaldi\User Data\Profile *\Cache",
+        KnownFolder::LocalAppData,
     ),
     (
         "vivaldi-code-cache-profiles",
         r"Vivaldi\User Data\Profile *\Code Cache",
+        KnownFolder::LocalAppData,
     ),
     (
         "vivaldi-gpu-cache-profiles",
         r"Vivaldi\User Data\Profile *\GPUCache",
+        KnownFolder::LocalAppData,
     ),
-    ("opera-cache", r"Opera Software\Opera *\Cache"),
-    ("opera-code-cache", r"Opera Software\Opera *\Code Cache"),
-    ("opera-gpu-cache", r"Opera Software\Opera *\GPUCache"),
+    (
+        "opera-cache",
+        r"Opera Software\Opera *\Cache",
+        KnownFolder::LocalAppData,
+    ),
+    (
+        "opera-default-cache",
+        r"Opera Software\Opera *\Default\Cache",
+        KnownFolder::LocalAppData,
+    ),
+    (
+        "opera-code-cache",
+        r"Opera Software\Opera *\Code Cache",
+        KnownFolder::RoamingAppData,
+    ),
+    (
+        "opera-gpu-cache",
+        r"Opera Software\Opera *\GPUCache",
+        KnownFolder::RoamingAppData,
+    ),
 ];
 
 #[test]
 fn vivaldi_and_opera_leaf_cache_targets_are_present() {
     let targets = embedded_targets();
-    for &(id, subpath) in VIVALDI_OPERA_LEAF_TARGETS {
+    for &(id, subpath, expected_anchor) in VIVALDI_OPERA_LEAF_TARGETS {
         let t = targets
             .iter()
             .find(|t| t.id == id)
             .unwrap_or_else(|| panic!("missing {id} target"));
         let anchor = (t.known_folder, t.relative_subpath.as_str(), t.tier);
-        assert_eq!(
-            anchor,
-            (KnownFolder::LocalAppData, subpath, Tier::Tier2),
-            "{id}"
-        );
+        assert_eq!(anchor, (expected_anchor, subpath, Tier::Tier2), "{id}");
         let safety = (t.risk, t.scope, t.requires_elevation, t.min_age_hours);
         assert_eq!(safety, (Risk::Safe, Scope::Contents, false, 24), "{id}");
         assert!(!t.description.trim().is_empty(), "{id}");
@@ -88,11 +112,15 @@ fn vivaldi_and_opera_cache_kb_annotations_are_present() {
         text.contains("Vivaldi"),
         text.contains("Opera"),
         text.to_ascii_lowercase().contains("profile data"),
+        entry
+            .relative_pattern
+            .contains(r"Opera Software\Opera *\Default\Cache"),
     ];
     assert_eq!(
         documented,
-        [true, true, true],
-        "annotation must mention Vivaldi, Opera and that profile data is not targeted: {text}"
+        [true, true, true, true],
+        "annotation must mention Vivaldi, Opera, that profile data is not targeted, \
+         and the Opera Default HTTP-cache leaf: {text}"
     );
 }
 
