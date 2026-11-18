@@ -9,6 +9,7 @@ import { ScanResultsSection, ScanScanningLayout } from './scan/ScanResultsSectio
 import { ScanViewControls } from './scan/ScanViewControls';
 import { ScanViewHeader } from './scan/ScanViewHeader';
 import { ScanNotices, ScanOnboarding, ScanProgressNotice, ScanTerminalStatus } from './scan/ScanViewStatus';
+import { EXPLANATION_CONCURRENCY, mapWithConcurrency, planExplanationTasks } from './scan/previewPerf';
 import { isSelectableScanItem } from './scan/scanHelpers';
 import { useScanDerived } from './scan/useScanDerived';
 import { clearScanSelection, runScanClean, runScanPreview, selectAllSafeIds, setTargetSelection, toggleScanItem, toggleSelectAllEligibleSafe } from './scan/useScanViewActions';
@@ -148,7 +149,8 @@ type SelectionSourcesState = {
   failedCount: number;
 };
 type ResolvedSelection = {
-  key: string;
+  /** Set identity, not a joined key: a new Set is produced on every selection change. */
+  key: ReadonlySet<string>;
   preview: PreviewResult;
   sources: readonly PreviewRiskCalloutSource[];
   failedCount: number;
@@ -200,12 +202,12 @@ type ResolvedExplanation = { source: PreviewRiskCalloutSource; failed: boolean }
 /** Pure render-time gate: explanations must match both the selection and the current Preview generation. */
 function derivationPending(args: {
   needs: boolean;
-  selectedKey: string;
+  selection: ReadonlySet<string>;
   preview: PreviewResult | null;
   resolved: ResolvedSelection | null;
 }): boolean {
   if (!args.needs) return false;
-  return args.resolved == null || args.resolved.key !== args.selectedKey || args.resolved.preview !== args.preview;
+  return args.resolved == null || args.resolved.key !== args.selection || args.resolved.preview !== args.preview;
 }
 
 /** Resolves one item to a callout source, falling back to known identity on failure. */
@@ -220,22 +222,35 @@ async function resolveItemExplanation(args: { client: SweeperClient; itemContext
   }
 }
 
-/** Resolves the whole selected set; a stale generation is ignored on arrival. */
+/**
+ * Resolve a bounded summary of explanations; a stale generation is ignored on
+ * arrival. Small selections keep one IPC per item (preserving per-item failure
+ * notices); large selections resolve one representative per Target, memoised
+ * by Target for this Preview generation, with capped concurrency.
+ */
 function resolveExplanations(args: {
   client: SweeperClient;
-  selectedKey: string;
+  selection: ReadonlySet<string>;
   preview: PreviewResult;
   allTargets: TargetScanResultDto[];
   setResolved: (value: ResolvedSelection) => void;
   isCurrent: () => boolean;
 }): void {
-  const ids = args.selectedKey === '' ? [] : args.selectedKey.split('\u0000');
-  if (ids.length === 0) return;
+  if (args.selection.size === 0) return;
   const itemContext = buildItemContext({ targets: args.allTargets });
-  void Promise.all(ids.map((itemId) => resolveItemExplanation({ client: args.client, itemContext, itemId }))).then((results) => {
+  const tasks = planExplanationTasks({ selected: args.selection, targetIdFor: (id) => itemContext.get(id)?.target.targetId });
+  const memo = new Map<string, Promise<ResolvedExplanation>>();
+  const run = mapWithConcurrency(tasks, EXPLANATION_CONCURRENCY, (task) => {
+    const cached = memo.get(task.memoKey);
+    if (cached) return cached;
+    const pending = resolveItemExplanation({ client: args.client, itemContext, itemId: task.itemId });
+    memo.set(task.memoKey, pending);
+    return pending;
+  });
+  void run.then((results) => {
     if (!args.isCurrent()) return;
     args.setResolved({
-      key: args.selectedKey,
+      key: args.selection,
       preview: args.preview,
       sources: results.map((result) => result.source),
       failedCount: results.filter((result) => result.failed).length,
@@ -244,30 +259,30 @@ function resolveExplanations(args: {
 }
 
 /**
- * Resolve Knowledge Base explanations for the full selected set. Explanations
- * are keyed by selection AND the current Preview, so reopening a Preview with
- * the same selection re-gates Clean until the new explanations resolve.
+ * Resolve Knowledge Base explanations for the current selection. Explanations
+ * are keyed by Set identity AND the current Preview, so reopening a Preview
+ * with the same selection re-gates Clean until the new explanations resolve.
  */
 function useSelectionSources(args: {
   client: SweeperClient;
-  selectedKey: string;
+  selection: ReadonlySet<string>;
   allTargets: TargetScanResultDto[];
   preview: PreviewResult | null;
 }): SelectionSourcesState {
-  const { client, selectedKey, allTargets, preview } = args;
+  const { client, selection, allTargets, preview } = args;
   const [resolved, setResolved] = useState<ResolvedSelection | null>(null);
-  const needs = preview != null && selectedKey !== '';
+  const needs = preview != null && selection.size > 0;
 
   useEffect(() => {
     let cancelled = false;
     if (preview != null && needs) {
-      resolveExplanations({ client, selectedKey, preview, allTargets, setResolved, isCurrent: () => !cancelled });
+      resolveExplanations({ client, selection, preview, allTargets, setResolved, isCurrent: () => !cancelled });
     }
     return () => { cancelled = true; };
-  }, [client, selectedKey, allTargets, preview, needs]);
+  }, [client, selection, allTargets, preview, needs]);
 
   if (!needs) return EMPTY_SELECTION_SOURCES;
-  if (derivationPending({ needs, selectedKey, preview, resolved })) return PENDING_SELECTION_SOURCES;
+  if (derivationPending({ needs, selection, preview, resolved })) return PENDING_SELECTION_SOURCES;
   return { sources: resolved!.sources, pending: false, failedCount: resolved!.failedCount };
 }
 
@@ -308,11 +323,12 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(fu
   const d = useScanDerived(w, settingsVersion);
   const inspectedCtx = useMemo(() => findInspectedCtx({ focus: w.focus, inspected: w.inspected, targets: d.targets }), [w.focus, w.inspected, d.targets]);
   const focusedGroup = useMemo(() => focusedGroupFor(w.focus, d.targets), [w.focus, d.targets]);
-  const selectedKey = useMemo(() => [...d.sel].sort().join('\u0000'), [d.sel]);
+  const selection = d.sel;
   const allTargets = useMemo(() => w.results?.targets ?? [], [w.results]);
   const previewActive = w.preview != null;
-  const selectionState = useSelectionSources({ client, selectedKey, allTargets, preview: w.preview });
+  const selectionState = useSelectionSources({ client, selection, allTargets, preview: w.preview });
   const progress = cleanProgressLabel(w.cleanProgress);
+  const prep = w.previewProgress;
   useImperativeHandle(ref, () => ({ runScan: w.runScan }), [w.runScan]);
   const onToggleCollapsed = (targetId: string) => w.setCollapsedTargets((prev) => toggleSetId({ prev, id: targetId }));
   const onToggleShowAll = (targetId: string) => w.setShowAllGroups((prev) => toggleSetId({ prev, id: targetId }));
@@ -333,6 +349,12 @@ export const ScanAndPreviewView = forwardRef<ScanAndPreviewViewHandle, Props>(fu
       <ScanNotices elevationError={elevationError} relaunchInfo={w.relaunchInfo} relaunchError={w.relaunchError} error={w.error} info={w.info} explanationWarning={explanationWarning({ failedCount: selectionState.failedCount })} />
       <ScanViewControls toolbar={w.toolbar} targetsCount={d.targets.length} selectableCount={d.selectableCount} skippedCount={d.skippedCount} hasResults={!!w.results} cleaning={w.cleaning} anyCollapsed={anyCollapsed} isFilterActive={d.isFilterActive} selectSafeIdsLength={d.selectSafeIds.length} allSelectSafeSelected={d.allSelectSafeSelected} onToolbar={w.setToolbar} onToggleCollapseAll={onToggleCollapseAll} onSelectAllSafe={() => selectAllSafeIds({ w, selectSafeIds: d.selectSafeIds })} />
       <StatusBlocks w={w} d={d} masterIndeterminate={masterIndeterminate} />
+      {prep != null && (
+        <div className="preview-preparing" role="status" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <span>Preparing preview… {prep.completed} / {prep.total} items</span>
+          <progress value={prep.completed} max={prep.total} />
+        </div>
+      )}
       <ResultsBlocks client={client} w={w} d={d} focusedGroup={focusedGroup} inspectedCtx={inspectedCtx} selectionSources={selectionState.sources} canPreview={previewOk} canClean={cleanOk} onOpenLog={onOpenLog} onOpenSettings={onOpenSettings} onToggleCollapsed={onToggleCollapsed} onToggleShowAll={onToggleShowAll} onToggleGroupSelect={onToggleGroupSelect} cleanProgress={progress} />
     </div>
   );

@@ -1,5 +1,6 @@
 import { formatContractError, type SweeperClient } from '../../api/client';
 import type { ContractError, ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
+import { preparePreviewSelection } from './previewPerf';
 import { isSelectableScanItem } from './scanHelpers';
 
 type Workflow = any;
@@ -132,11 +133,22 @@ export async function runScanPreview(args: { w: Workflow; client: SweeperClient;
   const confirmations = buildConfirmations(args);
   let res: unknown = null;
   try {
-    res = await args.client.previewClean(sid, Array.from(args.sel), confirmations);
+    // Chunked, yielding preparation keeps the main thread responsive and gives
+    // the view determinate "Preparing preview…" progress for large selections.
+    const itemIds = await preparePreviewSelection(args.sel, (completed, total) => {
+      if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress({ completed, total });
+    });
+    if (previewStale({ w, id: req.id, rev: req.rev, sid })) {
+      finishPreviewLoading(w, req.id);
+      return;
+    }
+    res = await args.client.previewClean(sid, itemIds, confirmations);
   } catch (error) {
     handlePreviewCatch({ w, error, req: { id: req.id, rev: req.rev, sid } });
     finishPreviewLoading(w, req.id);
     return;
+  } finally {
+    if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress(null);
   }
   if (previewStale({ w, id: req.id, rev: req.rev, sid })) {
     finishPreviewLoading(w, req.id);

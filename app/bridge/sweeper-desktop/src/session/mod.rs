@@ -2,6 +2,7 @@
 
 pub(crate) mod analyzer;
 pub(crate) mod clean;
+pub(crate) mod compact_selection;
 mod mapping;
 pub(crate) mod scan;
 mod support;

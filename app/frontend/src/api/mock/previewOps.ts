@@ -1,4 +1,5 @@
 import type { AnalyzerNodeDto, PreviewCleanResult } from '../client';
+import { expandPreviewSelectionIds } from '../../components/scan/previewPerf';
 import { analyzerBreakdown, dedupeAnalyzerNodes, err, isUnknownBlocked, scanBreakdown, sumNodeBytes } from './helpers';
 import { getValidSessionState } from './scanAnalyzerOps';
 import type { AnalyzerSessionState, MockCtx, ScanSessionState } from './types';
@@ -117,13 +118,14 @@ function buildSelection(input: { session: ScanSessionState | AnalyzerSessionStat
 
 function buildPreview(input: PreviewRequest): PreviewBuild {
   const allowDeleteUnknown = input.ctx.mutable.settingsState.allowDeleteUnknown;
+  const itemIds = expandPreviewSelectionIds(input.itemIds);
   if (input.ctx.sessions.has(input.sessionId)) {
     const session = getValidSessionState({ ctx: input.ctx, sessions: input.ctx.sessions, sessionId: input.sessionId });
-    return buildSelection({ session, itemIds: input.itemIds, confirmations: input.confirmations, allowDeleteUnknown });
+    return buildSelection({ session, itemIds, confirmations: input.confirmations, allowDeleteUnknown });
   }
   if (input.ctx.analyzerSessions.has(input.sessionId)) {
     const session = getValidSessionState({ ctx: input.ctx, sessions: input.ctx.analyzerSessions, sessionId: input.sessionId });
-    return buildSelection({ session, itemIds: input.itemIds, confirmations: input.confirmations, allowDeleteUnknown });
+    return buildSelection({ session, itemIds, confirmations: input.confirmations, allowDeleteUnknown });
   }
   err({ code: 'sessionInvalid', reason: 'Session not found.' });
 }
