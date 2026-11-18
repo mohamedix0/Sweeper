@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type { TargetScanResultDto } from '../../contract/bindings';
-import { sumDecimalStrings } from '../../utils/format';
-import { countSelectable, countSkipped, eligibleSafeIdsFor, heroReclaimableBytes, needsConfirmation, selectedCategoryCount, visibleEligibleSafeIdsFor } from './scanViewModel';
+import { buildSelectionIndex, selectedBytesFromIndex, selectedCategoryCountFromIndex, selectionNeedsConfirmationFromIndex } from './previewPerf';
+import { countSelectable, countSkipped, eligibleSafeIdsFor, heroReclaimableBytes, visibleEligibleSafeIdsFor } from './scanViewModel';
 import type { useScanWorkflow } from './useScanWorkflow';
 
 type Workflow = ReturnType<typeof useScanWorkflow>;
@@ -38,11 +38,12 @@ export function useScanDerived(w: Workflow, settingsVersion?: number) {
   const sel = w.selectedIds;
   const selectableCount = useMemo(() => countSelectable({ targets, allow }), [targets, allow]);
   const skippedCount = useMemo(() => countSkipped({ targets, allow }), [targets, allow]);
-  const selectedBytes = useMemo(() => sumDecimalStrings({ values: targets.flatMap((t) => t.items.filter((i) => sel.has(i.id)).map((i) => i.size)) }), [targets, sel]);
-  const requiresConfirmation = useMemo(() => needsConfirmation({ targets, allow, selectedIds: sel }), [targets, allow, sel]);
+  const selectionIndex = useMemo(() => buildSelectionIndex({ targets }), [targets]);
+  const selectedBytes = useMemo(() => selectedBytesFromIndex({ index: selectionIndex, selected: sel }), [selectionIndex, sel]);
+  const requiresConfirmation = useMemo(() => selectionNeedsConfirmationFromIndex({ index: selectionIndex, selected: sel }), [selectionIndex, sel]);
   const eligibleSafeIds = useMemo(() => eligibleSafeIdsFor({ targets, allow }), [targets, allow]);
   const allEligibleSelected = allSelected(eligibleSafeIds, sel);
-  const selectedCategoryCountValue = useMemo(() => selectedCategoryCount({ targets, allow, selectedIds: sel }), [targets, allow, sel]);
+  const selectedCategoryCountValue = useMemo(() => selectedCategoryCountFromIndex({ index: selectionIndex, selected: sel }), [selectionIndex, sel]);
   const heroReclaimable = useMemo(() => heroReclaimableBytes({ targets }), [targets]);
   const stale = settingsStale({ workflow: w, settingsVersion });
   const active = isFilterActive(w.toolbar);

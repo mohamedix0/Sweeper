@@ -1,5 +1,6 @@
 import { formatContractError, type SweeperClient } from '../../api/client';
 import type { ContractError, ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
+import { MAX_COMPACT_IDS, preparePreviewSelection } from './previewPerf';
 import { isSelectableScanItem } from './scanHelpers';
 
 type Workflow = any;
@@ -12,6 +13,10 @@ export function clearTransient(w: Workflow) {
 
 function invalidatePreview(w: Workflow) {
   w.invalidatePreviewRequest();
+  // The old request's request-ID guard will stop it clearing progress in its
+  // finally block, so clear it here or a cancelled Preview leaves a stale
+  // "Preparing preview…" status behind.
+  w.setPreviewProgress(null);
   clearTransient(w);
 }
 
@@ -120,23 +125,60 @@ function finishPreviewLoading(w: Workflow, requestId: number) {
   if (w.activePreviewRequestRef.current === requestId) w.setPreviewLoading(false);
 }
 
+function clearPreviewProgress(w: Workflow, requestId: number) {
+  if (w.activePreviewRequestRef.current === requestId) w.setPreviewProgress(null);
+}
+
+function previewRejected(args: { w: Workflow; selectionSize: number; expired: boolean }): boolean {
+  // The Rust decoder refuses descriptors above MAX_COMPACT_IDS; sending one
+  // would surface as an unknown item and a fail-closed Preview. Reject early
+  // with an actionable message instead of a silent failure.
+  if (args.selectionSize > MAX_COMPACT_IDS) {
+    args.w.setError(`This selection has ${args.selectionSize.toLocaleString('en-US')} items; Sweeper can Preview at most ${MAX_COMPACT_IDS.toLocaleString('en-US')} items at once. Deselect some items and try again.`);
+    return true;
+  }
+  if (args.expired) {
+    args.w.setError('Scan session expired or was invalidated. Start a new Scan.');
+    args.w.resetForInvalidSession('Scan session expired or was invalidated. Start a new Scan.');
+    return true;
+  }
+  return false;
+}
+
 export async function runScanPreview(args: { w: Workflow; client: SweeperClient; sel: Set<string>; requiresConfirmation: boolean; sessionId: string; confirmText: string }) {
   const { w } = args;
-  if (w.isSessionExpired) {
-    w.setError('Scan session expired or was invalidated. Start a new Scan.');
-    w.resetForInvalidSession('Scan session expired or was invalidated. Start a new Scan.');
-    return;
-  }
+  if (previewRejected({ w, selectionSize: args.sel.size, expired: w.isSessionExpired })) return;
   const req = markPreviewStart(w);
   const sid = args.sessionId;
   const confirmations = buildConfirmations(args);
   let res: unknown = null;
   try {
-    res = await args.client.previewClean(sid, Array.from(args.sel), confirmations);
+    // Chunked, yielding preparation keeps the main thread responsive and gives
+    // the view determinate "Preparing preview…" progress for large selections.
+    const itemIds = await preparePreviewSelection(
+      args.sel,
+      (completed, total) => {
+        // Request-ID guard: a stale action must not clear/overwrite a newer
+        // action's determinate progress state.
+        if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress({ completed, total });
+      },
+      () => previewStale({ w, id: req.id, rev: req.rev, sid }),
+    );
+    if (previewStale({ w, id: req.id, rev: req.rev, sid })) {
+      finishPreviewLoading(w, req.id);
+      return;
+    }
+    // Encoding is done: stop showing determinate preparation progress before
+    // the (possibly slow) Preview IPC, rather than leaving a stale "Preparing
+    // preview… N / N" message while the backend builds the Preview.
+    clearPreviewProgress(w, req.id);
+    res = await args.client.previewClean(sid, itemIds, confirmations);
   } catch (error) {
     handlePreviewCatch({ w, error, req: { id: req.id, rev: req.rev, sid } });
     finishPreviewLoading(w, req.id);
     return;
+  } finally {
+    clearPreviewProgress(w, req.id);
   }
   if (previewStale({ w, id: req.id, rev: req.rev, sid })) {
     finishPreviewLoading(w, req.id);

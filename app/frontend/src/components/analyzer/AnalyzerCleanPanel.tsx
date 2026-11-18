@@ -1,4 +1,6 @@
 ﻿import { formatBytes, pluralize } from '../../utils/format';
+import { UnselectAllButton } from '../UnselectAllButton';
+import { deleteActionLabel } from '../cleanActionLabel';
 
 interface AnalyzerCleanPanelProps {
   selectedCount: number;
@@ -32,19 +34,19 @@ function reviewLabel(args: AnalyzerCleanPanelProps): string {
   return `Review & Clean (${formatBytes({ bytes: args.selectedBytes })})`;
 }
 
-function cleanLabel(args: { cleaning: boolean }): string {
-  if (args.cleaning) return 'Cleaning…';
-  return 'Clean Permanently';
+function cleanLabel(args: { cleaning: boolean; count: number; size: string }): string {
+  return deleteActionLabel({
+    count: args.count,
+    size: args.size,
+    cleaning: args.cleaning,
+    singular: 'item',
+    plural: 'items',
+  });
 }
 
 function reviewClassName(args: { selected: boolean }): string {
   if (args.selected) return 'btn primary';
   return 'btn';
-}
-
-function ClearButton(props: { selected: number; cleaning: boolean; onClear: () => void }) {
-  if (props.selected <= 0) return null;
-  return <button type="button" className="btn small subtle-btn" onClick={props.onClear} disabled={props.cleaning}>Clear</button>;
 }
 
 function RiskyHint(props: { risky: boolean }) {
@@ -54,7 +56,7 @@ function RiskyHint(props: { risky: boolean }) {
 
 function ActionButton(props: AnalyzerCleanPanelProps) {
   if (props.hasPreview) {
-    return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean} aria-label="Clean Permanently">{cleanLabel(props)}</button>;
+    return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean}>{cleanLabel({ cleaning: props.cleaning, count: props.selectedCount, size: formatBytes({ bytes: props.selectedBytes }) })}</button>;
   }
   const cls = reviewClassName({ selected: props.selectedCount > 0 });
   return <button className={cls} onClick={props.onPreview} disabled={!props.canPreview} aria-label="Review & Clean">{reviewLabel(props)}</button>;
@@ -67,7 +69,7 @@ export function AnalyzerCleanPanel(props: AnalyzerCleanPanelProps) {
     <div className="scan-bottom-bar" aria-label="Analyzer actions">
       <div className="scan-bottom-bar-left">
         <span className="scan-bottom-bar-summary"><strong className="num">{count} selected</strong> · <span className="num">{size}</span></span>
-        <ClearButton selected={props.selectedCount} cleaning={props.cleaning} onClear={props.onClear} />
+        <UnselectAllButton selected={props.selectedCount} cleaning={props.cleaning} onClear={props.onClear} />
         <RiskyHint risky={props.hasSelectedRisky} />
       </div>
       <div className="scan-bottom-bar-right">

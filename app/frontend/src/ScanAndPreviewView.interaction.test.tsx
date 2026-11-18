@@ -76,7 +76,7 @@ async function runKeydownCase() {
   renderView({ client, settings: { allowDeleteUnknown: false, minAgeHours: 0 } as Settings });
   await user.click(screen.getByRole('button', { name: 'Start Scan' }));
   await screen.findByRole('heading', { name: 'Inspector' });
-  await user.click(screen.getByRole('button', { name: 'Clear' }));
+  await user.click(screen.getByRole('button', { name: 'Unselect all' }));
   const cb = screen.getByLabelText('Select C:\\Temp\\k.tmp') as HTMLInputElement;
   cb.focus();
   fireEvent.keyDown(cb, { key: 'Enter', code: 'Enter', bubbles: true });
@@ -117,7 +117,7 @@ async function runBlockWhileCleaningCase() {
   const cb = screen.getByLabelText('Select C:\\Temp\\a.tmp') as HTMLInputElement;
   if (!cb.checked) await user.click(cb);
   await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
-  await user.click(await screen.findByRole('button', { name: 'Clean Permanently' }));
+  await user.click(await screen.findByRole('button', { name: /Delete .* permanently/ }));
   await waitFor(() => expect(cb).toBeDisabled());
   const before = cb.checked;
   await user.click(row);
@@ -141,7 +141,7 @@ async function runRunScanBlockedWhileCleaningCase() {
   const cb = screen.getByLabelText('Select C:\\Temp\\a.tmp') as HTMLInputElement;
   if (!cb.checked) await user.click(cb);
   await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
-  await user.click(await screen.findByRole('button', { name: 'Clean Permanently' }));
+  await user.click(await screen.findByRole('button', { name: /Delete .* permanently/ }));
   await waitFor(() => expect(cb).toBeDisabled());
   await act(async () => { await scanRef.current?.runScan(); });
   expect(startScan.mock.calls.length).toBe(callsAfterScan);

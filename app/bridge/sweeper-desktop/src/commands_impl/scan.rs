@@ -319,6 +319,7 @@ pub fn preview_clean<C: Clock>(
     item_ids: Vec<String>,
     confirmations: Option<PreviewConfirmationsDto>,
 ) -> Result<PreviewCleanResponse, ContractError> {
+    let item_ids = crate::session::compact_selection::expand_selection_ids(&item_ids);
     let settings = state.settings.lock().map_err(|_| lock_state_error())?;
     let settings_gen = settings.generation();
     let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
