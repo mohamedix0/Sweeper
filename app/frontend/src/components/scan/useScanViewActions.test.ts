@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SweeperClient } from '../../api/client';
 import { MAX_COMPACT_IDS } from './previewPerf';
-import { runScanPreview } from './useScanViewActions';
+import { clearScanSelection, runScanPreview } from './useScanViewActions';
 
 function fakeWorkflow() {
   return {
@@ -16,6 +16,7 @@ function fakeWorkflow() {
     setCleanProgress: vi.fn(),
     setPreviewProgress: vi.fn(),
     setPreview: vi.fn(),
+    setSelectedIds: vi.fn(),
     invalidatePreviewRequest: vi.fn(),
     resetForInvalidSession: vi.fn(),
   };
@@ -24,6 +25,16 @@ function fakeWorkflow() {
 function fakeClient(previewClean: ReturnType<typeof vi.fn>) {
   return { previewClean } as unknown as SweeperClient;
 }
+
+describe('preview invalidation', () => {
+  it('clears preparation progress when a selection change invalidates the Preview', () => {
+    const w = fakeWorkflow();
+    w.setPreviewProgress({ completed: 3, total: 10 });
+    clearScanSelection({ w });
+    expect(w.invalidatePreviewRequest).toHaveBeenCalledTimes(1);
+    expect(w.setPreviewProgress).toHaveBeenLastCalledWith(null);
+  });
+});
 
 describe('runScanPreview preparation safety', () => {
   it('rejects an oversized selection with a clear message instead of sending an undecodable descriptor', async () => {

@@ -13,6 +13,10 @@ export function clearTransient(w: Workflow) {
 
 function invalidatePreview(w: Workflow) {
   w.invalidatePreviewRequest();
+  // The old request's request-ID guard will stop it clearing progress in its
+  // finally block, so clear it here or a cancelled Preview leaves a stale
+  // "Preparing preview…" status behind.
+  w.setPreviewProgress(null);
   clearTransient(w);
 }
 

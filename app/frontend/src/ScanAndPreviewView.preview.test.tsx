@@ -139,11 +139,24 @@ async function selectElevatedItem(user: Awaited<ReturnType<typeof openScan>>) {
  * before passive effects. That captures the very first render where the Clean
  * button exists, before the explanation requests are even started.
  */
-function renderViewWithProbe(input: { client: SweeperClient; record: (disabled: boolean | null) => void }) {
+function renderViewWithProbe(input: {
+  client: SweeperClient;
+  record: (disabled: boolean | null) => void;
+  recordCoverage?: (complete: boolean) => void;
+  expectedWarningCount?: number;
+}) {
   return render(
     <Profiler id="view" onRender={() => {
       const button = screen.queryByRole('button', { name: /Delete .* permanently/ }) as HTMLButtonElement | null;
       input.record(button ? button.disabled : null);
+      // Capture warning coverage on EVERY commit where the destructive CTA is
+      // enabled, not just the final DOM state: the CTA must never enable while
+      // any elevated-Risk item in the selection lacks a warning note.
+      if (button && !button.disabled && input.recordCoverage && input.expectedWarningCount != null) {
+        const group = screen.queryByRole('group', { name: CALLOUT_GROUP });
+        const noteCount = group ? within(group).queryAllByRole('note').length : 0;
+        input.recordCoverage(noteCount === input.expectedWarningCount);
+      }
     }}>
       <ScanAndPreviewView client={input.client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />
     </Profiler>,
@@ -200,7 +213,7 @@ describe('ScanAndPreviewView callout explanation gating', () => {
     });
     await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled());
     const group = screen.getByRole('group', { name: CALLOUT_GROUP });
-    expect(within(group).getByText('Cache entry')).toBeInTheDocument();
+    expect(within(group).getByText('C:\\Cache\\entry.tmp')).toBeInTheDocument();
   });
 
   it('ScanAndPreviewView re-gates Clean on a second Preview with the same selection while its explanation is delayed', async () => {
@@ -349,7 +362,24 @@ describe('ScanAndPreviewView large-selection risk coverage', () => {
       }),
     } as unknown as SweeperClient;
 
-    const user = await openScan({ client });
+    const results = manyCautionResults(sessionId);
+    const expectedIdentities = new Set(results.targets.flatMap((t) => t.items.map((i) => i.path)));
+    const enabledCommits: string[][] = [];
+    const user = userEvent.setup();
+    render(
+      <Profiler id="risk-coverage" onRender={() => {
+        const cta = screen.queryByRole('button', { name: /Delete .* permanently/ }) as HTMLButtonElement | null;
+        if (!cta || cta.disabled) return;
+        const group = screen.queryByRole('group', { name: CALLOUT_GROUP });
+        const notes = group ? within(group).queryAllByRole('note') : [];
+        // An enabled commit with missing warnings is a safety regression.
+        enabledCommits.push(notes.map((note) => (note.getAttribute('aria-label') ?? '').replace(/^Caution risk: /, '')));
+      }}>
+        <ScanAndPreviewView client={client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />
+      </Profiler>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await screen.findByRole('heading', { name: 'Inspector' });
     explainCalls = 0; // discard the scan-time auto-inspect explanation
     for (let t = 0; t < TARGET_COUNT; t += 1) {
       await user.click(screen.getByLabelText(`Select all eligible items in Caution target ${t}`));
@@ -360,5 +390,15 @@ describe('ScanAndPreviewView large-selection risk coverage', () => {
     const group = screen.getByRole('group', { name: CALLOUT_GROUP });
     expect(within(group).getAllByRole('note')).toHaveLength(TARGET_COUNT * ITEMS_PER_TARGET);
     expect(explainCalls).toBeLessThanOrEqual(16);
+
+    // Every commit where Clean was enabled already had complete warning coverage.
+    expect(enabledCommits.length).toBeGreaterThan(0);
+    for (const identities of enabledCommits) {
+      expect(identities).toHaveLength(TARGET_COUNT * ITEMS_PER_TARGET);
+    }
+    const finalIdentities = enabledCommits[enabledCommits.length - 1];
+    expect(new Set(finalIdentities)).toEqual(expectedIdentities);
+    // Target 19 is beyond the 16-task explanation cap: its item still warns.
+    expect(finalIdentities).toContain('C:\\Users\\Alice\\Temp\\19\\item-5');
   }, 20_000);
 });

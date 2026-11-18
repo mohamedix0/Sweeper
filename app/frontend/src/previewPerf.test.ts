@@ -215,7 +215,25 @@ describe('T3 known-risk source merging', () => {
     const callouts = deriveCalloutItemsFromSelection({ selectedIds: new Set(['caution::1']), sources });
     expect(callouts).toHaveLength(1);
     expect(callouts[0].risk).toBe('Caution');
-    expect(callouts[0].identity).toBe('Cache entry');
+    expect(callouts[0].identity).toBe('C:\\Cache\\entry');
+  });
+
+  it('keeps each selected file path as its warning identity within a shared Target', async () => {
+    const { deriveCalloutItemsFromSelection } = await import('./components/PreviewRiskCallouts');
+    const known = [
+      { itemId: 'caution::1', title: 'C:\\Cache\\first.tmp', description: 'known', risk: 'Caution' as const, targetId: 'caution' },
+      { itemId: 'caution::2', title: 'C:\\Cache\\second.tmp', description: 'known', risk: 'Caution' as const, targetId: 'caution' },
+    ];
+    const resolved = [
+      { itemId: 'caution::1', title: 'Shared Target Name', description: 'KB first', risk: 'Caution' as const, targetId: 'caution' },
+      { itemId: 'caution::2', title: 'Shared Target Name', description: 'KB second', risk: 'Caution' as const, targetId: 'caution' },
+    ];
+    const callouts = deriveCalloutItemsFromSelection({
+      selectedIds: new Set(['caution::1', 'caution::2']),
+      sources: mergeRiskSources(known, resolved),
+    });
+    expect(callouts.map((c) => c.identity)).toEqual(['C:\\Cache\\first.tmp', 'C:\\Cache\\second.tmp']);
+    expect(callouts.map((c) => c.explanation)).toEqual(['KB first', 'KB second']);
   });
 });
 

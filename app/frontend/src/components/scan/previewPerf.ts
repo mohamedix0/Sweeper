@@ -331,7 +331,10 @@ export function mergeRiskSources(
     const risk = previous != null && calloutCopyFor(previous.risk) !== null && calloutCopyFor(source.risk) === null
       ? previous.risk
       : source.risk;
-    byId.set(source.itemId, { ...source, risk });
+    // The known path is the per-item identity: an explanation for a shared
+    // Target can repeat the same title for several items, which would make
+    // their warnings indistinguishable. Use it only to enrich the description.
+    byId.set(source.itemId, { ...source, title: previous?.title ?? source.title, risk });
   }
   return [...byId.values()];
 }

@@ -7,7 +7,9 @@ import { installPreviewCalloutMock } from './previewCalloutMock';
  * is performed and the standard Edge channel comes from playwright.config.ts.
  */
 const CALLOUT_GROUP = 'Elevated risk in this selection';
-const CAUTION_IDENTITY = 'Vendor Logs';
+const CAUTION_IDENTITY = 'C:\\Users\\Alice\\AppData\\Local\\npm-cache\\package-cache-tarballs';
+const CAUTION_KB_TITLE = 'Vendor Logs';
+const CUSTOM_PATH_IDENTITY = 'C:\\Users\\Alice\\CustomCleanup\\old.bin';
 const CAUTION_DESCRIPTION = 'Knowledge Base: vendor application log, regenerated on demand.';
 const CAUTION_CONSEQUENCE = 'Removing this item is permanent and it may be slow or costly to restore.';
 const NPM_ITEM_ID = 't-npm-item-1';
@@ -36,7 +38,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await page.goto('/');
     await installPreviewCalloutMock(page, {
       elevatedItemId: NPM_ITEM_ID,
-      elevatedTitle: CAUTION_IDENTITY,
+      elevatedTitle: CAUTION_KB_TITLE,
       elevatedDescription: CAUTION_DESCRIPTION,
       skippedCount: '1',
       skippedReasons: [SKIPPED_REASON],
@@ -100,7 +102,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     // The selection that produced a callout still required the typed phrase.
     const callouts = page.getByRole('group', { name: CALLOUT_GROUP });
     await expect(callouts).toBeVisible();
-    await expect(callouts.getByRole('note', { name: 'Custom Path risk: Custom Path (Unknown)' })).toBeVisible();
+    await expect(callouts.getByRole('note', { name: `Custom Path risk: ${CUSTOM_PATH_IDENTITY}` })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Preview Breakdown' })).toBeVisible();
     await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
   });
@@ -124,7 +126,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await page.goto('/');
     await installPreviewCalloutMock(page, {
       elevatedItemId: NPM_ITEM_ID,
-      elevatedTitle: CAUTION_IDENTITY,
+      elevatedTitle: CAUTION_KB_TITLE,
       elevatedDescription: CAUTION_DESCRIPTION,
     });
 

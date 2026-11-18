@@ -17,6 +17,7 @@ const CTA_BOUND_MS = 15_000;
 
 type Metrics = {
   explainCalls: number;
+  previewCalls: number;
   previewIds: number;
   payloadIdsMatch: boolean;
   maxMainThreadGapMs: number;
@@ -151,6 +152,7 @@ async function readMetrics(page: Page): Promise<Metrics> {
     if (gaps.length === 0) throw new Error('animation-frame sampler recorded no frames');
     return {
       explainCalls: Number(p.explainCalls),
+      previewCalls: Number(p.previewCalls),
       previewIds: Number(p.previewIds),
       payloadIdsMatch: Boolean(p.payloadIdsMatch),
       maxMainThreadGapMs: gaps[gaps.length - 1],
@@ -194,6 +196,7 @@ test.describe('Sweeper Preview responsiveness at large selections (mock sandbox)
     const metrics = await readMetrics(page);
     console.log('T3 preview perf @20k', { ...metrics, elapsedMs });
     expect(metrics.explainCalls, 'explainItem IPC must be bounded').toBeLessThanOrEqual(EXPLAIN_CALL_BOUND);
+    expect(metrics.previewCalls, 'one Review click must send exactly one Preview request').toBe(1);
     expect(metrics.previewIds, 'compact selection must be sent to preview_clean').toBeLessThanOrEqual(PREVIEW_ID_BOUND);
     expect(metrics.payloadIdsMatch, 'compact payload must expand to the exact selection').toBe(true);
     expect(metrics.maxMainThreadGapMs, 'main thread must not block').toBeGreaterThan(0);
