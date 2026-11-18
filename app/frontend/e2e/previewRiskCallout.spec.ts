@@ -65,7 +65,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(skipped).toContainText(SKIPPED_REASON);
 
     // The callout is presentational: the normal Clean control stays available.
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
   });
 
   test('typed confirmation remains mandatory and the callout never enables Clean on its own', async ({ page }) => {
@@ -88,7 +88,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     const typed = page.getByLabel('Typed confirmation');
     await expect(typed).toBeVisible();
     await expect(review).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toHaveCount(0);
     await expect(page.getByRole('group', { name: CALLOUT_GROUP })).toHaveCount(0);
 
     await typed.fill('delete');
@@ -102,7 +102,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(callouts).toBeVisible();
     await expect(callouts.getByRole('note', { name: 'Custom Path risk: Custom Path (Unknown)' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Preview Breakdown' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
   });
 
   test('Safe-only selection renders no callout and the existing Preview flow is unchanged', async ({ page }) => {
@@ -117,7 +117,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(page.getByRole('group', { name: CALLOUT_GROUP })).toHaveCount(0);
     await expect(page.getByRole('note')).toHaveCount(0);
     await expect(page.getByLabel('Typed confirmation')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
   });
 
   test('cancelling a Preview that has callouts returns to the normal state', async ({ page }) => {
@@ -142,7 +142,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(group).toHaveCount(0);
     await expect(page.getByRole('note')).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Preview Breakdown' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Review & Clean' })).toBeVisible();
   });
 });

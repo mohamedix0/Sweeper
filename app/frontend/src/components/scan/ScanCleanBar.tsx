@@ -1,8 +1,13 @@
-﻿import { formatBytes, pluralize } from '../../utils/format';
+﻿import type { PreviewResult } from '../cleanSharedCore';
+import { formatBytes, pluralize } from '../../utils/format';
+import { UnselectAllButton } from '../UnselectAllButton';
 import { deleteActionLabel, localizedCount } from '../cleanActionLabel';
 
 export interface ScanCleanBarProps {
+  /** Original selection totals (pre-Preview summary). */
   selectedIdsCount: number;
+  /** The validated Preview totals; post-Preview actions must use these, never the original selection. */
+  preview?: PreviewResult | null;
   selectedCategoryCount: number;
   selectedBytes: string | bigint;
   cleaning: boolean;
@@ -27,8 +32,8 @@ function ActionButton(props: ScanCleanBarProps) {
     return <button className="btn primary" onClick={props.onPreview} disabled={!props.canPreview} aria-label="Review & Clean">{reviewLabel(props)}</button>;
   }
   const label = deleteActionLabel({
-    count: props.selectedIdsCount,
-    size: formatBytes({ bytes: props.selectedBytes }),
+    count: props.preview ? Number(props.preview.totalSelectedCount) : props.selectedIdsCount,
+    size: formatBytes({ bytes: props.preview ? props.preview.totalSelectedBytes : props.selectedBytes }),
     cleaning: props.cleaning,
     singular: 'file',
     plural: 'files',
@@ -38,7 +43,6 @@ function ActionButton(props: ScanCleanBarProps) {
       className="btn danger primary"
       onClick={props.onClean}
       disabled={!props.canClean}
-      aria-label="Clean Permanently"
       aria-describedby={props.reviewPending ? 'clean-review-pending' : undefined}
     >
       {label}
@@ -54,11 +58,6 @@ function PendingReviewStatus(props: { count: number }) {
   );
 }
 
-function UnselectAllButton(props: ScanCleanBarProps) {
-  if (props.selectedIdsCount <= 0) return null;
-  return <button type="button" className="btn small subtle-btn cleanup-deselect-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
-}
-
 export function ScanCleanBar(props: ScanCleanBarProps) {
   const files = pluralize({ count: props.selectedIdsCount, singular: 'file', plural: 'files' });
   const cats = pluralize({ count: props.selectedCategoryCount, singular: 'category', plural: 'categories' });
@@ -67,7 +66,7 @@ export function ScanCleanBar(props: ScanCleanBarProps) {
     <div className="scan-bottom-bar" aria-label="Cleanup actions">
       <div className="scan-bottom-bar-left">
         <span className="scan-bottom-bar-summary"><strong className="num">{files} selected</strong> ({cats}) · <span className="num">{size}</span> reclaimable</span>
-        <UnselectAllButton {...props} />
+        <UnselectAllButton selected={props.selectedIdsCount} cleaning={props.cleaning} onClear={props.onClear} />
         <span className="scan-bottom-bar-hint muted">Next: Review summary · permanent delete (skips Recycle Bin)</span>
       </div>
       <div className="scan-bottom-bar-right">

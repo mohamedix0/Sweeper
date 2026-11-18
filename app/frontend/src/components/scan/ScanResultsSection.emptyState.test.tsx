@@ -6,6 +6,10 @@ import { SCAN_RESULTS_HINT_TEXT, ScanResultsSection } from './ScanResultsSection
 
 type Props = ComponentProps<typeof ScanResultsSection>;
 
+it('the sparse-results completion hint does not point "below" itself', () => {
+  expect(SCAN_RESULTS_HINT_TEXT).toBe("That's everything found — review your selection");
+});
+
 function item(id: string, targetId: string): ScanItemDto {
   return {
     id,

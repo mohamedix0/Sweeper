@@ -49,7 +49,7 @@ async function runDiscardCase() {
   await user.click(boxes.cb2);
   resolvePreview({ sessionId: 'an-1', previewToken: 'tok-stale-an', issuedAtUnixSecs: '1710000000', expiresAtUnixSecs: '1710000600', totalBytes: '200', totalItems: '2', requiresConfirmation: false, requiresElevation: false, perTarget: [] });
   await waitFor(() => expect(screen.getByRole('button', { name: /Review & Clean/ })).toBeInTheDocument());
-  expect(screen.queryByRole('button', { name: 'Clean Permanently' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Delete .* permanently/ })).not.toBeInTheDocument();
   expect(screen.queryByText('Preview Breakdown')).not.toBeInTheDocument();
 }
 
@@ -87,7 +87,7 @@ async function runClearsLoadingCase() {
   expect(breakdown).toHaveTextContent(/100 B/);
   expect(breakdown).not.toHaveTextContent(/2 items/i);
   expect(breakdown).not.toHaveTextContent(/200 B/);
-  expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
 }
 
 describe('AnalyzerView preview stale handling', () => {

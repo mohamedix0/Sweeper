@@ -1,6 +1,6 @@
 import { formatContractError, type SweeperClient } from '../../api/client';
 import type { ContractError, ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
-import { preparePreviewSelection } from './previewPerf';
+import { MAX_COMPACT_IDS, preparePreviewSelection } from './previewPerf';
 import { isSelectableScanItem } from './scanHelpers';
 
 type Workflow = any;
@@ -123,6 +123,13 @@ function finishPreviewLoading(w: Workflow, requestId: number) {
 
 export async function runScanPreview(args: { w: Workflow; client: SweeperClient; sel: Set<string>; requiresConfirmation: boolean; sessionId: string; confirmText: string }) {
   const { w } = args;
+  // The Rust decoder refuses descriptors above MAX_COMPACT_IDS; sending one
+  // would surface as an unknown item and a fail-closed Preview. Reject early
+  // with an actionable message instead of a silent failure.
+  if (args.sel.size > MAX_COMPACT_IDS) {
+    w.setError(`This selection has ${args.sel.size.toLocaleString('en-US')} items; Sweeper can Preview at most ${MAX_COMPACT_IDS.toLocaleString('en-US')} items at once. Deselect some items and try again.`);
+    return;
+  }
   if (w.isSessionExpired) {
     w.setError('Scan session expired or was invalidated. Start a new Scan.');
     w.resetForInvalidSession('Scan session expired or was invalidated. Start a new Scan.');
@@ -142,6 +149,10 @@ export async function runScanPreview(args: { w: Workflow; client: SweeperClient;
       finishPreviewLoading(w, req.id);
       return;
     }
+    // Encoding is done: stop showing determinate preparation progress before
+    // the (possibly slow) Preview IPC, rather than leaving a stale "Preparing
+    // preview… N / N" message while the backend builds the Preview.
+    if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress(null);
     res = await args.client.previewClean(sid, itemIds, confirmations);
   } catch (error) {
     handlePreviewCatch({ w, error, req: { id: req.id, rev: req.rev, sid } });

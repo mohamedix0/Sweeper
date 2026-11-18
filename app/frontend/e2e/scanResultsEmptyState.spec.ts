@@ -52,6 +52,8 @@ test.describe('Scan results empty-state (mock sandbox, light theme, tall viewpor
     expect(box!.y).toBeGreaterThanOrEqual(0);
     expect(box!.y + box!.height).toBeLessThanOrEqual(1200);
     await page.waitForTimeout(200);
-    await expect(hint).toBeVisible();
+    // Full intersection, not just CSS visibility: the hint must not be clipped
+    // below the results pane's scrollport.
+    await expect(hint).toBeInViewport({ ratio: 1 });
   });
 });

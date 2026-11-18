@@ -86,7 +86,7 @@ describe('ScanAndPreviewView post-Preview delete discoverability', () => {
 
     await waitFor(() => expect(screen.getByText(/Preparing safety review…/)).toBeVisible());
     expect(screen.getByText(/Preparing safety review…/)).toHaveTextContent('1 item');
-    const cta = screen.getByRole('button', { name: 'Clean Permanently' });
+    const cta = screen.getByRole('button', { name: /Delete .* permanently/ });
     expect(cta).toBeDisabled();
     expect(cta).toHaveTextContent('Delete 1 file permanently · 100 B');
 

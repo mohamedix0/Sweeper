@@ -1,4 +1,5 @@
 ﻿import { formatBytes, pluralize } from '../../utils/format';
+import { UnselectAllButton } from '../UnselectAllButton';
 import { deleteActionLabel } from '../cleanActionLabel';
 
 interface AnalyzerCleanPanelProps {
@@ -48,11 +49,6 @@ function reviewClassName(args: { selected: boolean }): string {
   return 'btn';
 }
 
-function UnselectAllButton(props: { selected: number; cleaning: boolean; onClear: () => void }) {
-  if (props.selected <= 0) return null;
-  return <button type="button" className="btn small subtle-btn cleanup-deselect-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
-}
-
 function RiskyHint(props: { risky: boolean }) {
   if (!props.risky) return null;
   return <span className="scan-bottom-bar-hint muted">Includes Caution/Unknown items · requires DELETE confirm</span>;
@@ -60,7 +56,7 @@ function RiskyHint(props: { risky: boolean }) {
 
 function ActionButton(props: AnalyzerCleanPanelProps) {
   if (props.hasPreview) {
-    return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean} aria-label="Clean Permanently">{cleanLabel({ cleaning: props.cleaning, count: props.selectedCount, size: formatBytes({ bytes: props.selectedBytes }) })}</button>;
+    return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean}>{cleanLabel({ cleaning: props.cleaning, count: props.selectedCount, size: formatBytes({ bytes: props.selectedBytes }) })}</button>;
   }
   const cls = reviewClassName({ selected: props.selectedCount > 0 });
   return <button className={cls} onClick={props.onPreview} disabled={!props.canPreview} aria-label="Review & Clean">{reviewLabel(props)}</button>;

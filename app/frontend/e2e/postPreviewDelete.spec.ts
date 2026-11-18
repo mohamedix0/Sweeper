@@ -51,7 +51,7 @@ test.describe('Sweeper post-Preview delete action (mock sandbox)', () => {
     const expected = await expectedDeleteLabel(page);
     await page.getByRole('button', { name: 'Review & Clean' }).click();
 
-    const cta = page.getByRole('button', { name: 'Clean Permanently' });
+    const cta = page.getByRole('button', { name: /Delete .* permanently/ });
     await expect(cta).toBeVisible();
     await expect(cta).toBeEnabled();
     await expect(cta).toContainText(expected);
@@ -72,7 +72,7 @@ test.describe('Sweeper post-Preview delete action (mock sandbox)', () => {
     const pending = page.getByText(/Preparing safety review…/);
     await expect(pending).toBeVisible();
     await expect(pending).toContainText('items');
-    const cta = page.getByRole('button', { name: 'Clean Permanently' });
+    const cta = page.getByRole('button', { name: /Delete .* permanently/ });
     await expect(cta).toBeDisabled();
 
     await page.evaluate(() => {

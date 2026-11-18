@@ -7,7 +7,7 @@ import { ScanTargetCard } from './ScanTargetCard';
 import { isSelectableScanItem } from './scanHelpers';
 
 /** Contextual end-of-results hint shown when a Scan returns only a few Targets (spec #58 R2). */
-export const SCAN_RESULTS_HINT_TEXT = "That's everything found — review your selection below";
+export const SCAN_RESULTS_HINT_TEXT = "That's everything found — review your selection";
 
 /** A result set with no more than this many visible Targets is considered sparse. */
 const SPARSE_RESULT_LIMIT = 8;

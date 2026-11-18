@@ -92,7 +92,7 @@ describe('Sweeper frontend', () => {
     await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
     await screen.findByText('Preview Breakdown');
 
-    const cleanBtn = await screen.findByRole('button', { name: 'Clean Permanently' });
+    const cleanBtn = await screen.findByRole('button', { name: /Delete .* permanently/ });
     expect(cleanBtn).toBeEnabled();
     await user.click(cleanBtn);
 

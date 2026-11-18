@@ -9,7 +9,16 @@ import { ScanResultsSection, ScanScanningLayout } from './scan/ScanResultsSectio
 import { ScanViewControls } from './scan/ScanViewControls';
 import { ScanViewHeader } from './scan/ScanViewHeader';
 import { ScanNotices, ScanOnboarding, ScanProgressNotice, ScanTerminalStatus } from './scan/ScanViewStatus';
-import { EXPLANATION_CONCURRENCY, mapWithConcurrency, planExplanationTasks } from './scan/previewPerf';
+import type { ExplanationTask } from './scan/previewPerf';
+import {
+  buildKnownRiskSources,
+  EXPLANATION_CONCURRENCY,
+  EXPLANATION_UNAVAILABLE,
+  mapWithConcurrency,
+  mergeRiskSources,
+  planExplanationTasks,
+  riskCoverageComplete,
+} from './scan/previewPerf';
 import { isSelectableScanItem } from './scan/scanHelpers';
 import { useScanDerived } from './scan/useScanDerived';
 import { clearScanSelection, runScanClean, runScanPreview, selectAllSafeIds, setTargetSelection, toggleScanItem, toggleSelectAllEligibleSafe } from './scan/useScanViewActions';
@@ -131,7 +140,7 @@ function ResultsBlocks(props: { client: SweeperClient; w: ReturnType<typeof useS
   return (
     <>
       <ScanResultsSection targets={d.targets} visibleTargets={w.visibleTargets} allow={d.allow} minAgeHours={w.effectiveMinAgeHours} selectedIds={d.sel} selectionSources={props.selectionSources} collapsedTargets={w.collapsedTargets} showAllGroups={w.showAllGroups} focus={w.focus} focusedGroup={props.focusedGroup} inspected={w.inspected} inspectedCtx={props.inspectedCtx} cleaning={w.cleaning} scanning={w.scanning} eligibleSafeIdsLength={d.eligibleSafeIds.length} allEligibleSelected={d.allEligibleSelected} masterIndeterminate={masterIndeterminate} requiresConfirmation={d.requiresConfirmation} confirmText={w.confirmText} preview={w.preview} cleanProgressLabel={props.cleanProgress} cleanSummary={w.cleanSummary} onToggleSelectAll={() => toggleSelectAllEligibleSafe({ w, allEligibleSelected: d.allEligibleSelected, eligibleSafeIds: d.eligibleSafeIds })} onFocusGroup={(targetId) => w.setFocus({ kind: 'group', targetId })} onToggleCollapsed={props.onToggleCollapsed} onToggleGroupSelect={props.onToggleGroupSelect} onToggleItem={(item, target) => toggleScanItem({ w, item, target, allow: d.allow })} onToggleShowAll={props.onToggleShowAll} onConfirmText={w.setConfirmText} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
-      <ScanCleanBar selectedIdsCount={d.sel.size} selectedCategoryCount={d.selectedCategoryCount} selectedBytes={d.selectedBytes} cleaning={w.cleaning} previewLoading={w.previewLoading} hasPreview={!!w.preview} canPreview={props.canPreview} canClean={props.canClean} reviewPending={props.reviewPending} onClear={() => clearScanSelection({ w })} onPreview={() => void runScanPreview({ w, client: props.client, sel: d.sel, requiresConfirmation: d.requiresConfirmation, sessionId: w.sessionId!, confirmText: w.confirmText })} onClean={() => void runScanClean({ w, client: props.client })} />
+      <ScanCleanBar selectedIdsCount={d.sel.size} selectedCategoryCount={d.selectedCategoryCount} selectedBytes={d.selectedBytes} preview={w.preview} cleaning={w.cleaning} previewLoading={w.previewLoading} hasPreview={!!w.preview} canPreview={props.canPreview} canClean={props.canClean} reviewPending={props.reviewPending} onClear={() => clearScanSelection({ w })} onPreview={() => void runScanPreview({ w, client: props.client, sel: d.sel, requiresConfirmation: d.requiresConfirmation, sessionId: w.sessionId!, confirmText: w.confirmText })} onClean={() => void runScanClean({ w, client: props.client })} />
     </>
   );
 }
@@ -156,7 +165,6 @@ type ResolvedSelection = {
   failedCount: number;
 };
 
-const EXPLANATION_UNAVAILABLE = 'Explanation unavailable for this item — showing its known identity and risk only.';
 const EMPTY_SELECTION_SOURCES: SelectionSourcesState = { sources: [], pending: false, failedCount: 0 };
 const PENDING_SELECTION_SOURCES: SelectionSourcesState = { sources: [], pending: true, failedCount: 0 };
 
@@ -226,7 +234,9 @@ async function resolveItemExplanation(args: { client: SweeperClient; itemContext
  * Resolve a bounded summary of explanations; a stale generation is ignored on
  * arrival. Small selections keep one IPC per item (preserving per-item failure
  * notices); large selections resolve one representative per Target, memoised
- * by Target for this Preview generation, with capped concurrency.
+ * by Target for this Preview generation, with capped concurrency. A stale
+ * generation stops the pool from starting further IPC calls (in-flight calls
+ * are left to settle but their results are discarded).
  */
 function resolveExplanations(args: {
   client: SweeperClient;
@@ -240,13 +250,17 @@ function resolveExplanations(args: {
   const itemContext = buildItemContext({ targets: args.allTargets });
   const tasks = planExplanationTasks({ selected: args.selection, targetIdFor: (id) => itemContext.get(id)?.target.targetId });
   const memo = new Map<string, Promise<ResolvedExplanation>>();
+  const skipTask = (task: ExplanationTask): ResolvedExplanation => ({
+    source: fallbackSource({ itemId: task.itemId, ctx: itemContext.get(task.itemId) }),
+    failed: false,
+  });
   const run = mapWithConcurrency(tasks, EXPLANATION_CONCURRENCY, (task) => {
     const cached = memo.get(task.memoKey);
     if (cached) return cached;
     const pending = resolveItemExplanation({ client: args.client, itemContext, itemId: task.itemId });
     memo.set(task.memoKey, pending);
     return pending;
-  });
+  }, { shouldStop: () => !args.isCurrent(), onSkip: skipTask });
   void run.then((results) => {
     if (!args.isCurrent()) return;
     args.setResolved({
@@ -273,6 +287,15 @@ function useSelectionSources(args: {
   const [resolved, setResolved] = useState<ResolvedSelection | null>(null);
   const needs = preview != null && selection.size > 0;
 
+  // Every selected item's known Risk comes from the Scan result, not from an
+  // IPC call and not from the bounded explanation summary. This covers targets
+  // past EXPLANATION_SUMMARY_LIMIT (including Caution/Custom Path) so Clean can
+  // never enable while an elevated-Risk item has no warning.
+  const knownSources = useMemo(
+    () => (needs ? buildKnownRiskSources({ selection, itemContext: buildItemContext({ targets: allTargets }) }) : []),
+    [needs, selection, allTargets],
+  );
+
   useEffect(() => {
     let cancelled = false;
     if (preview != null && needs) {
@@ -282,8 +305,11 @@ function useSelectionSources(args: {
   }, [client, selection, allTargets, preview, needs]);
 
   if (!needs) return EMPTY_SELECTION_SOURCES;
-  if (derivationPending({ needs, selection, preview, resolved })) return PENDING_SELECTION_SOURCES;
-  return { sources: resolved!.sources, pending: false, failedCount: resolved!.failedCount };
+  const unresolved = derivationPending({ needs, selection, preview, resolved });
+  const uncovered = !riskCoverageComplete({ selection, sources: knownSources });
+  if (unresolved || uncovered) return PENDING_SELECTION_SOURCES;
+  const sources = mergeRiskSources(knownSources, resolved!.sources);
+  return { sources, pending: false, failedCount: resolved!.failedCount };
 }
 
 function explanationWarning(args: { failedCount: number }): string | null {

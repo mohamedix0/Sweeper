@@ -1,5 +1,10 @@
-import type { TargetScanResultDto } from '../../contract/bindings';
+import type { ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
+import type { PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
+import { calloutCopyFor } from '../previewRiskCalloutStrings';
 import { isCustomPathTargetId } from './scanHelpers';
+
+/** Shared fallback copy when the Knowledge Base explanation cannot be shown. */
+export const EXPLANATION_UNAVAILABLE = 'Explanation unavailable for this item — showing its known identity and risk only.';
 
 /** Selections at or below this size remain explicit; only large ones are compacted. */
 export const COMPACT_SELECTION_THRESHOLD = 128;
@@ -29,15 +34,20 @@ export function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, 0); });
 }
 
-/** Scan item IDs are `<target>::<sequence>`; anything else is carried verbatim. */
-function idParts(id: string): { prefix: string; seq: number } | null {
+/**
+ * Scan item IDs are `<target>::<sequence>`; anything else is carried verbatim.
+ * A noncanonical suffix (for example `007`) is not range-compressible: expanding
+ * a range would turn it into `7`, changing the ID the backend must resolve.
+ * Such IDs are carried in the descriptor's `explicit` list instead.
+ */
+function idParts(id: string): { prefix: string; seq: number; canonical: boolean } | null {
   const at = id.lastIndexOf('::');
   if (at <= 0) return null;
   const raw = id.slice(at + 2);
   if (!/^\d+$/.test(raw)) return null;
   const seq = Number(raw);
   if (!Number.isSafeInteger(seq) || seq <= 0) return null;
-  return { prefix: id.slice(0, at), seq };
+  return { prefix: id.slice(0, at), seq, canonical: String(seq) === raw };
 }
 
 function newGroups(): SequenceGroups {
@@ -47,7 +57,7 @@ function newGroups(): SequenceGroups {
 function collectInto(into: SequenceGroups, ids: Iterable<string>): void {
   for (const id of ids) {
     const parts = idParts(id);
-    if (!parts) {
+    if (!parts || !parts.canonical) {
       into.explicit.push(id);
       continue;
     }
@@ -128,8 +138,11 @@ function decodeSelectionDescriptor(ids: string[]): Descriptor | null {
 /** Validated bounds for one range; null when the range is corrupt or unsafe. */
 function rangeBounds(range: Range): { start: number; end: number } | null {
   if (typeof range.prefix !== 'string') return null;
-  const start = Number(range.start);
-  const end = Number(range.end);
+  // The descriptor is parsed from JSON at runtime: quoted numbers and booleans
+  // would be coerced by Number(...), so require the original values to be numbers.
+  if (typeof range.start !== 'number' || typeof range.end !== 'number') return null;
+  const start = range.start;
+  const end = range.end;
   if (!Number.isSafeInteger(start)) return null;
   if (!Number.isSafeInteger(end)) return null;
   if (start < 1) return null;
@@ -212,11 +225,22 @@ export async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
   worker: (item: T) => Promise<R>,
+  options?: { shouldStop?: () => boolean; onSkip?: (item: T) => R },
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  const skipRemaining = () => {
+    while (next < items.length) {
+      if (options?.onSkip) results[next] = options.onSkip(items[next]);
+      next += 1;
+    }
+  };
   const run = async () => {
     while (next < items.length) {
+      if (options?.shouldStop?.()) {
+        skipRemaining();
+        break;
+      }
       const at = next;
       next += 1;
       results[at] = await worker(items[at]);
@@ -261,4 +285,57 @@ export function selectionNeedsConfirmationFromIndex(args: { index: SelectionInde
     if (args.index.get(id)?.requiresConfirmation) return true;
   }
   return false;
+}
+
+export type ItemRiskContext = { target: TargetScanResultDto; item: ScanItemDto };
+
+/**
+ * Every selected item gets a known-risk source straight from the Scan result —
+ * no IPC and no target cap. This is what guarantees one warning per elevated-
+ * Risk selected item (including Caution/Custom Path targets beyond the bounded
+ * explanation summary) and lets Clean be gated on complete coverage.
+ */
+export function buildKnownRiskSources(args: {
+  selection: ReadonlySet<string>;
+  itemContext: ReadonlyMap<string, ItemRiskContext>;
+}): PreviewRiskCalloutSource[] {
+  const sources: PreviewRiskCalloutSource[] = [];
+  for (const itemId of args.selection) {
+    const ctx = args.itemContext.get(itemId);
+    sources.push({
+      itemId,
+      title: ctx?.item.path ?? itemId,
+      description: EXPLANATION_UNAVAILABLE,
+      risk: ctx?.target.risk ?? 'Unknown',
+      targetId: ctx?.target.targetId ?? null,
+    });
+  }
+  return sources;
+}
+
+/** Knowledge Base explanations replace the known-risk source for the same item. */
+export function mergeRiskSources(
+  known: readonly PreviewRiskCalloutSource[],
+  resolved: readonly PreviewRiskCalloutSource[],
+): PreviewRiskCalloutSource[] {
+  const byId = new Map(known.map((source) => [source.itemId, source]));
+  for (const source of resolved) {
+    const previous = byId.get(source.itemId);
+    // An explanation must never hide a warning: keep the known elevated Risk
+    // if the Knowledge Base result reports no callout-worthy Risk for it.
+    const risk = previous != null && calloutCopyFor(previous.risk) !== null && calloutCopyFor(source.risk) === null
+      ? previous.risk
+      : source.risk;
+    byId.set(source.itemId, { ...source, risk });
+  }
+  return [...byId.values()];
+}
+
+export function riskCoverageComplete(args: {
+  selection: ReadonlySet<string>;
+  sources: readonly PreviewRiskCalloutSource[];
+}): boolean {
+  const covered = new Set(args.sources.map((source) => source.itemId));
+  for (const id of args.selection) if (!covered.has(id)) return false;
+  return true;
 }
