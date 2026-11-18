@@ -371,6 +371,15 @@ fn browser_and_app_knowledge_entries() -> Vec<KnowledgeEntry> {
             notes: "Safe. Windows Explorer regenerates thumbnail cache data as needed.".to_string(),
         },
         KnowledgeEntry {
+            id: "kb-explorer-icon-web-cache-leaves".to_string(),
+            title: "Explorer Icon and Thumbnail Cache Databases (out of scope)".to_string(),
+            description: "Per-file Explorer cache databases (iconcache_*.db and thumbcache_*.db) stored directly inside the Explorer folder alongside non-cache data.".to_string(),
+            risk: Risk::Unknown,
+            known_folder: Some(KnownFolder::LocalAppData),
+            relative_pattern: r"Microsoft\Windows\Explorer\iconcache_*.db; Microsoft\Windows\Explorer\thumbcache_*.db".to_string(),
+            notes: "Out of scope for Sweeper v1. No safe leaf-scoped cleanup exists: these are individual database files interleaved with non-cache Explorer data, and the allowlist can only express whole-directory contents scope (no per-file patterns). Explorer holds the databases open while it is running, so safe removal would require stopping Explorer or a tool-driven API, which is outside the explicit user-action model. The only cleanable Explorer cache is the ThumbCacheToDelete staging folder, which Windows itself stages for deletion.".to_string(),
+        },
+        KnowledgeEntry {
             id: "kb-browser-extra-caches".to_string(),
             title: "Additional Browser Caches (Firefox, Brave)".to_string(),
             description: "Regenerable browser cache locations for Firefox profiles (cache2, startupCache) and Brave Chromium cache leaf folders.".to_string(),
@@ -378,6 +387,18 @@ fn browser_and_app_knowledge_entries() -> Vec<KnowledgeEntry> {
             known_folder: Some(KnownFolder::LocalAppData),
             relative_pattern: r"Mozilla\Firefox\Profiles\*\cache2; BraveSoftware\Brave-Browser\User Data\...\Cache".to_string(),
             notes: "Safe. Only explicit cache leaf folders/profile cache locations are targeted; browser profile data, cookies, history, and settings are not targeted.".to_string(),
+        },
+        KnowledgeEntry {
+            id: "kb-vivaldi-opera-browser-caches".to_string(),
+            title: "Vivaldi and Opera Browser Caches".to_string(),
+            description: "Regenerable cache locations for the Vivaldi and Opera browsers: HTTP Cache, Code Cache, and GPUCache leaves under Vivaldi User Data profiles and Opera channel profiles.".to_string(),
+            risk: Risk::Safe,
+            // Anchors the HTTP-cache leaves listed in `relative_pattern` (all LocalAppData).
+            // Opera's Code Cache and GPUCache leaves are separate targets anchored to
+            // RoamingAppData (the Roaming Opera profile tree).
+            known_folder: Some(KnownFolder::LocalAppData),
+            relative_pattern: r"Vivaldi\User Data\Default\Cache; Vivaldi\User Data\Profile *\Cache; Opera Software\Opera *\Cache; Opera Software\Opera *\Default\Cache".to_string(),
+            notes: "Safe. Only explicit cache leaf folders are targeted; browser profile data (history, cookies, bookmarks, settings) is not targeted. Opera HTTP Cache lives under LocalAppData; Opera Code Cache and GPUCache live under the RoamingAppData Opera Default profile tree (Opera One 104+ / Opera GX 119+).".to_string(),
         },
         KnowledgeEntry {
             id: "kb-app-runtime-caches".to_string(),
@@ -495,11 +516,11 @@ fn developer_and_elevation_knowledge_entries() -> Vec<KnowledgeEntry> {
         KnowledgeEntry {
             id: "kb-uv-cache".to_string(),
             title: "uv Cache".to_string(),
-            description: "uv package/cache directory. Informative Analyzer entry only.".to_string(),
+            description: "uv package download cache directory under LocalAppData.".to_string(),
             risk: Risk::Caution,
             known_folder: Some(KnownFolder::LocalAppData),
             relative_pattern: r"uv\cache".to_string(),
-            notes: "Analyzer only. Do not use partial file-age deletion because it can corrupt uv's internal hardlink/archive index; prune via `uv cache clean` or remove the entire cache.".to_string(),
+            notes: "Not cleanable (Analyzer only). A safe mechanism is required before this may be allowlisted: whole-cache removal of the entire explicitly scoped `uv\\cache` directory, or the tool-driven `uv cache clean` command. Per-file age-based deletion is prohibited because it can corrupt uv's hardlink/archive index and leave a partially cleared cache when files are still in use by a running uv process.".to_string(),
         },
         KnowledgeEntry {
             id: "kb-maven-repository-cache".to_string(),
@@ -508,7 +529,7 @@ fn developer_and_elevation_knowledge_entries() -> Vec<KnowledgeEntry> {
             risk: Risk::Caution,
             known_folder: Some(KnownFolder::UserProfile),
             relative_pattern: r".m2\repository".to_string(),
-            notes: "Analyzer only; excluded from automatic Allowlist cleanup because it may contain locally installed (`mvn install`) artifacts alongside downloaded dependencies that cannot be re-downloaded.".to_string(),
+            notes: "Not cleanable (Analyzer only). A safe mechanism is required before this may be allowlisted: tool-driven clean that excludes locally installed (`mvn install`) artifacts, or whole-cache removal of an explicitly scoped cache-only directory. `.m2\\repository` mixes downloaded dependencies with locally installed artifacts that cannot be re-downloaded; per-file or whole-directory deletion would irreversibly delete them.".to_string(),
         },
     ]
 }

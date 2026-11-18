@@ -507,6 +507,128 @@ min_age_hours = 24
 requires_elevation = false
 description = "Brave browser GPU cache for additional profiles (Profile *)."
 
+# --- Vivaldi & Opera browser cache leaves (Chromium-family Tier 2 parity) ---
+
+[[targets]]
+id = "vivaldi-cache-default"
+name = "Vivaldi Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Vivaldi\\User Data\\Default\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Vivaldi browser HTTP cache for the Default profile. Only the explicit Cache leaf folder is targeted; profile data is not targeted."
+
+[[targets]]
+id = "vivaldi-code-cache-default"
+name = "Vivaldi Code Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Vivaldi\\User Data\\Default\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Vivaldi browser compiled/script code cache for the Default profile. Regenerated automatically."
+
+[[targets]]
+id = "vivaldi-gpu-cache-default"
+name = "Vivaldi GPU Cache (Default)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Vivaldi\\User Data\\Default\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Vivaldi browser GPU cache for the Default profile. Regenerated automatically."
+
+[[targets]]
+id = "vivaldi-cache-profiles"
+name = "Vivaldi Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Vivaldi\\User Data\\Profile *\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Vivaldi browser HTTP cache for additional profiles (Profile *). Only explicit cache leaf folders are targeted."
+
+[[targets]]
+id = "vivaldi-code-cache-profiles"
+name = "Vivaldi Code Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Vivaldi\\User Data\\Profile *\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Vivaldi browser compiled/script code cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "vivaldi-gpu-cache-profiles"
+name = "Vivaldi GPU Cache (Profile *)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Vivaldi\\User Data\\Profile *\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Vivaldi browser GPU cache for additional profiles (Profile *)."
+
+[[targets]]
+id = "opera-cache"
+name = "Opera Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Opera Software\\Opera *\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Opera browser HTTP cache across Opera channel profiles (Opera *), legacy layout. Only the explicit Cache leaf folder is targeted; profile data is not targeted."
+
+[[targets]]
+id = "opera-default-cache"
+name = "Opera Cache (Default profile)"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "LocalAppData"
+relative_subpath = "Opera Software\\Opera *\\Default\\Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Opera browser HTTP cache for the Default profile layout (Opera One 104+ / Opera GX 119+). Only the explicit Cache leaf folder is targeted; profile data is not targeted."
+
+[[targets]]
+id = "opera-code-cache"
+name = "Opera Code Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Opera Software\\Opera *\\Default\\Code Cache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Opera browser compiled/script code cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera Default profile tree (Opera One 104+ / Opera GX 119+). Regenerated automatically."
+
+[[targets]]
+id = "opera-gpu-cache"
+name = "Opera GPU Cache"
+tier = "Tier2"
+risk = "Safe"
+known_folder = "RoamingAppData"
+relative_subpath = "Opera Software\\Opera *\\Default\\GPUCache"
+scope = "contents"
+min_age_hours = 24
+requires_elevation = false
+description = "Opera browser GPU cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera Default profile tree (Opera One 104+ / Opera GX 119+). Regenerated automatically."
+
 [[targets]]
 id = "discord-cache"
 name = "Discord Cache"
