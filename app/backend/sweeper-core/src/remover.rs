@@ -376,88 +376,36 @@ where
     F: FnMut(CleanProgress),
 {
     let _panic_guard = AbortOnPanicGuard;
-    let base_dir = opts
-        .journal_base_dir
-        .clone()
-        .unwrap_or_else(journal::default_logs_base_dir);
-    let mut journal = JournalWriter::open_in(&base_dir)?;
-
+    let mut journal = open_clean_journal(&opts)?;
     let total_items = items.len() as u64;
-    let mut report = CleanReport {
-        items: Vec::with_capacity(items.len()),
-        bytes_freed: 0,
-        skipped_count: 0,
-        aborted: false,
-        abort_reason: None,
-        journal_errors: Vec::new(),
-    };
+    let mut report = new_clean_report(items.len());
     let mut deleted_total: u64 = 0;
     let mut completed: u64 = 0;
 
     for item in items {
         if report.aborted {
-            let reason = report
-                .abort_reason
-                .clone()
-                .unwrap_or_else(|| "aborted".to_string());
-            record_skip(&mut journal, &mut report, &item, &reason)?;
-            completed = completed.saturating_add(1);
-            on_progress(CleanProgress {
-                target_id: item.target_id.clone(),
-                completed_items: completed,
+            record_post_abort_skip(
+                &mut journal,
+                &mut report,
+                &item,
+                &mut completed,
                 total_items,
-                bytes_freed_so_far: report.bytes_freed,
-                status: "Skipped".to_string(),
-            });
+                &mut on_progress,
+            )?;
             continue;
         }
 
         let outcome = process_item(&item, &opts, &mut journal, &mut deleted_total, &report)?;
-        let status = match &outcome {
-            ProcessOutcome::Deleted(bytes) => {
-                report.items.push(ItemCleanResult {
-                    id: item.id.clone(),
-                    path: item.path.clone(),
-                    status: "deleted".to_string(),
-                    reason: String::new(),
-                    bytes_deleted: *bytes,
-                });
-                report.bytes_freed = report.bytes_freed.saturating_add(*bytes);
-                "deleted".to_string()
-            }
-            ProcessOutcome::Skipped(reason) => {
-                report.items.push(ItemCleanResult {
-                    id: item.id.clone(),
-                    path: item.path.clone(),
-                    status: "Skipped".to_string(),
-                    reason: reason.clone(),
-                    bytes_deleted: 0,
-                });
-                report.skipped_count += 1;
-                "Skipped".to_string()
-            }
-            ProcessOutcome::Aborted(reason) => {
-                report.aborted = true;
-                report.abort_reason = Some(reason.clone());
-                report.items.push(ItemCleanResult {
-                    id: item.id.clone(),
-                    path: item.path.clone(),
-                    status: "Skipped".to_string(),
-                    reason: reason.clone(),
-                    bytes_deleted: 0,
-                });
-                report.skipped_count += 1;
-                "aborted".to_string()
-            }
-        };
+        let status = apply_process_outcome(&item, outcome, &mut report);
         completed = completed.saturating_add(1);
-        on_progress(CleanProgress {
-            target_id: item.target_id.clone(),
-            completed_items: completed,
+        emit_item_progress(
+            &mut on_progress,
+            &item,
+            completed,
             total_items,
-            bytes_freed_so_far: report.bytes_freed,
+            report.bytes_freed,
             status,
-        });
+        );
     }
 
     // Post-delete journal failures are recorded on the report rather than
@@ -465,6 +413,122 @@ where
     report.journal_errors = journal.take_deferred_errors();
 
     Ok(report)
+}
+
+/// Open the write-ahead journal used by a Clean run.
+fn open_clean_journal(opts: &CleanOptions) -> Result<JournalWriter, CleanError> {
+    let base_dir = opts
+        .journal_base_dir
+        .clone()
+        .unwrap_or_else(journal::default_logs_base_dir);
+    Ok(JournalWriter::open_in(&base_dir)?)
+}
+
+/// Build a fresh, empty report for a Clean run of `item_count` items.
+fn new_clean_report(item_count: usize) -> CleanReport {
+    CleanReport {
+        items: Vec::with_capacity(item_count),
+        bytes_freed: 0,
+        skipped_count: 0,
+        aborted: false,
+        abort_reason: None,
+        journal_errors: Vec::new(),
+    }
+}
+
+/// Record the skip of an item not processed because the batch already aborted,
+/// then emit its progress update.
+fn record_post_abort_skip<F>(
+    journal: &mut JournalWriter,
+    report: &mut CleanReport,
+    item: &ValidatedItem,
+    completed: &mut u64,
+    total_items: u64,
+    on_progress: &mut F,
+) -> Result<(), CleanError>
+where
+    F: FnMut(CleanProgress),
+{
+    let reason = report
+        .abort_reason
+        .clone()
+        .unwrap_or_else(|| "aborted".to_string());
+    record_skip(journal, report, item, &reason)?;
+    *completed = completed.saturating_add(1);
+    on_progress(CleanProgress {
+        target_id: item.target_id.clone(),
+        completed_items: *completed,
+        total_items,
+        bytes_freed_so_far: report.bytes_freed,
+        status: "Skipped".to_string(),
+    });
+    Ok(())
+}
+
+/// Apply a per-item processing outcome to the report and return the status
+/// label used in its progress update.
+fn apply_process_outcome(
+    item: &ValidatedItem,
+    outcome: ProcessOutcome,
+    report: &mut CleanReport,
+) -> String {
+    match outcome {
+        ProcessOutcome::Deleted(bytes) => {
+            report.items.push(ItemCleanResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                status: "deleted".to_string(),
+                reason: String::new(),
+                bytes_deleted: bytes,
+            });
+            report.bytes_freed = report.bytes_freed.saturating_add(bytes);
+            "deleted".to_string()
+        }
+        ProcessOutcome::Skipped(reason) => {
+            report.items.push(ItemCleanResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                status: "Skipped".to_string(),
+                reason: reason.clone(),
+                bytes_deleted: 0,
+            });
+            report.skipped_count += 1;
+            "Skipped".to_string()
+        }
+        ProcessOutcome::Aborted(reason) => {
+            report.aborted = true;
+            report.abort_reason = Some(reason.clone());
+            report.items.push(ItemCleanResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                status: "Skipped".to_string(),
+                reason: reason.clone(),
+                bytes_deleted: 0,
+            });
+            report.skipped_count += 1;
+            "aborted".to_string()
+        }
+    }
+}
+
+/// Emit a progress update for a single processed item.
+fn emit_item_progress<F>(
+    on_progress: &mut F,
+    item: &ValidatedItem,
+    completed: u64,
+    total_items: u64,
+    bytes_freed: u64,
+    status: String,
+) where
+    F: FnMut(CleanProgress),
+{
+    on_progress(CleanProgress {
+        target_id: item.target_id.clone(),
+        completed_items: completed,
+        total_items,
+        bytes_freed_so_far: bytes_freed,
+        status,
+    });
 }
 
 enum ProcessOutcome {
