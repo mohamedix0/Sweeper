@@ -7,7 +7,7 @@
     it prints OK / MISSING with an exact remediation command for each dependency.
     With -Install it attempts non-interactive installs for the safe, well-known cases
     (corepack/pnpm, rustup components, cargo tauri-cli). Tools that require a human
-    (GitHub auth, Tauri/WebView2/NSIS system prerequisites, Edge install) are reported
+    (GitHub auth, Tauri/NSIS system prerequisites, Edge install) are reported
     with instructions and are never silently assumed to be present.
 
     Never writes secrets, never modifies repository files, never runs the coderabbit CLI.
