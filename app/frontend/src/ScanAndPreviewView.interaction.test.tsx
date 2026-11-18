@@ -76,7 +76,7 @@ async function runKeydownCase() {
   renderView({ client, settings: { allowDeleteUnknown: false, minAgeHours: 0 } as Settings });
   await user.click(screen.getByRole('button', { name: 'Start Scan' }));
   await screen.findByRole('heading', { name: 'Inspector' });
-  await user.click(screen.getByRole('button', { name: 'Clear' }));
+  await user.click(screen.getByRole('button', { name: 'Unselect all' }));
   const cb = screen.getByLabelText('Select C:\\Temp\\k.tmp') as HTMLInputElement;
   cb.focus();
   fireEvent.keyDown(cb, { key: 'Enter', code: 'Enter', bubbles: true });

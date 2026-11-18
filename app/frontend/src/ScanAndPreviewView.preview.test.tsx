@@ -221,9 +221,9 @@ describe('ScanAndPreviewView callout explanation gating', () => {
     await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
 
-    // Clear the Preview and reopen it with the same selection. The resolved
+    // Unselect all and reopen the Preview with the same selection. The resolved
     // explanations from the first Preview must not carry over to the second.
-    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await user.click(screen.getByRole('button', { name: 'Unselect all' }));
     await selectElevatedItem(user);
     delayExplain = true;
     await user.click(screen.getByRole('button', { name: /Review & Clean/ }));

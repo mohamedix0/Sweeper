@@ -42,9 +42,9 @@ function reviewClassName(args: { selected: boolean }): string {
   return 'btn';
 }
 
-function ClearButton(props: { selected: number; cleaning: boolean; onClear: () => void }) {
+function UnselectAllButton(props: { selected: number; cleaning: boolean; onClear: () => void }) {
   if (props.selected <= 0) return null;
-  return <button type="button" className="btn small subtle-btn" onClick={props.onClear} disabled={props.cleaning}>Clear</button>;
+  return <button type="button" className="btn small subtle-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
 }
 
 function RiskyHint(props: { risky: boolean }) {
@@ -67,7 +67,7 @@ export function AnalyzerCleanPanel(props: AnalyzerCleanPanelProps) {
     <div className="scan-bottom-bar" aria-label="Analyzer actions">
       <div className="scan-bottom-bar-left">
         <span className="scan-bottom-bar-summary"><strong className="num">{count} selected</strong> · <span className="num">{size}</span></span>
-        <ClearButton selected={props.selectedCount} cleaning={props.cleaning} onClear={props.onClear} />
+        <UnselectAllButton selected={props.selectedCount} cleaning={props.cleaning} onClear={props.onClear} />
         <RiskyHint risky={props.hasSelectedRisky} />
       </div>
       <div className="scan-bottom-bar-right">

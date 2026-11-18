@@ -64,7 +64,7 @@ async function runBulkSelectionCase() {
   expect(screen.getAllByLabelText('Status Skipped').length).toBeGreaterThan(0);
   await user.click(screen.getByRole('button', { name: /^Eligible \(/ }));
   await waitFor(() => expect(screen.queryAllByLabelText('Status Skipped')).toHaveLength(0));
-  await user.click(screen.getAllByRole('button', { name: 'Clear' })[0]);
+  await user.click(screen.getAllByRole('button', { name: 'Unselect all' })[0]);
   await waitFor(() => expect(safeEligible.checked).toBe(false));
   await user.click(screen.getByRole('button', { name: /^All \(/ }));
   const userTempGroup = screen.getByLabelText('Select all eligible items in User Temp') as HTMLInputElement;

@@ -32,9 +32,9 @@ function ActionButton(props: ScanCleanBarProps) {
   return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean} aria-label="Clean Permanently">{cleanLabel({ cleaning: props.cleaning })}</button>;
 }
 
-function ClearButton(props: ScanCleanBarProps) {
+function UnselectAllButton(props: ScanCleanBarProps) {
   if (props.selectedIdsCount <= 0) return null;
-  return <button type="button" className="btn small subtle-btn" onClick={props.onClear} disabled={props.cleaning}>Clear</button>;
+  return <button type="button" className="btn small subtle-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
 }
 
 export function ScanCleanBar(props: ScanCleanBarProps) {
@@ -45,7 +45,7 @@ export function ScanCleanBar(props: ScanCleanBarProps) {
     <div className="scan-bottom-bar" aria-label="Cleanup actions">
       <div className="scan-bottom-bar-left">
         <span className="scan-bottom-bar-summary"><strong className="num">{files} selected</strong> ({cats}) · <span className="num">{size}</span> reclaimable</span>
-        <ClearButton {...props} />
+        <UnselectAllButton {...props} />
         <span className="scan-bottom-bar-hint muted">Next: Review summary · permanent delete (skips Recycle Bin)</span>
       </div>
       <div className="scan-bottom-bar-right"><ActionButton {...props} /></div>

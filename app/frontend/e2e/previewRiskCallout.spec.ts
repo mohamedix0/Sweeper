@@ -20,10 +20,10 @@ async function runScan(page: Page): Promise<void> {
   await expect(page.getByText('Ready to scan')).toHaveCount(0);
 }
 
-/** Clear the auto-selected Safe items, then select only the npm-cache item. */
+/** Unselect the auto-selected Safe items, then select only the npm-cache item. */
 async function selectOnlyNpmItem(page: Page): Promise<void> {
-  const clear = page.getByRole('button', { name: 'Clear' });
-  if (await clear.isVisible().catch(() => false)) await clear.click();
+  const unselectAll = page.getByRole('button', { name: 'Unselect all' });
+  if (await unselectAll.isVisible().catch(() => false)) await unselectAll.click();
 
   const group = page.getByRole('article').filter({ hasText: 'npm Package Cache' }).first();
   const expand = group.getByRole('button', { name: 'Expand npm Package Cache' });
@@ -137,7 +137,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(group.getByRole('note', { name: `Caution risk: ${CAUTION_IDENTITY}` })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Preview Breakdown' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Clear' }).click();
+    await page.getByRole('button', { name: 'Unselect all' }).click();
 
     await expect(group).toHaveCount(0);
     await expect(page.getByRole('note')).toHaveCount(0);
