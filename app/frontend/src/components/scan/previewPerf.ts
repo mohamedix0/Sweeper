@@ -221,6 +221,17 @@ export function planExplanationTasks(args: ExplanationPlanArgs): ExplanationTask
 }
 
 /** Minimal index-based pool: bounded IPC fan-out for explanation resolution. */
+function fillSkippedResults<T, R>(
+  items: readonly T[],
+  from: number,
+  results: R[],
+  onSkip?: (item: T) => R,
+): void {
+  for (let i = from; i < items.length; i += 1) {
+    if (onSkip) results[i] = onSkip(items[i]);
+  }
+}
+
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
@@ -229,17 +240,11 @@ export async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
-  const skipRemaining = () => {
-    while (next < items.length) {
-      if (options?.onSkip) results[next] = options.onSkip(items[next]);
-      next += 1;
-    }
-  };
   const run = async () => {
     while (next < items.length) {
       if (options?.shouldStop?.()) {
-        skipRemaining();
-        break;
+        fillSkippedResults(items, next, results, options?.onSkip);
+        return;
       }
       const at = next;
       next += 1;

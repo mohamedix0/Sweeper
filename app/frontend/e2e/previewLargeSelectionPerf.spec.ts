@@ -43,15 +43,19 @@ async function installGapSampler(page: Page): Promise<void> {
     // the same animation frame as the gap sampler. Checking for the wrapper at
     // the Preview IPC call is not evidence that the meter ever showed a real
     // value (and progress is cleared before that call once encoding finishes).
+    const recordDeterminateProgress = () => {
+      const meter = document.querySelector('.preview-preparing progress');
+      if (!meter) return;
+      const value = Number((meter as HTMLProgressElement).value);
+      if (value <= 0) return;
+      const max = Number((meter as HTMLProgressElement).max);
+      if (value >= max) return;
+      g.__perf.determinateProgressSeen = true;
+    };
     const tick = (now: number) => {
       if (g.__lastFrame > 0) g.__gapSamples.push(now - g.__lastFrame);
       g.__lastFrame = now;
-      const meter = document.querySelector('.preview-preparing progress');
-      if (meter) {
-        const value = Number((meter as HTMLProgressElement).value);
-        const max = Number((meter as HTMLProgressElement).max);
-        if (max > 0 && value > 0 && value < max) g.__perf.determinateProgressSeen = true;
-      }
+      recordDeterminateProgress();
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);

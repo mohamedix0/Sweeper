@@ -121,20 +121,29 @@ function finishPreviewLoading(w: Workflow, requestId: number) {
   if (w.activePreviewRequestRef.current === requestId) w.setPreviewLoading(false);
 }
 
-export async function runScanPreview(args: { w: Workflow; client: SweeperClient; sel: Set<string>; requiresConfirmation: boolean; sessionId: string; confirmText: string }) {
-  const { w } = args;
+function clearPreviewProgress(w: Workflow, requestId: number) {
+  if (w.activePreviewRequestRef.current === requestId) w.setPreviewProgress(null);
+}
+
+function previewRejected(args: { w: Workflow; selectionSize: number; expired: boolean }): boolean {
   // The Rust decoder refuses descriptors above MAX_COMPACT_IDS; sending one
   // would surface as an unknown item and a fail-closed Preview. Reject early
   // with an actionable message instead of a silent failure.
-  if (args.sel.size > MAX_COMPACT_IDS) {
-    w.setError(`This selection has ${args.sel.size.toLocaleString('en-US')} items; Sweeper can Preview at most ${MAX_COMPACT_IDS.toLocaleString('en-US')} items at once. Deselect some items and try again.`);
-    return;
+  if (args.selectionSize > MAX_COMPACT_IDS) {
+    args.w.setError(`This selection has ${args.selectionSize.toLocaleString('en-US')} items; Sweeper can Preview at most ${MAX_COMPACT_IDS.toLocaleString('en-US')} items at once. Deselect some items and try again.`);
+    return true;
   }
-  if (w.isSessionExpired) {
-    w.setError('Scan session expired or was invalidated. Start a new Scan.');
-    w.resetForInvalidSession('Scan session expired or was invalidated. Start a new Scan.');
-    return;
+  if (args.expired) {
+    args.w.setError('Scan session expired or was invalidated. Start a new Scan.');
+    args.w.resetForInvalidSession('Scan session expired or was invalidated. Start a new Scan.');
+    return true;
   }
+  return false;
+}
+
+export async function runScanPreview(args: { w: Workflow; client: SweeperClient; sel: Set<string>; requiresConfirmation: boolean; sessionId: string; confirmText: string }) {
+  const { w } = args;
+  if (previewRejected({ w, selectionSize: args.sel.size, expired: w.isSessionExpired })) return;
   const req = markPreviewStart(w);
   const sid = args.sessionId;
   const confirmations = buildConfirmations(args);
@@ -152,14 +161,14 @@ export async function runScanPreview(args: { w: Workflow; client: SweeperClient;
     // Encoding is done: stop showing determinate preparation progress before
     // the (possibly slow) Preview IPC, rather than leaving a stale "Preparing
     // preview… N / N" message while the backend builds the Preview.
-    if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress(null);
+    clearPreviewProgress(w, req.id);
     res = await args.client.previewClean(sid, itemIds, confirmations);
   } catch (error) {
     handlePreviewCatch({ w, error, req: { id: req.id, rev: req.rev, sid } });
     finishPreviewLoading(w, req.id);
     return;
   } finally {
-    if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress(null);
+    clearPreviewProgress(w, req.id);
   }
   if (previewStale({ w, id: req.id, rev: req.rev, sid })) {
     finishPreviewLoading(w, req.id);
