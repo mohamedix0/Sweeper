@@ -115,48 +115,81 @@ export async function preparePreviewSelection(
   return descriptorToWire(descriptorFrom(groups));
 }
 
+/** Decode a single sentinel-prefixed wire value; null means "not our descriptor". */
+function decodeSelectionDescriptor(ids: string[]): Descriptor | null {
+  if (ids.length !== 1) return null;
+  if (!ids[0].startsWith(COMPACT_SENTINEL)) return null;
+  const descriptor = JSON.parse(ids[0].slice(COMPACT_SENTINEL.length)) as Descriptor;
+  if (!Array.isArray(descriptor.ranges)) return null;
+  if (!Array.isArray(descriptor.explicit)) return null;
+  return descriptor;
+}
+
+/** Validated bounds for one range; null when the range is corrupt or unsafe. */
+function rangeBounds(range: Range): { start: number; end: number } | null {
+  if (typeof range.prefix !== 'string') return null;
+  const start = Number(range.start);
+  const end = Number(range.end);
+  if (!Number.isSafeInteger(start)) return null;
+  if (!Number.isSafeInteger(end)) return null;
+  if (start < 1) return null;
+  if (end < start) return null;
+  return { start, end };
+}
+
+/** Expand all ranges into explicit IDs; null if any range is invalid or oversized. */
+function expandRanges(ranges: Range[]): string[] | null {
+  const expanded: string[] = [];
+  for (const range of ranges) {
+    const bounds = rangeBounds(range);
+    if (!bounds) return null;
+    const span = bounds.end - bounds.start + 1;
+    if (span > MAX_COMPACT_IDS - expanded.length) return null;
+    for (let n = bounds.start; n <= bounds.end; n += 1) expanded.push(`${range.prefix}::${n}`);
+  }
+  return expanded;
+}
+
+/** Append verbatim explicit IDs; false when any entry is not a string. */
+function appendExplicitIds(expanded: string[], explicit: string[]): boolean {
+  for (const id of explicit) {
+    if (typeof id !== 'string') return false;
+    expanded.push(id);
+  }
+  return true;
+}
+
 /** Mirror of the Rust decoder. Unknown/corrupt descriptors fail closed as explicit IDs. */
 export function expandPreviewSelectionIds(ids: string[]): string[] {
-  if (ids.length !== 1 || !ids[0].startsWith(COMPACT_SENTINEL)) return ids;
   try {
-    const descriptor = JSON.parse(ids[0].slice(COMPACT_SENTINEL.length)) as Descriptor;
-    if (!Array.isArray(descriptor.ranges) || !Array.isArray(descriptor.explicit)) return ids;
-    const expanded: string[] = [];
-    for (const range of descriptor.ranges) {
-      if (typeof range.prefix !== 'string') return ids;
-      const start = Number(range.start);
-      const end = Number(range.end);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) return ids;
-      if (end - start + 1 > MAX_COMPACT_IDS - expanded.length) return ids;
-      for (let n = start; n <= end; n += 1) expanded.push(`${range.prefix}::${n}`);
-    }
-    for (const id of descriptor.explicit) {
-      if (typeof id !== 'string') return ids;
-      expanded.push(id);
-    }
-    if (expanded.length > MAX_COMPACT_IDS) return ids;
-    return expanded;
+    const descriptor = decodeSelectionDescriptor(ids);
+    if (!descriptor) return ids;
+    const expanded = expandRanges(descriptor.ranges);
+    if (!expanded) return ids;
+    if (!appendExplicitIds(expanded, descriptor.explicit)) return ids;
+    return expanded.length <= MAX_COMPACT_IDS ? expanded : ids;
   } catch {
     return ids;
   }
 }
 
-/**
- * Small selections keep one IPC per item (preserving per-item failure notices).
- * Large selections resolve at most one representative per Target, memoised by
- * Target for that Preview generation, with a hard global cap.
- */
-export function planExplanationTasks(args: {
+type ExplanationPlanArgs = {
   selected: ReadonlySet<string>;
   targetIdFor: (itemId: string) => string | undefined;
-}): ExplanationTask[] {
+};
+
+/** Small selections: one IPC per item, preserving per-item failure notices. */
+function planFullExplanationTasks(args: ExplanationPlanArgs): ExplanationTask[] {
   const tasks: ExplanationTask[] = [];
-  if (args.selected.size <= EXPLANATION_FULL_LIMIT) {
-    for (const itemId of args.selected) {
-      tasks.push({ itemId, memoKey: itemId, targetId: args.targetIdFor(itemId) ?? itemId });
-    }
-    return tasks;
+  for (const itemId of args.selected) {
+    tasks.push({ itemId, memoKey: itemId, targetId: args.targetIdFor(itemId) ?? itemId });
   }
+  return tasks;
+}
+
+/** Large selections: one representative per Target, memoised, with a global cap. */
+function planSummaryExplanationTasks(args: ExplanationPlanArgs): ExplanationTask[] {
+  const tasks: ExplanationTask[] = [];
   const seen = new Set<string>();
   for (const itemId of args.selected) {
     if (tasks.length >= EXPLANATION_SUMMARY_LIMIT) break;
@@ -166,6 +199,12 @@ export function planExplanationTasks(args: {
     tasks.push({ itemId, memoKey: targetId, targetId });
   }
   return tasks;
+}
+
+export function planExplanationTasks(args: ExplanationPlanArgs): ExplanationTask[] {
+  return args.selected.size <= EXPLANATION_FULL_LIMIT
+    ? planFullExplanationTasks(args)
+    : planSummaryExplanationTasks(args);
 }
 
 /** Minimal index-based pool: bounded IPC fan-out for explanation resolution. */

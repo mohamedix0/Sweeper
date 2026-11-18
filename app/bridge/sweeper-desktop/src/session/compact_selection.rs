@@ -24,34 +24,61 @@ struct Descriptor {
     explicit: Vec<String>,
 }
 
-pub(crate) fn expand_selection_ids(item_ids: &[String]) -> Vec<String> {
+/// Decode a single sentinel-prefixed wire value; `None` means "not our descriptor".
+fn decode_descriptor(item_ids: &[String]) -> Option<Descriptor> {
     if item_ids.len() != 1 {
-        return item_ids.to_vec();
+        return None;
     }
-    let Some(body) = item_ids[0].strip_prefix(SENTINEL) else {
-        return item_ids.to_vec();
-    };
-    let Ok(descriptor) = serde_json::from_str::<Descriptor>(body) else {
-        return item_ids.to_vec();
-    };
+    let body = item_ids[0].strip_prefix(SENTINEL)?;
+    serde_json::from_str::<Descriptor>(body).ok()
+}
+
+/// Number of IDs in a range, or `None` when its bounds are corrupt or unsafe.
+fn range_span(range: &Range) -> Option<usize> {
+    if range.start == 0 {
+        return None;
+    }
+    if range.end < range.start {
+        return None;
+    }
+    Some(usize::try_from(range.end - range.start + 1).unwrap_or(usize::MAX))
+}
+
+/// Expand all ranges into explicit IDs; `None` if any range is invalid or oversized.
+fn expand_ranges(ranges: &[Range]) -> Option<Vec<String>> {
     let mut expanded: Vec<String> = Vec::new();
-    for range in &descriptor.ranges {
-        if range.start == 0 || range.end < range.start {
-            return item_ids.to_vec();
-        }
-        let span = usize::try_from(range.end - range.start + 1).unwrap_or(usize::MAX);
+    for range in ranges {
+        let span = range_span(range)?;
         if span > MAX_COMPACT_IDS.saturating_sub(expanded.len()) {
-            return item_ids.to_vec();
+            return None;
         }
         for seq in range.start..=range.end {
             expanded.push(format!("{}::{}", range.prefix, seq));
         }
     }
-    for id in &descriptor.explicit {
+    Some(expanded)
+}
+
+/// Append verbatim explicit IDs; `false` once the global cap is reached.
+fn append_explicit(expanded: &mut Vec<String>, explicit: &[String]) -> bool {
+    for id in explicit {
         if expanded.len() >= MAX_COMPACT_IDS {
-            return item_ids.to_vec();
+            return false;
         }
         expanded.push(id.clone());
+    }
+    true
+}
+
+pub(crate) fn expand_selection_ids(item_ids: &[String]) -> Vec<String> {
+    let Some(descriptor) = decode_descriptor(item_ids) else {
+        return item_ids.to_vec();
+    };
+    let Some(mut expanded) = expand_ranges(&descriptor.ranges) else {
+        return item_ids.to_vec();
+    };
+    if !append_explicit(&mut expanded, &descriptor.explicit) {
+        return item_ids.to_vec();
     }
     expanded
 }
