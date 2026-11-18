@@ -58,7 +58,7 @@ async function installLargeSelectionMock(page: Page, count: number): Promise<voi
     const items = Array.from({ length: n }, (_, idx) => ({
       id: `user-temp::${idx + 1}`,
       targetId: 'user-temp',
-      path: `Z:\\Synthetic\\Alice\\item-${idx + 1}`,
+      path: `C:\\Users\\Alice\\AppData\\Local\\Temp\\item-${idx + 1}`,
       size: '100',
       mtimeUnixSecs: '1700000000',
       ageEligible: true,
@@ -66,7 +66,7 @@ async function installLargeSelectionMock(page: Page, count: number): Promise<voi
     const bytes = String(n * 100);
     const target = {
       targetId: 'user-temp', targetName: 'User Temp', tier: 'Tier1', risk: 'Safe',
-      resolvedPaths: ['Z:\\Synthetic\\Alice'], scanned: true, statusReason: null,
+      resolvedPaths: ['C:\\Users\\Alice\\AppData\\Local\\Temp'], scanned: true, statusReason: null,
       totalBytes: bytes, eligibleBytes: bytes, fileCount: String(n), eligibleCount: String(n),
       skippedCount: '0', items,
     };
