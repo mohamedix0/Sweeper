@@ -10,63 +10,51 @@ use sweeper_knowledge::{
     builtin_knowledge_entries, embedded_targets, KnownFolder, Risk, Scope, Tier,
 };
 
+/// (target id, expected `relative_subpath`) pairs for the Vivaldi/Opera leaf-cache targets.
+const VIVALDI_OPERA_LEAF_TARGETS: &[(&str, &str)] = &[
+    ("vivaldi-cache-default", r"Vivaldi\User Data\Default\Cache"),
+    (
+        "vivaldi-code-cache-default",
+        r"Vivaldi\User Data\Default\Code Cache",
+    ),
+    (
+        "vivaldi-gpu-cache-default",
+        r"Vivaldi\User Data\Default\GPUCache",
+    ),
+    (
+        "vivaldi-cache-profiles",
+        r"Vivaldi\User Data\Profile *\Cache",
+    ),
+    (
+        "vivaldi-code-cache-profiles",
+        r"Vivaldi\User Data\Profile *\Code Cache",
+    ),
+    (
+        "vivaldi-gpu-cache-profiles",
+        r"Vivaldi\User Data\Profile *\GPUCache",
+    ),
+    ("opera-cache", r"Opera Software\Opera *\Cache"),
+    ("opera-code-cache", r"Opera Software\Opera *\Code Cache"),
+    ("opera-gpu-cache", r"Opera Software\Opera *\GPUCache"),
+];
+
 #[test]
 fn vivaldi_and_opera_leaf_cache_targets_are_present() {
     let targets = embedded_targets();
-    let expected = [
-        ("vivaldi-cache-default", r"Vivaldi\User Data\Default\Cache"),
-        (
-            "vivaldi-code-cache-default",
-            r"Vivaldi\User Data\Default\Code Cache",
-        ),
-        (
-            "vivaldi-gpu-cache-default",
-            r"Vivaldi\User Data\Default\GPUCache",
-        ),
-        (
-            "vivaldi-cache-profiles",
-            r"Vivaldi\User Data\Profile *\Cache",
-        ),
-        (
-            "vivaldi-code-cache-profiles",
-            r"Vivaldi\User Data\Profile *\Code Cache",
-        ),
-        (
-            "vivaldi-gpu-cache-profiles",
-            r"Vivaldi\User Data\Profile *\GPUCache",
-        ),
-        ("opera-cache", r"Opera Software\Opera *\Cache"),
-        ("opera-code-cache", r"Opera Software\Opera *\Code Cache"),
-        ("opera-gpu-cache", r"Opera Software\Opera *\GPUCache"),
-    ];
-    for (id, subpath) in expected {
+    for &(id, subpath) in VIVALDI_OPERA_LEAF_TARGETS {
         let t = targets
             .iter()
             .find(|t| t.id == id)
             .unwrap_or_else(|| panic!("missing {id} target"));
+        let anchor = (t.known_folder, t.relative_subpath.as_str(), t.tier);
         assert_eq!(
-            (
-                t.known_folder,
-                t.relative_subpath.as_str(),
-                t.tier,
-                t.risk,
-                t.scope,
-                t.requires_elevation,
-                t.min_age_hours,
-                !t.description.trim().is_empty(),
-            ),
-            (
-                KnownFolder::LocalAppData,
-                subpath,
-                Tier::Tier2,
-                Risk::Safe,
-                Scope::Contents,
-                false,
-                24,
-                true,
-            ),
-            "unexpected fields for {id}",
+            anchor,
+            (KnownFolder::LocalAppData, subpath, Tier::Tier2),
+            "{id}"
         );
+        let safety = (t.risk, t.scope, t.requires_elevation, t.min_age_hours);
+        assert_eq!(safety, (Risk::Safe, Scope::Contents, false, 24), "{id}");
+        assert!(!t.description.trim().is_empty(), "{id}");
     }
 
     // No broad profile/root scoping: every Vivaldi/Opera target must end in an explicit cache leaf.
