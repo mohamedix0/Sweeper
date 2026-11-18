@@ -612,3 +612,148 @@ description="x"
         );
     }
 }
+
+// --- Reference-parity follow-up (#39 / #40 / #41) ---
+
+#[test]
+fn vivaldi_and_opera_leaf_cache_targets_are_present() {
+    let targets = embedded_targets();
+    let expected = [
+        ("vivaldi-cache-default", r"Vivaldi\User Data\Default\Cache"),
+        (
+            "vivaldi-code-cache-default",
+            r"Vivaldi\User Data\Default\Code Cache",
+        ),
+        (
+            "vivaldi-gpu-cache-default",
+            r"Vivaldi\User Data\Default\GPUCache",
+        ),
+        (
+            "vivaldi-cache-profiles",
+            r"Vivaldi\User Data\Profile *\Cache",
+        ),
+        (
+            "vivaldi-code-cache-profiles",
+            r"Vivaldi\User Data\Profile *\Code Cache",
+        ),
+        (
+            "vivaldi-gpu-cache-profiles",
+            r"Vivaldi\User Data\Profile *\GPUCache",
+        ),
+        ("opera-cache", r"Opera Software\Opera *\Cache"),
+        ("opera-code-cache", r"Opera Software\Opera *\Code Cache"),
+        ("opera-gpu-cache", r"Opera Software\Opera *\GPUCache"),
+    ];
+    for (id, subpath) in expected {
+        let t = targets
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("missing {id} target"));
+        assert_eq!(t.known_folder, KnownFolder::LocalAppData, "{id}");
+        assert_eq!(t.relative_subpath, subpath, "{id}");
+        assert_eq!(t.tier, Tier::Tier2, "{id}");
+        assert_eq!(t.risk, Risk::Safe, "{id}");
+        assert!(matches!(t.scope, Scope::Contents), "{id}");
+        assert!(!t.requires_elevation, "{id}");
+        assert_eq!(t.min_age_hours, 24, "{id}");
+        assert!(!t.description.trim().is_empty(), "{id}");
+    }
+
+    // No broad profile/root scoping: every Vivaldi/Opera target must end in an explicit cache leaf.
+    let leaf_caches = ["cache", "code cache", "gpucache"];
+    for t in targets.iter().filter(|t| {
+        t.relative_subpath.contains("Vivaldi") || t.relative_subpath.contains("Opera Software")
+    }) {
+        let last = t.relative_subpath.rsplit('\\').next().unwrap();
+        assert!(
+            leaf_caches.contains(&last.to_ascii_lowercase().as_str()),
+            "{} targets a non-leaf path: {}",
+            t.id,
+            t.relative_subpath
+        );
+    }
+}
+
+#[test]
+fn vivaldi_and_opera_cache_kb_annotations_are_present() {
+    let kb = builtin_knowledge_entries();
+    let entry = kb
+        .iter()
+        .find(|e| e.id == "kb-vivaldi-opera-browser-caches")
+        .unwrap_or_else(|| panic!("missing Vivaldi/Opera Knowledge Base annotation"));
+    assert_eq!(entry.risk, Risk::Safe);
+    assert_eq!(entry.known_folder, Some(KnownFolder::LocalAppData));
+    let text = format!("{} {} {}", entry.title, entry.description, entry.notes);
+    assert!(text.contains("Vivaldi"), "{text}");
+    assert!(text.contains("Opera"), "{text}");
+    assert!(
+        text.to_ascii_lowercase().contains("profile data"),
+        "annotation must state profile data is not targeted: {text}"
+    );
+}
+
+#[test]
+fn explorer_icon_web_cache_leaves_are_documented_out_of_scope() {
+    let kb = builtin_knowledge_entries();
+    let entry = kb
+        .iter()
+        .find(|e| e.id == "kb-explorer-icon-web-cache-leaves")
+        .unwrap_or_else(|| panic!("missing Explorer icon/web cache out-of-scope annotation"));
+    let text = format!("{} {}", entry.description, entry.notes).to_ascii_lowercase();
+    assert!(text.contains("iconcache"), "{text}");
+    assert!(text.contains("thumbcache"), "{text}");
+    assert!(text.contains("out of scope"), "{text}");
+    assert!(text.contains("non-cache"), "{text}");
+    assert!(
+        text.contains("locked") || text.contains("in use") || text.contains("running"),
+        "must document that Explorer holds these databases open: {text}"
+    );
+
+    // No broad Explorer folder target and no individual cache-DB file target.
+    let targets = embedded_targets();
+    assert!(targets
+        .iter()
+        .all(|t| t.relative_subpath != r"Microsoft\Windows\Explorer"));
+    assert!(targets.iter().all(|t| {
+        let s = t.relative_subpath.to_ascii_lowercase();
+        !s.contains("iconcache") && !s.contains("thumbcache_")
+    }));
+}
+
+#[test]
+fn uv_and_maven_analyzer_entries_document_safe_mechanism_rationale() {
+    let kb = builtin_knowledge_entries();
+
+    let uv = kb
+        .iter()
+        .find(|e| e.id == "kb-uv-cache")
+        .expect("missing uv Knowledge Base entry");
+    let uv_text = format!("{} {}", uv.description, uv.notes).to_ascii_lowercase();
+    assert!(
+        uv_text.contains("whole-cache") || uv_text.contains("whole cache"),
+        "{uv_text}"
+    );
+    assert!(uv_text.contains("uv cache clean"), "{uv_text}");
+    assert!(uv_text.contains("per-file"), "{uv_text}");
+    assert!(
+        uv_text.contains("not cleanable") || uv_text.contains("analyzer only"),
+        "{uv_text}"
+    );
+
+    let maven = kb
+        .iter()
+        .find(|e| e.id == "kb-maven-repository-cache")
+        .expect("missing Maven Knowledge Base entry");
+    let maven_text = format!("{} {}", maven.description, maven.notes).to_ascii_lowercase();
+    assert!(maven_text.contains("locally installed"), "{maven_text}");
+    assert!(
+        maven_text.contains("whole-cache")
+            || maven_text.contains("whole cache")
+            || maven_text.contains("tool-driven"),
+        "{maven_text}"
+    );
+    assert!(
+        maven_text.contains("not cleanable") || maven_text.contains("analyzer only"),
+        "{maven_text}"
+    );
+}
