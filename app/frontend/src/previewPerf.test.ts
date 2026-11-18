@@ -10,6 +10,7 @@ import {
   expandPreviewSelectionIds,
   planExplanationTasks,
   mergeRiskSources,
+  rangeBounds,
   riskCoverageComplete,
   preparePreviewSelection,
   mapWithConcurrency,
@@ -82,7 +83,7 @@ describe('T3 compact preview selection', () => {
     expect(expanded).not.toContain('user-temp::7');
   });
 
-  it('rejects nonnumeric and unsafe-integer range bounds instead of coercing them', () => {
+  it('rejects nonnumeric and boolean range bounds instead of coercing them', () => {
     const descriptor = JSON.stringify({ ranges: [{ prefix: 'user-temp', start: '1', end: 200 }], explicit: [] });
     const wire = [`SWSELECT1:${descriptor}`];
     expect(expandPreviewSelectionIds(wire)).toEqual(wire);
@@ -90,14 +91,23 @@ describe('T3 compact preview selection', () => {
     const booleanBound = JSON.stringify({ ranges: [{ prefix: 'user-temp', start: true, end: 200 }], explicit: [] });
     const booleanWire = [`SWSELECT1:${booleanBound}`];
     expect(expandPreviewSelectionIds(booleanWire)).toEqual(booleanWire);
+  });
 
-    // A SMALL span of unsafe integers (start = MAX_SAFE_INTEGER, end = +1) is
-    // JSON-legal and far below MAX_COMPACT_IDS, so the cap cannot reject it.
-    // Only the Number.isSafeInteger guard can fail it closed; without that
-    // guard this assertion would fail (the range would expand to two IDs).
-    const unsafeBound = JSON.stringify({ ranges: [{ prefix: 'user-temp', start: Number.MAX_SAFE_INTEGER, end: Number.MAX_SAFE_INTEGER + 1 }], explicit: [] });
-    const unsafeWire = [`SWSELECT1:${unsafeBound}`];
-    expect(expandPreviewSelectionIds(unsafeWire)).toEqual(unsafeWire);
+  it('rejects an unsafe end bound at the range-validation boundary', () => {
+    // Assert at rangeBounds, before expandRanges can iterate. Going through
+    // expandPreviewSelectionIds here would hang under mutation: end = 2**53 is
+    // unsafe, and `n += 1` cannot advance past 2**53, so the loop never ends.
+    // A direct validation assertion fails cleanly if the end-bound guard is
+    // removed while keeping the unsafe end-bound fixture.
+    const unsafeEnd = Number.MAX_SAFE_INTEGER + 1;
+    expect(rangeBounds({ prefix: 'user-temp', start: Number.MAX_SAFE_INTEGER, end: unsafeEnd })).toBeNull();
+  });
+
+  it('expands a valid range ending at Number.MAX_SAFE_INTEGER', () => {
+    const max = Number.MAX_SAFE_INTEGER;
+    const descriptor = JSON.stringify({ ranges: [{ prefix: 'user-temp', start: max - 1, end: max }], explicit: [] });
+    const wire = [`SWSELECT1:${descriptor}`];
+    expect(expandPreviewSelectionIds(wire)).toEqual([`user-temp::${max - 1}`, `user-temp::${max}`]);
   });
 
   function totalSeen(samples: Array<[number, number]>, total: number): boolean {

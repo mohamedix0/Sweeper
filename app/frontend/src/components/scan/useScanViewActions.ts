@@ -155,9 +155,15 @@ export async function runScanPreview(args: { w: Workflow; client: SweeperClient;
   try {
     // Chunked, yielding preparation keeps the main thread responsive and gives
     // the view determinate "Preparing preview…" progress for large selections.
-    const itemIds = await preparePreviewSelection(args.sel, (completed, total) => {
-      if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress({ completed, total });
-    });
+    const itemIds = await preparePreviewSelection(
+      args.sel,
+      (completed, total) => {
+        // Request-ID guard: a stale action must not clear/overwrite a newer
+        // action's determinate progress state.
+        if (w.activePreviewRequestRef.current === req.id) w.setPreviewProgress({ completed, total });
+      },
+      () => previewStale({ w, id: req.id, rev: req.rev, sid }),
+    );
     if (previewStale({ w, id: req.id, rev: req.rev, sid })) {
       finishPreviewLoading(w, req.id);
       return;

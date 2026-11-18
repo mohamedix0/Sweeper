@@ -107,6 +107,7 @@ export function buildPreviewSelectionIds(selected: ReadonlySet<string>): string[
 export async function preparePreviewSelection(
   selected: ReadonlySet<string>,
   onProgress?: (completed: number, total: number) => void,
+  shouldStop?: () => boolean,
 ): Promise<string[]> {
   const total = selected.size;
   if (total <= COMPACT_SELECTION_THRESHOLD) {
@@ -121,7 +122,14 @@ export async function preparePreviewSelection(
     completed = Math.min(i + PREPARE_CHUNK_SIZE, all.length);
     onProgress?.(completed, total);
     await yieldToEventLoop();
+    // An invalidated Preview can no longer be sent; stop collecting/sorting
+    // before the next chunk so obsolete work does not compete with the user's
+    // next Preview. The caller's stale-request guard suppresses IPC.
+    if (shouldStop?.()) return [];
   }
+  // Honour a cancellation that arrived during the final yield, before the
+  // expensive sort + serialize step.
+  if (shouldStop?.()) return [];
   return descriptorToWire(descriptorFrom(groups));
 }
 
@@ -136,7 +144,7 @@ function decodeSelectionDescriptor(ids: string[]): Descriptor | null {
 }
 
 /** Validated bounds for one range; null when the range is corrupt or unsafe. */
-function rangeBounds(range: Range): { start: number; end: number } | null {
+export function rangeBounds(range: Range): { start: number; end: number } | null {
   if (typeof range.prefix !== 'string') return null;
   // The descriptor is parsed from JSON at runtime: quoted numbers and booleans
   // would be coerced by Number(...), so require the original values to be numbers.
