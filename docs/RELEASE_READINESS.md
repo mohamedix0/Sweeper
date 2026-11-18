@@ -42,7 +42,7 @@ CI runs: `cargo test --manifest-path app/Cargo.toml --workspace --locked`.
 This workspace test run is the evidence bucket for Gates B–F (unit/property/adversarial/path/NTFS/remover/allowlist/bridge/settings/elevation coverage as implemented in `app/backend/` and `app/bridge/`). Representative suites present in the workspace include (non-exhaustive): `gate_b_proptest`, `gate_c_adversarial`, `gate_c_ntfs`, `gate_d_remover`, `gate_e_allowlist`, `gate_f_bridge`, `settings_tier3`, `elevation_targets`, `allowlist_lint`, `read_only`, and analyzer tests. Treat **all** workspace tests passing under `--locked` as required.
 
 ### Gate G — Frontend / E2E against Mock Backend (`gate-g-frontend`)
-CI job: `.github/workflows/ci.yml` → `gate-g-frontend` (Windows, Node 20, pnpm 9, `CI=true`).
+CI job: `.github/workflows/ci.yml` → `gate-g-frontend` (Windows, Node 24, pnpm 9, `CI=true`).
 
 | Step | Command (from repo root unless noted) |
 |---|---|
@@ -69,7 +69,7 @@ Script: `scripts/run-cargo-mutants.ps1` (targets `sweeper-core` files `backend/s
 Artifacts: `<OutputDir>\mutation-summary.json`, `<OutputDir>\mutants.out\outcomes.json`, and `<OutputDir>\mutants.out\missed.txt` (when present). A failing self-test or score below threshold is a release blocker.
 
 ### Packaging & SHA-256 Gate (`package-windows`)
-CI job: `.github/workflows/ci.yml` → `package-windows` (Windows, Rust `1.99.1`, Node 20, pnpm 9, Tauri CLI installed, NSIS ensured in CI).
+CI job: `.github/workflows/ci.yml` → `package-windows` (Windows, Rust `1.99.1`, Node 24, pnpm 9, Tauri CLI installed, NSIS ensured in CI).
 Script: `scripts/package-windows.ps1` (builds frontend, `cargo build --manifest-path app/Cargo.toml --package sweeper-desktop --release --locked`, and by default a Tauri NSIS bundle; then copies artifacts, optionally signs, and generates/verifies `SHA256SUMS.txt`).
 
 | Mode | Command | Expected outputs (in `-OutputDir`, default `<repo-root>\target\release-artifacts\windows`) |
