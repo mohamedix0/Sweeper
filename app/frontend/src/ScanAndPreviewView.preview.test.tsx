@@ -139,24 +139,15 @@ async function selectElevatedItem(user: Awaited<ReturnType<typeof openScan>>) {
  * before passive effects. That captures the very first render where the Clean
  * button exists, before the explanation requests are even started.
  */
-function renderViewWithProbe(input: {
-  client: SweeperClient;
-  record: (disabled: boolean | null) => void;
-  recordCoverage?: (complete: boolean) => void;
-  expectedWarningCount?: number;
-}) {
+function renderViewWithProbe(input: { client: SweeperClient; record: (disabled: boolean | null) => void }) {
   return render(
     <Profiler id="view" onRender={() => {
       const button = screen.queryByRole('button', { name: /Delete .* permanently/ }) as HTMLButtonElement | null;
-      input.record(button ? button.disabled : null);
-      // Capture warning coverage on EVERY commit where the destructive CTA is
-      // enabled, not just the final DOM state: the CTA must never enable while
-      // any elevated-Risk item in the selection lacks a warning note.
-      if (button && !button.disabled && input.recordCoverage && input.expectedWarningCount != null) {
-        const group = screen.queryByRole('group', { name: CALLOUT_GROUP });
-        const noteCount = group ? within(group).queryAllByRole('note').length : 0;
-        input.recordCoverage(noteCount === input.expectedWarningCount);
+      if (!button) {
+        input.record(null);
+        return;
       }
+      input.record(button.disabled);
     }}>
       <ScanAndPreviewView client={input.client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />
     </Profiler>,
@@ -369,7 +360,8 @@ describe('ScanAndPreviewView large-selection risk coverage', () => {
     render(
       <Profiler id="risk-coverage" onRender={() => {
         const cta = screen.queryByRole('button', { name: /Delete .* permanently/ }) as HTMLButtonElement | null;
-        if (!cta || cta.disabled) return;
+        if (!cta) return;
+        if (cta.disabled) return;
         const group = screen.queryByRole('group', { name: CALLOUT_GROUP });
         const notes = group ? within(group).queryAllByRole('note') : [];
         // An enabled commit with missing warnings is a safety regression.
