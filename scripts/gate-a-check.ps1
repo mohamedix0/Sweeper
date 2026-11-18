@@ -505,8 +505,10 @@ function Test-IsEscapedProseSegment([string]$seg, [string]$drive, [string[]]$all
   # Escaped-string prose names an allowlisted root followed by an ordinary lower-case sentence
   # (e.g. "Users must be rejected by sandbox safety validation"). A genuine path segment such as
   # "Windows confidential files" uses a path-segment noun instead. Require the continuation to
-  # OPEN with a verb/auxiliary - the subject-plus-verb shape of a sentence - so multi-word path
-  # names are no longer mistaken for prose. System-root controls are allowlisted before this guard.
+  # OPEN with an action/auxiliary verb - the subject-plus-verb shape of a sentence - so multi-word
+  # path names are no longer mistaken for prose. Copular "to be" forms are excluded because they
+  # double as ordinary path-segment words (e.g. a "Windows is private" continuation is a path).
+  # System-root controls are allowlisted before this guard.
   $lead = [regex]::Match($seg, '^(\S+)\s+(.+)')
   if (-not $lead.Success) { return $false }
   $leadKey = ($drive + ':\' + $lead.Groups[1].Value).ToLowerInvariant()
@@ -514,9 +516,9 @@ function Test-IsEscapedProseSegment([string]$seg, [string]$drive, [string[]]$all
   $continuation = $lead.Groups[2].Value
   if ($continuation -cnotmatch '[a-z]') { return $false }
   $firstWord = ([regex]::Match($continuation, '^[A-Za-z]+')).Value.ToLowerInvariant()
-  $proseVerbs = @('must','remains','is','are','was','were','be','been','being','can','could',
-                  'will','would','shall','should','may','might','has','have','had','does',
-                  'do','did','needs','need','seems','appears','becomes','continues','stays')
+  $proseVerbs = @('must','remains','can','could','will','would','shall','should','may','might',
+                  'has','have','had','does','do','did','needs','need','seems','appears',
+                  'becomes','continues','stays')
   return ($proseVerbs -contains $firstWord)
 }
 
@@ -527,8 +529,11 @@ function Test-ShouldSkipAbsolutePathMatch([string]$text, $match, [string[]]$allo
   if (Test-IsAllowedAbsolutePath $key $allowedRoots) { return $true }
   if (-not (Test-IsEscapedPathRoot $text $match)) { return $false }
   if (-not (Test-IsQuotedPathRoot $text $match)) { return $true }
-  if (Test-IsSyntheticMalformedFixture $key) { return $true }
+  # A following path separator makes this a real descendant path, so it must be reported even
+  # when its first segment is the synthetic malformed fixture. Check nesting before the fixture
+  # exemption so only the bare fixture stays exempt.
   if (Test-HasNestedPathSeparator $text $match) { return $false }
+  if (Test-IsSyntheticMalformedFixture $key) { return $true }
   return (Test-IsEscapedProseSegment $seg $drive $allowedRoots)
 }
 

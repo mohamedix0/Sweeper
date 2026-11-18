@@ -522,6 +522,41 @@ function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
   $malformed = $quote + 'C:' + $bs + $bs + 'Temp' + [char]0xFF0F + 'foo' + $quote
   $malformedWired = @(Get-PrivacyHitsForFile 'fixture.txt' $malformed $rules)
   Assert-SelfTest ($malformedWired.Count -eq 0) "malformed fullwidth-solidus fixture stays unflagged" $ok
+
+  # CodeRabbit 4607723328: the malformed-fixture exemption applies only to the bare fixture.
+  # A following path separator makes it a real descendant path and must be reported instead.
+  $malformedDescendant = $quote + 'C:' + $bs + $bs + 'Temp' + [char]0xFF0F + 'foo' + $bs + $bs + 'notes.txt' + $quote + ';'
+  $descMatches = @([regex]::Matches($malformedDescendant, $pattern))
+  Assert-SelfTest ($descMatches.Count -ge 1) "malformed-fixture descendant matches absolute-drive pattern" $ok
+  if ($descMatches.Count -ge 1) {
+    Assert-SelfTest ($descMatches[0].Groups['seg'].Value -ceq ('Temp' + [char]0xFF0F + 'foo')) "malformed-fixture descendant captures the first segment whole" $ok
+  }
+  $descDirect = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $malformedDescendant $pattern $allowed)
+  Assert-SelfTest ($descDirect.Count -ge 1) "malformed-fixture descendant flagged by direct detector" $ok
+  $descWired = @(Get-PrivacyHitsForFile 'fixture.txt' $malformedDescendant $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+  Assert-SelfTest ($descWired.Count -ge 1) "malformed-fixture descendant flagged through file-level privacy scan" $ok
+
+  # CodeRabbit 4607724831: a copular "is" continuation is a path-like string, not prose, so it
+  # must be reported. Genuine action/auxiliary-verb prose and system paths stay unflagged.
+  $copulaPath = $quote + 'C:' + $bs + $bs + 'Windows is private' + $quote
+  $copulaMatches = @([regex]::Matches($copulaPath, $pattern))
+  Assert-SelfTest ($copulaMatches.Count -ge 1) "copula-continuation path matches absolute-drive pattern" $ok
+  $copulaDirect = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $copulaPath $pattern $allowed)
+  Assert-SelfTest ($copulaDirect.Count -ge 1) "copula-continuation path flagged by direct detector" $ok
+  $copulaWired = @(Get-PrivacyHitsForFile 'fixture.txt' $copulaPath $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+  Assert-SelfTest ($copulaWired.Count -ge 1) "copula-continuation path flagged through file-level privacy scan" $ok
+
+  $proseControls = @(
+    ($quote + 'C:' + $bs + $bs + 'Users must be rejected by sandbox safety validation' + $quote)
+    ('note: ' + $quote + 'detail; C:' + $bs + $bs + 'Windows remains Protected.' + $quote)
+    ('C' + ':' + $sep + 'Windows' + $sep + 'System32')
+  )
+  foreach ($p in $proseControls) {
+    $ctrlDirect = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $p $pattern $allowed)
+    Assert-SelfTest ($ctrlDirect.Count -eq 0) "prose/system control unflagged by direct detector: $p" $ok
+    $ctrlWired = @(Get-PrivacyHitsForFile 'fixture.txt' $p $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+    Assert-SelfTest ($ctrlWired.Count -eq 0) "prose/system control unflagged by file scan: $p" $ok
+  }
 }
 
 function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
