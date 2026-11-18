@@ -518,7 +518,10 @@ function Get-PrivacyRules() {
   }
   # Use the absolute repo path (never a bare project name) so fresh clones named after the project do not self-match.
   $projectFrag = $repoRoot
-  $localUserPathPattern = '(?i)C:\\Users\\(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
+  # Separators accept one OR more backslashes so ordinary string literals with doubled, escaped
+  # backslashes are covered as well as single-backslash text. The placeholder/generic-account
+  # negative lookahead is unchanged, so documented placeholders and build accounts are excluded.
+  $localUserPathPattern = '(?i)C:\\+Users\\+(?!Alice\b|Bob\b|<|name>|<user>|Public\b|Default\b|Default User\b|All Users\b|User\b|Test\b|me\b|A\b|B\b|X\b|Admin\b|Administrator\b|user\b|test\b|admin\b)[A-Za-z0-9._-]+'
   # Machine-neutral detection of absolute checkout/workspace paths from *other* checkouts.
   # No real drive letter or machine path is stored; the drive and intermediates are matched generically.
   # Common checkout-root names are covered, not just the current project's special folders.
@@ -537,19 +540,19 @@ function Get-PrivacyRules() {
   # following sentence. End-of-text (not end-of-line) anchoring keeps prose at line ends from being
   # mistaken for a bare path segment.
   $firstSegmentPattern = '(?<seg>[^\\\r\n"''`<>{}:]+)(?=\\|(?:\r?\n)?$)'
-  # A quoted bare path (e.g. a raw-string literal: a drive root with a single backslash and no
-  # trailing separator) has no backslash to satisfy the boundary; its closing quote would otherwise
-  # block the match and let a non-allowlisted root slip past the privacy scan. Accept a quote as a
-  # boundary ONLY for a single-backslash root (captured as "onebs"). Paths in ordinary strings use
-  # doubled, escaped backslashes and keep the original boundary, so documented prose such as a
-  # Windows system-root description is not over-blocked. (?(onebs)["'']|(?!)) enables the quote
-  # alternative only when the root had exactly one backslash; an empty negative lookahead never
-  # matches, disabling it otherwise. A real first segment also cannot begin with whitespace: this
-  # keeps prose descriptions (e.g. a drive-root explanation whose text follows a space) from being
-  # mistaken for a bare path when the quote boundary is enabled.
-  $singleSlashRootPattern = '(?:(?<onebs>\\(?!\\))|\\+)'
-  $quoteAwareSegmentPattern = '(?<seg>[A-Za-z0-9_.][^\\\r\n"''`<>{}:]*)(?=\\|(?(onebs)["'']|(?!))|(?:\r?\n)?$)'
-  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):' + $singleSlashRootPattern + $quoteAwareSegmentPattern
+  # A quoted bare path has no trailing path separator, so its closing quote must also satisfy the
+  # first-segment boundary or a non-allowlisted root slips past the privacy scan. Accept a quote as
+  # a boundary for ANY backslash-root form: a raw-string literal (single backslash) and an ordinary
+  # string literal with doubled, escaped backslashes. Gating the quote on a single-backslash-only
+  # capture left escaped strings undetected even though that is the normal form in TS/C#/JSON config
+  # files. The match is still anchored to a real path root (one or more backslashes after the drive)
+  # and the first segment must start with a path-root character, so leading-whitespace prose cannot
+  # be mistaken for a bare path. The exact full-segment allowlist comparison is unchanged; no
+  # leading-token suppression is used, so a one-word allowlisted prefix cannot hide a non-allowlisted
+  # root. Escaped-string matches receive an additional string-literal guard in the hit helper below.
+  $rootSeparatorPattern = '\\+'
+  $quoteAwareSegmentPattern = '(?<seg>[A-Za-z0-9_.][^\\\r\n"''`<>{}:]*)(?=\\|["'']|(?:\r?\n)?$)'
+  $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):' + $rootSeparatorPattern + $quoteAwareSegmentPattern
   # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
   # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
   # First-segment allowlisting alone would let such a path pass because it carries no workspace
@@ -667,6 +670,25 @@ function Get-PrivacyHitsForAbsolutePaths([string]$rel, [string]$text, [string]$p
   foreach ($m in [regex]::Matches($text, $pattern)) {
     $key = ($m.Groups['drive'].Value + ':\' + $m.Groups['seg'].Value).ToLowerInvariant()
     if (Test-IsAllowedAbsolutePath $key $allowedRoots) { continue }
+    # An escaped-string root (doubled backslashes) is a genuine path literal only when the drive
+    # path STARTS the string literal (preceded by a quote) and the segment is ASCII. Mid-literal
+    # mentions, non-ASCII segments (invalid-path/mojibake fixtures) and prose that names an
+    # allowlisted root followed by a lowercase continuation (e.g. a sentence beginning with a
+    # neutral root word) are not machine paths and must stay unflagged. The prose rule requires an
+    # allowlisted leading token AND a lowercase next word, so a one-word allowlisted prefix followed
+    # by a real path segment (e.g. a capitalized Backup-style folder) is still flagged. Single-
+    # backslash text is direct path text and keeps the exact full-segment allowlist verdict with no
+    # suppression at all.
+    if ($m.Value.Length -ge 4 -and $m.Value.Substring(2, 2) -ceq '\\') {
+      if ($m.Index -eq 0 -or ($text[$m.Index - 1] -ne [char]34 -and $text[$m.Index - 1] -ne [char]39)) { continue }
+      $seg = $m.Groups['seg'].Value
+      if ($seg -match '[^\x00-\x7F]') { continue }
+      $proseLead = [regex]::Match($seg, '^(\S+)\s+(.)')
+      if ($proseLead.Success) {
+        $leadKey = ($m.Groups['drive'].Value + ':\' + $proseLead.Groups[1].Value).ToLowerInvariant()
+        if ((Test-IsAllowedAbsolutePath $leadKey $allowedRoots) -and $proseLead.Groups[2].Value -cmatch '[a-z]') { continue }
+      }
+    }
     $hits += "${rel}: forbidden absolute drive path detected: $($m.Value)"
   }
   return @($hits)
@@ -1089,6 +1111,113 @@ function Test-SelfTestQuotedBareAbsolutePaths([ref]$ok) {
   }
 }
 
+function Test-SelfTestOneWordAllowlistedPrefix([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $quote = [char]34
+
+  # Regression for CodeRabbit thread 4607401610: a non-allowlisted path whose first segment merely
+  # BEGINS with a one-word allowlisted root (e.g. "Windows Backup" starts with the allowlisted
+  # "Windows", "Temp confidential" with "Temp") must still be FLAGGED. The whole first segment is
+  # captured and compared exactly, so the one-word prefix must never grant a pass. All fixtures are
+  # synthetic and assembled from neutral fragments; no real machine path is stored in this gate.
+  $oneWordPrefixCases = @(
+    @{ Name = 'bare plain'; Text = ('C' + ':' + $sep + 'Windows Backup'); Quoted = $false }
+    @{ Name = 'bare quoted raw string'; Text = ('C' + ':' + $sep + 'Windows Backup'); Quoted = $true }
+    @{ Name = 'nested'; Text = ('C' + ':' + $sep + 'Windows Backup' + $sep + 'private-data' + $sep + 'notes.txt'); Quoted = $false }
+    @{ Name = 'neutral example nested'; Text = ('C' + ':' + $sep + 'Temp confidential' + $sep + 'notes.txt'); Quoted = $false }
+  )
+  foreach ($c in $oneWordPrefixCases) {
+    $fixture = if ($c.Quoted) { 'r' + $quote + $c.Text + $quote } else { $c.Text }
+    $directHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $fixture $pattern $allowed)
+    Assert-SelfTest ($directHits.Count -ge 1) "one-word prefix case flagged by direct detector: $($c.Name)" $ok
+    $wiredHits = @(Get-PrivacyHitsForFile 'fixture.txt' $fixture $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+    Assert-SelfTest ($wiredHits.Count -ge 1) "one-word prefix case flagged through file-level privacy scan: $($c.Name)" $ok
+  }
+
+  # Legitimate system paths whose entire first segment IS allowlisted must remain unflagged.
+  $controls = @(
+    ('C' + ':' + $sep + 'Windows' + $sep + 'System32'),
+    ('C' + ':' + $sep + 'Program Files' + $sep + 'NSIS')
+  )
+  foreach ($p in $controls) {
+    $directHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $p $pattern $allowed)
+    Assert-SelfTest ($directHits.Count -eq 0) "one-word prefix control accepted by direct detector: $p" $ok
+    $wiredHits = @(Get-PrivacyHitsForFile 'fixture.txt' $p $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+    Assert-SelfTest ($wiredHits.Count -eq 0) "one-word prefix control accepted by file-level privacy scan: $p" $ok
+  }
+}
+
+function Test-SelfTestEscapedStringAbsolutePaths([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $bs = '\'
+  $quote = [char]34
+
+  # Independent-review hard defect: an ordinary string literal uses doubled, escaped backslashes.
+  # The old single-backslash-gated quote boundary let an escaped-string path with a non-allowlisted
+  # root evade BOTH the absolute-path detector and the file-level scan, contradicting the
+  # deny-by-default rule. All fixtures are synthetic and assembled from neutral fragments; no real
+  # machine path is stored.
+  $escapedBackup = 'let p = ' + $quote + 'C:' + $sep + $sep + 'Program Files Backup' + $quote + ';'
+  $directHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $escapedBackup $pattern $allowed)
+  Assert-SelfTest ($directHits.Count -ge 1) "escaped-string absolute path flagged by direct detector" $ok
+  $wiredHits = @(Get-PrivacyHitsForFile 'fixture.txt' $escapedBackup $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+  Assert-SelfTest ($wiredHits.Count -ge 1) "escaped-string absolute path flagged through file-level privacy scan" $ok
+
+  # The reserved Users root is allowlisted by the absolute-path rule, so an escaped-string user
+  # path must be caught by the local-user-path detector instead. The previous single-backslash-only
+  # pattern missed the doubled-backslash form entirely.
+  $escapedUserPath = $quote + 'C:' + $sep + $sep + 'Users' + $sep + $sep + 'fixture-person' + $sep + $sep + 'projects' + $quote
+  $localDirect = @(Get-PrivacyHitsForLocalPaths 'fixture.txt' $escapedUserPath $rules.LocalUserPathPattern)
+  Assert-SelfTest ($localDirect.Count -ge 1) "escaped-string user path flagged by direct local-user detector" $ok
+  $localWired = @(Get-PrivacyHitsForFile 'fixture.txt' $escapedUserPath $rules | Where-Object { $_ -match 'forbidden local user path' })
+  Assert-SelfTest ($localWired.Count -ge 1) "escaped-string user path flagged through file-level privacy scan" $ok
+
+  # Legitimate system controls stay unflagged in both plain and escaped-string forms.
+  $controls = @(
+    ('C:' + $sep + 'Windows' + $sep + 'System32'),
+    ('C:' + $sep + 'Program Files' + $sep + 'NSIS')
+  )
+  foreach ($p in $controls) {
+    foreach ($text in @($p, ($quote + ($p -replace [regex]::Escape($sep), ($bs + $bs)) + $quote))) {
+      $allHits = @(Get-PrivacyHitsForFile 'fixture.txt' $text $rules)
+      Assert-SelfTest ($allHits.Count -eq 0) "escaped/control system path must not be flagged: $text" $ok
+    }
+  }
+
+  # Extended-path and neutral fixtures must remain unflagged (no over-broad delimiter or prefix).
+  $extendedFixtures = @(
+    ('C:' + $sep + 'Temp' + $sep + '??' + $sep + 'x'),
+    ($bs + $bs + '?' + $bs + 'C:' + $bs + 'foo')
+  )
+  foreach ($p in $extendedFixtures) {
+    $allHits = @(Get-PrivacyHitsForFile 'fixture.txt' $p $rules)
+    Assert-SelfTest ($allHits.Count -eq 0) "extended-path fixture must not be flagged: $p" $ok
+  }
+
+  # Escaped-string prose and invalid-path fixtures must stay unflagged, while a one-word allowlisted
+  # prefix followed by a real (capitalized) path segment is still flagged. Built from neutral
+  # fragments so no real machine path is stored in this gate.
+  $proseFixtures = @(
+    ($quote + 'C:' + $bs + $bs + 'Users must be rejected by sandbox safety validation' + $quote)
+    ('note: ' + $quote + 'detail; C:' + $bs + $bs + 'Windows remains Protected.' + $quote)
+    ('error: C:' + $bs + $bs + '...' + ')')
+    ($quote + 'C:' + $bs + $bs + 'Temp' + [char]0xFF0F + 'foo' + $quote)
+  )
+  foreach ($p in $proseFixtures) {
+    $absHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $p $pattern $allowed)
+    Assert-SelfTest ($absHits.Count -eq 0) "escaped-string prose/fixture must not be flagged: $p" $ok
+  }
+  $escapedWindowsBackup = $quote + 'C:' + $bs + $bs + 'Windows Backup' + $quote
+  $prefixHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $escapedWindowsBackup $pattern $allowed)
+  Assert-SelfTest ($prefixHits.Count -ge 1) "escaped one-word prefix path must still be flagged" $ok
+}
+
 function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
   $rules = Get-PrivacyRules
   $sep = [System.IO.Path]::DirectorySeparatorChar
@@ -1132,6 +1261,8 @@ function Invoke-GateASelfTests {
   Test-SelfTestAbsoluteDrivePaths $okRef
   Test-SelfTestFullFirstSegmentAllowlist $okRef
   Test-SelfTestQuotedBareAbsolutePaths $okRef
+  Test-SelfTestOneWordAllowlistedPrefix $okRef
+  Test-SelfTestEscapedStringAbsolutePaths $okRef
   Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
