@@ -314,27 +314,41 @@ pub fn open_for_delete(path: &Path) -> Result<SafeHandle> {
     Ok(SafeHandle(handle))
 }
 
-/// Resolve canonical path for an opened handle via `GetFinalPathNameByHandleW`.
-pub fn get_final_path(handle: &SafeHandle) -> Result<String> {
+/// Resolve the final path of an already-open, caller-owned handle via
+/// `GetFinalPathNameByHandleW` without taking ownership or closing it.
+///
+/// Use this when the caller already holds a live handle (for example a
+/// `std::fs::File`) and must validate its on-disk identity without reopening the
+/// path. Reopening by path would create a TOCTOU window in which an ancestor
+/// junction can be swapped between the two opens.
+pub fn get_final_path_from_raw_handle(raw: std::os::windows::io::RawHandle) -> Result<String> {
+    let handle = raw as HANDLE;
     // VOLUME_NAME_DOS = 0x0, FILE_NAME_NORMALIZED = 0x0
     const VOLUME_NAME_DOS: u32 = 0;
     const FILE_NAME_NORMALIZED: u32 = 0;
     let flags = VOLUME_NAME_DOS | FILE_NAME_NORMALIZED;
-    // SAFETY: querying required length with null buffer and size 0 is valid for a live handle.
-    let needed = unsafe { GetFinalPathNameByHandleW(handle.raw(), std::ptr::null_mut(), 0, flags) };
+    // SAFETY: querying the required length with a null buffer and size 0 is valid
+    // for a live handle. `handle` is borrowed and owned by the caller, which keeps
+    // it open for the duration of this call.
+    let needed = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, flags) };
     if needed == 0 {
         return Err(last_error("GetFinalPathNameByHandleW(len)"));
     }
     let mut buf = vec![0u16; needed as usize];
-    // SAFETY: `buf` is writable for `needed` UTF-16 code units and `handle` is valid/open.
-    let written =
-        unsafe { GetFinalPathNameByHandleW(handle.raw(), buf.as_mut_ptr(), needed, flags) };
+    // SAFETY: `buf` is writable for `needed` UTF-16 code units and `handle` is a
+    // live, caller-owned open handle valid for the duration of this call.
+    let written = unsafe { GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), needed, flags) };
     if written == 0 {
         return Err(last_error("GetFinalPathNameByHandleW"));
     }
     let len = written as usize;
     let slice = &buf[..len];
     String::from_utf16(slice).map_err(|e| WinfsError::InvalidEncoding(e.to_string()))
+}
+
+/// Resolve canonical path for an opened handle via `GetFinalPathNameByHandleW`.
+pub fn get_final_path(handle: &SafeHandle) -> Result<String> {
+    get_final_path_from_raw_handle(handle.raw())
 }
 
 /// Get file identity (volume serial + file index) via `GetFileInformationByHandle`.

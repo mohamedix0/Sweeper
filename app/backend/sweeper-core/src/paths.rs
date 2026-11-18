@@ -6,6 +6,12 @@ use std::path::Path;
 use sweeper_winfs::{self, ReparseTagClass, WinfsError};
 use thiserror::Error;
 
+/// Resolve the final path of an already-open, caller-owned handle without
+/// reopening it by path. Re-exported for bridge layers that hold a live handle
+/// (e.g. a log read handle) and must validate containment without a TOCTOU
+/// window; the underlying FFI stays confined to `sweeper-winfs`.
+pub use sweeper_winfs::get_final_path_from_raw_handle;
+
 /// Errors produced by lexical parsing or on-disk canonicalization.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PathError {

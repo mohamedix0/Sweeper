@@ -7,7 +7,7 @@ use sweeper_contract::{
     ValidateCustomPathResponse,
 };
 
-use sweeper_core::paths::CanonicalPath;
+use sweeper_core::paths::{get_final_path_from_raw_handle, CanonicalPath};
 
 /// Upper bound on bytes returned by a single `read_log` IPC call (8 MiB).
 /// Log files are small JSONL streams; bounding the read prevents a tampered or
@@ -354,7 +354,7 @@ fn resolve_log_candidate(
     logs_dir: &CanonicalPath,
     name: &str,
     is_bare: bool,
-) -> Result<Option<(String, CanonicalPath)>, ContractError> {
+) -> Result<Option<CanonicalPath>, ContractError> {
     if name.len() > 255 {
         if is_bare {
             return Err(invalid_log_id());
@@ -366,38 +366,57 @@ fn resolve_log_candidate(
     if !is_direct_log_child(logs_dir, &resolved) {
         return Err(invalid_log_id());
     }
-    Ok(Some((joined, resolved)))
+    Ok(Some(resolved))
+}
+
+/// Parse the final path reported by `GetFinalPathNameByHandleW` into a
+/// `CanonicalPath`. The API returns a `\\?\`-prefixed path (VOLUME_NAME_DOS),
+/// which the lexical parser rejects; strip that prefix first. UNC and other
+/// non-drive forms fail to parse and are therefore rejected (fail closed).
+fn canonical_path_from_handle_final(final_path: &str) -> Option<CanonicalPath> {
+    let stripped = final_path.strip_prefix(r"\\?\").unwrap_or(final_path);
+    CanonicalPath::parse_lexical(stripped).ok()
+}
+
+/// Validate the already-open READ handle without reopening its path.
+///
+/// Containment is resolved from this very handle. `GetFinalPathNameByHandle`
+/// follows ancestor junctions that were traversed when the handle was opened, so
+/// an ancestor junction swapped after the open cannot make an out-of-directory
+/// file pass containment: the final path still reflects the handle's real target.
+/// The previous approach reopened the path for validation and therefore allowed
+/// that swap to pass containment while content was read from the stale handle.
+fn validate_log_handle(logs_dir: &CanonicalPath, file: &fs::File) -> Result<(), ContractError> {
+    use std::os::windows::io::AsRawHandle;
+
+    if handle_is_reparse_point(file) {
+        return Err(ContractError::InvalidInput {
+            reason: "log file is not a regular file".into(),
+        });
+    }
+    let final_path =
+        get_final_path_from_raw_handle(file.as_raw_handle()).map_err(|_| invalid_log_id())?;
+    let resolved = canonical_path_from_handle_final(&final_path).ok_or_else(invalid_log_id)?;
+    if !is_direct_log_child(logs_dir, &resolved) {
+        return Err(invalid_log_id());
+    }
+    Ok(())
 }
 
 /// Open and validate one resolved candidate. `None` means the entry does not
 /// exist, so the next candidate can be tried.
 fn open_validated_log_candidate(
     logs_dir: &CanonicalPath,
-    joined: &str,
     path: &Path,
 ) -> Result<Option<fs::File>, ContractError> {
     // Open without following reparse points. A file symbolic link placed at this
     // path (including one swapped in after the lexical check) is opened as the
-    // link itself and rejected by the handle checks below.
+    // link itself and rejected by the handle checks in `validate_log_handle`.
     let file = match open_log_file_no_follow(path) {
         Ok(file) => file,
         Err(_) => return Ok(None),
     };
-    if handle_is_reparse_point(&file) {
-        return Err(ContractError::InvalidInput {
-            reason: "log file is not a regular file".into(),
-        });
-    }
-
-    // Handle-based re-validation: `CanonicalPath::from_existing_path` opens
-    // without following reparse points and calls
-    // `sweeper_winfs::inspect_reparse_point` to reject link points. Confirm the
-    // final path is still a direct child of the logs directory. The content is
-    // never re-opened by path; it is read from `file` below.
-    let validated = CanonicalPath::from_existing_path(joined).map_err(|_| invalid_log_id())?;
-    if !is_direct_log_child(logs_dir, validated.canonical()) {
-        return Err(invalid_log_id());
-    }
+    validate_log_handle(logs_dir, &file)?;
     Ok(Some(file))
 }
 
@@ -434,12 +453,14 @@ fn read_bounded_log_content<R: Read>(
 
 /// `read_log` in a specific directory (testable).
 ///
-/// Defense in depth (audit F38 / CodeRabbit 4618617742): the ID is restricted to a
-/// file name, the candidate path is parsed with the canonical path parser, and the
-/// parsed path must lie exactly one segment below the logs directory. The file is
-/// opened without following reparse points and validated from that handle; content
-/// is read through the same handle. Reads are size-bounded and files that grow past
-/// the cap are rejected instead of returning a partial record.
+/// Defense in depth (audit F38 / CodeRabbit 4618617742 / 4618853361): the ID is
+/// restricted to a file name, the candidate path is parsed with the canonical path
+/// parser, and the parsed path must lie exactly one segment below the logs directory.
+/// The file is opened without following reparse points, its final path is resolved
+/// from that same read handle (never by reopening the path, which would allow an
+/// ancestor-junction TOCTOU swap), and content is read through the same handle.
+/// Reads are size-bounded and files that grow past the cap are rejected instead of
+/// returning a partial record.
 pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadResponse, ContractError> {
     validate_log_id(log_id)?;
     let Some(dir) = dir else {
@@ -459,13 +480,10 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
     ];
     let bare_index = candidates.len() - 1;
     for (index, name) in candidates.into_iter().enumerate() {
-        let Some((joined, resolved)) =
-            resolve_log_candidate(&logs_dir, &name, index == bare_index)?
-        else {
+        let Some(resolved) = resolve_log_candidate(&logs_dir, &name, index == bare_index)? else {
             continue;
         };
-        let Some(file) =
-            open_validated_log_candidate(&logs_dir, &joined, Path::new(resolved.as_str()))?
+        let Some(file) = open_validated_log_candidate(&logs_dir, Path::new(resolved.as_str()))?
         else {
             continue;
         };
@@ -600,6 +618,82 @@ mod tests {
         assert!(
             matches!(err, ContractError::InvalidInput { .. }),
             "file symlink to an outside file must be rejected, got {err:?}"
+        );
+    }
+
+    /// Regression for CodeRabbit 4618853361 (ancestor-junction TOCTOU swap).
+    ///
+    /// The old code opened the read handle through an ancestor junction, then
+    /// re-opened the path to check containment. If the junction was swapped in
+    /// between, the second open saw a benign direct child and passed while the
+    /// original handle still read a secret outside the logs directory. The fix
+    /// resolves the final path of the ORIGINAL handle, so the swap cannot change
+    /// what containment observes.
+    #[test]
+    #[cfg(windows)]
+    fn read_log_rejects_original_handle_after_ancestor_junction_swap() {
+        use std::io::Read;
+        use sweeper_core::paths::CanonicalPath;
+        use sweeper_testkit::create_junction;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = Sandbox::new_in(outer.path());
+        let outside = sandbox.create_dir("outside").expect("outside dir");
+        sandbox
+            .write_file("outside/victim.jsonl", b"LEAK")
+            .expect("secret outside logs dir");
+        let logs = sandbox.guarded_path("logs");
+        let logs_dir = CanonicalPath::parse_lexical(&logs.to_string_lossy()).expect("logs dir");
+
+        // `logs` is a junction pointing OUTSIDE when the read handle is opened.
+        if let Err(e) = create_junction(&logs, &outside) {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("privilege") || msg.contains("permission") || msg.contains("denied") {
+                eprintln!("skipping junction swap regression test (insufficient privilege): {e}");
+                return;
+            }
+            panic!("create junction failed: {e}");
+        }
+
+        // This is the "first handle" from the old implementation: its path is
+        // `logs/victim.jsonl`, but it reads the secret through the junction.
+        let candidate = logs.join("victim.jsonl");
+        let file = super::open_log_file_no_follow(&candidate).expect("open through junction");
+        {
+            let mut reader = file.try_clone().expect("clone read handle");
+            let mut content = String::new();
+            reader
+                .read_to_string(&mut content)
+                .expect("read through junction");
+            assert_eq!(
+                content, "LEAK",
+                "read handle should reach the outside secret"
+            );
+        }
+
+        // Swap the junction aside and put a REAL logs directory in its place,
+        // holding a benign direct child. `rename` moves only the junction entry
+        // (it does not traverse into its target). The old path-based
+        // re-validation would now see this file and pass containment while the
+        // original handle still reads "LEAK".
+        let swapped_away = sandbox.guarded_path("logs-junction-swapped-away");
+        std::fs::rename(&logs, &swapped_away).expect("move junction aside");
+        std::fs::create_dir_all(&logs).expect("create real logs dir");
+        std::fs::write(&candidate, b"benign").expect("write benign direct child");
+        let path_based = CanonicalPath::from_existing_path(&candidate.to_string_lossy())
+            .expect("benign file should resolve by path after swap");
+        assert!(
+            super::is_direct_log_child(&logs_dir, path_based.canonical()),
+            "this is why the old second-open check was fooled by the swap"
+        );
+
+        // The fix validates the ORIGINAL handle: its final path still points to
+        // the outside secret, so it is rejected after the swap.
+        let err = super::validate_log_handle(&logs_dir, &file)
+            .expect_err("original out-of-directory handle must be rejected after swap");
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "original handle to an outside file must be rejected, got {err:?}"
         );
     }
 
