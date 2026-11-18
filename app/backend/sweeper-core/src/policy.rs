@@ -588,6 +588,72 @@ mod tests {
         assert!(!is_ancestor_of_subtree_protected(&canon(r"C:\Temp\foo")));
     }
 
+    // Small assertion helpers keep each block below the Large Assertion Blocks
+    // threshold while preserving every drive-agnostic protection check.
+    fn assert_subtree_and_selection_protected(p: &CanonicalPath) {
+        assert!(is_subtree_protected(p), "expected subtree-protected: {p}");
+        assert!(
+            is_protected_for_selection(p),
+            "expected protected for selection: {p}"
+        );
+    }
+
+    fn assert_container_root_fully_protected(p: &CanonicalPath) {
+        assert!(
+            is_protected_container_root(p),
+            "expected container root: {p}"
+        );
+        assert!(
+            is_under_protected_container_root(p),
+            "expected under container: {p}"
+        );
+        assert!(
+            !validate_custom_path_lexical(&p.to_string()).allowed,
+            "custom path must be rejected: {p}"
+        );
+    }
+
+    fn assert_profile_root_protected(p: &CanonicalPath) {
+        assert!(is_protected_container_root(p), "profile root: {p}");
+        assert!(is_under_protected_container_root(p), "profile root: {p}");
+    }
+
+    fn assert_drive_root_ancestry(root: &CanonicalPath, protected: &CanonicalPath) {
+        assert!(is_ancestor_of_subtree_protected(root));
+        assert!(is_protected_container_root(root));
+        assert!(root.is_self_or_ancestor_of(protected));
+    }
+
+    fn assert_prefix_confusion_allowed(p: &CanonicalPath) {
+        assert!(!is_subtree_protected(p), "prefix confusion: {p}");
+        assert!(!is_protected_container_root(p), "prefix confusion: {p}");
+    }
+
+    fn assert_safe_directory_allowed(dir: &CanonicalPath, leaf: &CanonicalPath) {
+        assert!(!is_subtree_protected(dir), "expected allowed: {dir}");
+        assert!(!is_protected_for_selection(dir), "expected allowed: {dir}");
+        assert!(
+            validate_custom_path_lexical(&leaf.to_string()).allowed,
+            "expected custom path allowed: {leaf}"
+        );
+    }
+
+    fn assert_unicode_path_allowed(p: &CanonicalPath) {
+        assert!(!is_subtree_protected(p), "unicode subtree: {p}");
+        assert!(
+            validate_custom_path_lexical(&p.to_string()).allowed,
+            "unicode custom path: {p}"
+        );
+    }
+
+    fn assert_unicode_segment_not_protected(p: &CanonicalPath, at_root: &CanonicalPath) {
+        assert!(!is_subtree_protected(p), "unicode segment: {p}");
+        assert!(
+            !is_protected_container_root(at_root),
+            "unicode root: {at_root}"
+        );
+    }
+
     #[test]
     fn protected_paths_are_drive_agnostic() {
         // Audit F37: the same protections must hold on any fixed drive. Paths are
@@ -611,55 +677,28 @@ mod tests {
             r"System Volume Information",
             r"Windows\System32\drivers",
         ] {
-            let p = on('D', rest);
-            assert!(is_subtree_protected(&p), "expected subtree-protected: {p}");
-            assert!(
-                is_protected_for_selection(&p),
-                "expected protected for selection: {p}"
-            );
+            assert_subtree_and_selection_protected(&on('D', rest));
         }
 
         // Protected container roots on D: (exact identity and descendants).
         for rest in ["Windows", "Users", "ProgramData"] {
-            let p = on('D', rest);
-            assert!(
-                is_protected_container_root(&p),
-                "expected container root: {p}"
-            );
-            assert!(
-                is_under_protected_container_root(&p),
-                "expected under container: {p}"
-            );
-            assert!(
-                !validate_custom_path_lexical(&p.to_string()).allowed,
-                "custom path must be rejected: {p}"
-            );
+            assert_container_root_fully_protected(&on('D', rest));
         }
-        let profile = on('D', r"Users\Alice");
-        assert!(is_protected_container_root(&profile));
-        assert!(is_under_protected_container_root(&profile));
+        assert_profile_root_protected(&on('D', r"Users\Alice"));
 
         // A drive root is an ancestor of every protected path on that drive.
-        let d_root = drive_root('D');
-        assert!(is_ancestor_of_subtree_protected(&d_root));
-        assert!(is_protected_container_root(&d_root));
-        assert!(d_root.is_self_or_ancestor_of(&on('D', "Windows")));
+        assert_drive_root_ancestry(&drive_root('D'), &on('D', "Windows"));
 
         // Prefix confusion and ordinary directories remain allowed on D:.
-        assert!(!is_subtree_protected(&on('D', "Windows.old")));
-        assert!(!is_protected_container_root(&on('D', "Windows.old")));
-        assert!(!is_subtree_protected(&on('D', r"Temp\safe")));
-        assert!(!is_protected_for_selection(&on('D', r"Temp\safe")));
-        assert!(validate_custom_path_lexical(&on('D', r"Temp\safe\leaf").to_string()).allowed);
+        assert_prefix_confusion_allowed(&on('D', "Windows.old"));
+        assert_safe_directory_allowed(&on('D', r"Temp\safe"), &on('D', r"Temp\safe\leaf"));
 
         // Unicode paths remain unaffected by the segment-based checks.
-        let unicode_safe = on('D', "Ünicode/文档/données/leaf");
-        assert!(!is_subtree_protected(&unicode_safe));
-        assert!(validate_custom_path_lexical(&unicode_safe.to_string()).allowed);
-        let unicode_protected = on('D', "Ünicode/Windows/System32");
-        assert!(!is_subtree_protected(&unicode_protected));
-        let unicode_at_root = on('D', "Ünicode");
-        assert!(!is_protected_container_root(&unicode_at_root));
+        assert_unicode_path_allowed(&on('D', "Ünicode/文档/données/leaf"));
+        assert_unicode_segment_not_protected(
+            &on('D', "Ünicode/Windows/System32"),
+            &on('D', "Ünicode"),
+        );
     }
 
     #[test]
@@ -690,6 +729,15 @@ mod tests {
         )));
     }
 
+    fn assert_onedrive_root_is_protected(p: &CanonicalPath) {
+        assert!(is_onedrive_sync_root(p), "expected OneDrive root: {p}");
+        assert!(is_subtree_protected(p), "expected protected: {p}");
+    }
+
+    fn assert_not_onedrive_root(p: &CanonicalPath) {
+        assert!(!is_onedrive_sync_root(p), "unexpected OneDrive root: {p}");
+    }
+
     #[test]
     fn onedrive_sync_root_matches_kb_one_drive_star_on_any_drive() {
         // Audit F8: OneDrive* recognition must be case-insensitive, start-with based,
@@ -703,12 +751,10 @@ mod tests {
             ('D', r"Data\onedrive-sync"),
             ('D', r"Users\Bob\OneDrive - Tailspin"),
         ] {
-            let p = path_on(drive, rest);
-            assert!(is_onedrive_sync_root(&p), "expected OneDrive root: {p}");
-            assert!(is_subtree_protected(&p), "expected protected: {p}");
+            assert_onedrive_root_is_protected(&path_on(drive, rest));
         }
-        assert!(!is_onedrive_sync_root(&canon(r"C:\Users\Alice\Documents")));
-        assert!(!is_onedrive_sync_root(&canon(r"C:\Temp\cache")));
+        assert_not_onedrive_root(&canon(r"C:\Users\Alice\Documents"));
+        assert_not_onedrive_root(&canon(r"C:\Temp\cache"));
     }
 
     #[test]

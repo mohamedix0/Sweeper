@@ -265,16 +265,56 @@ fn invalid_log_id() -> ContractError {
 /// `log_id` must be a bare file name: no drive qualifier (`:`), no separators,
 /// no traversal, and no empty value. Dots within a name (e.g. `clean.2026`) and
 /// Unicode names remain valid.
-fn validate_log_id(log_id: &str) -> Result<(), ContractError> {
-    if log_id.is_empty()
-        || log_id.contains("..")
-        || log_id.contains('/')
-        || log_id.contains('\\')
-        || log_id.contains(':')
-    {
-        return Err(invalid_log_id());
+///
+/// Each rule is a flat guard, so the predicate has no compound `||` conditional.
+fn is_valid_log_id(log_id: &str) -> bool {
+    if log_id.is_empty() {
+        return false;
     }
-    Ok(())
+    if log_id.contains("..") {
+        return false;
+    }
+    if log_id.contains('/') {
+        return false;
+    }
+    if log_id.contains('\\') {
+        return false;
+    }
+    if log_id.contains(':') {
+        return false;
+    }
+    true
+}
+
+fn validate_log_id(log_id: &str) -> Result<(), ContractError> {
+    if is_valid_log_id(log_id) {
+        Ok(())
+    } else {
+        Err(invalid_log_id())
+    }
+}
+
+/// Join a candidate file name to the already-parsed logs directory.
+fn join_log_file_name(logs_dir: &CanonicalPath, name: &str) -> String {
+    if logs_dir.as_str().ends_with('\\') {
+        format!("{}{name}", logs_dir.as_str())
+    } else {
+        format!("{}\\{name}", logs_dir.as_str())
+    }
+}
+
+/// A resolved candidate is accepted only when it is a direct child of the logs
+/// directory on the same drive. Each rule is a flat guard with no `||`.
+fn is_direct_log_child(logs_dir: &CanonicalPath, resolved: &CanonicalPath) -> bool {
+    if resolved.segment_count() != logs_dir.segment_count() + 1 {
+        return false;
+    }
+    if !logs_dir.is_self_or_ancestor_of(resolved) {
+        return false;
+    }
+    resolved
+        .drive_prefix()
+        .eq_ignore_ascii_case(logs_dir.drive_prefix())
 }
 
 /// `read_log` in a specific directory (testable).
@@ -300,20 +340,9 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
         log_id.to_string(),
     ];
     for name in candidates {
-        let joined = if logs_dir.as_str().ends_with('\\') {
-            format!("{}{name}", logs_dir.as_str())
-        } else {
-            format!("{}\\{name}", logs_dir.as_str())
-        };
+        let joined = join_log_file_name(&logs_dir, &name);
         let resolved = CanonicalPath::parse_lexical(&joined).map_err(|_| invalid_log_id())?;
-        // The resolved file must be a direct child of the logs directory on the
-        // same drive. A mismatched segment count or failed containment is rejected.
-        if resolved.segment_count() != logs_dir.segment_count() + 1
-            || !logs_dir.is_self_or_ancestor_of(&resolved)
-            || !resolved
-                .drive_prefix()
-                .eq_ignore_ascii_case(logs_dir.drive_prefix())
-        {
+        if !is_direct_log_child(&logs_dir, &resolved) {
             return Err(invalid_log_id());
         }
 
