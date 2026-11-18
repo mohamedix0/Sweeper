@@ -378,6 +378,36 @@ fn canonical_path_from_handle_final(final_path: &str) -> Option<CanonicalPath> {
     CanonicalPath::parse_lexical(stripped).ok()
 }
 
+/// Resolve the configured logs directory to its final (long-name) path via a
+/// no-follow handle, so containment compares like-for-like with the file-handle
+/// final path produced by `validate_log_handle`.
+///
+/// On NTFS the configured directory string can contain an 8.3 short-name segment
+/// (e.g. `RUNNER~1` under `%TEMP%` on CI runners), while
+/// `GetFinalPathNameByHandle` returns fully resolved long names. Comparing a
+/// lexical short-name base against a resolved long-name file path would reject
+/// valid direct children. Resolving the directory through a
+/// `FILE_FLAG_OPEN_REPARSE_POINT` handle (so Link Points in the directory path
+/// are never followed) keeps both sides in the same namespace without relaxing
+/// any reparse-point/junction containment check. `None` means the handle could
+/// not be opened or the final path could not be parsed; the caller then falls
+/// back to the lexical form and still enforces containment (fail closed).
+fn canonicalize_logs_dir(dir: &Path) -> Option<CanonicalPath> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+        .ok()?;
+    let final_path = get_final_path_from_raw_handle(handle.as_raw_handle()).ok()?;
+    canonical_path_from_handle_final(&final_path)
+}
+
 /// Validate the already-open READ handle without reopening its path.
 ///
 /// Containment is resolved from this very handle. `GetFinalPathNameByHandle`
@@ -469,8 +499,12 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
         });
     };
 
-    let logs_dir =
-        CanonicalPath::parse_lexical(&dir.to_string_lossy()).map_err(|_| invalid_log_id())?;
+    // Resolve the base to long names so the handle final path check below
+    // compares like-for-like; a short-name base (8.3 alias in `%TEMP%`) would
+    // otherwise reject valid direct children on the CI Windows runner.
+    let logs_dir = canonicalize_logs_dir(dir)
+        .or_else(|| CanonicalPath::parse_lexical(&dir.to_string_lossy()).ok())
+        .ok_or_else(invalid_log_id)?;
 
     // Try the same extensions as `list_logs`, plus the bare ID.
     let candidates = [
@@ -688,10 +722,14 @@ mod tests {
         std::fs::rename(&logs, &swapped_away).expect("move junction aside");
         std::fs::create_dir_all(&logs).expect("create real logs dir");
         std::fs::write(&candidate, b"benign").expect("write benign direct child");
-        let path_based = CanonicalPath::from_existing_path(&candidate.to_string_lossy())
+        // Use the lexical parser here (not `from_existing_path`) to illustrate
+        // the old path-based check: on runners whose temp path contains an 8.3
+        // short-name segment, `from_existing_path` rejects it as a short-name
+        // alias, which is unrelated to the junction-swap behaviour under test.
+        let path_based = CanonicalPath::parse_lexical(&candidate.to_string_lossy())
             .expect("benign file should resolve by path after swap");
         assert!(
-            super::is_direct_log_child(&logs_dir, path_based.canonical()),
+            super::is_direct_log_child(&logs_dir, &path_based),
             "this is why the old second-open check was fooled by the swap"
         );
 
@@ -732,6 +770,45 @@ mod tests {
             matches!(err, ContractError::InvalidInput { .. }),
             "grown log must fail instead of returning a truncated record, got {err:?}"
         );
+    }
+
+    /// Regression for the CI Gate-A failures (run 44375028741): on GitHub's
+    /// Windows runner the temp directory contains an 8.3 short-name segment
+    /// (e.g. `RUNNER~1`). `GetFinalPathNameByHandle` returns the long name while
+    /// the lexical logs-dir path keeps the short name, so the final-path
+    /// containment check rejected valid direct children. A junction ancestor
+    /// named with `~` reproduces that alias deterministically without depending
+    /// on the runner's 8.3-name registry settings.
+    #[test]
+    #[cfg(windows)]
+    fn read_log_resolves_short_name_alias_in_logs_dir_ancestor() {
+        use sweeper_testkit::create_junction;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let real_root = outer.path().join("real-root");
+        std::fs::create_dir_all(&real_root).expect("real root");
+        let alias_root = outer.path().join("ROOTA~1");
+        match create_junction(&alias_root, &real_root) {
+            Ok(()) => {}
+            Err(e) => {
+                if is_insufficient_privilege_error(&e) {
+                    eprintln!("skipping alias regression test (insufficient privilege): {e}");
+                    return;
+                }
+                panic!("create junction failed: {e}");
+            }
+        }
+
+        // The logs directory is below the alias junction, so the input path has
+        // a `~` ancestor exactly like `%TEMP%` on the CI runner.
+        let logs = alias_root.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
+
+        let resp = read_log_in_dir(Some(&logs), "good")
+            .expect("short-name alias in logs path must still resolve");
+        assert_eq!(resp.id, "good");
+        assert_eq!(resp.content, "ok");
     }
 
     #[test]
