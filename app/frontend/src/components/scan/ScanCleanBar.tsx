@@ -1,6 +1,7 @@
 ﻿import { formatBytes, pluralize } from '../../utils/format';
+import { deleteActionLabel, localizedCount } from '../cleanActionLabel';
 
-interface ScanCleanBarProps {
+export interface ScanCleanBarProps {
   selectedIdsCount: number;
   selectedCategoryCount: number;
   selectedBytes: string | bigint;
@@ -9,6 +10,7 @@ interface ScanCleanBarProps {
   hasPreview: boolean;
   canPreview: boolean;
   canClean: boolean;
+  reviewPending: boolean;
   onClear: () => void;
   onPreview: () => void;
   onClean: () => void;
@@ -20,21 +22,41 @@ function reviewLabel(args: ScanCleanBarProps): string {
   return `Review & Clean (${formatBytes({ bytes: args.selectedBytes })})`;
 }
 
-function cleanLabel(args: { cleaning: boolean }): string {
-  if (args.cleaning) return 'Cleaning…';
-  return 'Clean Permanently';
-}
-
 function ActionButton(props: ScanCleanBarProps) {
   if (!props.hasPreview) {
     return <button className="btn primary" onClick={props.onPreview} disabled={!props.canPreview} aria-label="Review & Clean">{reviewLabel(props)}</button>;
   }
-  return <button className="btn danger primary" onClick={props.onClean} disabled={!props.canClean} aria-label="Clean Permanently">{cleanLabel({ cleaning: props.cleaning })}</button>;
+  const label = deleteActionLabel({
+    count: props.selectedIdsCount,
+    size: formatBytes({ bytes: props.selectedBytes }),
+    cleaning: props.cleaning,
+    singular: 'file',
+    plural: 'files',
+  });
+  return (
+    <button
+      className="btn danger primary"
+      onClick={props.onClean}
+      disabled={!props.canClean}
+      aria-label="Clean Permanently"
+      aria-describedby={props.reviewPending ? 'clean-review-pending' : undefined}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PendingReviewStatus(props: { count: number }) {
+  return (
+    <span id="clean-review-pending" className="clean-review-pending" role="status" aria-live="polite">
+      Preparing safety review… {localizedCount({ count: props.count, singular: 'item', plural: 'items' })}
+    </span>
+  );
 }
 
 function UnselectAllButton(props: ScanCleanBarProps) {
   if (props.selectedIdsCount <= 0) return null;
-  return <button type="button" className="btn small subtle-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
+  return <button type="button" className="btn small subtle-btn cleanup-deselect-btn" onClick={props.onClear} disabled={props.cleaning} aria-label="Unselect all">Unselect all</button>;
 }
 
 export function ScanCleanBar(props: ScanCleanBarProps) {
@@ -48,7 +70,10 @@ export function ScanCleanBar(props: ScanCleanBarProps) {
         <UnselectAllButton {...props} />
         <span className="scan-bottom-bar-hint muted">Next: Review summary · permanent delete (skips Recycle Bin)</span>
       </div>
-      <div className="scan-bottom-bar-right"><ActionButton {...props} /></div>
+      <div className="scan-bottom-bar-right">
+        {props.hasPreview && props.reviewPending && <PendingReviewStatus count={props.selectedIdsCount} />}
+        <ActionButton {...props} />
+      </div>
     </div>
   );
 }
