@@ -60,8 +60,8 @@ Required tooling and the exact checks:
 | Git + GitHub CLI | `git --version`, `gh --version`, `gh auth status` | `gh auth login` if not authenticated; PR/issue workflow depends on it |
 | Rust toolchain | `rustc --version`, `cargo --version` | CI pins Rust `1.99.1`; use `rustup` to match. Add `rustfmt`, `clippy` |
 | Cargo target hygiene | `$env:CARGO_TARGET_DIR = (Join-Path (git rev-parse --show-toplevel) "target")` | All builds must land here, never in per-worktree folders |
-| Node + pnpm | `node --version`, `pnpm --version` | `corepack enable` if pnpm is absent; CI uses pnpm 9 / Node 20+ |
-| Tauri CLI / WebView2 / NSIS | `cargo tauri --version` | Needed for `scripts/package-windows.ps1` default mode; `-StandaloneOnly` is not CI-equivalent |
+| Node + pnpm | `node --version`, `pnpm --version` | `corepack enable` if pnpm is absent; Node >= 20 required (bootstrap accepts any major >= 20); CI pins pnpm 9 / Node 24 |
+| Tauri CLI / NSIS | `cargo tauri --version`, `makensis.exe` present | Needed for `scripts/package-windows.ps1` default mode; `-StandaloneOnly` is not CI-equivalent |
 | Microsoft Edge (system channel) | Edge present; Playwright config uses `channel: "msedge"` | Do **not** download Playwright browsers |
 | CodeRabbit | GitHub App enabled on the repo; PR checks visible | **Never run the `coderabbit` CLI locally** — this is a permanent AGENTS.md rule. Verification is purely via GitHub PR checks/reviews; trigger with `@coderabbitai review` on OSS PRs when skipped |
 | CodeScene | PR check `CodeScene Code Health Review (main)` visible on GitHub; MCP tools if available in-session | Verify the check exists on a PR before merging |
