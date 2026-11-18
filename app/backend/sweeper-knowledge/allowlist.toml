@@ -611,11 +611,11 @@ name = "Opera Code Cache"
 tier = "Tier2"
 risk = "Safe"
 known_folder = "RoamingAppData"
-relative_subpath = "Opera Software\\Opera *\\Code Cache"
+relative_subpath = "Opera Software\\Opera *\\Default\\Code Cache"
 scope = "contents"
 min_age_hours = 24
 requires_elevation = false
-description = "Opera browser compiled/script code cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera profile tree. Regenerated automatically."
+description = "Opera browser compiled/script code cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera Default profile tree (Opera One 104+ / Opera GX 119+). Regenerated automatically."
 
 [[targets]]
 id = "opera-gpu-cache"
@@ -623,11 +623,11 @@ name = "Opera GPU Cache"
 tier = "Tier2"
 risk = "Safe"
 known_folder = "RoamingAppData"
-relative_subpath = "Opera Software\\Opera *\\GPUCache"
+relative_subpath = "Opera Software\\Opera *\\Default\\GPUCache"
 scope = "contents"
 min_age_hours = 24
 requires_elevation = false
-description = "Opera browser GPU cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera profile tree. Regenerated automatically."
+description = "Opera browser GPU cache across Opera channel profiles (Opera *). This cache leaf lives under the Roaming Opera Default profile tree (Opera One 104+ / Opera GX 119+). Regenerated automatically."
 
 [[targets]]
 id = "discord-cache"

@@ -398,7 +398,7 @@ fn browser_and_app_knowledge_entries() -> Vec<KnowledgeEntry> {
             // RoamingAppData (the Roaming Opera profile tree).
             known_folder: Some(KnownFolder::LocalAppData),
             relative_pattern: r"Vivaldi\User Data\Default\Cache; Vivaldi\User Data\Profile *\Cache; Opera Software\Opera *\Cache; Opera Software\Opera *\Default\Cache".to_string(),
-            notes: "Safe. Only explicit cache leaf folders are targeted; browser profile data (history, cookies, bookmarks, settings) is not targeted. Opera HTTP Cache lives under LocalAppData; Opera Code Cache and GPUCache live under the RoamingAppData Opera profile tree.".to_string(),
+            notes: "Safe. Only explicit cache leaf folders are targeted; browser profile data (history, cookies, bookmarks, settings) is not targeted. Opera HTTP Cache lives under LocalAppData; Opera Code Cache and GPUCache live under the RoamingAppData Opera Default profile tree (Opera One 104+ / Opera GX 119+).".to_string(),
         },
         KnowledgeEntry {
             id: "kb-app-runtime-caches".to_string(),

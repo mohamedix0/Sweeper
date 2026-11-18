@@ -56,12 +56,12 @@ const VIVALDI_OPERA_LEAF_TARGETS: &[(&str, &str, KnownFolder)] = &[
     ),
     (
         "opera-code-cache",
-        r"Opera Software\Opera *\Code Cache",
+        r"Opera Software\Opera *\Default\Code Cache",
         KnownFolder::RoamingAppData,
     ),
     (
         "opera-gpu-cache",
-        r"Opera Software\Opera *\GPUCache",
+        r"Opera Software\Opera *\Default\GPUCache",
         KnownFolder::RoamingAppData,
     ),
 ];
