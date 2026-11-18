@@ -354,7 +354,10 @@ function Get-PrivacyRules() {
   # leading-token suppression is used, so a one-word allowlisted prefix cannot hide a non-allowlisted
   # root. Escaped-string matches receive an additional string-literal guard in the hit helper below.
   $rootSeparatorPattern = '\\+'
-  $quoteAwareSegmentPattern = '(?<seg>[A-Za-z0-9_.][^\\\r\n"''`<>{}:]*)(?=\\|["'']|(?:\r?\n)?$)'
+  # The first character of a segment may be ANY legal Windows filename character, including
+  # non-ASCII letters (e.g. "equipe" with an accent). Only whitespace and path/quote delimiters
+  # are excluded, so leading-whitespace prose still cannot be mistaken for a bare path.
+  $quoteAwareSegmentPattern = '(?<seg>[^\s\\\r\n"''`<>{}:][^\\\r\n"''`<>{}:]*)(?=\\|["'']|(?:\r?\n)?$)'
   $absoluteDrivePathPattern = '(?i)\b(?<drive>[A-Za-z]):' + $rootSeparatorPattern + $quoteAwareSegmentPattern
   # A checkout-style absolute path buried under an otherwise-allowlisted fixture/placeholder root,
   # e.g. a source checkout's app folder beneath a first segment that the absolute-path rule permits.
@@ -483,11 +486,13 @@ function Test-IsQuotedPathRoot([string]$text, $match) {
   return (($prev -eq [char]34) -or ($prev -eq [char]39))
 }
 
-function Test-IsMalformedPathSegment([string]$seg) {
-  # A Unicode solidus/slash lookalike is not a valid Windows path character. Invalid-path
-  # fixtures use it to fake a separator (e.g. "Temp" + U+FF0F + "foo"). Exempt only that
-  # malformed shape; ordinary non-ASCII folder names (e.g. "private-" + U+00E9 + "quipe") stay reportable.
-  return ($seg -match '[\uFF0F\u2044\u2215\u29F8\u2AFB]')
+function Test-IsSyntheticMalformedFixture([string]$key) {
+  # The ONLY intentionally exempt malformed path in the repo's adversarial fixtures is the
+  # synthetic Temp + U+FF0F + foo literal under an allowlisted root. U+FF0F is a legal Windows
+  # filename character, so a real path using it must stay reportable. Match the exact fixture by
+  # its full case-folded key; never exempt a slash lookalike by character class. Paths here are
+  # assembled from fragments at runtime so this gate never stores an absolute machine path.
+  return ($key -ieq ('c:\temp' + [char]0xFF0F + 'foo'))
 }
 
 function Test-HasNestedPathSeparator([string]$text, $match) {
@@ -497,19 +502,22 @@ function Test-HasNestedPathSeparator([string]$text, $match) {
 }
 
 function Test-IsEscapedProseSegment([string]$seg, [string]$drive, [string[]]$allowedRoots) {
-  # Escaped-string prose names an allowlisted root followed by an ordinary lower-case
-  # sentence (e.g. "Users must be rejected by sandbox safety validation"). A genuine path
-  # segment such as "Windows confidential" is short, so require at least two words after the
-  # leading root token before suppressing the match. This keeps the prose guard intact while
-  # no longer hiding bare or nested escaped paths with a lowercase continuation.
+  # Escaped-string prose names an allowlisted root followed by an ordinary lower-case sentence
+  # (e.g. "Users must be rejected by sandbox safety validation"). A genuine path segment such as
+  # "Windows confidential files" uses a path-segment noun instead. Require the continuation to
+  # OPEN with a verb/auxiliary - the subject-plus-verb shape of a sentence - so multi-word path
+  # names are no longer mistaken for prose. System-root controls are allowlisted before this guard.
   $lead = [regex]::Match($seg, '^(\S+)\s+(.+)')
   if (-not $lead.Success) { return $false }
   $leadKey = ($drive + ':\' + $lead.Groups[1].Value).ToLowerInvariant()
   if (-not (Test-IsAllowedAbsolutePath $leadKey $allowedRoots)) { return $false }
   $continuation = $lead.Groups[2].Value
   if ($continuation -cnotmatch '[a-z]') { return $false }
-  $words = @($continuation -split '\s+' | Where-Object { $_ })
-  return ($words.Count -ge 2)
+  $firstWord = ([regex]::Match($continuation, '^[A-Za-z]+')).Value.ToLowerInvariant()
+  $proseVerbs = @('must','remains','is','are','was','were','be','been','being','can','could',
+                  'will','would','shall','should','may','might','has','have','had','does',
+                  'do','did','needs','need','seems','appears','becomes','continues','stays')
+  return ($proseVerbs -contains $firstWord)
 }
 
 function Test-ShouldSkipAbsolutePathMatch([string]$text, $match, [string[]]$allowedRoots) {
@@ -519,7 +527,7 @@ function Test-ShouldSkipAbsolutePathMatch([string]$text, $match, [string[]]$allo
   if (Test-IsAllowedAbsolutePath $key $allowedRoots) { return $true }
   if (-not (Test-IsEscapedPathRoot $text $match)) { return $false }
   if (-not (Test-IsQuotedPathRoot $text $match)) { return $true }
-  if (Test-IsMalformedPathSegment $seg) { return $true }
+  if (Test-IsSyntheticMalformedFixture $key) { return $true }
   if (Test-HasNestedPathSeparator $text $match) { return $false }
   return (Test-IsEscapedProseSegment $seg $drive $allowedRoots)
 }

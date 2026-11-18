@@ -430,9 +430,17 @@ function Test-SelfTestEscapedStringAbsolutePaths([ref]$ok) {
   $prefixHits = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $escapedWindowsBackup $pattern $allowed)
   Assert-SelfTest ($prefixHits.Count -ge 1) "escaped one-word prefix path must still be flagged" $ok
 
+}
+
+function Test-SelfTestEscapedLowercaseContinuations([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $quote = [char]34
+
   # CodeRabbit PR #48 thread 4607517845: bare and nested escaped paths whose first segment uses an
-  # allowlisted lead word followed by a lowercase continuation must be flagged. Prose is still
-  # suppressed by Test-IsEscapedProseSegment only when the literal ends right after that segment.
+  # allowlisted lead word followed by a lowercase continuation must be flagged.
   $escapedBareLower = $quote + 'C:' + $sep + $sep + 'Windows confidential' + $quote
   $bareMatchCount = @([regex]::Matches($escapedBareLower, $pattern)).Count
   Assert-SelfTest ($bareMatchCount -ge 1) "escaped bare lowercase-continuation path matches pattern" $ok
@@ -449,8 +457,27 @@ function Test-SelfTestEscapedStringAbsolutePaths([ref]$ok) {
   $nestedLowerWired = @(Get-PrivacyHitsForFile 'fixture.txt' $escapedNestedLower $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
   Assert-SelfTest ($nestedLowerWired.Count -ge 1) "escaped nested lowercase-continuation path flagged by file scan" $ok
 
-  # CodeRabbit PR #48 thread 4607568585: the prose exemption must not apply when the literal
-  # continues into more path segments after the captured allowlisted lead word.
+  # CodeRabbit PR #48 thread 4607652129: a two-word lowercase continuation in a bare escaped
+  # literal is a path segment, not prose. "confidential files" has no subject-verb prose shape.
+  $escapedTwoWord = $quote + 'C:' + $sep + $sep + 'Windows confidential files' + $quote + ';'
+  $twoWordMatchCount = @([regex]::Matches($escapedTwoWord, $pattern)).Count
+  Assert-SelfTest ($twoWordMatchCount -ge 1) "two-word continuation path matches pattern" $ok
+  $twoWordDirect = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $escapedTwoWord $pattern $allowed)
+  Assert-SelfTest ($twoWordDirect.Count -ge 1) "two-word continuation path flagged directly" $ok
+  $twoWordWired = @(Get-PrivacyHitsForFile 'fixture.txt' $escapedTwoWord $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+  Assert-SelfTest ($twoWordWired.Count -ge 1) "two-word continuation path flagged by file scan" $ok
+}
+
+function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $bs = '\'
+  $quote = [char]34
+
+  # CodeRabbit PR #48 thread 4607568585: continuation into more path segments after an allowlisted
+  # lead word must be reported even when the captured segment looks like prose.
   $continuedCases = @(
     ($quote + 'C:' + $sep + $sep + 'Windows backup' + $sep + $sep + 'private-data' + $sep + $sep + 'notes.txt' + $quote + ';')
     ($quote + 'C:' + $sep + $sep + 'Windows backup folder' + $sep + $sep + 'private-data' + $sep + $sep + 'notes.txt' + $quote + ';')
@@ -462,9 +489,7 @@ function Test-SelfTestEscapedStringAbsolutePaths([ref]$ok) {
     Assert-SelfTest ($wired.Count -ge 1) "continued escaped path must be flagged by file scan: $p" $ok
   }
 
-  # CodeRabbit PR #48 thread 4607568579: a valid non-ASCII folder name is not a reason to skip an
-  # escaped path. The malformed fullwidth-solidus fixture in $proseFixtures stays exempt via
-  # Test-IsMalformedPathSegment. The accent is assembled at runtime so no machine path is stored.
+  # CodeRabbit PR #48 thread 4607568579: a valid non-ASCII folder name must not suppress detection.
   $accent = [char]0x00E9
   $nonAsciiFolder = 'private-' + $accent + 'quipe'
   $escapedNonAscii = $quote + 'D:' + $sep + $sep + $nonAsciiFolder + $sep + $sep + 'notes.txt' + $quote + ';'
@@ -474,6 +499,25 @@ function Test-SelfTestEscapedStringAbsolutePaths([ref]$ok) {
   Assert-SelfTest ($nonAsciiDirect.Count -ge 1) "escaped valid non-ASCII path flagged directly" $ok
   $nonAsciiWired = @(Get-PrivacyHitsForFile 'fixture.txt' $escapedNonAscii $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
   Assert-SelfTest ($nonAsciiWired.Count -ge 1) "escaped valid non-ASCII path flagged by file scan" $ok
+
+  # CodeRabbit PR #48 thread 4607658800: a legal non-ASCII filename is allowed as the FIRST
+  # character of a segment, and U+FF0F is a legal Windows filename character. Both real paths
+  # below must be flagged; only the exact synthetic "Temp" + U+FF0F + "foo" fixture is exempt.
+  $leadingNonAsciiPath = $quote + 'D:' + $sep + $sep + $accent + 'quipe' + $sep + $sep + 'notes.txt' + $quote + ';'
+  $leadingNonAsciiMatches = @([regex]::Matches($leadingNonAsciiPath, $pattern)).Count
+  Assert-SelfTest ($leadingNonAsciiMatches -ge 1) "non-ASCII leading segment matches pattern" $ok
+  $leadingNonAsciiDirect = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $leadingNonAsciiPath $pattern $allowed)
+  Assert-SelfTest ($leadingNonAsciiDirect.Count -ge 1) "non-ASCII leading segment flagged directly" $ok
+  $leadingNonAsciiWired = @(Get-PrivacyHitsForFile 'fixture.txt' $leadingNonAsciiPath $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+  Assert-SelfTest ($leadingNonAsciiWired.Count -ge 1) "non-ASCII leading segment flagged by file scan" $ok
+
+  $slashLikePath = $quote + 'D:' + $sep + $sep + 'private' + [char]0xFF0F + 'notes' + $sep + $sep + 'file.txt' + $quote + ';'
+  $slashLikeMatches = @([regex]::Matches($slashLikePath, $pattern)).Count
+  Assert-SelfTest ($slashLikeMatches -ge 1) "slash-lookalike segment matches pattern" $ok
+  $slashLikeDirect = @(Get-PrivacyHitsForAbsolutePaths 'fixture.txt' $slashLikePath $pattern $allowed)
+  Assert-SelfTest ($slashLikeDirect.Count -ge 1) "slash-lookalike segment flagged directly" $ok
+  $slashLikeWired = @(Get-PrivacyHitsForFile 'fixture.txt' $slashLikePath $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
+  Assert-SelfTest ($slashLikeWired.Count -ge 1) "slash-lookalike segment flagged by file scan" $ok
 
   $malformed = $quote + 'C:' + $bs + $bs + 'Temp' + [char]0xFF0F + 'foo' + $quote
   $malformedWired = @(Get-PrivacyHitsForFile 'fixture.txt' $malformed $rules)
@@ -525,6 +569,8 @@ function Invoke-GateASelfTests {
   Test-SelfTestQuotedBareAbsolutePaths $okRef
   Test-SelfTestOneWordAllowlistedPrefix $okRef
   Test-SelfTestEscapedStringAbsolutePaths $okRef
+  Test-SelfTestEscapedLowercaseContinuations $okRef
+  Test-SelfTestEscapedContinuedAndNonAscii $okRef
   Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green

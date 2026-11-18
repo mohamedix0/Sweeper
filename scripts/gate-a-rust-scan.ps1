@@ -1,9 +1,22 @@
 # Gate A - Rust lexical scanner helpers.
 # Dot-sourced by gate-a-check.ps1. Pure state-machine functions that blank comments and
 # string literals so forbid(unsafe_code) and SAFETY-comment checks see only active code.
+# Compound character tests are named predicates so each function stays simple and reviewable.
 
 function Test-RustNewline([char]$c) {
   return ($c -eq "`r") -or ($c -eq "`n")
+}
+
+function Blank-RustNonNewline([hashtable]$state, [int]$i) {
+  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+}
+
+function Test-RustBlockOpen([hashtable]$state, [int]$i, [int]$j) {
+  return (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq '*'))
+}
+
+function Test-RustBlockClose([hashtable]$state, [int]$i, [int]$j) {
+  return (($j -lt $state.Len) -and ($state.Out[$i] -eq '*') -and ($state.Out[$j] -eq '/'))
 }
 
 function Get-RustScanState([string]$text) {
@@ -14,66 +27,78 @@ function Get-RustScanState([string]$text) {
 function Step-RustBlock([hashtable]$state) {
   $i = $state.Index
   $j = $i + 1
-  $open = (($state.Out[$i] -eq '/') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '*'))
-  if ($open) {
+  if (Test-RustBlockOpen $state $i $j) {
     $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth++; $state.Index = $i + 2; return
   }
-  $close = (($state.Out[$i] -eq '*') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq '/'))
-  if ($close) {
+  if (Test-RustBlockClose $state $i $j) {
     $state.Out[$i] = ' '; $state.Out[$j] = ' '; $state.Depth--; $state.Index = $i + 2; return
   }
-  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+  Blank-RustNonNewline $state $i
   $state.Index = $i + 1
 }
 
 function Step-RustLineComment([hashtable]$state) {
   $i = $state.Index
-  $isNl = Test-RustNewline $state.Out[$i]
-  if ($isNl) { $state.InLine = $false; $state.Index = $i + 1; return }
-  $state.Out[$i] = ' '; $state.Index = $i + 1
+  if (Test-RustNewline $state.Out[$i]) { $state.InLine = $false; $state.Index = $i + 1; return }
+  Blank-RustNonNewline $state $i
+  $state.Index = $i + 1
+}
+
+function Test-RustStringEscaped([hashtable]$state, [int]$i, [int]$j) {
+  return (($state.Out[$i] -eq '\') -and ($j -lt $state.Len))
 }
 
 function Step-RustString([hashtable]$state) {
   $i = $state.Index
   $j = $i + 1
-  $esc = (($state.Out[$i] -eq '\') -and ($j -lt $state.Len))
-  if ($esc) {
-    if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
-    if (-not (Test-RustNewline $state.Out[$j])) { $state.Out[$j] = ' ' }
+  if (Test-RustStringEscaped $state $i $j) {
+    Blank-RustNonNewline $state $i
+    Blank-RustNonNewline $state $j
     $state.Index = $i + 2; return
   }
   if ($state.Out[$i] -eq '"') {
     $state.Out[$i] = ' '; $state.InString = $false; $state.Index = $i + 1; return
   }
-  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+  Blank-RustNonNewline $state $i
   $state.Index = $i + 1
+}
+
+function Test-RustRawHashAt([hashtable]$state, [int]$i) {
+  return (($i -lt $state.Len) -and ($state.Out[$i] -eq '#'))
+}
+
+function Test-RustRawQuoteAt([hashtable]$state, [int]$i) {
+  return (($i -lt $state.Len) -and ($state.Out[$i] -eq '"'))
 }
 
 function Test-RustRawHashesAt([hashtable]$state, [int]$i) {
   $j = $i
-  while (($j -lt $state.Len) -and ($state.Out[$j] -eq '#')) { $j++ }
-  $ok = (($j -lt $state.Len) -and ($state.Out[$j] -eq '"'))
-  if (-not $ok) { return -1 }
+  while (Test-RustRawHashAt $state $j) { $j++ }
+  if (-not (Test-RustRawQuoteAt $state $j)) { return -1 }
   return ($j - $i)
+}
+
+function Test-RustRawPrefixAt([hashtable]$state, [int]$i, [int]$j, [char]$prefix) {
+  return (($state.Out[$i] -eq $prefix) -and ($j -lt $state.Len) -and ($state.Out[$j] -eq 'r'))
 }
 
 function Get-RustRawPrefixStart([hashtable]$state) {
   $i = $state.Index
-  if ($state.Out[$i] -eq 'r') { return $i }
   $j = $i + 1
-  $isB = (($state.Out[$i] -eq 'b') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq 'r'))
-  if ($isB) { return $j }
-  $isC = (($state.Out[$i] -eq 'c') -and ($j -lt $state.Len) -and ($state.Out[$j] -eq 'r'))
-  if ($isC) { return $j }
+  if ($state.Out[$i] -eq 'r') { return $i }
+  if (Test-RustRawPrefixAt $state $i $j 'b') { return $j }
+  if (Test-RustRawPrefixAt $state $i $j 'c') { return $j }
   return -1
+}
+
+function Test-RustIdentBefore([hashtable]$state, [int]$prev) {
+  return (($prev -ge 0) -and ($state.Out[$prev] -match '[A-Za-z0-9_]'))
 }
 
 function Try-StartRustRawString([hashtable]$state) {
   $rIdx = Get-RustRawPrefixStart $state
   if ($rIdx -lt 0) { return $false }
-  $prev = $state.Index - 1
-  $ident = (($prev -ge 0) -and ($state.Out[$prev] -match '[A-Za-z0-9_]'))
-  if ($ident) { return $false }
+  if (Test-RustIdentBefore $state ($state.Index - 1)) { return $false }
   $hashes = Test-RustRawHashesAt $state ($rIdx + 1)
   if ($hashes -lt 0) { return $false }
   $end = $rIdx + 1 + $hashes
@@ -86,8 +111,7 @@ function Test-RustRawCloseAt([hashtable]$state) {
   if ($state.Out[$i] -ne '"') { return $false }
   for ($k = 0; $k -lt $state.RawHashes; $k++) {
     $j = $i + 1 + $k
-    $inBounds = ($j -lt $state.Len)
-    if (-not $inBounds) { return $false }
+    if ($j -ge $state.Len) { return $false }
     if ($state.Out[$j] -ne '#') { return $false }
   }
   return $true
@@ -103,17 +127,19 @@ function Complete-RustRawClose([hashtable]$state) {
 
 function Step-RustRawString([hashtable]$state) {
   $isClose = Test-RustRawCloseAt $state
-  $i = $state.Index
-  if (-not (Test-RustNewline $state.Out[$i])) { $state.Out[$i] = ' ' }
+  Blank-RustNonNewline $state $state.Index
   if ($isClose) { Complete-RustRawClose $state; return }
-  $state.Index = $i + 1
+  $state.Index = $state.Index + 1
+}
+
+function Test-RustSlashPair([hashtable]$state, [int]$i, [int]$j, [char]$second) {
+  return (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq $second))
 }
 
 function Try-StartRustLineComment([hashtable]$state) {
   $i = $state.Index
   $j = $i + 1
-  $isLine = (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq '/'))
-  if (-not $isLine) { return $false }
+  if (-not (Test-RustSlashPair $state $i $j '/')) { return $false }
   $state.Out[$i] = ' '; $state.Out[$j] = ' '
   $state.InLine = $true; $state.Index = $i + 2
   return $true
@@ -122,8 +148,7 @@ function Try-StartRustLineComment([hashtable]$state) {
 function Try-StartRustBlockComment([hashtable]$state) {
   $i = $state.Index
   $j = $i + 1
-  $isBlock = (($j -lt $state.Len) -and ($state.Out[$i] -eq '/') -and ($state.Out[$j] -eq '*'))
-  if (-not $isBlock) { return $false }
+  if (-not (Test-RustSlashPair $state $i $j '*')) { return $false }
   $state.Out[$i] = ' '; $state.Out[$j] = ' '
   $state.Depth = 1; $state.Index = $i + 2
   return $true
@@ -137,13 +162,14 @@ function Try-StartRustQuoteString([hashtable]$state) {
   return $true
 }
 
+function Test-RustSimpleCharFiller([char]$c) {
+  return (($c -eq '\') -or ($c -eq "'") -or ($c -eq "`r") -or ($c -eq "`n"))
+}
+
 function Try-BlankRustSimpleChar([hashtable]$state) {
   $i = $state.Index
-  $len = $state.Len
-  if (($i + 2) -ge $len) { return $false }
-  $c1 = $state.Out[$i + 1]
-  $isBad = (($c1 -eq '\') -or ($c1 -eq "'") -or ($c1 -eq "`r") -or ($c1 -eq "`n"))
-  if ($isBad) { return $false }
+  if (($i + 2) -ge $state.Len) { return $false }
+  if (Test-RustSimpleCharFiller $state.Out[$i + 1]) { return $false }
   if ($state.Out[$i + 2] -ne "'") { return $false }
   $state.Out[$i] = ' '; $state.Out[$i + 1] = ' '; $state.Out[$i + 2] = ' '
   $state.Index = $i + 3
@@ -156,7 +182,7 @@ function Find-RustEscapedCharEnd([hashtable]$state) {
   $j = $i + 3
   while ($j -le $max) {
     $c = $state.Out[$j]
-    if (($c -eq "`r") -or ($c -eq "`n")) { return -1 }
+    if (Test-RustNewline $c) { return -1 }
     if ($c -eq "'") { return $j }
     $j++
   }
@@ -165,8 +191,7 @@ function Find-RustEscapedCharEnd([hashtable]$state) {
 
 function Try-BlankRustEscapedChar([hashtable]$state) {
   $i = $state.Index
-  $len = $state.Len
-  if (($i + 2) -ge $len) { return $false }
+  if (($i + 2) -ge $state.Len) { return $false }
   if ($state.Out[$i + 1] -ne '\') { return $false }
   $endIdx = Find-RustEscapedCharEnd $state
   if ($endIdx -lt 0) { return $false }
