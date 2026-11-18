@@ -144,6 +144,14 @@ impl CanonicalPath {
         if self.folded == other.folded {
             return true;
         }
+        if self.is_drive_root() {
+            // A drive root's normalized form already ends in '\' (e.g. `C:\`). The generic
+            // boundary check below looks for a *separator after* `self`, which does not exist
+            // for a root: the separator is the last character of `self` itself. Any path on
+            // the same drive is therefore under the root. Cross-drive paths cannot share the
+            // `X:\` prefix, so this stays segment-safe.
+            return other.folded.starts_with(&self.folded);
+        }
         if other.segments.len() <= self.segments.len() {
             return false;
         }
@@ -529,6 +537,39 @@ mod tests {
         assert!(!is_same_or_under(&b, &base));
         assert!(is_same_or_under(&c, &base));
         assert!(is_same_or_under(&base, &base));
+    }
+
+    #[test]
+    fn drive_root_is_self_or_ancestor_of_every_path_on_its_drive() {
+        // Regression (audit F7): a drive root already ends in '\', so the generic
+        // post-prefix boundary check misclassified all of its descendants.
+        // Paths are assembled at runtime so this test stays machine-neutral.
+        let root_str = |drive: char| format!("{drive}:\\");
+        let path_str = |drive: char, rest: &str| format!("{drive}:\\{rest}");
+
+        for drive in ['C', 'D'] {
+            let root = parse_drive_root(&root_str(drive)).expect("drive root");
+            let child = canon(&path_str(drive, r"Windows\System32"));
+            let deep = canon(&path_str(drive, r"A\B\C\D"));
+            assert!(
+                root.is_self_or_ancestor_of(&child),
+                "drive root must contain a direct child on the same drive"
+            );
+            assert!(
+                root.is_self_or_ancestor_of(&deep),
+                "drive root must contain a deep descendant on the same drive"
+            );
+            assert!(root.is_self_or_ancestor_of(&root), "root contains itself");
+        }
+
+        // Cross-drive paths must still be rejected by the prefix check.
+        let c_root = parse_drive_root(&root_str('C')).expect("C drive root");
+        let d_child = canon(&path_str('D', "Windows"));
+        assert!(!c_root.is_self_or_ancestor_of(&d_child));
+
+        // Unicode / non-ASCII descendants are handled by the same prefix rule.
+        let c_unicode = canon(&path_str('C', "Último/文档/données"));
+        assert!(c_root.is_self_or_ancestor_of(&c_unicode));
     }
 
     #[test]

@@ -428,6 +428,19 @@ pub fn inspect_handle(handle: &SafeHandle) -> Result<HandleInspection> {
     })
 }
 
+/// Decode the reparse tag (the first DWORD, little-endian) from an FSCTL output buffer.
+///
+/// Returns `None` when the device reported fewer than four bytes. Reading through an
+/// aligned byte conversion avoids the unaligned `u32` pointer dereference, which was
+/// formal undefined behaviour on this live path (audit F40).
+fn reparse_tag_from_buffer(buf: &[u8], bytes_returned: u32) -> Option<u32> {
+    if (bytes_returned as usize) < std::mem::size_of::<u32>() {
+        return None;
+    }
+    let tag_bytes: [u8; 4] = buf.get(..4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(tag_bytes))
+}
+
 fn query_reparse_tag(handle: &SafeHandle) -> Result<Option<u32>> {
     let mut buf = vec![0u8; 16 * 1024];
     let mut bytes_returned: u32 = 0;
@@ -457,11 +470,10 @@ fn query_reparse_tag(handle: &SafeHandle) -> Result<Option<u32>> {
             code: err,
         });
     }
-    if (bytes_returned as usize) < std::mem::size_of::<u32>() {
-        return Ok(Some(0));
-    }
-    // SAFETY: at least 4 bytes returned; first DWORD of reparse data buffer is the reparse tag.
-    let tag = unsafe { *(buf.as_ptr() as *const u32) };
+    let tag = match reparse_tag_from_buffer(&buf, bytes_returned) {
+        Some(tag) => tag,
+        None => return Ok(Some(0)),
+    };
     Ok(Some(tag))
 }
 
@@ -764,11 +776,10 @@ pub fn inspect_reparse_point(handle: &SafeHandle) -> Result<ReparseTagClass> {
             code: err,
         });
     }
-    if (bytes_returned as usize) < std::mem::size_of::<u32>() {
-        return Ok(ReparseTagClass::OtherReparse(0));
-    }
-    // SAFETY: buffer contains at least 4 bytes; first field of reparse data buffer is the tag.
-    let tag = unsafe { *(buf.as_ptr() as *const u32) };
+    let tag = match reparse_tag_from_buffer(&buf, bytes_returned) {
+        Some(tag) => tag,
+        None => return Ok(ReparseTagClass::OtherReparse(0)),
+    };
     Ok(classify_reparse_tag(tag))
 }
 
@@ -1310,4 +1321,27 @@ pub fn set_last_write_time(path: &Path, filetime: u64) -> Result<()> {
         return Err(last_error("SetFileTime"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reparse_tag_from_buffer;
+
+    #[test]
+    fn reparse_tag_is_decoded_as_little_endian_dword() {
+        // 0xA000_000C (IO_REPARSE_TAG_SYMLINK) in little-endian byte order.
+        let buf = [0x0C, 0x00, 0x00, 0xA0, 0xDE, 0xAD, 0xBE, 0xEF];
+        assert_eq!(reparse_tag_from_buffer(&buf, 8), Some(0xA000_000C));
+    }
+
+    #[test]
+    fn reparse_tag_decode_respects_bytes_returned_guard() {
+        let buf = [0x0C, 0x00, 0x00, 0xA0];
+        // Fewer than four bytes reported -> no tag (callers use their safe fallback).
+        assert_eq!(reparse_tag_from_buffer(&buf, 0), None);
+        assert_eq!(reparse_tag_from_buffer(&buf, 3), None);
+        // Short backing buffer must not panic or over-read.
+        assert_eq!(reparse_tag_from_buffer(&[0x0C, 0x00], 4), None);
+        assert_eq!(reparse_tag_from_buffer(&buf, 4), Some(0xA000_000C));
+    }
 }

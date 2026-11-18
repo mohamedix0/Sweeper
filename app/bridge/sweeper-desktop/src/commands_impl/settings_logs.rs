@@ -1,11 +1,18 @@
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
     ContractError, LogMetadataDto, LogReadResponse, SettingsDto, U64String,
     ValidateCustomPathResponse,
 };
+
+use sweeper_core::paths::CanonicalPath;
+
+/// Upper bound on bytes returned by a single `read_log` IPC call (8 MiB).
+/// Log files are small JSONL streams; bounding the read prevents a tampered or
+/// runaway file from exhausting application memory.
+const MAX_LOG_READ_BYTES: u64 = 8 * 1024 * 1024;
 
 use crate::clock::Clock;
 use crate::AppState;
@@ -249,44 +256,90 @@ pub fn read_log<C: Clock>(
     read_log_in_dir(default_logs_dir().as_deref(), &log_id)
 }
 
+fn invalid_log_id() -> ContractError {
+    ContractError::InvalidInput {
+        reason: "invalid log id".into(),
+    }
+}
+
+/// `log_id` must be a bare file name: no drive qualifier (`:`), no separators,
+/// no traversal, and no empty value. Dots within a name (e.g. `clean.2026`) and
+/// Unicode names remain valid.
+fn validate_log_id(log_id: &str) -> Result<(), ContractError> {
+    if log_id.is_empty()
+        || log_id.contains("..")
+        || log_id.contains('/')
+        || log_id.contains('\\')
+        || log_id.contains(':')
+    {
+        return Err(invalid_log_id());
+    }
+    Ok(())
+}
+
 /// `read_log` in a specific directory (testable).
+///
+/// Defense in depth (audit F38): the ID is restricted to a file name, the candidate
+/// path is parsed with the canonical path parser, and the parsed path must lie
+/// exactly one segment below the logs directory. Reads are size-bounded.
 pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadResponse, ContractError> {
-    if log_id.contains("..") {
-        return Err(ContractError::InvalidInput {
-            reason: "invalid log id".into(),
-        });
-    }
-    if log_id.contains('/') {
-        return Err(ContractError::InvalidInput {
-            reason: "invalid log id".into(),
-        });
-    }
-    if log_id.contains('\\') {
-        return Err(ContractError::InvalidInput {
-            reason: "invalid log id".into(),
-        });
-    }
+    validate_log_id(log_id)?;
     let Some(dir) = dir else {
         return Err(ContractError::NotFound {
             reason: "log not found".into(),
         });
     };
-    // Try common extensions
+
+    let logs_dir =
+        CanonicalPath::parse_lexical(&dir.to_string_lossy()).map_err(|_| invalid_log_id())?;
+
+    // Try the same extensions as `list_logs`, plus the bare ID.
     let candidates = [
-        dir.join(format!("{log_id}.jsonl")),
-        dir.join(format!("{log_id}.log")),
-        dir.join(log_id),
+        format!("{log_id}.jsonl"),
+        format!("{log_id}.log"),
+        log_id.to_string(),
     ];
-    for p in candidates {
-        if p.is_file() {
-            let content = fs::read_to_string(&p).map_err(|_| ContractError::NotFound {
-                reason: "log not found".into(),
-            })?;
-            return Ok(LogReadResponse {
-                id: log_id.to_string(),
-                content,
+    for name in candidates {
+        let joined = if logs_dir.as_str().ends_with('\\') {
+            format!("{}{name}", logs_dir.as_str())
+        } else {
+            format!("{}\\{name}", logs_dir.as_str())
+        };
+        let resolved = CanonicalPath::parse_lexical(&joined).map_err(|_| invalid_log_id())?;
+        // The resolved file must be a direct child of the logs directory on the
+        // same drive. A mismatched segment count or failed containment is rejected.
+        if resolved.segment_count() != logs_dir.segment_count() + 1
+            || !logs_dir.is_self_or_ancestor_of(&resolved)
+            || !resolved
+                .drive_prefix()
+                .eq_ignore_ascii_case(logs_dir.drive_prefix())
+        {
+            return Err(invalid_log_id());
+        }
+
+        let path = Path::new(resolved.as_str());
+        if !path.is_file() {
+            continue;
+        }
+        let file = fs::File::open(path).map_err(|_| ContractError::NotFound {
+            reason: "log not found".into(),
+        })?;
+        let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+        if size > MAX_LOG_READ_BYTES {
+            return Err(ContractError::InvalidInput {
+                reason: "log file too large".into(),
             });
         }
+        let mut content = String::new();
+        file.take(MAX_LOG_READ_BYTES)
+            .read_to_string(&mut content)
+            .map_err(|_| ContractError::NotFound {
+                reason: "log not found".into(),
+            })?;
+        return Ok(LogReadResponse {
+            id: log_id.to_string(),
+            content,
+        });
     }
     Err(ContractError::NotFound {
         reason: "log not found".into(),
@@ -295,7 +348,75 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
 
 #[cfg(test)]
 mod tests {
-    use super::clean_log_phantom_reasons;
+    use super::{clean_log_phantom_reasons, read_log_in_dir, MAX_LOG_READ_BYTES};
+    use sweeper_contract::ContractError;
+
+    #[test]
+    fn read_log_accepts_valid_dotted_and_unicode_file_name_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("create logs dir");
+        std::fs::write(logs.join("clean.2026.ünicode.jsonl"), b"line-one\n").expect("write log");
+
+        let resp = read_log_in_dir(Some(&logs), "clean.2026.ünicode").expect("read log");
+        assert_eq!(resp.id, "clean.2026.ünicode");
+        assert_eq!(resp.content, "line-one\n");
+
+        // The bare-ID candidate is supported too.
+        std::fs::write(logs.join("plain-id"), b"bare").expect("write bare log");
+        assert_eq!(
+            read_log_in_dir(Some(&logs), "plain-id")
+                .expect("read bare log")
+                .content,
+            "bare"
+        );
+    }
+
+    #[test]
+    fn read_log_rejects_drive_qualified_and_non_file_name_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("create logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
+
+        let bad_ids = [
+            format!("{}:foo", "C"), // drive-qualified ID must not escape the logs dir
+            "..".to_string(),
+            "../outside".to_string(),
+            "sub\\file".to_string(),
+            "sub/file".to_string(),
+            String::new(),
+        ];
+        for id in bad_ids {
+            let err = read_log_in_dir(Some(&logs), &id).unwrap_err();
+            assert!(
+                matches!(err, ContractError::InvalidInput { .. }),
+                "id={id:?} should be rejected as invalid input, got: {err:?}"
+            );
+        }
+        // A valid ID still resolves after the hardened checks.
+        assert_eq!(
+            read_log_in_dir(Some(&logs), "good")
+                .expect("valid log id")
+                .content,
+            "ok"
+        );
+    }
+
+    #[test]
+    fn read_log_caps_bytes_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("create logs dir");
+        let oversized = vec![b'x'; (MAX_LOG_READ_BYTES + 1) as usize];
+        std::fs::write(logs.join("huge.jsonl"), &oversized).expect("write oversized log");
+
+        let err = read_log_in_dir(Some(&logs), "huge").unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "oversized log must be rejected, got: {err:?}"
+        );
+    }
 
     #[test]
     fn real_path_with_sweeper_test_substring_is_not_sandbox() {
