@@ -317,11 +317,129 @@ fn is_direct_log_child(logs_dir: &CanonicalPath, resolved: &CanonicalPath) -> bo
         .eq_ignore_ascii_case(logs_dir.drive_prefix())
 }
 
+/// Open a candidate log file without following reparse points.
+///
+/// Uses the same `FILE_FLAG_OPEN_REPARSE_POINT` no-follow pattern as
+/// `sweeper_winfs::open_for_inspection`, but requests read access so the bounded
+/// content can be read from this very handle. A file symbolic link is therefore
+/// opened as the link itself, never as its target.
+fn open_log_file_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Reject any reparse point observed on the opened handle (symlink, junction,
+/// cloud placeholder). This is the handle-level equivalent of the
+/// `sweeper_winfs::inspect_reparse_point` checks used by the safety layers.
+fn handle_is_reparse_point(file: &fs::File) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    file.metadata()
+        .map(|meta| {
+            (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || meta.is_symlink()
+        })
+        .unwrap_or(true) // fail closed if the handle cannot be inspected
+}
+
+/// Resolve one candidate name. `None` means the candidate is skipped: an
+/// overlong suffixed name (e.g. a 250-char ID plus ".jsonl") cannot be a single
+/// path component, so the existing bare-file fallback must stay reachable.
+fn resolve_log_candidate(
+    logs_dir: &CanonicalPath,
+    name: &str,
+    is_bare: bool,
+) -> Result<Option<(String, CanonicalPath)>, ContractError> {
+    if name.len() > 255 {
+        if is_bare {
+            return Err(invalid_log_id());
+        }
+        return Ok(None);
+    }
+    let joined = join_log_file_name(logs_dir, name);
+    let resolved = CanonicalPath::parse_lexical(&joined).map_err(|_| invalid_log_id())?;
+    if !is_direct_log_child(logs_dir, &resolved) {
+        return Err(invalid_log_id());
+    }
+    Ok(Some((joined, resolved)))
+}
+
+/// Open and validate one resolved candidate. `None` means the entry does not
+/// exist, so the next candidate can be tried.
+fn open_validated_log_candidate(
+    logs_dir: &CanonicalPath,
+    joined: &str,
+    path: &Path,
+) -> Result<Option<fs::File>, ContractError> {
+    // Open without following reparse points. A file symbolic link placed at this
+    // path (including one swapped in after the lexical check) is opened as the
+    // link itself and rejected by the handle checks below.
+    let file = match open_log_file_no_follow(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    if handle_is_reparse_point(&file) {
+        return Err(ContractError::InvalidInput {
+            reason: "log file is not a regular file".into(),
+        });
+    }
+
+    // Handle-based re-validation: `CanonicalPath::from_existing_path` opens
+    // without following reparse points and calls
+    // `sweeper_winfs::inspect_reparse_point` to reject link points. Confirm the
+    // final path is still a direct child of the logs directory. The content is
+    // never re-opened by path; it is read from `file` below.
+    let validated = CanonicalPath::from_existing_path(joined).map_err(|_| invalid_log_id())?;
+    if !is_direct_log_child(logs_dir, validated.canonical()) {
+        return Err(invalid_log_id());
+    }
+    Ok(Some(file))
+}
+
+fn log_file_too_large() -> ContractError {
+    ContractError::InvalidInput {
+        reason: "log file too large".into(),
+    }
+}
+
+/// Read a log through the already-opened handle with a hard byte cap.
+///
+/// The declared size is checked first, but the read also goes one byte beyond the
+/// cap and the resulting content is checked again. A file that grows during the
+/// read therefore fails instead of returning a truncated JSON record.
+fn read_bounded_log_content<R: Read>(
+    reader: R,
+    declared_size: u64,
+) -> Result<String, ContractError> {
+    if declared_size > MAX_LOG_READ_BYTES {
+        return Err(log_file_too_large());
+    }
+    let mut content = String::new();
+    reader
+        .take(MAX_LOG_READ_BYTES + 1)
+        .read_to_string(&mut content)
+        .map_err(|_| ContractError::NotFound {
+            reason: "log not found".into(),
+        })?;
+    if content.len() as u64 > MAX_LOG_READ_BYTES {
+        return Err(log_file_too_large());
+    }
+    Ok(content)
+}
+
 /// `read_log` in a specific directory (testable).
 ///
-/// Defense in depth (audit F38): the ID is restricted to a file name, the candidate
-/// path is parsed with the canonical path parser, and the parsed path must lie
-/// exactly one segment below the logs directory. Reads are size-bounded.
+/// Defense in depth (audit F38 / CodeRabbit 4618617742): the ID is restricted to a
+/// file name, the candidate path is parsed with the canonical path parser, and the
+/// parsed path must lie exactly one segment below the logs directory. The file is
+/// opened without following reparse points and validated from that handle; content
+/// is read through the same handle. Reads are size-bounded and files that grow past
+/// the cap are rejected instead of returning a partial record.
 pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadResponse, ContractError> {
     validate_log_id(log_id)?;
     let Some(dir) = dir else {
@@ -339,32 +457,20 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
         format!("{log_id}.log"),
         log_id.to_string(),
     ];
-    for name in candidates {
-        let joined = join_log_file_name(&logs_dir, &name);
-        let resolved = CanonicalPath::parse_lexical(&joined).map_err(|_| invalid_log_id())?;
-        if !is_direct_log_child(&logs_dir, &resolved) {
-            return Err(invalid_log_id());
-        }
-
-        let path = Path::new(resolved.as_str());
-        if !path.is_file() {
+    let bare_index = candidates.len() - 1;
+    for (index, name) in candidates.into_iter().enumerate() {
+        let Some((joined, resolved)) =
+            resolve_log_candidate(&logs_dir, &name, index == bare_index)?
+        else {
             continue;
-        }
-        let file = fs::File::open(path).map_err(|_| ContractError::NotFound {
-            reason: "log not found".into(),
-        })?;
+        };
+        let Some(file) =
+            open_validated_log_candidate(&logs_dir, &joined, Path::new(resolved.as_str()))?
+        else {
+            continue;
+        };
         let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
-        if size > MAX_LOG_READ_BYTES {
-            return Err(ContractError::InvalidInput {
-                reason: "log file too large".into(),
-            });
-        }
-        let mut content = String::new();
-        file.take(MAX_LOG_READ_BYTES)
-            .read_to_string(&mut content)
-            .map_err(|_| ContractError::NotFound {
-                reason: "log not found".into(),
-            })?;
+        let content = read_bounded_log_content(file, size)?;
         return Ok(LogReadResponse {
             id: log_id.to_string(),
             content,
@@ -377,8 +483,12 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_log_phantom_reasons, read_log_in_dir, MAX_LOG_READ_BYTES};
+    use super::{
+        clean_log_phantom_reasons, read_bounded_log_content, read_log_in_dir, MAX_LOG_READ_BYTES,
+    };
+    use std::io::Read;
     use sweeper_contract::ContractError;
+    use sweeper_testkit::{create_file_symlink, Sandbox};
 
     #[test]
     fn read_log_accepts_valid_dotted_and_unicode_file_name_ids() {
@@ -444,6 +554,81 @@ mod tests {
         assert!(
             matches!(err, ContractError::InvalidInput { .. }),
             "oversized log must be rejected, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_log_reaches_bare_file_when_suffixed_candidate_is_overlong() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = Sandbox::new_in(outer.path());
+        let logs = sandbox.create_dir("logs").expect("logs dir");
+
+        // 250 ASCII chars + ".jsonl" = 256 bytes, over the 255-byte component
+        // limit. The suffixed candidates must be skipped so the existing bare
+        // file is still reachable.
+        let bare_id = "a".repeat(250);
+        std::fs::write(logs.join(&bare_id), b"bare-content").expect("write bare log");
+
+        let resp = read_log_in_dir(Some(&logs), &bare_id).expect("long bare ID must resolve");
+        assert_eq!(resp.id, bare_id);
+        assert_eq!(resp.content, "bare-content");
+    }
+
+    #[test]
+    fn read_log_rejects_file_symlink_outside_logs_dir() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = Sandbox::new_in(outer.path());
+        let logs = sandbox.create_dir("logs").expect("logs dir");
+        let secret = sandbox
+            .write_file("outside-secret.jsonl", b"LEAK")
+            .expect("secret file outside logs dir");
+        let alias = sandbox.guarded_path("logs/alias.jsonl");
+
+        match create_file_symlink(&alias, &secret) {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("privilege") || msg.contains("permission") {
+                    eprintln!("skipping symlink regression test (insufficient privilege): {e}");
+                    return;
+                }
+                panic!("create file symlink failed: {e}");
+            }
+        }
+
+        let err = read_log_in_dir(Some(&logs), "alias").unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "file symlink to an outside file must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_log_rejects_content_that_grows_past_read_cap() {
+        struct GrownReader {
+            remaining: usize,
+        }
+        impl Read for GrownReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = buf.len().min(self.remaining);
+                buf[..n].fill(b'x');
+                self.remaining -= n;
+                Ok(n)
+            }
+        }
+
+        // The declared size looks small, but the reader yields cap+1 bytes, as
+        // if the file grew between the metadata check and the bounded read.
+        let err = read_bounded_log_content(
+            GrownReader {
+                remaining: (MAX_LOG_READ_BYTES + 1) as usize,
+            },
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "grown log must fail instead of returning a truncated record, got {err:?}"
         );
     }
 
