@@ -133,44 +133,26 @@ pub(in crate::scanner) fn paths_overlap(a: &CanonicalPath, b: &CanonicalPath) ->
     b.is_self_or_ancestor_of(a)
 }
 
-pub(super) fn segment_pattern_matches(name: &str, pattern: &str) -> bool {
-    if !pattern.contains('*') {
-        return name.eq_ignore_ascii_case(pattern);
-    }
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    wildcard_segment_matches(name, parts[0], parts[1])
-}
+// Single shared matcher: the scanner allowlist path and the Analyzer path both
+// delegate to `crate::wildcard`, so their wildcard semantics cannot drift.
+pub(super) use crate::wildcard::segment_pattern_matches;
 
-struct WildcardEdgeCheck<'a> {
-    name: &'a str,
-    name_len: usize,
-    prefix: &'a str,
-    pre_len: usize,
-    suffix: &'a str,
-    suf_len: usize,
-}
+#[cfg(test)]
+mod tests {
+    use super::segment_pattern_matches;
 
-fn wildcard_segment_matches(name: &str, prefix: &str, suffix: &str) -> bool {
-    let name_len = name.len();
-    let pre_len = prefix.len();
-    let suf_len = suffix.len();
-    if name_len < pre_len + suf_len {
-        return false;
+    /// F5 regression: a multi-byte directory name whose byte length satisfies
+    /// the old guard but whose prefix slice offset is not a char boundary.
+    #[test]
+    fn multibyte_name_prefix_wildcard_returns_verdict_without_panic() {
+        // "aéééé" is 9 bytes; "Profile " is 8 bytes -> old name[..8] panicked.
+        assert!(!segment_pattern_matches(
+            "a\u{e9}\u{e9}\u{e9}\u{e9}",
+            "Profile *"
+        ));
+        assert!(segment_pattern_matches(
+            "Profile \u{e9}\u{e9}\u{e9}",
+            "PROFILE *"
+        ));
     }
-    has_matching_wildcard_edges(&WildcardEdgeCheck {
-        name,
-        name_len,
-        prefix,
-        pre_len,
-        suffix,
-        suf_len,
-    })
-}
-
-fn has_matching_wildcard_edges(check: &WildcardEdgeCheck<'_>) -> bool {
-    check.name[..check.pre_len].eq_ignore_ascii_case(check.prefix)
-        && check.name[check.name_len - check.suf_len..].eq_ignore_ascii_case(check.suffix)
 }
