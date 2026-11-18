@@ -100,6 +100,18 @@ export function buildPreviewSelectionIds(selected: ReadonlySet<string>): string[
   return descriptorToWire(descriptorFrom(groups));
 }
 
+function reportPreparationProgress(
+  onProgress: ((completed: number, total: number) => void) | undefined,
+  completed: number,
+  total: number,
+): void {
+  onProgress?.(completed, total);
+}
+
+function isPreparationStopped(shouldStop: (() => boolean) | undefined): boolean {
+  return Boolean(shouldStop?.());
+}
+
 /**
  * Chunked form used by the preview action. It yields between chunks so the
  * renderer stays responsive and reports determinate progress to the caller.
@@ -111,7 +123,7 @@ export async function preparePreviewSelection(
 ): Promise<string[]> {
   const total = selected.size;
   if (total <= COMPACT_SELECTION_THRESHOLD) {
-    onProgress?.(total, total);
+    reportPreparationProgress(onProgress, total, total);
     return [...selected];
   }
   const groups = newGroups();
@@ -120,16 +132,16 @@ export async function preparePreviewSelection(
   for (let i = 0; i < all.length; i += PREPARE_CHUNK_SIZE) {
     collectInto(groups, all.slice(i, i + PREPARE_CHUNK_SIZE));
     completed = Math.min(i + PREPARE_CHUNK_SIZE, all.length);
-    onProgress?.(completed, total);
+    reportPreparationProgress(onProgress, completed, total);
     await yieldToEventLoop();
     // An invalidated Preview can no longer be sent; stop collecting/sorting
     // before the next chunk so obsolete work does not compete with the user's
     // next Preview. The caller's stale-request guard suppresses IPC.
-    if (shouldStop?.()) return [];
+    if (isPreparationStopped(shouldStop)) return [];
   }
   // Honour a cancellation that arrived during the final yield, before the
   // expensive sort + serialize step.
-  if (shouldStop?.()) return [];
+  if (isPreparationStopped(shouldStop)) return [];
   return descriptorToWire(descriptorFrom(groups));
 }
 
