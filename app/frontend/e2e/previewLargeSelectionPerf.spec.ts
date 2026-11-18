@@ -23,8 +23,8 @@ type Metrics = {
   determinateProgressSeen: boolean;
 };
 
-async function installGapSampler(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+async function installGapSampler(page: Page, expectedMax: number): Promise<void> {
+  await page.addInitScript((expectedMax) => {
     const g = globalThis as unknown as {
       __gapSamples: number[];
       __lastFrame: number;
@@ -40,17 +40,25 @@ async function installGapSampler(page: Page): Promise<void> {
       // click/effect scheduling, not a renderer stall, so it is not sampled.
       g.__lastFrame = 0;
     };
+    const isVisible = (el: Element): boolean => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== 'hidden' && style.display !== 'none';
+    };
     // Record a determinate progress meter *while preparation is running*, on
     // the same animation frame as the gap sampler. Checking for the wrapper at
     // the Preview IPC call is not evidence that the meter ever showed a real
     // value (and progress is cleared before that call once encoding finishes).
+    // Require a VISIBLE meter whose max equals the fixture selection: a hidden
+    // meter or one with the wrong maximum must not satisfy the assertion.
     const recordDeterminateProgress = () => {
       const meter = document.querySelector('.preview-preparing progress');
-      if (!meter) return;
-      const value = Number((meter as HTMLProgressElement).value);
-      if (value <= 0) return;
+      if (!meter || !isVisible(meter)) return;
       const max = Number((meter as HTMLProgressElement).max);
-      if (value >= max) return;
+      if (max !== expectedMax) return;
+      const value = Number((meter as HTMLProgressElement).value);
+      if (value <= 0 || value >= max) return;
       g.__perf.determinateProgressSeen = true;
     };
     const tick = (now: number) => {
@@ -60,7 +68,7 @@ async function installGapSampler(page: Page): Promise<void> {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
-  });
+  }, expectedMax);
 }
 
 async function installLargeSelectionMock(page: Page, count: number): Promise<void> {
@@ -153,7 +161,7 @@ async function readMetrics(page: Page): Promise<Metrics> {
 
 test.describe('Sweeper Preview responsiveness at large selections (mock sandbox)', () => {
   test('20k selection: bounded IPC, compact selection, determinate progress, responsive UI', async ({ page }) => {
-    await installGapSampler(page);
+    await installGapSampler(page, ITEM_COUNT);
     await page.goto('/');
     await installLargeSelectionMock(page, ITEM_COUNT);
 

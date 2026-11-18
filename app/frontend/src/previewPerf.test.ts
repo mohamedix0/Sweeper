@@ -82,7 +82,7 @@ describe('T3 compact preview selection', () => {
     expect(expanded).not.toContain('user-temp::7');
   });
 
-  it('rejects nonnumeric range bounds in a descriptor instead of coercing them', () => {
+  it('rejects nonnumeric and unsafe-integer range bounds instead of coercing them', () => {
     const descriptor = JSON.stringify({ ranges: [{ prefix: 'user-temp', start: '1', end: 200 }], explicit: [] });
     const wire = [`SWSELECT1:${descriptor}`];
     expect(expandPreviewSelectionIds(wire)).toEqual(wire);
@@ -90,6 +90,14 @@ describe('T3 compact preview selection', () => {
     const booleanBound = JSON.stringify({ ranges: [{ prefix: 'user-temp', start: true, end: 200 }], explicit: [] });
     const booleanWire = [`SWSELECT1:${booleanBound}`];
     expect(expandPreviewSelectionIds(booleanWire)).toEqual(booleanWire);
+
+    // A SMALL span of unsafe integers (start = MAX_SAFE_INTEGER, end = +1) is
+    // JSON-legal and far below MAX_COMPACT_IDS, so the cap cannot reject it.
+    // Only the Number.isSafeInteger guard can fail it closed; without that
+    // guard this assertion would fail (the range would expand to two IDs).
+    const unsafeBound = JSON.stringify({ ranges: [{ prefix: 'user-temp', start: Number.MAX_SAFE_INTEGER, end: Number.MAX_SAFE_INTEGER + 1 }], explicit: [] });
+    const unsafeWire = [`SWSELECT1:${unsafeBound}`];
+    expect(expandPreviewSelectionIds(unsafeWire)).toEqual(unsafeWire);
   });
 
   function totalSeen(samples: Array<[number, number]>, total: number): boolean {
@@ -172,21 +180,25 @@ describe('T3 stale explanation-pool cancellation', () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let cancelled = false;
 
+    // Concurrency 2 keeps two calls in flight while two stay queued. Every
+    // worker awaits the same gate, so a runner cannot churn through queued work
+    // before cancellation is observed; this proves the shouldStop check runs
+    // before each queued task, for every runner in the pool.
     const run = mapWithConcurrency(
       [0, 1, 2, 3],
-      1,
+      2,
       async (n) => {
         started.push(n);
-        if (n === 0) await gate;
+        await gate;
         return n;
       },
       { shouldStop: () => cancelled, onSkip: () => -1 },
     );
-    expect(started).toEqual([0]); // only the first call started
+    expect(started).toEqual([0, 1]); // only in-flight calls started
     cancelled = true;
     release();
-    expect(await run).toEqual([0, -1, -1, -1]);
-    expect(started).toEqual([0]);
+    expect(await run).toEqual([0, 1, -1, -1]); // in-flight settle, queued are skipped
+    expect(started).toEqual([0, 1]); // no queued call started after shouldStop flipped
   });
 });
 
