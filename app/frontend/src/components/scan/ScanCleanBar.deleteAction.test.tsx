@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ScanCleanBar, type ScanCleanBarProps } from './ScanCleanBar';
+import type { PreviewResult } from '../cleanSharedCore';
 
 const LARGE_BYTES = '27520002949'; // formats to 25.62 GB
 
@@ -38,7 +39,7 @@ describe('ScanCleanBar post-Preview delete action', () => {
     const preview = {
       previewToken: 'tok', issuedAtMs: 0, breakdown: [],
       totalSelectedCount: '2', totalSelectedBytes: '200',
-    } as any;
+    } satisfies PreviewResult;
     render(<ScanCleanBar {...barProps({ preview })} />);
 
     const cta = screen.getByRole('button', { name: /Delete .* permanently/ });

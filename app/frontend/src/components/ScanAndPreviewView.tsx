@@ -296,6 +296,20 @@ function useSelectionSources(args: {
     [needs, selection, allTargets],
   );
 
+  // Coverage checks and the merge are O(selection). An unrelated rerender (for
+  // example the 1s scan timer) must not rebuild the 20k-item coverage Set or
+  // merged Map. Both derive from stable inputs; `resolved` is generation-keyed
+  // by Set identity and Preview, so a new selection or Preview changes an input
+  // and recomputes — the Clean gate on a new generation is preserved.
+  const uncovered = useMemo(
+    () => !riskCoverageComplete({ selection, sources: knownSources }),
+    [selection, knownSources],
+  );
+  const sources = useMemo(
+    () => (resolved != null ? mergeRiskSources(knownSources, resolved.sources) : []),
+    [knownSources, resolved],
+  );
+
   useEffect(() => {
     let cancelled = false;
     if (preview != null && needs) {
@@ -306,9 +320,7 @@ function useSelectionSources(args: {
 
   if (!needs) return EMPTY_SELECTION_SOURCES;
   const unresolved = derivationPending({ needs, selection, preview, resolved });
-  const uncovered = !riskCoverageComplete({ selection, sources: knownSources });
   if (unresolved || uncovered) return PENDING_SELECTION_SOURCES;
-  const sources = mergeRiskSources(knownSources, resolved!.sources);
   return { sources, pending: false, failedCount: resolved!.failedCount };
 }
 

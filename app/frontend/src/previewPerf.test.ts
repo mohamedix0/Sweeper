@@ -176,6 +176,7 @@ describe('T3 bounded explanation resolution', () => {
 describe('T3 stale explanation-pool cancellation', () => {
   it('does not start queued IPC work once the current Preview changes', async () => {
     const started: number[] = [];
+    const skipped: number[] = [];
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let cancelled = false;
@@ -183,7 +184,9 @@ describe('T3 stale explanation-pool cancellation', () => {
     // Concurrency 2 keeps two calls in flight while two stay queued. Every
     // worker awaits the same gate, so a runner cannot churn through queued work
     // before cancellation is observed; this proves the shouldStop check runs
-    // before each queued task, for every runner in the pool.
+    // before each queued task, for every runner in the pool. Both in-flight
+    // workers observe cancellation, so onSkip must be claimed once per queued
+    // item even though two runners reach the skip path.
     const run = mapWithConcurrency(
       [0, 1, 2, 3],
       2,
@@ -192,13 +195,14 @@ describe('T3 stale explanation-pool cancellation', () => {
         await gate;
         return n;
       },
-      { shouldStop: () => cancelled, onSkip: () => -1 },
+      { shouldStop: () => cancelled, onSkip: (n) => { skipped.push(n); return -1; } },
     );
     expect(started).toEqual([0, 1]); // only in-flight calls started
     cancelled = true;
     release();
     expect(await run).toEqual([0, 1, -1, -1]); // in-flight settle, queued are skipped
     expect(started).toEqual([0, 1]); // no queued call started after shouldStop flipped
+    expect(skipped).toEqual([2, 3]); // one onSkip per queued item, no duplicates
   });
 });
 

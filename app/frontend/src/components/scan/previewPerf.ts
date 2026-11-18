@@ -243,7 +243,13 @@ export async function mapWithConcurrency<T, R>(
   const run = async () => {
     while (next < items.length) {
       if (options?.shouldStop?.()) {
-        fillSkippedResults(items, next, results, options?.onSkip);
+        // Two workers can be in flight when cancellation starts; without an
+        // atomic claim both would resume with the same `next` and call onSkip
+        // twice for the same queued items. Claim the whole remaining range
+        // before building any fallback so each queued item is skipped once.
+        const claimFrom = next;
+        next = items.length;
+        fillSkippedResults(items, claimFrom, results, options?.onSkip);
         return;
       }
       const at = next;
