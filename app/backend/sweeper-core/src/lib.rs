@@ -7,6 +7,7 @@ pub mod policy;
 pub mod remover;
 pub mod scanner;
 pub mod settings;
+pub(crate) mod wildcard;
 
 pub use scanner::{ScanError, ScanProgress, ScanProgressCallback};
 
