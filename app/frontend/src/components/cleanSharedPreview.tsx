@@ -87,6 +87,16 @@ function AbortedNotice(props: { summary: ExecuteCleanResponse }) {
   return <div className="notice error" role="alert"><strong>Clean aborted.</strong> {reason}</div>;
 }
 
+function JournalWarning(props: { errors: string[] | undefined }) {
+  const errors = props.errors ?? [];
+  if (errors.length === 0) return null;
+  return (
+    <div className="notice warn" role="alert" aria-label="Journal warnings">
+      <strong>Operation log warning.</strong> {errors.length} internal log write failure{errors.length === 1 ? '' : 's'} occurred after deletion. The results above reflect what actually happened, but the operation log may be incomplete; verify affected files on disk if needed.
+    </div>
+  );
+}
+
 function SkippedReasons(props: { reasons: ExecuteCleanResponse['skippedReasons'] }) {
   if (props.reasons.length === 0) return <p className="muted small-note" aria-label="Skipped reasons">None.</p>;
   return <ul aria-label="Skipped reasons" className="skipped-reasons">{props.reasons.map((r, idx) => <li key={`${r.reason}-${idx}`}>{r.reason} — {r.count}</li>)}</ul>;
@@ -102,6 +112,7 @@ export function CleanSummaryBlock(props: { summary: ExecuteCleanResponse; onOpen
     <div className="clean-summary-section" aria-labelledby="clean-summary-heading" role="status">
       <h4 id="clean-summary-heading" className="clean-summary-title">Clean Summary</h4>
       <AbortedNotice summary={props.summary} />
+      <JournalWarning errors={props.summary.journalErrors} />
       <dl className="kv">
         <dt>Bytes freed</dt><dd className="num">{formatBytes({ bytes: props.summary.bytesFreed })}</dd>
         <dt>Deleted count</dt><dd className="num">{props.summary.deletedCount}</dd>

@@ -354,6 +354,9 @@ pub struct ExecuteCleanResponse {
     pub abort_reason: Option<String>,
     /// Associated log identifier for viewing operation log.
     pub log_id: Option<String>,
+    /// Non-fatal journal failures recorded after a deletion already happened.
+    #[serde(default)]
+    pub journal_errors: Vec<String>,
 }
 
 /// Explanation for an item or target (read-only knowledge).

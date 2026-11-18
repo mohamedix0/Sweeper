@@ -330,6 +330,11 @@ pub struct CleanReport {
     pub aborted: bool,
     /// Abort reason if any.
     pub abort_reason: Option<String>,
+    /// Non-fatal journal failures recorded after a deletion already happened.
+    ///
+    /// These are surfaced to the user instead of discarding the whole report.
+    #[serde(default)]
+    pub journal_errors: Vec<String>,
 }
 
 /// Progress update emitted during clean execution.
@@ -384,6 +389,7 @@ where
         skipped_count: 0,
         aborted: false,
         abort_reason: None,
+        journal_errors: Vec::new(),
     };
     let mut deleted_total: u64 = 0;
     let mut completed: u64 = 0;
@@ -453,6 +459,10 @@ where
             status,
         });
     }
+
+    // Post-delete journal failures are recorded on the report rather than
+    // discarding the outcomes of deletions that already took place.
+    report.journal_errors = journal.take_deferred_errors();
 
     Ok(report)
 }
@@ -969,9 +979,11 @@ fn delete_path_entry_inner(
             let reported = base_bytes_deleted
                 .unwrap_or(0)
                 .saturating_add(bytes_accounted);
-            journal.write_outcome(&journal::outcome_record(
+            // The deletion already succeeded; a journal failure must not throw away
+            // this outcome or abort the remaining batch.
+            journal.write_outcome_best_effort(&journal::outcome_record(
                 &item.id, path_str, reported, "deleted", "", None,
-            ))?;
+            ));
             Ok(ProcessOutcome::Deleted(reported))
         }
         Err(e) => {
@@ -984,9 +996,9 @@ fn delete_path_entry_inner(
                 }
                 other => format!("Skipped: delete failed: {other}"),
             };
-            journal.write_outcome(&journal::outcome_record(
+            journal.write_outcome_best_effort(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
-            ))?;
+            ));
             Ok(ProcessOutcome::Skipped(reason))
         }
     }

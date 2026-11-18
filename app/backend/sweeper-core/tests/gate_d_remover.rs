@@ -876,3 +876,49 @@ impl OpenOptionsShareExt for fs::OpenOptions {
         std::os::windows::fs::OpenOptionsExt::share_mode(self, val)
     }
 }
+
+#[test]
+fn gate_d_post_delete_journal_failure_returns_honest_partial_report() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("target").unwrap();
+    let victim = target_root.join("journal-failure.txt");
+    write_file(&victim, b"delete me");
+    set_filetime(&victim, old_mtime_secs());
+    let item = make_item(
+        "post-delete-journal",
+        &target_root,
+        &victim,
+        9,
+        Some(old_mtime_secs()),
+    );
+    let journal_dir = sb.create_dir("journal").unwrap();
+
+    // Simulate a journal write failure *after* the handle-based deletion succeeds.
+    journal::fail_next_best_effort_outcome();
+    let report = remover::execute_clean(
+        vec![item],
+        CleanOptions {
+            preview_estimated_bytes: 1024 * 1024,
+            min_age: Duration::from_secs(24 * 3600),
+            now: now(),
+            journal_base_dir: Some(journal_dir),
+        },
+    )
+    .unwrap();
+
+    // The deletion actually happened, and the honest report keeps that outcome.
+    assert!(!victim.exists(), "eligible file must have been deleted");
+    assert_eq!(
+        report.items.len(),
+        1,
+        "partial report must keep the deleted item"
+    );
+    assert_eq!(report.items[0].status, "deleted");
+    assert_eq!(report.bytes_freed, 9);
+    assert!(!report.aborted, "journal failure is not a safety abort");
+    assert!(
+        !report.journal_errors.is_empty(),
+        "post-delete journal failure must be recorded and surfaced"
+    );
+    assert_sentinel_intact(&sb);
+}

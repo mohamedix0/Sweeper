@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -83,6 +84,25 @@ struct CleanLogScanState {
     saw_outcome: bool,
     saw_path: bool,
     all_sandbox: bool,
+    /// (target_id, path) pairs for intent records.
+    intents: Vec<(String, String)>,
+    /// (target_id, path) pairs for outcome records.
+    outcomes: HashSet<(String, String)>,
+}
+
+impl CleanLogScanState {
+    fn sandbox_only(&self) -> bool {
+        self.saw_path && self.all_sandbox
+    }
+
+    /// Intents with no matching outcome are "unknown, verify on disk": the item
+    /// may have been deleted even though its outcome record was never written.
+    fn intent_without_outcome(&self) -> usize {
+        self.intents
+            .iter()
+            .filter(|key| !self.outcomes.contains(key))
+            .count()
+    }
 }
 
 fn json_record_kind(value: &serde_json::Value) -> Option<&str> {
@@ -105,9 +125,27 @@ fn note_path_hint(state: &mut CleanLogScanState, path: &str) {
 }
 
 fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Value) {
-    if json_record_kind(value) == Some("outcome") {
-        state.saw_outcome = true;
+    let kind = json_record_kind(value);
+    let target_id = value
+        .get("target_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let path = value
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match kind {
+        Some("outcome") => {
+            state.saw_outcome = true;
+            state.outcomes.insert((target_id, path));
+        }
+        Some("intent") => state.intents.push((target_id, path)),
+        _ => {}
     }
+
     if let Some(p) = value.get("path").and_then(|v| v.as_str()) {
         note_path_hint(state, p);
     }
@@ -138,38 +176,56 @@ fn accumulate_clean_log_state(reader: BufReader<fs::File>) -> CleanLogScanState 
     state
 }
 
-fn clean_log_phantom_reasons(path: &Path) -> (bool, bool) {
-    let Ok(file) = fs::File::open(path) else {
-        return (true, false);
-    };
-    let state = accumulate_clean_log_state(BufReader::new(file));
-    let no_outcome = !state.saw_outcome;
-    let sandbox_only = state.saw_path && state.all_sandbox;
-    (no_outcome, sandbox_only)
+fn is_clean_log_file_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower.starts_with("clean-") && lower.ends_with(".jsonl")
+        })
+        .unwrap_or(false)
+}
+
+fn inspect_clean_log(path: &Path) -> Option<CleanLogScanState> {
+    let file = fs::File::open(path).ok()?;
+    Some(accumulate_clean_log_state(BufReader::new(file)))
 }
 
 fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool) -> bool {
     if size == 0 {
         return false;
     }
-    let is_clean = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| {
-            s.to_ascii_lowercase().starts_with("clean-")
-                && s.to_ascii_lowercase().ends_with(".jsonl")
-        })
-        .unwrap_or(false);
-    if is_clean {
-        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(path);
-        if no_outcome {
-            return false;
-        }
-        if filter_sandbox_phantoms && sandbox_only {
-            return false;
+    if is_clean_log_file_name(path) && filter_sandbox_phantoms {
+        // An intent-without-outcome log is reconciled and surfaced rather than
+        // hidden: a post-delete journal failure may have left it outcome-less
+        // even though the deletion succeeded. Sandbox-only test logs remain
+        // filtered from the real user's list.
+        if let Some(state) = inspect_clean_log(path) {
+            if state.sandbox_only() && state.intent_without_outcome() == 0 {
+                return false;
+            }
         }
     }
     true
+}
+
+/// Append a reconciliation note for intent-without-outcome records to the log view.
+fn annotate_unreconciled_clean_log(path: &Path, content: String) -> String {
+    let Some(state) = inspect_clean_log(path) else {
+        return content;
+    };
+    let unreconciled = state.intent_without_outcome();
+    if unreconciled == 0 {
+        return content;
+    }
+    let mut out = content;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "{{\"record\":\"reconciliation\",\"status\":\"unknown\",\"reason\":\"verify_on_disk\",\"intent_without_outcome\":{unreconciled}}}\n"
+    ));
+    out
 }
 
 fn list_logs_in_dir_impl(
@@ -282,6 +338,11 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
             let content = fs::read_to_string(&p).map_err(|_| ContractError::NotFound {
                 reason: "log not found".into(),
             })?;
+            let content = if is_clean_log_file_name(&p) {
+                annotate_unreconciled_clean_log(&p, content)
+            } else {
+                content
+            };
             return Ok(LogReadResponse {
                 id: log_id.to_string(),
                 content,
@@ -295,7 +356,7 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
 
 #[cfg(test)]
 mod tests {
-    use super::clean_log_phantom_reasons;
+    use super::{inspect_clean_log, list_logs_in_dir_impl, read_log_in_dir};
 
     #[test]
     fn real_path_with_sweeper_test_substring_is_not_sandbox() {
@@ -306,8 +367,46 @@ mod tests {
             "{\"kind\":\"outcome\",\"status\":\"deleted\",\"path\":\"C:\\\\Users\\\\Public\\\\Documents\\\\sweeper-test-results\\\\report.json\"}\n"
         );
         std::fs::write(&path, content).expect("write log");
-        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(&path);
-        assert!(!no_outcome);
-        assert!(!sandbox_only);
+        let state = inspect_clean_log(&path).expect("inspect log");
+        assert!(state.saw_outcome);
+        assert!(!state.sandbox_only());
+        assert_eq!(state.intent_without_outcome(), 0);
+    }
+
+    #[test]
+    fn intent_without_outcome_log_is_listed_and_reconciled_in_view() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-1-1";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        // A journal that lost its outcome write after a deletion: intent only.
+        let content =
+            "{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\a.tmp\"}\n";
+        std::fs::write(&path, content).expect("write log");
+
+        // Even with the real-user sandbox-phantom filter enabled, the
+        // reconciliation path must surface the log instead of hiding it.
+        let logs = list_logs_in_dir_impl(Some(dir.path()), true).expect("list logs");
+        assert!(logs.iter().any(|l| l.id == log_id), "logs={logs:?}");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(read.content.contains("\"record\":\"reconciliation\""));
+        assert!(read.content.contains("\"status\":\"unknown\""));
+        assert!(read.content.contains("\"reason\":\"verify_on_disk\""));
+        assert!(read.content.contains("\"intent_without_outcome\":1"));
+    }
+
+    #[test]
+    fn fully_outcome_log_has_no_reconciliation_note() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-2-2";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let content = concat!(
+            "{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\b.tmp\"}\n",
+            "{\"record\":\"outcome\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\b.tmp\",\"status\":\"deleted\"}\n"
+        );
+        std::fs::write(&path, content).expect("write log");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(!read.content.contains("\"record\":\"reconciliation\""));
     }
 }

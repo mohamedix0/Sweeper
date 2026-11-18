@@ -1046,7 +1046,8 @@ pub fn is_lock_like_error(code: u32) -> bool {
 /// Retire (delete) a single Sweeper journal/log file within `logs_dir`.
 ///
 /// Strictly scoped maintenance helper for log rotation (not a `Clean` target deletion primitive).
-/// Only files whose names match Sweeper journal log naming (`clean-*.jsonl`) are eligible.
+/// Only files whose names match Sweeper activity-log naming (`clean-*.jsonl` or
+/// `scan-*.jsonl`) are eligible.
 pub fn retire_sweeper_log_file(logs_dir: &Path, file_name: &str) -> Result<()> {
     if file_name.is_empty()
         || file_name.contains('/')
@@ -1120,7 +1121,11 @@ pub fn retire_sweeper_log_file(logs_dir: &Path, file_name: &str) -> Result<()> {
 }
 
 fn is_sweeper_journal_log_name(file_name: &str) -> bool {
-    let Some(rest) = file_name.strip_prefix("clean-") else {
+    // Both Clean journals and scan summary logs participate in rotation.
+    let Some(rest) = file_name
+        .strip_prefix("clean-")
+        .or_else(|| file_name.strip_prefix("scan-"))
+    else {
         return false;
     };
     let Some(stem) = rest.strip_suffix(".jsonl") else {
@@ -1310,4 +1315,27 @@ pub fn set_last_write_time(path: &Path, filetime: u64) -> Result<()> {
         return Err(last_error("SetFileTime"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_sweeper_journal_log_name;
+
+    #[test]
+    fn journal_log_name_accepts_clean_and_scan_shapes() {
+        assert!(is_sweeper_journal_log_name(
+            "clean-1700000000-123-456.jsonl"
+        ));
+        assert!(is_sweeper_journal_log_name("scan-1700000000-123-456.jsonl"));
+
+        // Other prefixes, malformed numeric segments, traversal and wrong extensions
+        // must remain ineligible for retirement.
+        assert!(!is_sweeper_journal_log_name(
+            "other-1700000000-123-456.jsonl"
+        ));
+        assert!(!is_sweeper_journal_log_name("scan-17x-123-456.jsonl"));
+        assert!(!is_sweeper_journal_log_name("scan-1700000000-123.jsonl"));
+        assert!(!is_sweeper_journal_log_name("scan-1700000000-123-456.txt"));
+        assert!(!is_sweeper_journal_log_name("scan-..-123-456.jsonl"));
+    }
 }

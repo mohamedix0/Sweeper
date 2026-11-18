@@ -163,6 +163,11 @@ pub(crate) fn detect_new_log_id(
             if existing.contains(stem) {
                 continue;
             }
+            // A Clean's log_id must point at its own clean-* journal, never at a
+            // scan-* log written concurrently by another session.
+            if !stem.to_ascii_lowercase().starts_with("clean-") {
+                continue;
+            }
             let modified = e
                 .metadata()
                 .and_then(|m| m.modified())
@@ -176,7 +181,8 @@ pub(crate) fn detect_new_log_id(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_reason;
+    use super::{detect_new_log_id, sanitize_reason};
+    use std::collections::HashSet;
 
     #[test]
     fn sanitize_reason_truncates_on_utf8_char_boundary() {
@@ -185,5 +191,33 @@ mod tests {
         let out = sanitize_reason(&msg);
         assert_eq!(out.chars().count(), 119);
         assert!(out.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn detect_new_log_id_ignores_newer_scan_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let clean_id = "clean-1700000000-1-1";
+        let clean_path = dir.path().join(format!("{clean_id}.jsonl"));
+        let scan_path = dir.path().join("scan-1700000001-2-2.jsonl");
+        std::fs::write(&clean_path, b"{}\n").unwrap();
+        std::fs::write(&scan_path, b"{}\n").unwrap();
+
+        // Make the scan log newer so an unfiltered newest-by-mtime pick would select it.
+        sweeper_testkit::set_last_write_time(
+            &clean_path,
+            sweeper_testkit::filetime_from_unix_secs(1_700_000_000),
+        )
+        .unwrap();
+        sweeper_testkit::set_last_write_time(
+            &scan_path,
+            sweeper_testkit::filetime_from_unix_secs(1_700_000_100),
+        )
+        .unwrap();
+
+        let existing = HashSet::new();
+        assert_eq!(
+            detect_new_log_id(dir.path(), &existing).as_deref(),
+            Some(clean_id)
+        );
     }
 }

@@ -128,6 +128,54 @@ fn valid_scan_preview_execute_clean_in_sentinel_sandbox_writes_log_and_preserves
     common::assert_clean_log_contains_intent_and_outcome(&log);
 }
 
+#[test]
+fn clean_log_id_is_not_hijacked_by_a_scan_log_written_during_clean() {
+    let state = common::make_state();
+    let sandbox = Sandbox::new();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let file_path = sandbox
+        .write_file("Temp\\deleteme-scan-race.tmp", b"hello-sweeper")
+        .unwrap();
+    common::seed_session(&state, &root, &file_path, 1_700_000_000);
+    let preview = commands_impl::preview_clean(
+        &state,
+        "scan-test".to_string(),
+        vec!["t1::1".to_string()],
+        None,
+    )
+    .unwrap();
+    let logs_base = tempfile::tempdir().unwrap();
+    let scan_written = AtomicBool::new(false);
+
+    let resp = commands_impl::execute_clean(
+        &state,
+        preview.preview_token,
+        Some(logs_base.path().to_path_buf()),
+        |_evt| {
+            // A concurrent scan writes a newer scan-* log while the Clean is running.
+            if !scan_written.swap(true, Ordering::SeqCst) {
+                let scan_path = sweeper_core::journal::write_scan_log(
+                    logs_base.path(),
+                    &serde_json::json!({ "kind": "scan" }),
+                )
+                .unwrap();
+                sweeper_testkit::set_last_write_time(
+                    &scan_path,
+                    sweeper_testkit::filetime_from_unix_secs(2_000_000_000),
+                )
+                .unwrap();
+            }
+        },
+    )
+    .unwrap();
+
+    let log_id = resp.log_id.expect("log_id must be present");
+    assert!(
+        log_id.starts_with("clean-"),
+        "Clean log_id must point at the clean journal, got {log_id}"
+    );
+}
+
 struct CustomScanCtx {
     state: sweeper_desktop::AppState<sweeper_desktop::clock::FixedClock>,
     _sandbox: Sandbox,

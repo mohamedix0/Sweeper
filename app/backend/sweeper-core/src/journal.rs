@@ -4,7 +4,7 @@
 //! outcomes recorded after each item/batch, and readers ignore a truncated trailing line.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Cursor, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -75,7 +75,32 @@ pub enum JournalRecord {
 pub struct JournalWriter {
     path: PathBuf,
     file: File,
+    /// Non-fatal write failures (e.g. an outcome write after a completed deletion).
+    deferred_errors: Vec<String>,
 }
+
+/// Test-only failure injection for the post-delete best-effort outcome path.
+#[cfg(feature = "test-support")]
+mod test_injection {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_NEXT_BEST_EFFORT_OUTCOME: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make the next best-effort outcome write fail (test-support builds only).
+    pub fn fail_next_best_effort_outcome() {
+        FAIL_NEXT_BEST_EFFORT_OUTCOME.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn take_fail_best_effort_outcome() -> bool {
+        FAIL_NEXT_BEST_EFFORT_OUTCOME.with(|flag| flag.take())
+    }
+}
+
+/// Make the next post-delete best-effort outcome write fail (test-support builds only).
+#[cfg(feature = "test-support")]
+pub use test_injection::fail_next_best_effort_outcome;
 
 impl JournalWriter {
     /// Create/open a journal file in `base_dir\logs` (or `base_dir` itself if it already ends with `logs`/custom test dir)
@@ -96,7 +121,11 @@ impl JournalWriter {
             .create_new(true)
             .append(true)
             .open(&path)?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            deferred_errors: Vec::new(),
+        })
     }
 
     /// Path of the active journal file.
@@ -116,6 +145,33 @@ impl JournalWriter {
         self.flush_and_sync()
     }
 
+    /// Record an outcome after a deletion has already happened.
+    ///
+    /// A failure here must never discard a deletion that actually took place, so
+    /// the error is recorded for the caller/report instead of being propagated.
+    pub fn write_outcome_best_effort(&mut self, record: &JournalRecord) {
+        #[cfg(feature = "test-support")]
+        let injected = test_injection::take_fail_best_effort_outcome();
+        #[cfg(not(feature = "test-support"))]
+        let injected = false;
+
+        let result = if injected {
+            Err(JournalError::Io(std::io::Error::other(
+                "injected post-delete outcome write failure",
+            )))
+        } else {
+            self.write_outcome(record)
+        };
+        if let Err(err) = result {
+            self.deferred_errors.push(err.to_string());
+        }
+    }
+
+    /// Take and clear non-fatal journal errors recorded by best-effort writes.
+    pub fn take_deferred_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.deferred_errors)
+    }
+
     fn append_record(&mut self, record: &JournalRecord) -> Result<(), JournalError> {
         let mut line = serde_json::to_string(record)?;
         line.push('\n');
@@ -132,36 +188,56 @@ impl JournalWriter {
 }
 
 /// Parse journal records from in-memory JSON-lines bytes.
-/// Ignores a truncated trailing incomplete line; malformed non-trailing lines error.
+///
+/// Only newline-terminated lines are decoded. An unterminated final fragment is
+/// ignored regardless of its byte content, so a torn multi-byte UTF-8 tail cannot
+/// discard the valid records that preceded it. Malformed terminated lines error.
 pub fn parse_records_bytes(data: &[u8]) -> Result<Vec<JournalRecord>, JournalError> {
-    parse_records_from_reader(Cursor::new(data))
+    let mut records = Vec::new();
+    let mut start = 0usize;
+    for (idx, byte) in data.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let line = trim_ascii_whitespace_bytes(&data[start..idx]);
+        start = idx + 1;
+        if line.is_empty() {
+            continue;
+        }
+        let line = std::str::from_utf8(line)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        match serde_json::from_str::<JournalRecord>(line) {
+            Ok(rec) => records.push(rec),
+            Err(e) => return Err(JournalError::Serde(e)),
+        }
+    }
+    // Bytes after the last newline are an unterminated trailing fragment and are
+    // deliberately ignored (crash/torn-write recovery).
+    Ok(records)
 }
 
-/// Read journal records from a file, ignoring a truncated trailing incomplete line (crash recovery).
+/// Read journal records from a file, ignoring a truncated trailing fragment (crash recovery).
 pub fn read_records(path: &Path) -> Result<Vec<JournalRecord>, JournalError> {
     let file = File::open(path)?;
     parse_records_from_reader(BufReader::new(file))
 }
 
-fn parse_records_from_reader<R: BufRead>(reader: R) -> Result<Vec<JournalRecord>, JournalError> {
-    let mut records = Vec::new();
-    let mut lines = reader.lines().peekable();
-    while let Some(line_res) = lines.next() {
-        let line = line_res?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<JournalRecord>(&line) {
-            Ok(rec) => records.push(rec),
-            Err(e) => {
-                if lines.peek().is_none() {
-                    break;
-                }
-                return Err(JournalError::Serde(e));
-            }
-        }
+fn parse_records_from_reader<R: BufRead>(
+    mut reader: R,
+) -> Result<Vec<JournalRecord>, JournalError> {
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data)?;
+    parse_records_bytes(&data)
+}
+
+fn trim_ascii_whitespace_bytes(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
     }
-    Ok(records)
+    while bytes.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 /// Rotate activity log files in `log_dir`, retaining only the newest `max_files`
@@ -337,6 +413,27 @@ mod tests {
     }
 
     #[test]
+    fn read_records_tolerates_truncated_multibyte_tail_and_keeps_prior_records() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("clean-multibyte-tail.jsonl");
+        let mut bytes = serde_json::to_string(&intent_record("kept", "C:\\a\\b\\c", 1, None))
+            .unwrap()
+            .into_bytes();
+        bytes.push(b'\n');
+        // A torn multi-byte UTF-8 tail (first byte of a 2-byte sequence) with no newline.
+        bytes.extend_from_slice(b"{\"record\":\"outcome\",\"path\":\"\xC3");
+        fs::write(&path, &bytes).unwrap();
+
+        let recs = read_records(&path).unwrap();
+        assert_eq!(recs.len(), 1, "prior record must survive a torn UTF-8 tail");
+        assert!(matches!(&recs[0], JournalRecord::Intent { target_id, .. } if target_id == "kept"));
+
+        // The same guarantee holds for in-memory parsing.
+        let parsed = parse_records_bytes(&bytes).unwrap();
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
     fn rotation_keeps_last_n_logs() {
         let dir = tempdir().unwrap();
         let log_dir = dir.path().join("logs");
@@ -355,6 +452,25 @@ mod tests {
     }
 
     #[test]
+    fn rotation_retires_scan_logs_as_well_as_clean_logs() {
+        let dir = tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        // Scan logs must be eligible for retirement, otherwise they grow without bound.
+        for i in 0..35 {
+            let p = log_dir.join(format!("scan-{}-{}-0.jsonl", 1_700_000_000u64 + i, i));
+            fs::write(&p, format!("{{\"i\":{i}}}\n")).unwrap();
+        }
+        rotate_logs(&log_dir, 30).unwrap();
+        let count = fs::read_dir(&log_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| is_activity_log_file(&e.path()))
+            .count();
+        assert!(count <= 30, "scan logs were not retired: count={count}");
+    }
+
+    #[test]
     fn parse_records_bytes_handles_valid_malformed_and_binary() {
         let mut bytes = serde_json::to_string(&intent_record("t", "C:\\a", 1, None))
             .unwrap()
@@ -369,7 +485,11 @@ mod tests {
         let truncated = parse_records_bytes(b"{\"record\":\"intent\"").unwrap();
         assert!(truncated.is_empty());
 
+        // An unterminated final fragment is tolerated regardless of its bytes.
         let binary = parse_records_bytes(&[0xff, 0x00, 0xfe]);
-        assert!(binary.is_err());
+        assert!(binary.unwrap().is_empty());
+
+        // Invalid UTF-8 in a *terminated* line is still an error.
+        assert!(parse_records_bytes(&[0xff, b'\n']).is_err());
     }
 }
