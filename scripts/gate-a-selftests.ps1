@@ -468,12 +468,11 @@ function Test-SelfTestEscapedLowercaseContinuations([ref]$ok) {
   Assert-SelfTest ($twoWordWired.Count -ge 1) "two-word continuation path flagged by file scan" $ok
 }
 
-function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
+function Test-SelfTestEscapedContinuedPaths([ref]$ok) {
   $rules = Get-PrivacyRules
   $pattern = $rules.AbsoluteDrivePathPattern
   $allowed = $rules.AllowedAbsolutePathRoots
   $sep = [System.IO.Path]::DirectorySeparatorChar
-  $bs = '\'
   $quote = [char]34
 
   # CodeRabbit PR #48 thread 4607568585: continuation into more path segments after an allowlisted
@@ -488,9 +487,17 @@ function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
     $wired = @(Get-PrivacyHitsForFile 'fixture.txt' $p $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
     Assert-SelfTest ($wired.Count -ge 1) "continued escaped path must be flagged by file scan: $p" $ok
   }
+}
+
+function Test-SelfTestNonAsciiPaths([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $quote = [char]34
+  $accent = [char]0x00E9
 
   # CodeRabbit PR #48 thread 4607568579: a valid non-ASCII folder name must not suppress detection.
-  $accent = [char]0x00E9
   $nonAsciiFolder = 'private-' + $accent + 'quipe'
   $escapedNonAscii = $quote + 'D:' + $sep + $sep + $nonAsciiFolder + $sep + $sep + 'notes.txt' + $quote + ';'
   $nonAsciiMatchCount = @([regex]::Matches($escapedNonAscii, $pattern)).Count
@@ -518,6 +525,14 @@ function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
   Assert-SelfTest ($slashLikeDirect.Count -ge 1) "slash-lookalike segment flagged directly" $ok
   $slashLikeWired = @(Get-PrivacyHitsForFile 'fixture.txt' $slashLikePath $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
   Assert-SelfTest ($slashLikeWired.Count -ge 1) "slash-lookalike segment flagged by file scan" $ok
+}
+
+function Test-SelfTestMalformedFullwidthFixture([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $bs = '\'
+  $quote = [char]34
 
   $malformed = $quote + 'C:' + $bs + $bs + 'Temp' + [char]0xFF0F + 'foo' + $quote
   $malformedWired = @(Get-PrivacyHitsForFile 'fixture.txt' $malformed $rules)
@@ -535,6 +550,15 @@ function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
   Assert-SelfTest ($descDirect.Count -ge 1) "malformed-fixture descendant flagged by direct detector" $ok
   $descWired = @(Get-PrivacyHitsForFile 'fixture.txt' $malformedDescendant $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
   Assert-SelfTest ($descWired.Count -ge 1) "malformed-fixture descendant flagged through file-level privacy scan" $ok
+}
+
+function Test-SelfTestCopulaAndProseControls([ref]$ok) {
+  $rules = Get-PrivacyRules
+  $pattern = $rules.AbsoluteDrivePathPattern
+  $allowed = $rules.AllowedAbsolutePathRoots
+  $sep = [System.IO.Path]::DirectorySeparatorChar
+  $bs = '\'
+  $quote = [char]34
 
   # CodeRabbit 4607724831: a copular "is" continuation is a path-like string, not prose, so it
   # must be reported. Genuine action/auxiliary-verb prose and system paths stay unflagged.
@@ -557,6 +581,13 @@ function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
     $ctrlWired = @(Get-PrivacyHitsForFile 'fixture.txt' $p $rules | Where-Object { $_ -match 'forbidden absolute drive path' })
     Assert-SelfTest ($ctrlWired.Count -eq 0) "prose/system control unflagged by file scan: $p" $ok
   }
+}
+
+function Test-SelfTestEscapedContinuedAndNonAscii([ref]$ok) {
+  Test-SelfTestEscapedContinuedPaths $ok
+  Test-SelfTestNonAsciiPaths $ok
+  Test-SelfTestMalformedFullwidthFixture $ok
+  Test-SelfTestCopulaAndProseControls $ok
 }
 
 function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
