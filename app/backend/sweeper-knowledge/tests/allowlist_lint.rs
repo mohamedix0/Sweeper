@@ -1,23 +1,31 @@
 use sweeper_knowledge::{
     builtin_knowledge_entries, builtin_protected_path_catalog, embedded_targets,
-    lint_allowlist_toml, KnowledgeEntry, KnownFolder, ProtectedPathKind, Risk, Scope, Tier,
+    lint_allowlist_toml, KnowledgeEntry, KnownFolder, ProtectedPathCatalog, ProtectedPathKind,
+    Risk, Scope, TargetDefinition, Tier,
 };
 
 #[test]
 fn embedded_allowlist_passes_lint_and_has_expected_targets() {
     let targets = embedded_targets();
-    assert!(targets.iter().any(|t| t.id == "user-temp"));
-    assert!(targets.iter().any(|t| t.id == "crash-dumps"));
-    assert!(targets.iter().any(|t| t.id == "wer-reports"));
-    assert!(targets.iter().any(|t| t.id == "inet-cache"));
-    assert!(targets.iter().any(|t| t.id == "npm-cache"));
-    assert!(targets.iter().any(|t| t.id == "gradle-caches"));
-    assert!(targets.iter().any(|t| t.id == "cargo-registry-cache"));
-    assert!(targets.iter().any(|t| t.id == "vscode-cache"));
-    assert!(targets.iter().any(|t| t.id == "vscode-cached-data"));
-    assert!(targets.iter().any(|t| t.id == "pip-cache"));
-    assert!(targets.iter().any(|t| t.id == "nuget-v3-cache"));
-    assert!(targets.iter().any(|t| t.id == "jetbrains-caches"));
+    let expect_present = |id: &str| {
+        assert!(targets.iter().any(|t| t.id == id), "missing {id}");
+    };
+    for id in [
+        "user-temp",
+        "crash-dumps",
+        "wer-reports",
+        "inet-cache",
+        "npm-cache",
+        "gradle-caches",
+        "cargo-registry-cache",
+        "vscode-cache",
+        "vscode-cached-data",
+        "pip-cache",
+        "nuget-v3-cache",
+        "jetbrains-caches",
+    ] {
+        expect_present(id);
+    }
     for id in [
         "chrome-cache-default",
         "chrome-code-cache-default",
@@ -71,6 +79,12 @@ fn embedded_allowlist_passes_lint_and_has_expected_targets() {
 
 fn assert_protected_catalog_present() {
     let prot = builtin_protected_path_catalog();
+    assert_has_protected_kinds(&prot);
+    assert_has_container_root(&prot, "C:\\Windows");
+    assert_has_container_root(&prot, "C:\\ProgramData");
+}
+
+fn assert_has_protected_kinds(prot: &ProtectedPathCatalog) {
     assert!(prot
         .entries
         .iter()
@@ -79,11 +93,11 @@ fn assert_protected_catalog_present() {
         .entries
         .iter()
         .any(|e| e.kind == ProtectedPathKind::ProtectedContainerRoot));
+}
+
+fn assert_has_container_root(prot: &ProtectedPathCatalog, needle: &str) {
     assert!(prot.entries.iter().any(|e| {
-        e.kind == ProtectedPathKind::ProtectedContainerRoot && e.display.contains("C:\\Windows")
-    }));
-    assert!(prot.entries.iter().any(|e| {
-        e.kind == ProtectedPathKind::ProtectedContainerRoot && e.display.contains("C:\\ProgramData")
+        e.kind == ProtectedPathKind::ProtectedContainerRoot && e.display.contains(needle)
     }));
 }
 
@@ -127,12 +141,13 @@ fn catalogs_and_knowledge_entries_present() {
     assert_protected_catalog_present();
 
     let kb = builtin_knowledge_entries();
-    assert!(kb.iter().any(|e| e.relative_pattern.contains(".rustup")));
-    assert!(kb.iter().any(|e| e.relative_pattern == "Packages"));
-    assert!(kb.iter().any(|e| e.relative_pattern.contains(".vhdx")));
-    assert!(kb
-        .iter()
-        .any(|e| e.risk == Risk::Protected || e.risk == Risk::Unknown || e.risk == Risk::Caution));
+    let has_entry = |predicate: fn(&KnowledgeEntry) -> bool| {
+        assert!(kb.iter().any(predicate));
+    };
+    has_entry(|e| e.relative_pattern.contains(".rustup"));
+    has_entry(|e| e.relative_pattern == "Packages");
+    has_entry(|e| e.relative_pattern.contains(".vhdx"));
+    has_entry(|e| e.risk == Risk::Protected || e.risk == Risk::Unknown || e.risk == Risk::Caution);
 
     for id in [
         "windows-temp",
@@ -615,6 +630,23 @@ description="x"
 
 // --- Reference-parity follow-up (#39 / #40 / #41) ---
 
+fn assert_leaf_cache_anchor(target: &TargetDefinition, subpath: &str, id: &str) {
+    assert_eq!(target.known_folder, KnownFolder::LocalAppData, "{id}");
+    assert_eq!(target.relative_subpath, subpath, "{id}");
+}
+
+fn assert_leaf_cache_scope(target: &TargetDefinition, id: &str) {
+    assert_eq!(target.tier, Tier::Tier2, "{id}");
+    assert_eq!(target.risk, Risk::Safe, "{id}");
+    assert!(matches!(target.scope, Scope::Contents), "{id}");
+}
+
+fn assert_leaf_cache_safety(target: &TargetDefinition, id: &str) {
+    assert!(!target.requires_elevation, "{id}");
+    assert_eq!(target.min_age_hours, 24, "{id}");
+    assert!(!target.description.trim().is_empty(), "{id}");
+}
+
 #[test]
 fn vivaldi_and_opera_leaf_cache_targets_are_present() {
     let targets = embedded_targets();
@@ -649,14 +681,9 @@ fn vivaldi_and_opera_leaf_cache_targets_are_present() {
             .iter()
             .find(|t| t.id == id)
             .unwrap_or_else(|| panic!("missing {id} target"));
-        assert_eq!(t.known_folder, KnownFolder::LocalAppData, "{id}");
-        assert_eq!(t.relative_subpath, subpath, "{id}");
-        assert_eq!(t.tier, Tier::Tier2, "{id}");
-        assert_eq!(t.risk, Risk::Safe, "{id}");
-        assert!(matches!(t.scope, Scope::Contents), "{id}");
-        assert!(!t.requires_elevation, "{id}");
-        assert_eq!(t.min_age_hours, 24, "{id}");
-        assert!(!t.description.trim().is_empty(), "{id}");
+        assert_leaf_cache_anchor(t, subpath, id);
+        assert_leaf_cache_scope(t, id);
+        assert_leaf_cache_safety(t, id);
     }
 
     // No broad profile/root scoping: every Vivaldi/Opera target must end in an explicit cache leaf.
@@ -700,10 +727,13 @@ fn explorer_icon_web_cache_leaves_are_documented_out_of_scope() {
         .find(|e| e.id == "kb-explorer-icon-web-cache-leaves")
         .unwrap_or_else(|| panic!("missing Explorer icon/web cache out-of-scope annotation"));
     let text = format!("{} {}", entry.description, entry.notes).to_ascii_lowercase();
-    assert!(text.contains("iconcache"), "{text}");
-    assert!(text.contains("thumbcache"), "{text}");
-    assert!(text.contains("out of scope"), "{text}");
-    assert!(text.contains("non-cache"), "{text}");
+    let mentions = |needle: &str| {
+        assert!(text.contains(needle), "{text}");
+    };
+    mentions("iconcache");
+    mentions("thumbcache");
+    mentions("out of scope");
+    mentions("non-cache");
     assert!(
         text.contains("locked") || text.contains("in use") || text.contains("running"),
         "must document that Explorer holds these databases open: {text}"
@@ -729,12 +759,15 @@ fn uv_and_maven_analyzer_entries_document_safe_mechanism_rationale() {
         .find(|e| e.id == "kb-uv-cache")
         .expect("missing uv Knowledge Base entry");
     let uv_text = format!("{} {}", uv.description, uv.notes).to_ascii_lowercase();
+    let uv_mentions = |needle: &str| {
+        assert!(uv_text.contains(needle), "{uv_text}");
+    };
     assert!(
         uv_text.contains("whole-cache") || uv_text.contains("whole cache"),
         "{uv_text}"
     );
-    assert!(uv_text.contains("uv cache clean"), "{uv_text}");
-    assert!(uv_text.contains("per-file"), "{uv_text}");
+    uv_mentions("uv cache clean");
+    uv_mentions("per-file");
     assert!(
         uv_text.contains("not cleanable") || uv_text.contains("analyzer only"),
         "{uv_text}"
