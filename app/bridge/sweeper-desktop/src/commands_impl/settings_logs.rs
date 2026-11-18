@@ -508,6 +508,15 @@ mod tests {
     use sweeper_contract::ContractError;
     use sweeper_testkit::{create_file_symlink, Sandbox};
 
+    /// True when a filesystem error means the sandbox lacks the privilege to
+    /// perform the setup step, in which case the regression test skips itself.
+    fn is_insufficient_privilege_error(error: &impl std::fmt::Display) -> bool {
+        let message = error.to_string().to_lowercase();
+        ["privilege", "permission", "denied"]
+            .iter()
+            .any(|needle| message.contains(needle))
+    }
+
     #[test]
     fn read_log_accepts_valid_dotted_and_unicode_file_name_ids() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -647,8 +656,7 @@ mod tests {
 
         // `logs` is a junction pointing OUTSIDE when the read handle is opened.
         if let Err(e) = create_junction(&logs, &outside) {
-            let msg = e.to_string().to_lowercase();
-            if msg.contains("privilege") || msg.contains("permission") || msg.contains("denied") {
+            if is_insufficient_privilege_error(&e) {
                 eprintln!("skipping junction swap regression test (insufficient privilege): {e}");
                 return;
             }
