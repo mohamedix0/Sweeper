@@ -700,6 +700,30 @@ function Test-SelfTestBuildScriptUnsafe([ref]$ok) {
   Assert-SelfTest (-not (Test-RustHasUnsafeToken $commented)) "commented unsafe in build script must be ignored" $ok
   Assert-SelfTest (-not (Test-RustHasUnsafeToken $inString)) "unsafe in build-script string literal must be ignored" $ok
   Assert-SelfTest (-not (Test-RustHasUnsafeToken $safe)) "safe build script must pass" $ok
+
+  # Rust keywords are case-sensitive: an `Unsafe` identifier is safe code, not the keyword.
+  $capitalUnsafe = "struct Unsafe;`nfn main() { let _ = Unsafe; }"
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $capitalUnsafe)) "capitalized Unsafe identifier must not be detected as unsafe keyword" $ok
+  # The lowercase keyword must still be caught (control for the case-sensitive change).
+  $lowerUnsafe = "fn main() { unsafe { rerun(); } }"
+  Assert-SelfTest (Test-RustHasUnsafeToken $lowerUnsafe) "lowercase unsafe keyword must still be detected" $ok
+}
+
+function Test-SelfTestOwnedBuildScriptExemption([ref]$ok) {
+  # The ADR 0003 exemption is matched on the repo-relative path, not on absolute path segments.
+  # Synthetic roots are assembled from neutral fragments (no drive letter or machine path).
+  $neutralRoot = 'repo'
+  $winfsBuild = Join-Path $neutralRoot 'app\backend\sweeper-winfs\build.rs'
+  Assert-SelfTest (-not (Test-OwnedBuildScript $winfsBuild $neutralRoot)) "build script under app/backend/sweeper-winfs must be exempt" $ok
+
+  # Even when an ancestor directory is named sweeper-winfs, the desktop build script is not exempt.
+  $ancestorRoot = Join-Path 'checkout' 'sweeper-winfs'
+  $desktopBuild = Join-Path $ancestorRoot 'app\bridge\sweeper-desktop\build.rs'
+  Assert-SelfTest (Test-OwnedBuildScript $desktopBuild $ancestorRoot) "desktop build script must not be exempt when an ancestor is named sweeper-winfs" $ok
+
+  # Control: a different owned crate build script under a neutral root stays in scope.
+  $coreBuild = Join-Path $neutralRoot 'app\backend\sweeper-core\build.rs'
+  Assert-SelfTest (Test-OwnedBuildScript $coreBuild $neutralRoot) "non-winfs backend build script must not be exempt" $ok
 }
 
 function Test-SelfTestGeigerOmittedOwnedCrates([ref]$ok) {
@@ -796,6 +820,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestCIGeigerRequirement $okRef
   Test-SelfTestGeigerUnsafeConfinement $okRef
   Test-SelfTestBuildScriptUnsafe $okRef
+  Test-SelfTestOwnedBuildScriptExemption $okRef
   Test-SelfTestGeigerOmittedOwnedCrates $okRef
   Test-SelfTestGeigerGateFailure $okRef
   if ($ok) {

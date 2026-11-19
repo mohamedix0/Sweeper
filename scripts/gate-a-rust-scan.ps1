@@ -233,6 +233,8 @@ function Get-RustScanText([string]$text) {
 function Test-RustHasUnsafeToken([string]$text) {
   # Conservative detection of any active `unsafe` token (unsafe block, fn, impl, trait, extern).
   # Comments and string/char literals are blanked first, so docs and examples never false-positive.
+  # Rust keywords are case-sensitive: `-cmatch` prevents identifiers such as `Unsafe` from being
+  # mistaken for the keyword, while the comment/string/char-aware scan still blanks non-code.
   $scan = Get-RustScanText $text
-  return ($scan -match '\bunsafe\b')
+  return ($scan -cmatch '\bunsafe\b')
 }

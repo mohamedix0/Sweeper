@@ -285,10 +285,26 @@ function Test-IsCIEnvironment([string]$ci, [string]$githubActions) {
   return (($ci -ieq 'true') -or ($githubActions -ieq 'true'))
 }
 
-function Test-OwnedBuildScript([string]$path) {
+function Get-OwnedBuildScriptRelativePath([string]$path, [string]$root) {
+  # Strip the checkout root before applying the ADR 0003 exemption. Matching the absolute path
+  # would exempt EVERY build script whenever the checkout or a parent is named sweeper-winfs.
+  $normalizedRoot = $root.TrimEnd([char[]]@('\', '/'))
+  foreach ($sep in @('\', '/')) {
+    $prefix = $normalizedRoot + $sep
+    if ($path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $path.Substring($prefix.Length)
+    }
+  }
+  return $path
+}
+
+function Test-OwnedBuildScript([string]$path, [string]$root = $repoRoot) {
   if (-not (Test-NotTargetPath $path)) { return $false }
-  # ADR 0003 permits unsafe in sweeper-winfs; every other owned crate must stay unsafe-free.
-  return ($path -notmatch '([/\\])sweeper-winfs([/\\])')
+  $relative = Get-OwnedBuildScriptRelativePath $path $root
+  # ADR 0003 permits unsafe only in app/backend/sweeper-winfs. Anchor the repo-relative prefix
+  # so an ancestor named sweeper-winfs cannot exempt an unrelated owned crate (e.g. the desktop
+  # build script). Every other owned crate must stay unsafe-free.
+  return ($relative -notmatch '^app[/\\]backend[/\\]sweeper-winfs[/\\]')
 }
 
 function Get-OwnedBuildScriptPaths([string]$root) {
