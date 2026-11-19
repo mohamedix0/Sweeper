@@ -293,10 +293,10 @@ function truncatedLeaf(args: LeafTruncateOptions): string | null {
   const parts = leafParts(args);
   const tailKeep = Math.min(glyphLength({ value: parts.ext }) + 4, Math.max(3, Math.floor(budget / 2)));
   const headKeep = Math.max(2, budget - tailKeep - 1);
-  // Select the tail from the ORIGINAL leaf so the grapheme at the extension
-  // boundary (e.g. a Prepend character before '.') is never reconstructed from
-  // a count-derived core that may have lost it.
-  const middle = `${takeGlyphs({ value: parts.core, count: Math.max(1, headKeep) })}${ELLIPSIS}${takeLastGlyphs({ value: args.leaf, count: Math.max(1, tailKeep) })}`;
+  // Select both head and tail from the ORIGINAL leaf so the grapheme at the
+  // extension boundary (e.g. a Prepend character before '.') is never
+  // reconstructed from a count-derived core that may have lost it.
+  const middle = `${takeGlyphs({ value: args.leaf, count: Math.max(1, headKeep) })}${ELLIPSIS}${takeLastGlyphs({ value: args.leaf, count: Math.max(1, tailKeep) })}`;
   const candidate = normalizeSlashes({ value: `${args.prefixForLeaf}${middle}` });
   if (glyphLength({ value: candidate }) > args.maxLen) return null;
   return candidate;

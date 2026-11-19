@@ -195,4 +195,18 @@ describe('middleTruncatePath (grapheme-aware)', () => {
     expect(out.endsWith('.txt')).toBe(true);
     expect(graphemeLength(out)).toBeLessThanOrEqual(22);
   });
+
+  it('preserves a Unicode Prepend grapheme at the head boundary with a short core', () => {
+    const PREPEND = '\u0600'; // clusters with the following '.' — a Prepend character
+    const path = `C:\\Temp\\cache\\aa${PREPEND}.123456789`;
+    const maxLen = 13;
+    const out = middleTruncatePath({ path, maxLen });
+    expect(out).toContain(ELLIPSIS);
+    // The head must be taken from the original leaf so the complete U+0600 +
+    // '.' grapheme survives; a count-derived core loses the dot and would leave
+    // U+0600 clustered with the ellipsis instead.
+    expect(out).toContain(`${PREPEND}.`);
+    expect(out).not.toContain(`${PREPEND}${ELLIPSIS}`);
+    expect(graphemeLength(out)).toBeLessThanOrEqual(maxLen);
+  });
 });
