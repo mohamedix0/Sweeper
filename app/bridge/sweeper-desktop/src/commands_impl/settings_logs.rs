@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -98,8 +98,10 @@ struct CleanLogScanState {
     all_sandbox: bool,
     /// (target_id, path) pairs for intent records.
     intents: Vec<(String, String)>,
-    /// (target_id, path) pairs for outcome records.
-    outcomes: HashSet<(String, String)>,
+    /// Outcome counts by (target_id, path). A count (rather than a set) lets
+    /// each outcome satisfy at most one intent when `item_ids` repeats an ID
+    /// and the journal therefore holds duplicate intents for the same key.
+    outcomes: HashMap<(String, String), usize>,
 }
 
 impl CleanLogScanState {
@@ -109,10 +111,19 @@ impl CleanLogScanState {
 
     /// Intents with no matching outcome are "unknown, verify on disk": the item
     /// may have been deleted even though its outcome record was never written.
+    /// Each outcome satisfies only one intent: consume a count per matching
+    /// intent so a single outcome cannot resolve two duplicate intents.
     fn intent_without_outcome(&self) -> usize {
+        let mut remaining = self.outcomes.clone();
         self.intents
             .iter()
-            .filter(|key| !self.outcomes.contains(key))
+            .filter(|key| match remaining.get_mut(*key) {
+                Some(count) if *count > 0 => {
+                    *count -= 1;
+                    false
+                }
+                _ => true,
+            })
             .count()
     }
 }
@@ -152,7 +163,7 @@ fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Va
     match kind {
         Some("outcome") => {
             state.saw_outcome = true;
-            state.outcomes.insert((target_id, path));
+            *state.outcomes.entry((target_id, path)).or_insert(0) += 1;
         }
         Some("intent") => state.intents.push((target_id, path)),
         _ => {}
@@ -1663,6 +1674,27 @@ mod tests {
 
         let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
         assert!(!read.content.contains("\"record\":\"reconciliation\""));
+    }
+
+    /// Review 5970893591: `item_ids` may repeat an ID, so a journal can hold
+    /// two intents for the same (target_id, path). One outcome must reconcile
+    /// only one of them; the other stays unknown/verify_on_disk in the view.
+    #[test]
+    fn duplicate_intents_with_single_outcome_leave_one_unreconciled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-5-5";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let intent =
+            "{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\dup.tmp\"}\n";
+        let outcome = "{\"record\":\"outcome\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\dup.tmp\",\"status\":\"deleted\"}\n";
+        std::fs::write(&path, format!("{intent}{intent}{outcome}")).expect("write log");
+
+        let state = inspect_clean_log(&path).expect("inspect log");
+        assert_eq!(state.intent_without_outcome(), 1);
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(read.content.contains("\"record\":\"reconciliation\""));
+        assert!(read.content.contains("\"intent_without_outcome\":1"));
     }
 
     #[test]
