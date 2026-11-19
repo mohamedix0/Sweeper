@@ -1,6 +1,7 @@
 # Gate A - Rust lexical scanner helpers.
 # Dot-sourced by gate-a-check.ps1. Pure state-machine functions that blank comments and
-# string literals so forbid(unsafe_code) and SAFETY-comment checks see only active code.
+# string literals so forbid(unsafe_code), SAFETY-comment and build-script unsafe checks see
+# only active code.
 # Compound character tests are named predicates so each function stays simple and reviewable.
 
 function Test-RustNewline([char]$c) {
@@ -227,4 +228,11 @@ function Get-RustScanText([string]$text) {
   $state = Get-RustScanState $text
   while ($state.Index -lt $state.Len) { Step-RustScan $state }
   return -join $state.Out
+}
+
+function Test-RustHasUnsafeToken([string]$text) {
+  # Conservative detection of any active `unsafe` token (unsafe block, fn, impl, trait, extern).
+  # Comments and string/char literals are blanked first, so docs and examples never false-positive.
+  $scan = Get-RustScanText $text
+  return ($scan -match '\bunsafe\b')
 }

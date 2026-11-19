@@ -41,10 +41,12 @@ jobs:
         run: cargo fmt --manifest-path app/Cargo.toml --all -- --check
 
       # Gate A enforces the unsafe-count audit, so the tool must be present before it runs.
+      # Pinned to 0.14.0 (verified locally): cargo-geiger does not scan build-script roots in
+      # this version, so Gate A supplements the audit with a direct owned build.rs scan.
       - name: Install cargo-geiger
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-geiger
+          tool: cargo-geiger@0.14.0
 
       - name: Gate A checks
         run: ./scripts/gate-a-check.ps1

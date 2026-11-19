@@ -688,6 +688,55 @@ function Test-SelfTestGeigerUnsafeConfinement([ref]$ok) {
   Assert-SelfTest (-not (Get-GeigerUnsafeAudit @()).Ok) "empty audit must be rejected" $ok
 }
 
+function Test-SelfTestBuildScriptUnsafe([ref]$ok) {
+  # cargo-geiger skips build-script roots, so Gate A scans owned build.rs files directly.
+  $activeBlock = "fn main() { unsafe { rerun(); } }"
+  $activeFn = "unsafe fn rerun() {}"
+  $commented = "// unsafe { rerun(); }`n/* unsafe { rerun(); } */`nfn main() {}"
+  $inString = "const S: &str = `"unsafe { rerun(); }`";`nfn main() {}"
+  $safe = "fn main() { rerun(); }`nconst S: &str = `"safe`";"
+  Assert-SelfTest (Test-RustHasUnsafeToken $activeBlock) "active unsafe block in build script must be detected" $ok
+  Assert-SelfTest (Test-RustHasUnsafeToken $activeFn) "unsafe fn in build script must be detected" $ok
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $commented)) "commented unsafe in build script must be ignored" $ok
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $inString)) "unsafe in build-script string literal must be ignored" $ok
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $safe)) "safe build script must pass" $ok
+}
+
+function Test-SelfTestGeigerOmittedOwnedCrates([ref]$ok) {
+  # One audited owned crate plus one owned crate in packages_without_metrics. The gate's Fail
+  # branch is driven by Get-GeigerOmittedOwnedCrates, so a non-empty result means Gate A fails.
+  $fixture = @'
+{
+  "packages": [
+    { "package": { "id": { "name": "sweeper-core" } },
+      "unsafety": { "used": { "exprs": { "unsafe_": 1 } } } }
+  ],
+  "packages_without_metrics": [
+    { "name": "sweeper-knowledge", "version": "0.1.0", "source": {} },
+    { "name": "windows-sys", "version": "0.1.0", "source": {} }
+  ]
+}
+'@
+  $omitted = @(Get-GeigerOmittedOwnedCrates ($fixture | ConvertFrom-Json))
+  Assert-SelfTest ($omitted.Count -eq 1) "omitted owned crate must make Gate A fail" $ok
+  Assert-SelfTest ($omitted[0] -eq 'sweeper-knowledge') "omitted owned crate must be named" $ok
+
+  $thirdPartyOnly = @'
+{
+  "packages": [ { "package": { "id": { "name": "sweeper-core" } } } ],
+  "packages_without_metrics": [ { "name": "windows-sys", "version": "0.1.0", "source": {} } ]
+}
+'@
+  $thirdPartyOmitted = @(Get-GeigerOmittedOwnedCrates ($thirdPartyOnly | ConvertFrom-Json))
+  Assert-SelfTest ($thirdPartyOmitted.Count -eq 0) "third-party omissions must stay excluded" $ok
+
+  $stringForm = @'
+{ "packages": [], "packages_without_metrics": [ "sweeper-contract" ] }
+'@
+  $stringOmitted = @(Get-GeigerOmittedOwnedCrates ($stringForm | ConvertFrom-Json))
+  Assert-SelfTest ($stringOmitted.Count -eq 1) "string-form owned omission must also be detected" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -709,6 +758,8 @@ function Invoke-GateASelfTests {
   Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
   Test-SelfTestCIGeigerRequirement $okRef
   Test-SelfTestGeigerUnsafeConfinement $okRef
+  Test-SelfTestBuildScriptUnsafe $okRef
+  Test-SelfTestGeigerOmittedOwnedCrates $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return

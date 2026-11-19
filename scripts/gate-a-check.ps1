@@ -285,6 +285,43 @@ function Test-IsCIEnvironment([string]$ci, [string]$githubActions) {
   return (($ci -ieq 'true') -or ($githubActions -ieq 'true'))
 }
 
+function Test-OwnedBuildScript([string]$path) {
+  if (-not (Test-NotTargetPath $path)) { return $false }
+  # ADR 0003 permits unsafe in sweeper-winfs; every other owned crate must stay unsafe-free.
+  return ($path -notmatch '([/\\])sweeper-winfs([/\\])')
+}
+
+function Get-OwnedBuildScriptPaths([string]$root) {
+  # cargo-geiger does not analyse build-script roots (verified with the pinned 0.14.0: a crate
+  # whose build.rs contains unsafe reports zero unsafe). Scan owned build scripts directly so
+  # an unsafe block there cannot slip past the ADR 0003 confinement audit.
+  $paths = @()
+  foreach ($appRoot in @((Join-Path $root 'app\backend'), (Join-Path $root 'app\bridge'))) {
+    $found = @(Get-ChildItem -Path $appRoot -Recurse -Filter 'build.rs' -File -ErrorAction SilentlyContinue |
+      Where-Object { Test-OwnedBuildScript $_.FullName } |
+      ForEach-Object { $_.FullName })
+    $paths += $found
+  }
+  return @($paths | Sort-Object -Unique)
+}
+
+function Get-BuildScriptUnsafeIssues([string[]]$paths) {
+  $issues = @()
+  foreach ($path in $paths) {
+    $text = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $text) { continue }
+    if (Test-RustHasUnsafeToken $text) { $issues += $path }
+  }
+  return @($issues)
+}
+
+function Invoke-BuildScriptUnsafeCheck([string]$root) {
+  $paths = @(Get-OwnedBuildScriptPaths $root)
+  foreach ($issue in @(Get-BuildScriptUnsafeIssues $paths)) {
+    Fail "unsafe code found in build script $issue. cargo-geiger does not scan build-script roots; unsafe must be confined to sweeper-winfs (ADR 0003)."
+  }
+}
+
 function Get-GeigerWorkspaceManifests([string]$root) {
   # cargo-geiger requires a concrete package manifest (a virtual workspace manifest is rejected).
   # Enumerate the workspace members directly from the crate folders so new crates are covered.
@@ -385,6 +422,20 @@ function Get-GeigerUnsafeAudit($entries) {
   return Format-GeigerAuditResult $summary $offenders $seen.Count
 }
 
+function Get-GeigerOmittedCrateName($entry) {
+  # Real cargo-geiger reports packages_without_metrics as PackageId objects ({ name, ... }).
+  # Accept the plain string form too so older/synthetic reports are handled conservatively.
+  if ($null -eq $entry) { return '' }
+  if ($entry -is [string]) { return [string]$entry }
+  return [string]$entry.name
+}
+
+function Get-GeigerOmittedOwnedCrates($report) {
+  # Only owned sweeper-* crates matter; a third-party omission is not this repo's unsafe.
+  $names = @(@($report.packages_without_metrics) | ForEach-Object { Get-GeigerOmittedCrateName $_ })
+  return @($names | Where-Object { $_ -like 'sweeper-*' })
+}
+
 function Invoke-CargoGeiger([string]$root) {
   Write-Host "GATE-A: running cargo geiger unsafe audit for workspace crates..."
   $manifests = @(Get-GeigerWorkspaceManifests $root)
@@ -397,6 +448,11 @@ function Invoke-CargoGeiger([string]$root) {
     $report = Invoke-GeigerForManifest $manifest
     if ($null -eq $report) { return }
     $entries += @($report.packages)
+    $omitted = @(Get-GeigerOmittedOwnedCrates $report)
+    if ($omitted.Count -gt 0) {
+      Fail "cargo geiger produced no unsafe metrics for owned workspace crate(s) in $manifest ($($omitted -join ', ')). Unsafe confinement could not be verified."
+      return
+    }
   }
 
   $audit = Get-GeigerUnsafeAudit $entries
@@ -762,6 +818,7 @@ function Invoke-GateAChecks {
   Invoke-CheckDesktopCargoDeps
   Test-ForbidUnsafeCode $repoRoot
   Test-WinfsSafetyComments $repoRoot
+  Invoke-BuildScriptUnsafeCheck $repoRoot
   Invoke-RequiredCargoGeiger $repoRoot
   Invoke-PrivacyScrubChecks
   if ($failed) { exit 1 }
