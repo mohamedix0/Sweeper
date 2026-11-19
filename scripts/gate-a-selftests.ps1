@@ -619,6 +619,206 @@ function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
   }
 }
 
+function Test-SelfTestCIGeigerRequirement([ref]$ok) {
+  Assert-SelfTest (Test-IsCIEnvironment 'true' '') "CI=true must be detected as CI" $ok
+  Assert-SelfTest (Test-IsCIEnvironment '' 'true') "GITHUB_ACTIONS=true must be detected as CI" $ok
+  Assert-SelfTest (Test-IsCIEnvironment 'TRUE' 'false') "CI detection must be case-insensitive" $ok
+  Assert-SelfTest (-not (Test-IsCIEnvironment 'false' 'false')) "explicit false values must not be detected as CI" $ok
+  Assert-SelfTest (-not (Test-IsCIEnvironment '' '')) "empty environment must not be detected as CI" $ok
+}
+
+function Test-SelfTestGeigerUnsafeConfinement([ref]$ok) {
+  # Synthetic geiger packages: the only offending workspace crate is sweeper-core.
+  # sweeper-winfs (approved) and a third-party dependency (not owned) may contain unsafe.
+  $fixture = @'
+[
+  {
+    "package": { "id": { "name": "sweeper-core" } },
+    "unsafety": {
+      "used": { "exprs": { "unsafe_": 2 }, "functions": { "unsafe_": 0 }, "item_impls": { "unsafe_": 0 }, "item_traits": { "unsafe_": 0 }, "methods": { "unsafe_": 0 } },
+      "unused": { "exprs": { "unsafe_": 0 } }
+    }
+  },
+  {
+    "package": { "id": { "name": "sweeper-winfs" } },
+    "unsafety": {
+      "used": { "exprs": { "unsafe_": 4 } },
+      "unused": { "exprs": { "unsafe_": 0 } }
+    }
+  },
+  {
+    "package": { "id": { "name": "windows-sys" } },
+    "unsafety": {
+      "used": { "exprs": { "unsafe_": 100 } },
+      "unused": { "exprs": { "unsafe_": 0 } }
+    }
+  }
+]
+'@
+  $entries = $fixture | ConvertFrom-Json
+  $audit = Get-GeigerUnsafeAudit $entries
+  Assert-SelfTest $audit.Ok "valid geiger entries must be accepted" $ok
+  Assert-SelfTest ($audit.Offenders.Count -eq 1) "only one offending workspace crate must be reported" $ok
+  if ($audit.Offenders.Count -ge 1) {
+    Assert-SelfTest ($audit.Offenders[0] -match 'sweeper-core') "offender must name sweeper-core" $ok
+  }
+
+  # Per-crate summary boundaries: only owned sweeper crates, sorted, with their own counts.
+  $summaryLines = @($audit.Summary)
+  Assert-SelfTest ($summaryLines.Count -eq 2) "summary must cover only sweeper workspace crates" $ok
+  Assert-SelfTest ($summaryLines[0] -like 'sweeper-core=*') "summary must be sorted and include sweeper-core" $ok
+  Assert-SelfTest ($summaryLines[1] -like 'sweeper-winfs=*') "summary must include approved sweeper-winfs" $ok
+  $thirdParty = @($audit.Summary | Where-Object { $_ -match 'windows-sys' })
+  Assert-SelfTest ($thirdParty.Count -eq 0) "third-party unsafe must be excluded from summary" $ok
+
+  # Unsafe is counted from the 'unused' section too, matching 'used' handling.
+  $unusedOnly = @'
+[
+  { "package": { "id": { "name": "sweeper-core" } },
+    "unsafety": { "unused": { "exprs": { "unsafe_": 3 } } } }
+]
+'@
+  $unusedAudit = Get-GeigerUnsafeAudit ($unusedOnly | ConvertFrom-Json)
+  Assert-SelfTest ($unusedAudit.Ok -and $unusedAudit.Offenders.Count -eq 1) "unsafe in unused section must be counted" $ok
+
+  $winfsOnly = $fixture -replace '"unsafe_": 2', '"unsafe_": 0'
+  $safeAudit = Get-GeigerUnsafeAudit ($winfsOnly | ConvertFrom-Json)
+  Assert-SelfTest ($safeAudit.Offenders.Count -eq 0) "winfs-only unsafe must not be reported" $ok
+
+  Assert-SelfTest (-not (Get-GeigerUnsafeAudit @()).Ok) "empty audit must be rejected" $ok
+}
+
+function Test-SelfTestBuildScriptUnsafe([ref]$ok) {
+  # cargo-geiger skips build-script roots, so Gate A scans owned build.rs files directly.
+  $activeBlock = "fn main() { unsafe { rerun(); } }"
+  $activeFn = "unsafe fn rerun() {}"
+  $commented = "// unsafe { rerun(); }`n/* unsafe { rerun(); } */`nfn main() {}"
+  $inString = "const S: &str = `"unsafe { rerun(); }`";`nfn main() {}"
+  $safe = "fn main() { rerun(); }`nconst S: &str = `"safe`";"
+  Assert-SelfTest (Test-RustHasUnsafeToken $activeBlock) "active unsafe block in build script must be detected" $ok
+  Assert-SelfTest (Test-RustHasUnsafeToken $activeFn) "unsafe fn in build script must be detected" $ok
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $commented)) "commented unsafe in build script must be ignored" $ok
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $inString)) "unsafe in build-script string literal must be ignored" $ok
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $safe)) "safe build script must pass" $ok
+
+  # Rust keywords are case-sensitive: an `Unsafe` identifier is safe code, not the keyword.
+  $capitalUnsafe = "struct Unsafe;`nfn main() { let _ = Unsafe; }"
+  Assert-SelfTest (-not (Test-RustHasUnsafeToken $capitalUnsafe)) "capitalized Unsafe identifier must not be detected as unsafe keyword" $ok
+  # The lowercase keyword must still be caught (control for the case-sensitive change).
+  $lowerUnsafe = "fn main() { unsafe { rerun(); } }"
+  Assert-SelfTest (Test-RustHasUnsafeToken $lowerUnsafe) "lowercase unsafe keyword must still be detected" $ok
+}
+
+function Test-SelfTestOwnedBuildScriptExemption([ref]$ok) {
+  # The ADR 0003 exemption is matched on the repo-relative path, not on absolute path segments.
+  # Synthetic roots are assembled from neutral fragments (no drive letter or machine path).
+  $neutralRoot = 'repo'
+  $winfsBuild = Join-Path $neutralRoot 'app\backend\sweeper-winfs\build.rs'
+  Assert-SelfTest (-not (Test-OwnedBuildScript $winfsBuild $neutralRoot)) "build script under app/backend/sweeper-winfs must be exempt" $ok
+
+  # Even when an ancestor directory is named sweeper-winfs, the desktop build script is not exempt.
+  $ancestorRoot = Join-Path 'checkout' 'sweeper-winfs'
+  $desktopBuild = Join-Path $ancestorRoot 'app\bridge\sweeper-desktop\build.rs'
+  Assert-SelfTest (Test-OwnedBuildScript $desktopBuild $ancestorRoot) "desktop build script must not be exempt when an ancestor is named sweeper-winfs" $ok
+
+  # Control: a different owned crate build script under a neutral root stays in scope.
+  $coreBuild = Join-Path $neutralRoot 'app\backend\sweeper-core\build.rs'
+  Assert-SelfTest (Test-OwnedBuildScript $coreBuild $neutralRoot) "non-winfs backend build script must not be exempt" $ok
+}
+
+function Test-SelfTestOwnedBuildScriptAlternateRoot([ref]$ok) {
+  # Discovery must forward its own $root to Test-OwnedBuildScript. Otherwise scanning another
+  # checkout or a temp fixture tree cannot strip that root, so the sweeper-winfs build script
+  # loses its ADR 0003 exemption and its approved unsafe is wrongly flagged. Get-ChildItem is
+  # mocked so no real filesystem or machine paths are involved.
+  $alternateRoot = Join-Path 'elsewhere' 'checkout'
+  $winfsBuild = Join-Path $alternateRoot 'app\backend\sweeper-winfs\build.rs'
+  $coreBuild = Join-Path $alternateRoot 'app\backend\sweeper-core\build.rs'
+  function Get-ChildItem {
+    [CmdletBinding()]
+    param([string]$Path, [switch]$Recurse, [string]$Filter, [switch]$File)
+    return @(
+      [pscustomobject]@{ FullName = $winfsBuild },
+      [pscustomobject]@{ FullName = $coreBuild }
+    )
+  }
+  $paths = @(Get-OwnedBuildScriptPaths $alternateRoot)
+  Assert-SelfTest ($paths -notcontains $winfsBuild) "alternate-root scan must keep sweeper-winfs build script exempt" $ok
+  Assert-SelfTest ($paths -contains $coreBuild) "alternate-root scan must still include non-winfs owned build scripts" $ok
+}
+
+function Test-SelfTestGeigerOmittedOwnedCrates([ref]$ok) {
+  # One audited owned crate plus one owned crate in packages_without_metrics. The gate's Fail
+  # branch is driven by Get-GeigerOmittedOwnedCrates, so a non-empty result means Gate A fails.
+  $fixture = @'
+{
+  "packages": [
+    { "package": { "id": { "name": "sweeper-core" } },
+      "unsafety": { "used": { "exprs": { "unsafe_": 1 } } } }
+  ],
+  "packages_without_metrics": [
+    { "name": "sweeper-knowledge", "version": "0.1.0", "source": {} },
+    { "name": "windows-sys", "version": "0.1.0", "source": {} }
+  ]
+}
+'@
+  $omitted = @(Get-GeigerOmittedOwnedCrates ($fixture | ConvertFrom-Json))
+  Assert-SelfTest ($omitted.Count -eq 1) "omitted owned crate must make Gate A fail" $ok
+  Assert-SelfTest ($omitted[0] -eq 'sweeper-knowledge') "omitted owned crate must be named" $ok
+
+  $thirdPartyOnly = @'
+{
+  "packages": [ { "package": { "id": { "name": "sweeper-core" } } } ],
+  "packages_without_metrics": [ { "name": "windows-sys", "version": "0.1.0", "source": {} } ]
+}
+'@
+  $thirdPartyOmitted = @(Get-GeigerOmittedOwnedCrates ($thirdPartyOnly | ConvertFrom-Json))
+  Assert-SelfTest ($thirdPartyOmitted.Count -eq 0) "third-party omissions must stay excluded" $ok
+
+  $stringForm = @'
+{ "packages": [], "packages_without_metrics": [ "sweeper-contract" ] }
+'@
+  $stringOmitted = @(Get-GeigerOmittedOwnedCrates ($stringForm | ConvertFrom-Json))
+  Assert-SelfTest ($stringOmitted.Count -eq 1) "string-form owned omission must also be detected" $ok
+}
+
+function New-GeigerMockReport([string[]]$omittedNames) {
+  # One audited owned crate carrying (zero) unsafe metrics plus the requested omissions.
+  $owned = [pscustomobject]@{
+    package  = [pscustomobject]@{ id = [pscustomobject]@{ name = 'sweeper-core' } }
+    unsafety = [pscustomobject]@{ used = [pscustomobject]@{ exprs = [pscustomobject]@{ 'unsafe_' = 0 } } }
+  }
+  $omitted = @($omittedNames | ForEach-Object {
+    [pscustomobject]@{ name = $_; version = '0.1.0'; source = [pscustomobject]@{} }
+  })
+  return [pscustomobject]@{ packages = @($owned); packages_without_metrics = $omitted }
+}
+
+function Test-SelfTestGeigerGateFailure([ref]$ok) {
+  # End-to-end: prove Invoke-CargoGeiger calls Fail when an owned crate is omitted from geiger
+  # metrics, and that a third-party-only omission keeps the gate green. Helpers are mocked in this
+  # scope so no real cargo/manifest access occurs; the real Fail message is asserted via the mock.
+  $mockGeigerReport = $null
+  $failMessages = [System.Collections.Generic.List[string]]::new()
+  function Get-GeigerWorkspaceManifests([string]$root) { return @('mock-manifest') }
+  function Invoke-GeigerForManifest([string]$manifest) { return $mockGeigerReport }
+  function Fail([string]$msg) { $failMessages.Add($msg) }
+
+  $mockGeigerReport = New-GeigerMockReport @('sweeper-knowledge', 'windows-sys')
+  $failMessages.Clear()
+  Invoke-CargoGeiger 'mock-root'
+  Assert-SelfTest ($failMessages.Count -eq 1) "omitted owned crate must make Invoke-CargoGeiger call Fail once" $ok
+  if ($failMessages.Count -ge 1) {
+    Assert-SelfTest ($failMessages[0] -match 'no unsafe metrics for owned workspace crate') "gate failure message must explain omitted owned crate" $ok
+    Assert-SelfTest ($failMessages[0] -match 'sweeper-knowledge') "gate failure message must name the omitted owned crate" $ok
+  }
+
+  $mockGeigerReport = New-GeigerMockReport @('windows-sys')
+  $failMessages.Clear()
+  Invoke-CargoGeiger 'mock-root'
+  Assert-SelfTest ($failMessages.Count -eq 0) "third-party-only omission must not make the gate fail" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -638,6 +838,13 @@ function Invoke-GateASelfTests {
   Test-SelfTestEscapedLowercaseContinuations $okRef
   Test-SelfTestEscapedContinuedAndNonAscii $okRef
   Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
+  Test-SelfTestCIGeigerRequirement $okRef
+  Test-SelfTestGeigerUnsafeConfinement $okRef
+  Test-SelfTestBuildScriptUnsafe $okRef
+  Test-SelfTestOwnedBuildScriptExemption $okRef
+  Test-SelfTestOwnedBuildScriptAlternateRoot $okRef
+  Test-SelfTestGeigerOmittedOwnedCrates $okRef
+  Test-SelfTestGeigerGateFailure $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
