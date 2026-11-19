@@ -25,6 +25,7 @@ export type ExecuteCleanResponse = {
   aborted: boolean;
   abortReason: string | null;
   logId: string | null;
+  journalErrors?: string[];
 };
 
 export type ContractError =

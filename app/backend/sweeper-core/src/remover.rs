@@ -28,6 +28,17 @@ pub enum CleanError {
     /// Internal invariant violation.
     #[error("invariant violation: {0}")]
     Invariant(String),
+    /// A circuit-breaker stop whose Skipped-outcome journal write also failed.
+    ///
+    /// Carries the original breaker reason so finalization keeps it as the abort
+    /// reason while still recording the journal failure and stopping further appends.
+    #[error("journal failure while stopping at circuit breaker ({reason}): {detail}")]
+    BreakerJournalFailure {
+        /// The circuit-breaker reason that stopped the batch.
+        reason: String,
+        /// The journal write failure that occurred while recording the skip.
+        detail: String,
+    },
 }
 
 /// Source/authorization context for a validated item.
@@ -330,6 +341,11 @@ pub struct CleanReport {
     pub aborted: bool,
     /// Abort reason if any.
     pub abort_reason: Option<String>,
+    /// Non-fatal journal failures recorded after a deletion already happened.
+    ///
+    /// These are surfaced to the user instead of discarding the whole report.
+    #[serde(default)]
+    pub journal_errors: Vec<String>,
 }
 
 /// Progress update emitted during clean execution.
@@ -371,96 +387,271 @@ where
     F: FnMut(CleanProgress),
 {
     let _panic_guard = AbortOnPanicGuard;
-    let base_dir = opts
-        .journal_base_dir
-        .clone()
-        .unwrap_or_else(journal::default_logs_base_dir);
-    let mut journal = JournalWriter::open_in(&base_dir)?;
-
+    let mut journal = open_clean_journal(&opts)?;
     let total_items = items.len() as u64;
-    let mut report = CleanReport {
-        items: Vec::with_capacity(items.len()),
-        bytes_freed: 0,
-        skipped_count: 0,
-        aborted: false,
-        abort_reason: None,
-    };
+    let mut report = new_clean_report(items.len());
     let mut deleted_total: u64 = 0;
     let mut completed: u64 = 0;
 
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         if report.aborted {
-            let reason = report
-                .abort_reason
-                .clone()
-                .unwrap_or_else(|| "aborted".to_string());
-            record_skip(&mut journal, &mut report, &item, &reason)?;
-            completed = completed.saturating_add(1);
-            on_progress(CleanProgress {
-                target_id: item.target_id.clone(),
-                completed_items: completed,
+            if let Err(err) = record_post_abort_skip(
+                &mut journal,
+                &mut report,
+                item,
+                &mut completed,
                 total_items,
-                bytes_freed_so_far: report.bytes_freed,
-                status: "Skipped".to_string(),
-            });
+                &mut on_progress,
+            ) {
+                return Ok(stop_after_journal_failure(
+                    &mut journal,
+                    report,
+                    err,
+                    &items[index..],
+                ));
+            }
             continue;
         }
 
-        let outcome = process_item(&item, &opts, &mut journal, &mut deleted_total, &report)?;
-        let status = match &outcome {
-            ProcessOutcome::Deleted(bytes) => {
-                report.items.push(ItemCleanResult {
-                    id: item.id.clone(),
-                    path: item.path.clone(),
-                    status: "deleted".to_string(),
-                    reason: String::new(),
-                    bytes_deleted: *bytes,
-                });
-                report.bytes_freed = report.bytes_freed.saturating_add(*bytes);
-                "deleted".to_string()
-            }
-            ProcessOutcome::Skipped(reason) => {
-                report.items.push(ItemCleanResult {
-                    id: item.id.clone(),
-                    path: item.path.clone(),
-                    status: "Skipped".to_string(),
-                    reason: reason.clone(),
-                    bytes_deleted: 0,
-                });
-                report.skipped_count += 1;
-                "Skipped".to_string()
-            }
-            ProcessOutcome::Aborted(reason) => {
-                report.aborted = true;
-                report.abort_reason = Some(reason.clone());
-                report.items.push(ItemCleanResult {
-                    id: item.id.clone(),
-                    path: item.path.clone(),
-                    status: "Skipped".to_string(),
-                    reason: reason.clone(),
-                    bytes_deleted: 0,
-                });
-                report.skipped_count += 1;
-                "aborted".to_string()
+        let outcome = match process_item(item, &opts, &mut journal, &mut deleted_total, &mut report)
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // An intent-write failure stops further deletion, but the
+                // deletions already completed and all journal errors collected
+                // so far must still reach the caller in a partial report.
+                return Ok(stop_after_journal_failure(
+                    &mut journal,
+                    report,
+                    err,
+                    &items[index..],
+                ));
             }
         };
+        let status = apply_process_outcome(item, outcome, &mut report);
         completed = completed.saturating_add(1);
-        on_progress(CleanProgress {
-            target_id: item.target_id.clone(),
-            completed_items: completed,
+        emit_item_progress(
+            &mut on_progress,
+            item,
+            completed,
             total_items,
-            bytes_freed_so_far: report.bytes_freed,
+            report.bytes_freed,
             status,
-        });
+        );
     }
+
+    // Post-delete journal failures are recorded on the report rather than
+    // discarding the outcomes of deletions that already took place.
+    report.journal_errors = journal.take_deferred_errors();
 
     Ok(report)
 }
 
+/// Open the write-ahead journal used by a Clean run.
+fn open_clean_journal(opts: &CleanOptions) -> Result<JournalWriter, CleanError> {
+    let base_dir = opts
+        .journal_base_dir
+        .clone()
+        .unwrap_or_else(journal::default_logs_base_dir);
+    Ok(JournalWriter::open_in(&base_dir)?)
+}
+
+/// Stop a clean batch after a fatal journal failure while preserving the
+/// deletions that already completed and every journal error collected so far.
+fn stop_after_journal_failure(
+    journal: &mut JournalWriter,
+    mut report: CleanReport,
+    err: CleanError,
+    remaining: &[ValidatedItem],
+) -> CleanReport {
+    let mut errors = journal.take_deferred_errors();
+    errors.push(format!("clean stopped: {err}"));
+    report.journal_errors = errors;
+
+    // The first stop owns the abort reason. A later failure while recording a
+    // post-abort skip must not replace the reason that actually stopped the batch.
+    // A breaker stop whose own Skipped-outcome write failed carries its reason
+    // on the error, because `apply_process_outcome` never got to set it.
+    if !report.aborted {
+        report.aborted = true;
+        let carried_reason = match &err {
+            CleanError::BreakerJournalFailure { reason, .. } => Some(reason.clone()),
+            _ => None,
+        };
+        report.abort_reason = Some(
+            carried_reason.unwrap_or_else(|| format!("clean stopped after journal failure: {err}")),
+        );
+    }
+
+    let reason = report
+        .abort_reason
+        .clone()
+        .unwrap_or_else(|| "aborted".to_string());
+    record_missing_statuses(&mut report, remaining, &reason);
+    report
+}
+
+/// Give every failed or unattempted item a Skipped status row, matching the
+/// per-item accounting of the circuit-breaker path. Items that already carry a
+/// partial Deleted result are left untouched.
+fn record_missing_statuses(report: &mut CleanReport, items: &[ValidatedItem], reason: &str) {
+    for item in items {
+        if report.items.iter().any(|row| row.id == item.id) {
+            continue;
+        }
+        report.items.push(ItemCleanResult {
+            id: item.id.clone(),
+            path: item.path.clone(),
+            status: "Skipped".to_string(),
+            reason: reason.to_string(),
+            bytes_deleted: 0,
+        });
+        report.skipped_count += 1;
+    }
+}
+
+/// Build a fresh, empty report for a Clean run of `item_count` items.
+fn new_clean_report(item_count: usize) -> CleanReport {
+    CleanReport {
+        items: Vec::with_capacity(item_count),
+        bytes_freed: 0,
+        skipped_count: 0,
+        aborted: false,
+        abort_reason: None,
+        journal_errors: Vec::new(),
+    }
+}
+
+/// Record the skip of an item not processed because the batch already aborted,
+/// then emit its progress update.
+fn record_post_abort_skip<F>(
+    journal: &mut JournalWriter,
+    report: &mut CleanReport,
+    item: &ValidatedItem,
+    completed: &mut u64,
+    total_items: u64,
+    on_progress: &mut F,
+) -> Result<(), CleanError>
+where
+    F: FnMut(CleanProgress),
+{
+    let reason = report
+        .abort_reason
+        .clone()
+        .unwrap_or_else(|| "aborted".to_string());
+    record_skip(journal, report, item, &reason)?;
+    *completed = completed.saturating_add(1);
+    on_progress(CleanProgress {
+        target_id: item.target_id.clone(),
+        completed_items: *completed,
+        total_items,
+        bytes_freed_so_far: report.bytes_freed,
+        status: "Skipped".to_string(),
+    });
+    Ok(())
+}
+
+/// Apply a per-item processing outcome to the report and return the status
+/// label used in its progress update.
+fn apply_process_outcome(
+    item: &ValidatedItem,
+    outcome: ProcessOutcome,
+    report: &mut CleanReport,
+) -> String {
+    match outcome {
+        ProcessOutcome::Deleted(bytes) => {
+            report.items.push(ItemCleanResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                status: "deleted".to_string(),
+                reason: String::new(),
+                bytes_deleted: bytes,
+            });
+            report.bytes_freed = report.bytes_freed.saturating_add(bytes);
+            "deleted".to_string()
+        }
+        ProcessOutcome::Skipped(reason, bytes) => {
+            report.items.push(ItemCleanResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                status: "Skipped".to_string(),
+                reason: reason.clone(),
+                bytes_deleted: bytes,
+            });
+            report.bytes_freed = report.bytes_freed.saturating_add(bytes);
+            report.skipped_count += 1;
+            "Skipped".to_string()
+        }
+        ProcessOutcome::Aborted(reason, bytes) => {
+            report.aborted = true;
+            report.abort_reason = Some(reason.clone());
+            report.items.push(ItemCleanResult {
+                id: item.id.clone(),
+                path: item.path.clone(),
+                status: "Skipped".to_string(),
+                reason: reason.clone(),
+                bytes_deleted: bytes,
+            });
+            report.bytes_freed = report.bytes_freed.saturating_add(bytes);
+            report.skipped_count += 1;
+            "aborted".to_string()
+        }
+    }
+}
+
+/// Fold completed child bytes into a Tier 3 root outcome that did not delete
+/// the root itself. A successful `Deleted` already accounts for them; a
+/// `Skipped` or `Aborted` root must not drop the work done on its children.
+fn root_outcome_with_child_bytes(outcome: ProcessOutcome, child_bytes: u64) -> ProcessOutcome {
+    match outcome {
+        ProcessOutcome::Deleted(deleted) => ProcessOutcome::Deleted(deleted),
+        ProcessOutcome::Skipped(reason, carried) => {
+            ProcessOutcome::Skipped(reason, carried.saturating_add(child_bytes))
+        }
+        ProcessOutcome::Aborted(reason, carried) => {
+            ProcessOutcome::Aborted(reason, carried.saturating_add(child_bytes))
+        }
+    }
+}
+
+/// Emit a progress update for a single processed item.
+fn emit_item_progress<F>(
+    on_progress: &mut F,
+    item: &ValidatedItem,
+    completed: u64,
+    total_items: u64,
+    bytes_freed: u64,
+    status: String,
+) where
+    F: FnMut(CleanProgress),
+{
+    on_progress(CleanProgress {
+        target_id: item.target_id.clone(),
+        completed_items: completed,
+        total_items,
+        bytes_freed_so_far: bytes_freed,
+        status,
+    });
+}
+
 enum ProcessOutcome {
     Deleted(u64),
-    Skipped(String),
-    Aborted(String),
+    /// Skipped with a reason and the bytes already deleted by a partial traversal.
+    Skipped(String, u64),
+    /// Aborted with a reason and the bytes already deleted by a partial traversal.
+    Aborted(String, u64),
+}
+
+impl ProcessOutcome {
+    /// A skip outcome with no completed deletions.
+    fn skipped(reason: impl Into<String>) -> Self {
+        Self::Skipped(reason.into(), 0)
+    }
+
+    /// An abort outcome with no completed deletions.
+    fn aborted(reason: impl Into<String>) -> Self {
+        Self::Aborted(reason.into(), 0)
+    }
 }
 
 fn process_item(
@@ -468,7 +659,7 @@ fn process_item(
     opts: &CleanOptions,
     journal: &mut JournalWriter,
     deleted_total: &mut u64,
-    _report: &CleanReport,
+    report: &mut CleanReport,
 ) -> Result<ProcessOutcome, CleanError> {
     // Missing target root/custom path: zero deletions, parent untouched.
     let target_root_path = Path::new(&item.target_root);
@@ -483,7 +674,7 @@ fn process_item(
         journal.write_outcome(&journal::outcome_record(
             &item.id, &item.path, 0, "Skipped", &reason, None,
         ))?;
-        return Ok(ProcessOutcome::Skipped(reason));
+        return Ok(ProcessOutcome::skipped(reason));
     }
     // Revalidate target root/ancestors are not link points at moment of deletion.
     if let Err(reason) = ensure_target_root_safe(&item.target_root) {
@@ -501,9 +692,9 @@ fn process_item(
             || (reason.contains("link point") && reason.contains("target root"))
         {
             // Target root compromised -> abort entire clean for safety.
-            return Ok(ProcessOutcome::Aborted(reason));
+            return Ok(ProcessOutcome::aborted(reason));
         }
-        return Ok(ProcessOutcome::Skipped(reason));
+        return Ok(ProcessOutcome::skipped(reason));
     }
 
     let item_path = Path::new(&item.path);
@@ -518,26 +709,28 @@ fn process_item(
         journal.write_outcome(&journal::outcome_record(
             &item.id, &item.path, 0, "Skipped", &reason, None,
         ))?;
-        return Ok(ProcessOutcome::Skipped(reason));
+        return Ok(ProcessOutcome::skipped(reason));
     }
 
     // Determine if item is the target root itself.
     let is_root_itself = paths_equal_str(&item.path, &item.target_root);
     if is_root_itself {
         if item_path.is_dir() {
-            let contents = clean_directory_contents(item, opts, journal, deleted_total)?;
+            let contents = clean_directory_contents(item, opts, journal, deleted_total, report)?;
             let outcome = contents.outcome;
             if let ProcessOutcome::Deleted(bytes) = outcome {
                 // For Tier 3 stale project directories, remove the now-cleaned directory root itself.
                 if matches!(item.source, ValidatedSource::Tier3ProjectDirectory { .. }) {
                     if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-                        return Ok(ProcessOutcome::Aborted(reason));
+                        // The final root safety check aborted after the children
+                        // were deleted; keep their bytes instead of reporting zero.
+                        return Ok(ProcessOutcome::Aborted(reason, bytes));
                     }
                     let root_empty = sweeper_winfs::read_dir_entries(item_path)
                         .map(|v| v.is_empty())
                         .unwrap_or(false);
                     if root_empty {
-                        return delete_path_entry_allowing_root(
+                        let result = delete_path_entry_allowing_root(
                             item,
                             &item.path,
                             opts,
@@ -546,6 +739,27 @@ fn process_item(
                             Some(bytes),
                             contents.root_mutated,
                         );
+                        return match result {
+                            // Root was not deleted (Skipped/Aborted): carry the
+                            // completed child bytes instead of dropping them.
+                            Ok(root_outcome) => {
+                                Ok(root_outcome_with_child_bytes(root_outcome, bytes))
+                            }
+                            Err(err) => {
+                                // Child deletions already completed even though the
+                                // final root-removal intent could not be journaled.
+                                // An already-empty root did no work, so only report a
+                                // partial deletion when an entry was actually deleted.
+                                if contents.deleted_any {
+                                    apply_process_outcome(
+                                        item,
+                                        ProcessOutcome::Deleted(bytes),
+                                        report,
+                                    );
+                                }
+                                Err(err)
+                            }
+                        };
                     }
                     return Ok(ProcessOutcome::Deleted(bytes));
                 }
@@ -563,7 +777,7 @@ fn process_item(
         journal.write_outcome(&journal::outcome_record(
             &item.id, &item.path, 0, "Skipped", &reason, None,
         ))?;
-        return Ok(ProcessOutcome::Skipped(reason));
+        return Ok(ProcessOutcome::skipped(reason));
     }
 
     delete_path_entry(item, &item.path, opts, journal, deleted_total)
@@ -572,10 +786,320 @@ fn process_item(
 struct CleanContentsResult {
     outcome: ProcessOutcome,
     root_mutated: bool,
+    /// Whether at least one entry was actually deleted (even a zero-byte file).
+    /// Distinguishes "empty root, no work" from a completed partial deletion.
+    deleted_any: bool,
 }
 
 fn norm_path_key(path: &Path) -> String {
     path.to_string_lossy().to_ascii_lowercase()
+}
+
+/// Mutable state accumulated while cleaning a directory's contents.
+///
+/// Keeping this in one place lets the traversal helpers stay small: each one
+/// only records bytes/dirs and decides whether the caller must stop early.
+struct ContentsState {
+    /// Bytes deleted by this contents-clean so far (partial results).
+    deleted_bytes: u64,
+    /// Whether at least one entry was actually deleted (even a zero-byte file).
+    deleted_any: bool,
+    /// Directories whose contents changed, used to bypass the emptied-dir age check.
+    mutated_dirs: HashSet<String>,
+    /// Child directories to remove bottom-up after the file sweep.
+    postorder: Vec<PathBuf>,
+    /// Normalized key of the contents root.
+    root_key: String,
+}
+
+impl ContentsState {
+    fn new(root: &str) -> Self {
+        Self {
+            deleted_bytes: 0,
+            deleted_any: false,
+            mutated_dirs: HashSet::new(),
+            postorder: Vec::new(),
+            root_key: norm_path_key(Path::new(root)),
+        }
+    }
+
+    fn root_mutated(&self) -> bool {
+        self.mutated_dirs.contains(&self.root_key)
+    }
+
+    fn aborted(&self, reason: String) -> CleanContentsResult {
+        CleanContentsResult {
+            outcome: ProcessOutcome::Aborted(reason, self.deleted_bytes),
+            root_mutated: self.root_mutated(),
+            deleted_any: self.deleted_any,
+        }
+    }
+
+    fn skipped(&self, reason: String) -> CleanContentsResult {
+        CleanContentsResult {
+            outcome: ProcessOutcome::Skipped(reason, self.deleted_bytes),
+            root_mutated: self.root_mutated(),
+            deleted_any: self.deleted_any,
+        }
+    }
+
+    fn deleted(&self) -> CleanContentsResult {
+        CleanContentsResult {
+            outcome: ProcessOutcome::Deleted(self.deleted_bytes),
+            root_mutated: self.root_mutated(),
+            deleted_any: self.deleted_any,
+        }
+    }
+}
+
+/// A failed target-root recheck during traversal stops the whole clean.
+fn check_root(item: &ValidatedItem, state: &ContentsState) -> Option<CleanContentsResult> {
+    ensure_target_root_safe(&item.target_root)
+        .err()
+        .map(|reason| state.aborted(reason))
+}
+
+/// Apply the deletions already completed, then propagate a fatal error.
+///
+/// This is what keeps the two-children partial-result guarantee: a later
+/// intent/outcome write failure must not erase earlier successful deletions.
+fn fail_after_partial<T>(
+    item: &ValidatedItem,
+    state: &ContentsState,
+    report: &mut CleanReport,
+    err: impl Into<CleanError>,
+) -> Result<T, CleanError> {
+    // Only report a partial deletion when an entry was actually deleted. A
+    // zero-byte file is still a deletion, but a first-intent failure is not.
+    if state.deleted_any {
+        apply_process_outcome(item, ProcessOutcome::Deleted(state.deleted_bytes), report);
+    }
+    Err(err.into())
+}
+
+/// Journal an intent plus a Skipped outcome for one entry (unreadable dir or
+/// reparse placeholder). A fatal write preserves already-completed deletions.
+fn journal_skip(
+    item: &ValidatedItem,
+    journal: &mut JournalWriter,
+    path: &str,
+    size: u64,
+    reason: &str,
+    state: &ContentsState,
+    report: &mut CleanReport,
+) -> Result<(), CleanError> {
+    if let Err(err) = journal.write_intent(&journal::intent_record(&item.id, path, size, None)) {
+        return fail_after_partial(item, state, report, err);
+    }
+    if let Err(err) = journal.write_outcome(&journal::outcome_record(
+        &item.id, path, 0, "Skipped", reason, None,
+    )) {
+        return fail_after_partial(item, state, report, err);
+    }
+    Ok(())
+}
+
+/// Delete one entry and fold its outcome into the traversal state.
+///
+/// Returns `Some(result)` only when the caller must stop (abort or the 120%
+/// circuit breaker). `mutated_dir` marks the directory whose contents changed.
+#[allow(clippy::too_many_arguments)]
+fn delete_and_apply(
+    item: &ValidatedItem,
+    path_str: &str,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+    mutated_dir: Option<&Path>,
+    ignore_emptied_dir_age: bool,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    let outcome = match delete_path_entry_with_options(
+        item,
+        path_str,
+        opts,
+        journal,
+        deleted_total,
+        false,
+        None,
+        ignore_emptied_dir_age,
+    ) {
+        Ok(outcome) => outcome,
+        Err(err) => return fail_after_partial(item, state, report, err),
+    };
+    match outcome {
+        ProcessOutcome::Deleted(bytes) => {
+            state.deleted_bytes = state.deleted_bytes.saturating_add(bytes);
+            state.deleted_any = true;
+            if let Some(dir) = mutated_dir {
+                state.mutated_dirs.insert(norm_path_key(dir));
+            }
+            if circuit_breaker_exceeded(opts.preview_estimated_bytes, *deleted_total) {
+                return Ok(Some(
+                    state.aborted("aborted: 120% circuit breaker exceeded".to_string()),
+                ));
+            }
+        }
+        ProcessOutcome::Aborted(reason, _) => return Ok(Some(state.aborted(reason))),
+        ProcessOutcome::Skipped(_, _) => {}
+    }
+    Ok(None)
+}
+
+/// Classify and handle one enumerated entry: unlink link points (never
+/// traverse them), skip reparse placeholders, queue real child dirs, delete
+/// real files.
+#[allow(clippy::too_many_arguments)]
+fn apply_entry(
+    item: &ValidatedItem,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+    stack: &mut Vec<PathBuf>,
+    dir: &Path,
+    ent: sweeper_winfs::DirEntry,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    match ent.reparse {
+        // Unlink only the link entry itself.
+        ReparseTagClass::LinkPoint => delete_and_apply(
+            item,
+            &ent.path.to_string_lossy(),
+            opts,
+            journal,
+            deleted_total,
+            report,
+            state,
+            Some(dir),
+            false,
+        ),
+        // Cloud/unknown reparse points are always Skipped and never traversed.
+        ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
+            journal_skip(
+                item,
+                journal,
+                &ent.path.to_string_lossy(),
+                ent.size,
+                "Skipped: reparse point (cloud/unknown)",
+                state,
+                report,
+            )?;
+            Ok(None)
+        }
+        ReparseTagClass::NotReparse => {
+            if ent.is_dir {
+                stack.push(ent.path);
+                Ok(None)
+            } else {
+                delete_and_apply(
+                    item,
+                    &ent.path.to_string_lossy(),
+                    opts,
+                    journal,
+                    deleted_total,
+                    report,
+                    state,
+                    Some(dir),
+                    false,
+                )
+            }
+        }
+    }
+}
+
+/// Iteratively sweep files/link entries without following link points.
+fn sweep_entries(
+    item: &ValidatedItem,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    while let Some(dir) = stack.pop() {
+        if let Some(result) = check_root(item, state) {
+            return Ok(Some(result));
+        }
+        let entries = match sweeper_winfs::read_dir_entries(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                let reason = format!("Skipped: unreadable directory during contents clean: {e}");
+                journal_skip(
+                    item,
+                    journal,
+                    &dir.to_string_lossy(),
+                    0,
+                    &reason,
+                    state,
+                    report,
+                )?;
+                return Ok(Some(state.skipped(reason)));
+            }
+        };
+        // Only child directories (not the root itself) are deletion candidates.
+        if !paths_equal_str(&dir.to_string_lossy(), &item.path) {
+            state.postorder.push(dir.clone());
+        }
+        for ent in entries {
+            if let Some(result) = apply_entry(
+                item,
+                opts,
+                journal,
+                deleted_total,
+                report,
+                state,
+                stack,
+                &dir,
+                ent,
+            )? {
+                return Ok(Some(result));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Remove now-empty child directories bottom-up, revalidating safety each time.
+fn delete_empty_dirs(
+    item: &ValidatedItem,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    let postorder = std::mem::take(&mut state.postorder);
+    for dir in postorder.into_iter().rev() {
+        if let Some(result) = check_root(item, state) {
+            return Ok(Some(result));
+        }
+        // Skip directories that are not empty.
+        if !sweeper_winfs::read_dir_entries(&dir)
+            .map(|v| v.is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let ignore_emptied_dir_age = state.mutated_dirs.contains(&norm_path_key(&dir));
+        let parent = dir.parent().map(Path::to_path_buf);
+        if let Some(result) = delete_and_apply(
+            item,
+            &dir.to_string_lossy(),
+            opts,
+            journal,
+            deleted_total,
+            report,
+            state,
+            parent.as_deref(),
+            ignore_emptied_dir_age,
+        )? {
+            return Ok(Some(result));
+        }
+    }
+    Ok(None)
 }
 
 fn clean_directory_contents(
@@ -583,200 +1107,28 @@ fn clean_directory_contents(
     opts: &CleanOptions,
     journal: &mut JournalWriter,
     deleted_total: &mut u64,
+    report: &mut CleanReport,
 ) -> Result<CleanContentsResult, CleanError> {
-    // Iterative traversal of contents, deleting files and empty dirs/link entries without following link points.
+    let mut state = ContentsState::new(&item.path);
     let mut stack: Vec<PathBuf> = vec![PathBuf::from(&item.path)];
-    let mut postorder: Vec<PathBuf> = Vec::new();
-    let mut any_deleted_bytes: u64 = 0;
-    let mut mutated_dirs: HashSet<String> = HashSet::new();
-    let root_key = norm_path_key(Path::new(&item.path));
 
-    while let Some(dir) = stack.pop() {
-        // Re-check root safety during traversal.
-        if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-            return Ok(CleanContentsResult {
-                outcome: ProcessOutcome::Aborted(reason),
-                root_mutated: mutated_dirs.contains(&root_key),
-            });
-        }
-        let entries = match sweeper_winfs::read_dir_entries(&dir) {
-            Ok(e) => e,
-            Err(e) => {
-                journal.write_intent(&journal::intent_record(
-                    &item.id,
-                    &dir.to_string_lossy(),
-                    0,
-                    None,
-                ))?;
-                let reason = format!("Skipped: unreadable directory during contents clean: {e}");
-                journal.write_outcome(&journal::outcome_record(
-                    &item.id,
-                    &dir.to_string_lossy(),
-                    0,
-                    "Skipped",
-                    &reason,
-                    None,
-                ))?;
-                return Ok(CleanContentsResult {
-                    outcome: ProcessOutcome::Skipped(reason),
-                    root_mutated: mutated_dirs.contains(&root_key),
-                });
-            }
-        };
-        // Record directory for possible deletion later only if it is not the root itself.
-        if !paths_equal_str(&dir.to_string_lossy(), &item.path) {
-            postorder.push(dir.clone());
-        }
-        for ent in entries {
-            match ent.reparse {
-                ReparseTagClass::LinkPoint => {
-                    // Unlink only the link entry itself.
-                    match delete_path_entry(
-                        item,
-                        &ent.path.to_string_lossy(),
-                        opts,
-                        journal,
-                        deleted_total,
-                    )? {
-                        ProcessOutcome::Deleted(b) => {
-                            any_deleted_bytes = any_deleted_bytes.saturating_add(b);
-                            mutated_dirs.insert(norm_path_key(&dir));
-                            if circuit_breaker_exceeded(
-                                opts.preview_estimated_bytes,
-                                *deleted_total,
-                            ) {
-                                return Ok(CleanContentsResult {
-                                    outcome: ProcessOutcome::Aborted(
-                                        "aborted: 120% circuit breaker exceeded".to_string(),
-                                    ),
-                                    root_mutated: mutated_dirs.contains(&root_key),
-                                });
-                            }
-                        }
-                        ProcessOutcome::Aborted(r) => {
-                            return Ok(CleanContentsResult {
-                                outcome: ProcessOutcome::Aborted(r),
-                                root_mutated: mutated_dirs.contains(&root_key),
-                            })
-                        }
-                        ProcessOutcome::Skipped(_) => {}
-                    }
-                }
-                ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
-                    // Skip reparse entries (cloud/other). Do not traverse.
-                    journal.write_intent(&journal::intent_record(
-                        &item.id,
-                        &ent.path.to_string_lossy(),
-                        ent.size,
-                        None,
-                    ))?;
-                    let reason = "Skipped: reparse point (cloud/unknown)".to_string();
-                    journal.write_outcome(&journal::outcome_record(
-                        &item.id,
-                        &ent.path.to_string_lossy(),
-                        0,
-                        "Skipped",
-                        &reason,
-                        None,
-                    ))?;
-                }
-                ReparseTagClass::NotReparse => {
-                    if ent.is_dir {
-                        stack.push(ent.path);
-                    } else {
-                        match delete_path_entry(
-                            item,
-                            &ent.path.to_string_lossy(),
-                            opts,
-                            journal,
-                            deleted_total,
-                        )? {
-                            ProcessOutcome::Deleted(b) => {
-                                any_deleted_bytes = any_deleted_bytes.saturating_add(b);
-                                mutated_dirs.insert(norm_path_key(&dir));
-                                if circuit_breaker_exceeded(
-                                    opts.preview_estimated_bytes,
-                                    *deleted_total,
-                                ) {
-                                    return Ok(CleanContentsResult {
-                                        outcome: ProcessOutcome::Aborted(
-                                            "aborted: 120% circuit breaker exceeded".to_string(),
-                                        ),
-                                        root_mutated: mutated_dirs.contains(&root_key),
-                                    });
-                                }
-                            }
-                            ProcessOutcome::Aborted(r) => {
-                                return Ok(CleanContentsResult {
-                                    outcome: ProcessOutcome::Aborted(r),
-                                    root_mutated: mutated_dirs.contains(&root_key),
-                                })
-                            }
-                            ProcessOutcome::Skipped(_) => {}
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(result) = sweep_entries(
+        item,
+        opts,
+        journal,
+        deleted_total,
+        report,
+        &mut state,
+        &mut stack,
+    )? {
+        return Ok(result);
     }
-
-    // Delete now-empty child directories bottom-up (skip if not empty or revalidated unsafe).
-    for dir in postorder.into_iter().rev() {
-        if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-            return Ok(CleanContentsResult {
-                outcome: ProcessOutcome::Aborted(reason),
-                root_mutated: mutated_dirs.contains(&root_key),
-            });
-        }
-        // Skip if directory not empty.
-        let is_empty = sweeper_winfs::read_dir_entries(&dir)
-            .map(|v| v.is_empty())
-            .unwrap_or(false);
-        if !is_empty {
-            continue;
-        }
-        let dir_key = norm_path_key(&dir);
-        let ignore_emptied_dir_age = mutated_dirs.contains(&dir_key);
-        // Delete directory entry itself (must remain within target root and pass revalidation).
-        match delete_path_entry_with_options(
-            item,
-            &dir.to_string_lossy(),
-            opts,
-            journal,
-            deleted_total,
-            false,
-            None,
-            ignore_emptied_dir_age,
-        )? {
-            ProcessOutcome::Deleted(b) => {
-                any_deleted_bytes = any_deleted_bytes.saturating_add(b);
-                if let Some(parent) = dir.parent() {
-                    mutated_dirs.insert(norm_path_key(parent));
-                }
-                if circuit_breaker_exceeded(opts.preview_estimated_bytes, *deleted_total) {
-                    return Ok(CleanContentsResult {
-                        outcome: ProcessOutcome::Aborted(
-                            "aborted: 120% circuit breaker exceeded".to_string(),
-                        ),
-                        root_mutated: mutated_dirs.contains(&root_key),
-                    });
-                }
-            }
-            ProcessOutcome::Aborted(r) => {
-                return Ok(CleanContentsResult {
-                    outcome: ProcessOutcome::Aborted(r),
-                    root_mutated: mutated_dirs.contains(&root_key),
-                })
-            }
-            ProcessOutcome::Skipped(_) => {}
-        }
+    if let Some(result) = delete_empty_dirs(item, opts, journal, deleted_total, report, &mut state)?
+    {
+        return Ok(result);
     }
-
-    // Represent contents-clean as deleted summary for the root item context.
-    Ok(CleanContentsResult {
-        outcome: ProcessOutcome::Deleted(any_deleted_bytes),
-        root_mutated: mutated_dirs.contains(&root_key),
-    })
+    // Represent contents-clean as a deleted summary for the root item context.
+    Ok(state.deleted())
 }
 
 fn delete_path_entry(
@@ -867,9 +1219,9 @@ fn delete_path_entry_inner(
             &item.id, path_str, 0, "Skipped", &reason, None,
         ))?;
         return Ok(if reason.contains("escape") || reason.contains("swapped") {
-            ProcessOutcome::Aborted(reason)
+            ProcessOutcome::aborted(reason)
         } else {
-            ProcessOutcome::Skipped(reason)
+            ProcessOutcome::skipped(reason)
         });
     }
 
@@ -890,7 +1242,7 @@ fn delete_path_entry_inner(
             journal.write_outcome(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
             ))?;
-            return Ok(ProcessOutcome::Skipped(reason));
+            return Ok(ProcessOutcome::skipped(reason));
         }
     };
 
@@ -901,7 +1253,7 @@ fn delete_path_entry_inner(
             journal.write_outcome(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
             ))?;
-            return Ok(ProcessOutcome::Skipped(reason));
+            return Ok(ProcessOutcome::skipped(reason));
         }
     };
 
@@ -920,9 +1272,9 @@ fn delete_path_entry_inner(
         if reason.contains("escape")
             || (reason.contains("target root") && reason.contains("link point"))
         {
-            return Ok(ProcessOutcome::Aborted(reason));
+            return Ok(ProcessOutcome::aborted(reason));
         }
-        return Ok(ProcessOutcome::Skipped(reason));
+        return Ok(ProcessOutcome::skipped(reason));
     }
 
     // Track actual deleted bytes for circuit breaker based on handle-observed file size (or item estimate).
@@ -937,10 +1289,17 @@ fn delete_path_entry_inner(
         bytes_accounted,
     ) {
         let reason = "aborted: 120% circuit breaker exceeded".to_string();
-        journal.write_outcome(&journal::outcome_record(
+        if let Err(err) = journal.write_outcome(&journal::outcome_record(
             &item.id, path_str, 0, "Skipped", &reason, None,
-        ))?;
-        return Ok(ProcessOutcome::Aborted(reason));
+        )) {
+            // Do not lose the breaker reason when its Skipped-outcome write
+            // fails: carry it on the error so finalization records both.
+            return Err(CleanError::BreakerJournalFailure {
+                reason,
+                detail: err.to_string(),
+            });
+        }
+        return Ok(ProcessOutcome::aborted(reason));
     }
 
     // Cloud/other reparse tags must be skipped (Link Point allowed only as entry deletion).
@@ -950,7 +1309,7 @@ fn delete_path_entry_inner(
             journal.write_outcome(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
             ))?;
-            return Ok(ProcessOutcome::Skipped(reason));
+            return Ok(ProcessOutcome::skipped(reason));
         }
         ReparseTagClass::LinkPoint | ReparseTagClass::NotReparse => {}
     }
@@ -969,9 +1328,11 @@ fn delete_path_entry_inner(
             let reported = base_bytes_deleted
                 .unwrap_or(0)
                 .saturating_add(bytes_accounted);
-            journal.write_outcome(&journal::outcome_record(
+            // The deletion already succeeded; a journal failure must not throw away
+            // this outcome or abort the remaining batch.
+            journal.write_outcome_best_effort(&journal::outcome_record(
                 &item.id, path_str, reported, "deleted", "", None,
-            ))?;
+            ));
             Ok(ProcessOutcome::Deleted(reported))
         }
         Err(e) => {
@@ -984,10 +1345,10 @@ fn delete_path_entry_inner(
                 }
                 other => format!("Skipped: delete failed: {other}"),
             };
-            journal.write_outcome(&journal::outcome_record(
+            journal.write_outcome_best_effort(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
-            ))?;
-            Ok(ProcessOutcome::Skipped(reason))
+            ));
+            Ok(ProcessOutcome::skipped(reason))
         }
     }
 }
@@ -1296,4 +1657,187 @@ pub fn validated_item_for_tests(
         source,
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn journal_failure_after_breaker_keeps_first_abort_reason() {
+        let dir = tempdir().unwrap();
+        let mut journal = JournalWriter::open_in(dir.path()).unwrap();
+        let mut report = new_clean_report(2);
+        report.aborted = true;
+        report.abort_reason = Some("aborted: 120% circuit breaker exceeded".to_string());
+
+        let report = stop_after_journal_failure(
+            &mut journal,
+            report,
+            CleanError::Invariant("later skip write failed".to_string()),
+            &[],
+        );
+
+        assert_eq!(
+            report.abort_reason.as_deref(),
+            Some("aborted: 120% circuit breaker exceeded"),
+            "the first stop reason must be preserved"
+        );
+        assert!(
+            report
+                .journal_errors
+                .iter()
+                .any(|e| e.contains("clean stopped")),
+            "the later journal failure must still be recorded: {:?}",
+            report.journal_errors
+        );
+    }
+
+    #[test]
+    fn breaker_journal_failure_preserves_breaker_reason_and_records_error() {
+        // A breaker stop whose own Skipped-outcome write fails must keep the
+        // breaker reason (apply_process_outcome never ran) and still record the
+        // journal failure so a partial report reaches the caller.
+        let dir = tempdir().unwrap();
+        let mut journal = JournalWriter::open_in(dir.path()).unwrap();
+        let report = new_clean_report(1);
+
+        let report = stop_after_journal_failure(
+            &mut journal,
+            report,
+            CleanError::BreakerJournalFailure {
+                reason: "aborted: 120% circuit breaker exceeded".to_string(),
+                detail: "disk full".to_string(),
+            },
+            &[],
+        );
+
+        assert!(report.aborted);
+        assert_eq!(
+            report.abort_reason.as_deref(),
+            Some("aborted: 120% circuit breaker exceeded"),
+            "the carried breaker reason must be kept as the abort reason"
+        );
+        assert!(
+            report
+                .journal_errors
+                .iter()
+                .any(|e| e.contains("clean stopped") && e.contains("disk full")),
+            "the journal failure must still be recorded: {:?}",
+            report.journal_errors
+        );
+    }
+
+    #[test]
+    fn journal_failure_as_first_stop_sets_abort_reason() {
+        let dir = tempdir().unwrap();
+        let mut journal = JournalWriter::open_in(dir.path()).unwrap();
+        let report = new_clean_report(1);
+
+        let report = stop_after_journal_failure(
+            &mut journal,
+            report,
+            CleanError::Invariant("first stop".to_string()),
+            &[],
+        );
+
+        assert!(report.aborted);
+        assert!(
+            report
+                .abort_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("first stop"),
+            "the journal failure must become the reason when it caused the stop"
+        );
+    }
+
+    #[test]
+    fn root_outcome_carries_child_bytes_for_skipped_and_aborted() {
+        let skipped = root_outcome_with_child_bytes(ProcessOutcome::skipped("skip"), 9);
+        assert!(
+            matches!(skipped, ProcessOutcome::Skipped(reason, 9) if reason == "skip"),
+            "a skipped root must carry the completed child bytes"
+        );
+        let aborted = root_outcome_with_child_bytes(ProcessOutcome::aborted("stop"), 9);
+        assert!(
+            matches!(aborted, ProcessOutcome::Aborted(reason, 9) if reason == "stop"),
+            "an aborted root must carry the completed child bytes"
+        );
+        let deleted = root_outcome_with_child_bytes(ProcessOutcome::Deleted(13), 9);
+        assert!(
+            matches!(deleted, ProcessOutcome::Deleted(13)),
+            "a deleted root already accounts for the child bytes"
+        );
+    }
+
+    #[test]
+    fn contents_result_carries_deleted_any() {
+        let mut state = ContentsState::new("C:\\A\\B\\C");
+        assert!(!state.deleted().deleted_any);
+        state.deleted_any = true;
+        assert!(state.deleted().deleted_any);
+        assert!(state.aborted("stop".into()).deleted_any);
+        assert!(state.skipped("skip".into()).deleted_any);
+    }
+
+    #[test]
+    fn stop_outcomes_carry_completed_bytes() {
+        let mut state = ContentsState::new("C:\\A\\B\\C");
+        state.deleted_bytes = 9;
+        let aborted = state.aborted("stop".to_string());
+        assert!(matches!(aborted.outcome, ProcessOutcome::Aborted(_, 9)));
+        let skipped = state.skipped("skip".to_string());
+        assert!(matches!(skipped.outcome, ProcessOutcome::Skipped(_, 9)));
+    }
+
+    fn partial_item() -> ValidatedItem {
+        validated_item_for_tests(
+            "i",
+            "t",
+            "C:\\A\\B\\C",
+            "C:\\A\\B\\C\\child",
+            0,
+            None,
+            ValidatedSource::CustomPath,
+        )
+    }
+
+    #[test]
+    fn fail_after_partial_reports_zero_byte_deletion_when_work_occurred() {
+        // A zero-byte file is still a deletion; the decision must not depend
+        // on a positive byte count.
+        let item = partial_item();
+        let mut state = ContentsState::new("C:\\A\\B\\C");
+        state.deleted_any = true;
+        let mut report = new_clean_report(1);
+        let result: Result<(), CleanError> = fail_after_partial(
+            &item,
+            &state,
+            &mut report,
+            CleanError::Invariant("boom".into()),
+        );
+        assert!(result.is_err());
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(report.items[0].status, "deleted");
+        assert_eq!(report.items[0].bytes_deleted, 0);
+    }
+
+    #[test]
+    fn fail_after_partial_skips_result_when_no_entry_was_deleted() {
+        // A first-intent failure before any deletion must not fabricate a
+        // Deleted result.
+        let item = partial_item();
+        let state = ContentsState::new("C:\\A\\B\\C");
+        let mut report = new_clean_report(1);
+        let result: Result<(), CleanError> = fail_after_partial(
+            &item,
+            &state,
+            &mut report,
+            CleanError::Invariant("boom".into()),
+        );
+        assert!(result.is_err());
+        assert!(report.items.is_empty());
+    }
 }

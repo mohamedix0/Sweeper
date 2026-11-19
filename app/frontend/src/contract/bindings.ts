@@ -28,7 +28,7 @@ async previewClean(sessionId: string, itemIds: string[], confirmations: { typedC
     else return { status: "error", error: e  as any };
 }
 },
-async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; deletedCount: string; skippedCount: string; skippedReasons: SkippedReasonDto[]; aborted: boolean; abortReason: string | null; logId: string | null }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; deletedCount: string; skippedCount: string; skippedReasons: SkippedReasonDto[]; aborted: boolean; abortReason: string | null; logId: string | null; journalErrors?: string[] }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("execute_clean", { previewToken }) };
 } catch (e) {

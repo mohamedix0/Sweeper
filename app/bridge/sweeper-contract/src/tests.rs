@@ -66,6 +66,7 @@ fn sample_clean_response() -> ExecuteCleanResponse {
         aborted: false,
         abort_reason: None,
         log_id: Some("log-1".to_string()),
+        journal_errors: Vec::new(),
     }
 }
 

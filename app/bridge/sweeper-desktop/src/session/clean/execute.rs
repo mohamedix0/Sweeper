@@ -215,6 +215,7 @@ impl SessionStore {
             aborted: report.aborted,
             abort_reason: report.abort_reason,
             log_id,
+            journal_errors: report.journal_errors,
         }
     }
 

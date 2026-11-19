@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
@@ -95,6 +96,36 @@ struct CleanLogScanState {
     saw_outcome: bool,
     saw_path: bool,
     all_sandbox: bool,
+    /// (target_id, path) pairs for intent records.
+    intents: Vec<(String, String)>,
+    /// Outcome counts by (target_id, path). A count (rather than a set) lets
+    /// each outcome satisfy at most one intent when `item_ids` repeats an ID
+    /// and the journal therefore holds duplicate intents for the same key.
+    outcomes: HashMap<(String, String), usize>,
+}
+
+impl CleanLogScanState {
+    fn sandbox_only(&self) -> bool {
+        self.saw_path && self.all_sandbox
+    }
+
+    /// Intents with no matching outcome are "unknown, verify on disk": the item
+    /// may have been deleted even though its outcome record was never written.
+    /// Each outcome satisfies only one intent: consume a count per matching
+    /// intent so a single outcome cannot resolve two duplicate intents.
+    fn intent_without_outcome(&self) -> usize {
+        let mut remaining = self.outcomes.clone();
+        self.intents
+            .iter()
+            .filter(|key| match remaining.get_mut(*key) {
+                Some(count) if *count > 0 => {
+                    *count -= 1;
+                    false
+                }
+                _ => true,
+            })
+            .count()
+    }
 }
 
 fn json_record_kind(value: &serde_json::Value) -> Option<&str> {
@@ -117,9 +148,27 @@ fn note_path_hint(state: &mut CleanLogScanState, path: &str) {
 }
 
 fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Value) {
-    if json_record_kind(value) == Some("outcome") {
-        state.saw_outcome = true;
+    let kind = json_record_kind(value);
+    let target_id = value
+        .get("target_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let path = value
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match kind {
+        Some("outcome") => {
+            state.saw_outcome = true;
+            *state.outcomes.entry((target_id, path)).or_insert(0) += 1;
+        }
+        Some("intent") => state.intents.push((target_id, path)),
+        _ => {}
     }
+
     if let Some(p) = value.get("path").and_then(|v| v.as_str()) {
         note_path_hint(state, p);
     }
@@ -139,49 +188,101 @@ fn inspect_clean_log_line(state: &mut CleanLogScanState, line: &str) {
     inspect_clean_log_value(state, &value);
 }
 
-fn accumulate_clean_log_state(reader: BufReader<fs::File>) -> CleanLogScanState {
+fn accumulate_clean_log_state(content: &str) -> CleanLogScanState {
     let mut state = CleanLogScanState {
         all_sandbox: true,
         ..CleanLogScanState::default()
     };
-    for line in reader.lines().map_while(Result::ok) {
-        inspect_clean_log_line(&mut state, &line);
+    for line in content.lines() {
+        inspect_clean_log_line(&mut state, line);
     }
     state
 }
 
-fn clean_log_phantom_reasons(path: &Path) -> (bool, bool) {
-    let Ok(file) = fs::File::open(path) else {
-        return (true, false);
-    };
-    let state = accumulate_clean_log_state(BufReader::new(file));
-    let no_outcome = !state.saw_outcome;
-    let sandbox_only = state.saw_path && state.all_sandbox;
-    (no_outcome, sandbox_only)
+/// Read the complete, newline-terminated records of a JSONL log as raw bytes.
+///
+/// A torn trailing fragment (no terminating newline, possibly invalid UTF-8 from
+/// a failed mid-character write) is dropped. Reading raw bytes first prevents a
+/// torn UTF-8 tail from making `fs::read_to_string` reject the entire file and
+/// hide valid records that precede it. Malformed bytes inside a *terminated*
+/// record are kept (decoded lossily) so corruption there stays distinguishable
+/// from the benign incomplete tail.
+fn read_complete_records(path: &Path) -> Option<Vec<u8>> {
+    // Listing inspection must obey the same cap as `read_log`: a runaway or
+    // tampered clean log must not exhaust memory while the list is opening.
+    // An over-cap file yields None here, and `should_include_log_file` already
+    // keeps the entry when inspection fails.
+    let size = fs::metadata(path).ok()?.len();
+    let file = fs::File::open(path).ok()?;
+    let bytes = read_bounded_bytes(file, size).ok()?;
+    Some(complete_records_bytes(bytes))
+}
+
+/// Drop a torn trailing fragment (everything after the last newline), keeping
+/// only newline-terminated records. Shared by the path-based inspector and the
+/// handle-based `read_log` path so display and reconciliation always see the
+/// same retained records.
+fn complete_records_bytes(bytes: Vec<u8>) -> Vec<u8> {
+    let end = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    bytes[..end].to_vec()
+}
+
+fn is_clean_log_file_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower.starts_with("clean-") && lower.ends_with(".jsonl")
+        })
+        .unwrap_or(false)
+}
+
+fn inspect_clean_log(path: &Path) -> Option<CleanLogScanState> {
+    let bytes = read_complete_records(path)?;
+    let content = String::from_utf8_lossy(&bytes);
+    Some(accumulate_clean_log_state(&content))
 }
 
 fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool) -> bool {
     if size == 0 {
         return false;
     }
-    let is_clean = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| {
-            s.to_ascii_lowercase().starts_with("clean-")
-                && s.to_ascii_lowercase().ends_with(".jsonl")
-        })
-        .unwrap_or(false);
-    if is_clean {
-        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(path);
-        if no_outcome {
-            return false;
-        }
-        if filter_sandbox_phantoms && sandbox_only {
-            return false;
+    if is_clean_log_file_name(path) && filter_sandbox_phantoms {
+        // An intent-without-outcome log is reconciled and surfaced rather than
+        // hidden: a post-delete journal failure may have left it outcome-less
+        // even though the deletion succeeded. Sandbox-only test logs remain
+        // filtered from the real user's list.
+        if let Some(state) = inspect_clean_log(path) {
+            if state.sandbox_only() && state.intent_without_outcome() == 0 {
+                return false;
+            }
         }
     }
     true
+}
+
+/// Append a reconciliation note for intent-without-outcome records to the log view.
+///
+/// Reconciliation runs on the same retained complete records used for display, so
+/// a torn UTF-8 tail cannot suppress the note for a valid intent that precedes it.
+fn annotate_unreconciled_clean_log(content: String) -> String {
+    let state = accumulate_clean_log_state(&content);
+    let unreconciled = state.intent_without_outcome();
+    if unreconciled == 0 {
+        return content;
+    }
+    let mut out = content;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "{{\"record\":\"reconciliation\",\"status\":\"unknown\",\"reason\":\"verify_on_disk\",\"intent_without_outcome\":{unreconciled}}}\n"
+    ));
+    out
 }
 
 fn list_logs_in_dir_impl(
@@ -524,10 +625,7 @@ fn log_file_too_large() -> ContractError {
 /// during the read therefore fails instead of returning a truncated JSON record,
 /// and a multibyte character split at the cap boundary is reported as "too large"
 /// rather than as a UTF-8 (NotFound) error.
-fn read_bounded_log_content<R: Read>(
-    reader: R,
-    declared_size: u64,
-) -> Result<String, ContractError> {
+fn read_bounded_bytes<R: Read>(reader: R, declared_size: u64) -> Result<Vec<u8>, ContractError> {
     if declared_size > MAX_LOG_READ_BYTES {
         return Err(log_file_too_large());
     }
@@ -541,9 +639,73 @@ fn read_bounded_log_content<R: Read>(
     if raw.len() as u64 > MAX_LOG_READ_BYTES {
         return Err(log_file_too_large());
     }
+    Ok(raw)
+}
+
+/// Read a log through the already-opened handle with a hard byte cap.
+/// Generic logs use this strict UTF-8 path; Clean journals instead read raw
+/// bytes so a torn UTF-8 tail can be dropped without hiding earlier records.
+fn read_bounded_log_content<R: Read>(
+    reader: R,
+    declared_size: u64,
+) -> Result<String, ContractError> {
+    let raw = read_bounded_bytes(reader, declared_size)?;
     String::from_utf8(raw).map_err(|_| ContractError::NotFound {
         reason: "log not found".into(),
     })
+}
+
+/// Read a Clean journal through the validated handle: enforce the byte cap,
+/// drop the torn tail, decode lossily and append the unmatched-intent note.
+/// The same retained records feed both the displayed content and reconciliation.
+fn read_bounded_clean_log_content<R: Read>(
+    reader: R,
+    declared_size: u64,
+) -> Result<String, ContractError> {
+    let bytes = complete_records_bytes(read_bounded_bytes(reader, declared_size)?);
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(annotate_unreconciled_clean_log(content))
+}
+
+/// Resolve the logs directory to its handle-derived (long-name) base, then
+/// verify that base still sits under the exact ancestor chain captured by the
+/// pinned handles. A pinned ancestor can be turned into a junction via
+/// FILE_WRITE_ATTRIBUTES access, which share modes cannot deny; comparing the
+/// freshly resolved base to the captured chain (review 5969166919) is the
+/// authoritative swap check and fails closed on ANY component change. The
+/// lexical fallback is still containment-checked by `validate_log_handle`.
+///
+/// The caller must keep the `PinnedAncestors` alive across the whole read (the
+/// handles are borrowed here, not consumed) so ancestors cannot be swapped
+/// between this resolution and the file open.
+fn resolve_validated_logs_base(
+    pinned: &PinnedAncestors,
+    dir: &Path,
+) -> Result<CanonicalPath, ContractError> {
+    let resolved = canonicalize_logs_dir(dir);
+    if let Some(resolved_dir) = &resolved {
+        if !resolved_base_matches_pins(pinned, resolved_dir) {
+            return Err(invalid_log_id());
+        }
+    }
+    resolved
+        .or_else(|| CanonicalPath::parse_lexical(&dir.to_string_lossy()).ok())
+        .ok_or_else(invalid_log_id)
+}
+
+/// Read content through an already-validated handle. Clean journals use the
+/// torn-tail-tolerant read plus unmatched-intent reconciliation; generic logs
+/// keep the strict UTF-8 bounded read.
+fn read_log_candidate_content(
+    path: &Path,
+    file: fs::File,
+    size: u64,
+) -> Result<String, ContractError> {
+    if is_clean_log_file_name(path) {
+        read_bounded_clean_log_content(file, size)
+    } else {
+        read_bounded_log_content(file, size)
+    }
 }
 
 /// `read_log` in a specific directory (testable).
@@ -625,22 +787,9 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
 
     // Resolve the base to long names so the handle final path check below
     // compares like-for-like; a short-name base (8.3 alias in `%TEMP%`) would
-    // otherwise reject valid direct children on the CI Windows runner.
-    let resolved = canonicalize_logs_dir(dir);
-    // AUTHORITATIVE check (review 5969166919): a pinned ancestor can be
-    // converted to a junction via FILE_WRITE_ATTRIBUTES access, which share
-    // modes cannot deny. If that happened, the freshly resolved base now sits
-    // under a different ancestor chain; compare it to the chain captured at pin
-    // time and fail closed on ANY component change. This does not rely on share
-    // modes at all.
-    if let Some(resolved_dir) = &resolved {
-        if !resolved_base_matches_pins(&_pinned, resolved_dir) {
-            return Err(invalid_log_id());
-        }
-    }
-    let logs_dir = resolved
-        .or_else(|| CanonicalPath::parse_lexical(&dir.to_string_lossy()).ok())
-        .ok_or_else(invalid_log_id)?;
+    // otherwise reject valid direct children on the CI Windows runner. The
+    // authoritative pinned-ancestor chain check is part of this step.
+    let logs_dir = resolve_validated_logs_base(&_pinned, dir)?;
 
     // Try the same extensions as `list_logs`, plus the bare ID.
     let candidates = [
@@ -658,7 +807,7 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
             continue;
         };
         let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
-        let content = read_bounded_log_content(file, size)?;
+        let content = read_log_candidate_content(Path::new(resolved.as_str()), file, size)?;
         return Ok(LogReadResponse {
             id: log_id.to_string(),
             content,
@@ -672,7 +821,8 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_log_phantom_reasons, read_bounded_log_content, read_log_in_dir, MAX_LOG_READ_BYTES,
+        inspect_clean_log, list_logs_in_dir_impl, read_bounded_log_content, read_log_in_dir,
+        MAX_LOG_READ_BYTES,
     };
     use std::io::Read;
     use sweeper_contract::ContractError;
@@ -751,6 +901,32 @@ mod tests {
         assert!(
             matches!(err, ContractError::InvalidInput { .. }),
             "oversized log must be rejected, got: {err:?}"
+        );
+    }
+
+    /// Listing inspection uses the bounded reader too. An oversized clean log
+    /// must not be loaded into memory just to decide whether to surface it;
+    /// inspection returns None and the listing keeps the entry.
+    #[test]
+    fn list_logs_inspection_refuses_oversized_clean_log_but_keeps_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("create logs dir");
+        let oversized = vec![b'x'; (MAX_LOG_READ_BYTES + 1) as usize];
+        let path = logs.join("clean-huge.jsonl");
+        std::fs::write(&path, &oversized).expect("write oversized clean log");
+
+        // The bounded reader refuses the over-cap file instead of loading it.
+        assert!(
+            inspect_clean_log(&path).is_none(),
+            "oversized clean log must not be fully read during listing"
+        );
+
+        // Inspection failure must not hide the entry from the activity list.
+        let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
+        assert!(
+            listed.iter().any(|entry| entry.name == "clean-huge.jsonl"),
+            "an uninspectable log stays listed: {listed:?}"
         );
     }
 
@@ -1457,8 +1633,118 @@ mod tests {
             "{\"kind\":\"outcome\",\"status\":\"deleted\",\"path\":\"C:\\\\Users\\\\Public\\\\Documents\\\\sweeper-test-results\\\\report.json\"}\n"
         );
         std::fs::write(&path, content).expect("write log");
-        let (no_outcome, sandbox_only) = clean_log_phantom_reasons(&path);
-        assert!(!no_outcome);
-        assert!(!sandbox_only);
+        let state = inspect_clean_log(&path).expect("inspect log");
+        assert!(state.saw_outcome);
+        assert!(!state.sandbox_only());
+        assert_eq!(state.intent_without_outcome(), 0);
+    }
+
+    #[test]
+    fn intent_without_outcome_log_is_listed_and_reconciled_in_view() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-1-1";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        // A journal that lost its outcome write after a deletion: intent only.
+        let content =
+            "{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\a.tmp\"}\n";
+        std::fs::write(&path, content).expect("write log");
+
+        // Even with the real-user sandbox-phantom filter enabled, the
+        // reconciliation path must surface the log instead of hiding it.
+        let logs = list_logs_in_dir_impl(Some(dir.path()), true).expect("list logs");
+        assert!(logs.iter().any(|l| l.id == log_id), "logs={logs:?}");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(read.content.contains("\"record\":\"reconciliation\""));
+        assert!(read.content.contains("\"status\":\"unknown\""));
+        assert!(read.content.contains("\"reason\":\"verify_on_disk\""));
+        assert!(read.content.contains("\"intent_without_outcome\":1"));
+    }
+
+    #[test]
+    fn fully_outcome_log_has_no_reconciliation_note() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-2-2";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let content = concat!(
+            "{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\b.tmp\"}\n",
+            "{\"record\":\"outcome\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\b.tmp\",\"status\":\"deleted\"}\n"
+        );
+        std::fs::write(&path, content).expect("write log");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(!read.content.contains("\"record\":\"reconciliation\""));
+    }
+
+    /// Review 5970893591: `item_ids` may repeat an ID, so a journal can hold
+    /// two intents for the same (target_id, path). One outcome must reconcile
+    /// only one of them; the other stays unknown/verify_on_disk in the view.
+    #[test]
+    fn duplicate_intents_with_single_outcome_leave_one_unreconciled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-5-5";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let intent =
+            "{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\dup.tmp\"}\n";
+        let outcome = "{\"record\":\"outcome\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\dup.tmp\",\"status\":\"deleted\"}\n";
+        std::fs::write(&path, format!("{intent}{intent}{outcome}")).expect("write log");
+
+        let state = inspect_clean_log(&path).expect("inspect log");
+        assert_eq!(state.intent_without_outcome(), 1);
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(read.content.contains("\"record\":\"reconciliation\""));
+        assert!(read.content.contains("\"intent_without_outcome\":1"));
+    }
+
+    #[test]
+    fn torn_utf8_tail_does_not_hide_complete_records_or_reconciliation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-3-3";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let mut bytes =
+            b"{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\a.tmp\"}\n"
+                .to_vec();
+        // Outcome write stopped inside a multi-byte UTF-8 character, with no
+        // terminating newline. `read_to_string` would reject the whole file.
+        bytes.extend_from_slice(b"{\"record\":\"outcome\",\"path\":\"\xC3");
+        std::fs::write(&path, &bytes).expect("write log");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("torn tail must be tolerated");
+        assert!(
+            read.content.contains("\"record\":\"intent\""),
+            "complete record must be displayed"
+        );
+        assert!(
+            !read.content.contains("\"record\":\"outcome\""),
+            "incomplete trailing record must be dropped"
+        );
+        assert!(
+            read.content.contains("\"record\":\"reconciliation\"")
+                && read.content.contains("\"intent_without_outcome\":1"),
+            "reconciliation must run on the retained complete records: {}",
+            read.content
+        );
+    }
+
+    #[test]
+    fn malformed_terminated_record_is_retained_unlike_torn_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-4-4";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let mut bytes =
+            b"{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\a.tmp\"}\n"
+                .to_vec();
+        // A newline-terminated record containing invalid UTF-8 is corruption, not
+        // a torn tail: it is retained lossily so it stays visible/distinguishable.
+        bytes.extend_from_slice(b"\xFF\xFE\n");
+        std::fs::write(&path, &bytes).expect("write log");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(
+            read.content.contains('\u{FFFD}'),
+            "malformed terminated record must be preserved lossily: {}",
+            read.content
+        );
     }
 }
