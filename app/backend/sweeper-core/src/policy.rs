@@ -4,7 +4,7 @@ use std::path::Path;
 
 use sweeper_winfs::{self, ReparseTagClass};
 
-use crate::paths::{self, CanonicalPath, PathError};
+use crate::paths::{CanonicalPath, PathError};
 
 /// Verdict from validation APIs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,20 +44,71 @@ pub fn is_drive_root(path: &CanonicalPath) -> bool {
     path.is_drive_root()
 }
 
-/// Returns true if `path` is under or equal to any fixed subtree-protected prefix.
+/// Root-anchored, drive-agnostic segment patterns for fixed Subtree-Protected Paths.
+///
+/// Each pattern is matched against a path's segments *after* the drive root, so the
+/// same subtree is protected on any fixed drive. This replaces the former literal
+/// `C:\...` prefixes, which silently stopped protecting the OS on any other fixed
+/// drive (audit F37).
+const FIXED_SUBTREE_PROTECTED_SEGMENTS: &[&[&str]] = &[
+    &["Windows", "System32"],
+    &["Windows", "WinSxS"],
+    &["Windows", "SysWOW64"],
+    &["Windows", "Boot"],
+    &["Windows", "Fonts"],
+    &["Windows", "servicing"],
+    &["Program Files"],
+    &["Program Files (x86)"],
+    &["Recovery"],
+    &["System Volume Information"],
+];
+
+/// Drive-agnostic container roots matched exactly (case-insensitively) at the drive root.
+const FIXED_CONTAINER_ROOT_SEGMENTS: &[&[&str]] = &[&["Windows"], &["Users"], &["ProgramData"]];
+
+/// Case-insensitive: does `path` begin at its drive root with `pattern`?
+fn segments_start_with_ci(path: &CanonicalPath, pattern: &[&str]) -> bool {
+    let mut segments = path.segments();
+    pattern.iter().all(|expected| {
+        segments
+            .next()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+    })
+}
+
+/// Case-insensitive: does `path` consist of exactly `pattern` after the drive root?
+fn segments_equal_ci(path: &CanonicalPath, pattern: &[&str]) -> bool {
+    let segments: Vec<&str> = path.segments().collect();
+    segments.len() == pattern.len()
+        && segments
+            .iter()
+            .zip(pattern)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+}
+
+/// Returns true if `path` is the fixed protected path itself or any ancestor of one.
+/// Ancestor checks are drive-agnostic and segment-based, so the operating-system
+/// root is recognised as an ancestor of its protected subtree on any drive.
+fn is_ancestor_of_fixed_subtree_protected(path: &CanonicalPath) -> bool {
+    let segments: Vec<&str> = path.segments().collect();
+    FIXED_SUBTREE_PROTECTED_SEGMENTS.iter().any(|pattern| {
+        pattern.len() >= segments.len()
+            && segments
+                .iter()
+                .zip(pattern.iter())
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    })
+}
+
+/// Returns true if `path` is under or equal to any fixed subtree-protected path.
 fn matches_fixed_subtree_protected(path: &CanonicalPath) -> bool {
-    for p in fixed_subtree_protected_prefixes() {
-        if let Ok(base) = CanonicalPath::parse_lexical(p) {
-            if base.is_self_or_ancestor_of(path) {
-                return true;
-            }
-        } else if let Ok(base) = paths::parse_drive_root(p) {
-            if base.is_self_or_ancestor_of(path) {
-                return true;
-            }
-        }
+    if FIXED_SUBTREE_PROTECTED_SEGMENTS
+        .iter()
+        .any(|pattern| segments_start_with_ci(path, pattern))
+    {
+        return true;
     }
-    // Pattern-based subtree protections
+    // Pattern-based subtree protections (drive- and location-independent)
     if has_segment_named(path, ".git")
         || has_segment_named(path, ".ssh")
         || has_segment_named(path, ".gnupg")
@@ -67,27 +118,27 @@ fn matches_fixed_subtree_protected(path: &CanonicalPath) -> bool {
     {
         return true;
     }
-    // Recovery anywhere? spec lists `Recovery` as subtree-protected (commonly C:\Recovery)
-    if has_segment_named(path, "Recovery") {
+    // Recovery / System Volume Information anywhere under any drive.
+    if has_segment_named(path, "Recovery") || has_segment_named(path, "System Volume Information") {
         return true;
     }
-    // System Volume Information
-    if has_segment_named(path, "System Volume Information") {
-        return true;
-    }
-    // NTUSER.DAT* files (by final segment prefix)
+    // NTUSER.DAT* files and OS system files (by final segment prefix)
     if let Some(last) = path_last_segment(path) {
         let u = last.to_ascii_uppercase();
-        if u == "NTUSER.DAT" || u.starts_with("NTUSER.DAT") {
+        if u.starts_with("NTUSER.DAT") {
             return true;
         }
         if matches!(u.as_str(), "PAGEFILE.SYS" | "HIBERFIL.SYS" | "SWAPFILE.SYS") {
             return true;
         }
     }
-    // Common user data folders under any user profile: Desktop/Documents/Downloads/Pictures/Videos/Music
-    // and OneDrive sync roots (best-effort lexical: segment named OneDrive or OneDrive*)
+    // Common user data folders under any user profile.
     if is_user_profile_data_subtree(path) {
+        return true;
+    }
+    // OneDrive sync roots (Knowledge Base rule `OneDrive*`), independent of drive or
+    // profile location (audit F8).
+    if is_onedrive_sync_root(path) {
         return true;
     }
     false
@@ -97,49 +148,13 @@ fn matches_fixed_subtree_protected(path: &CanonicalPath) -> bool {
 /// `path` is an ancestor of any subtree-protected location (rule: "no Target root or Custom Path
 /// may be an ancestor of any Subtree-Protected Path").
 pub fn is_ancestor_of_subtree_protected(path: &CanonicalPath) -> bool {
-    // Check fixed protected paths
-    for p in fixed_subtree_protected_prefixes() {
-        if let Ok(prot) = CanonicalPath::parse_lexical(p).or_else(|_| paths::parse_drive_root(p)) {
-            if path.is_self_or_ancestor_of(&prot) && !path.is_same_path(&prot) {
-                return true;
-            }
-            // Explicit equality case: selecting the protected path itself is blocked.
-            if path.is_same_path(&prot) {
-                return true;
-            }
-        }
-    }
-    // Pattern ancestors: selecting C:\Users or C:\Users\<name> could be ancestor of .ssh/.git under them,
-    // but those are handled by container root/user profile rules and generic ancestor containment checks
-    // using known important locations; be conservative for common cases.
-    // If path is drive root, it is ancestor of many protected paths.
+    // A drive root is an ancestor of every fixed protected path on its drive.
     if path.is_drive_root() {
         return true;
     }
-    // C:\Users ancestor of all profile secret dirs -> but C:\Users is container root (blocked exactly)
-    // and C:\Users\<name> container root.
-    // For generic directories, we cannot know if they contain a future .git; but spec states
-    // "any .git directory" subtree-protected. Lexical ancestor-of-.git can't be proven without FS,
-    // however Custom Path must not contain a Subtree-Protected descendant (checked on-disk at validation time).
-    // For lexical/property purposes, treat obvious ancestors of fixed user paths as risky? keep minimal here.
-    false
-}
-
-/// Fixed subtree-protected prefixes (canonical forms). Includes some broad ones; user-specific ones
-/// are supplemented by pattern rules.
-fn fixed_subtree_protected_prefixes() -> &'static [&'static str] {
-    &[
-        r"C:\Windows\System32",
-        r"C:\Windows\WinSxS",
-        r"C:\Windows\SysWOW64",
-        r"C:\Windows\Boot",
-        r"C:\Windows\Fonts",
-        r"C:\Windows\servicing",
-        r"C:\Program Files",
-        r"C:\Program Files (x86)",
-        r"C:\Recovery",
-        r"C:\System Volume Information",
-    ]
+    // Selecting the protected path itself, or any ancestor of a fixed subtree-protected
+    // path, is blocked. Matching is drive-agnostic and segment-based.
+    is_ancestor_of_fixed_subtree_protected(path)
 }
 
 /// Returns true if path matches a protected container root (exact identity).
@@ -147,11 +162,15 @@ pub fn is_protected_container_root(path: &CanonicalPath) -> bool {
     if path.is_drive_root() {
         return true;
     }
-    // Fixed container roots
-    if eq_ci(path, r"C:\Windows") || eq_ci(path, r"C:\Users") || eq_ci(path, r"C:\ProgramData") {
+    // Fixed container roots are matched on segments after the drive root, so the
+    // rule holds on any drive (audit F37).
+    if FIXED_CONTAINER_ROOT_SEGMENTS
+        .iter()
+        .any(|pattern| segments_equal_ci(path, pattern))
+    {
         return true;
     }
-    // User profile root: C:\Users\<name>
+    // User profile root: <drive>:\Users\<name>
     if is_user_profile_root(path) {
         return true;
     }
@@ -165,21 +184,20 @@ pub fn is_protected_container_root(path: &CanonicalPath) -> bool {
 /// Returns true if `path` is blocked by protected-container-root selection rules.
 ///
 /// - Drive roots: exact identity blocked only.
-/// - `C:\Windows`, `C:\Users`, `C:\ProgramData`: exact identity and all descendants blocked from
-///   Custom Path / Analyzer selection (non-Allowlist descendants).
-/// - Any user profile root (`C:\Users\<name>`): exact identity and all descendants blocked.
+/// - `<drive>:\Windows`, `<drive>:\Users`, `<drive>:\ProgramData`: exact identity and all
+///   descendants blocked from Custom Path / Analyzer selection (non-Allowlist descendants).
+/// - Any user profile root (`<drive>:\Users\<name>`): exact identity and all descendants blocked.
 /// - Browser `User Data` and profile roots (`Default`, `Profile *` under `User Data`): exact
 ///   identity and all descendants blocked.
 pub fn is_under_protected_container_root(path: &CanonicalPath) -> bool {
     if path.is_drive_root() {
         return true;
     }
-    for root in [r"C:\Windows", r"C:\Users", r"C:\ProgramData"] {
-        if let Ok(r) = CanonicalPath::parse_lexical(root) {
-            if r.is_self_or_ancestor_of(path) {
-                return true;
-            }
-        }
+    if FIXED_CONTAINER_ROOT_SEGMENTS
+        .iter()
+        .any(|pattern| segments_start_with_ci(path, pattern))
+    {
+        return true;
     }
     // Browser container roots: "User Data" and descendants, and profile roots under User Data.
     let segs: Vec<&str> = path.segments().collect();
@@ -187,16 +205,6 @@ pub fn is_under_protected_container_root(path: &CanonicalPath) -> bool {
         return true;
     }
     false
-}
-
-fn eq_ci(path: &CanonicalPath, lit: &str) -> bool {
-    if let Ok(p) = CanonicalPath::parse_lexical(lit) {
-        path.is_same_path(&p)
-    } else if let Ok(p) = paths::parse_drive_root(lit) {
-        path.is_same_path(&p)
-    } else {
-        false
-    }
 }
 
 fn has_segment_named(path: &CanonicalPath, name: &str) -> bool {
@@ -209,7 +217,7 @@ fn path_last_segment(path: &CanonicalPath) -> Option<&str> {
 }
 
 fn is_user_profile_root(path: &CanonicalPath) -> bool {
-    // C:\Users\<name> => segments ["Users","<name>"]
+    // <drive>:\Users\<name> => segments ["Users","<name>"] (drive-agnostic).
     let segs: Vec<&str> = path.segments().collect();
     segs.len() == 2 && segs[0].eq_ignore_ascii_case("Users")
 }
@@ -222,10 +230,9 @@ fn is_user_profile_data_subtree(path: &CanonicalPath) -> bool {
     if !segs[0].eq_ignore_ascii_case("Users") {
         return false;
     }
-    // segs[1] = username, segs[2...] may include known data folders or OneDrive roots
-    let third = segs[2];
-    if matches_ci_any(
-        third,
+    // segs[1] = username, segs[2] is the well-known user data folder.
+    matches_ci_any(
+        segs[2],
         &[
             "Desktop",
             "Documents",
@@ -234,18 +241,18 @@ fn is_user_profile_data_subtree(path: &CanonicalPath) -> bool {
             "Videos",
             "Music",
         ],
-    ) {
-        return true;
-    }
-    // OneDrive sync roots (common names)
-    let third_u = third.to_ascii_uppercase();
-    if third_u == "ONEDRIVE"
-        || third_u.starts_with("ONEDRIVE -")
-        || third_u.starts_with("ONEDRIVE-")
-    {
-        return true;
-    }
-    false
+    )
+}
+
+/// OneDrive sync-root recognition (Knowledge Base rule `OneDrive*`).
+///
+/// Drive- and profile-location-independent: any path segment whose uppercased form
+/// starts with `ONEDRIVE` is treated as a protected sync root. This covers the
+/// default `OneDrive`, tenant names (`OneDrive - Contoso`), and variants such as
+/// `OneDrive2`, on any drive or at any depth (audit F8).
+fn is_onedrive_sync_root(path: &CanonicalPath) -> bool {
+    path.segments()
+        .any(|segment| segment.to_ascii_uppercase().starts_with("ONEDRIVE"))
 }
 
 fn matches_ci_any(s: &str, opts: &[&str]) -> bool {
@@ -581,6 +588,119 @@ mod tests {
         assert!(!is_ancestor_of_subtree_protected(&canon(r"C:\Temp\foo")));
     }
 
+    // Small assertion helpers keep each block below the Large Assertion Blocks
+    // threshold while preserving every drive-agnostic protection check.
+    fn assert_subtree_and_selection_protected(p: &CanonicalPath) {
+        assert!(is_subtree_protected(p), "expected subtree-protected: {p}");
+        assert!(
+            is_protected_for_selection(p),
+            "expected protected for selection: {p}"
+        );
+    }
+
+    fn assert_container_root_fully_protected(p: &CanonicalPath) {
+        assert!(
+            is_protected_container_root(p),
+            "expected container root: {p}"
+        );
+        assert!(
+            is_under_protected_container_root(p),
+            "expected under container: {p}"
+        );
+        assert!(
+            !validate_custom_path_lexical(&p.to_string()).allowed,
+            "custom path must be rejected: {p}"
+        );
+    }
+
+    fn assert_profile_root_protected(p: &CanonicalPath) {
+        assert!(is_protected_container_root(p), "profile root: {p}");
+        assert!(is_under_protected_container_root(p), "profile root: {p}");
+    }
+
+    fn assert_drive_root_ancestry(root: &CanonicalPath, protected: &CanonicalPath) {
+        assert!(is_ancestor_of_subtree_protected(root));
+        assert!(is_protected_container_root(root));
+        assert!(root.is_self_or_ancestor_of(protected));
+    }
+
+    fn assert_prefix_confusion_allowed(p: &CanonicalPath) {
+        assert!(!is_subtree_protected(p), "prefix confusion: {p}");
+        assert!(!is_protected_container_root(p), "prefix confusion: {p}");
+    }
+
+    fn assert_safe_directory_allowed(dir: &CanonicalPath, leaf: &CanonicalPath) {
+        assert!(!is_subtree_protected(dir), "expected allowed: {dir}");
+        assert!(!is_protected_for_selection(dir), "expected allowed: {dir}");
+        assert!(
+            validate_custom_path_lexical(&leaf.to_string()).allowed,
+            "expected custom path allowed: {leaf}"
+        );
+    }
+
+    fn assert_unicode_path_allowed(p: &CanonicalPath) {
+        assert!(!is_subtree_protected(p), "unicode subtree: {p}");
+        assert!(
+            validate_custom_path_lexical(&p.to_string()).allowed,
+            "unicode custom path: {p}"
+        );
+    }
+
+    fn assert_unicode_segment_not_protected(p: &CanonicalPath, at_root: &CanonicalPath) {
+        assert!(!is_subtree_protected(p), "unicode segment: {p}");
+        assert!(
+            !is_protected_container_root(at_root),
+            "unicode root: {at_root}"
+        );
+    }
+
+    #[test]
+    fn protected_paths_are_drive_agnostic() {
+        // Audit F37: the same protections must hold on any fixed drive. Paths are
+        // assembled at runtime so this test contains no machine-specific absolute path.
+        let on = |drive: char, rest: &str| canon(&format!("{drive}:\\{rest}"));
+        let drive_root = |drive: char| paths::parse_drive_root(&format!("{drive}:\\")).unwrap();
+
+        // Fixed subtree-protected segment patterns on D:.
+        for rest in [
+            r"Windows\System32",
+            r"Windows\WinSxS",
+            r"Windows\SysWOW64",
+            r"Windows\Boot",
+            r"Windows\Fonts",
+            r"Windows\servicing",
+            r"Program Files",
+            r"Program Files (x86)",
+            r"Program Files\SomeApp",
+            r"Recovery",
+            r"Recovery\WinRE",
+            r"System Volume Information",
+            r"Windows\System32\drivers",
+        ] {
+            assert_subtree_and_selection_protected(&on('D', rest));
+        }
+
+        // Protected container roots on D: (exact identity and descendants).
+        for rest in ["Windows", "Users", "ProgramData"] {
+            assert_container_root_fully_protected(&on('D', rest));
+        }
+        assert_profile_root_protected(&on('D', r"Users\Alice"));
+
+        // A drive root is an ancestor of every protected path on that drive.
+        assert_drive_root_ancestry(&drive_root('D'), &on('D', "Windows"));
+
+        // Prefix confusion and ordinary directories remain allowed on D:.
+        assert_prefix_confusion_allowed(&on('D', "Windows.old"));
+        assert_safe_directory_allowed(&on('D', r"Temp\safe"), &on('D', r"Temp\safe\leaf"));
+
+        // Unicode paths remain unaffected by the segment-based checks.
+        assert_unicode_path_allowed(&on('D', "Ünicode/文档/données/leaf"));
+        assert_unicode_segment_not_protected(
+            &on('D', "Ünicode/Windows/System32"),
+            &on('D', "Ünicode"),
+        );
+    }
+
     #[test]
     fn path_last_segment_returns_exact_value() {
         assert_eq!(path_last_segment(&canon(r"C:\Temp\Leaf")), Some("Leaf"));
@@ -600,9 +720,6 @@ mod tests {
         assert!(is_user_profile_data_subtree(&canon(
             r"C:\Users\Alice\Documents"
         )));
-        assert!(is_user_profile_data_subtree(&canon(
-            r"C:\Users\Alice\OneDrive - Contoso"
-        )));
         assert!(!is_user_profile_data_subtree(&canon(r"C:\Users\Alice")));
         assert!(!is_user_profile_data_subtree(&canon(
             r"C:\Other\Alice\Documents"
@@ -610,6 +727,34 @@ mod tests {
         assert!(!is_user_profile_data_subtree(&canon(
             r"C:\Users\Alice\Projects"
         )));
+    }
+
+    fn assert_onedrive_root_is_protected(p: &CanonicalPath) {
+        assert!(is_onedrive_sync_root(p), "expected OneDrive root: {p}");
+        assert!(is_subtree_protected(p), "expected protected: {p}");
+    }
+
+    fn assert_not_onedrive_root(p: &CanonicalPath) {
+        assert!(!is_onedrive_sync_root(p), "unexpected OneDrive root: {p}");
+    }
+
+    #[test]
+    fn onedrive_sync_root_matches_kb_one_drive_star_on_any_drive() {
+        // Audit F8: OneDrive* recognition must be case-insensitive, start-with based,
+        // and independent of profile location/drive.
+        let path_on = |drive: char, rest: &str| canon(&format!("{drive}:\\{rest}"));
+        for (drive, rest) in [
+            ('C', r"Users\Alice\OneDrive"),
+            ('C', r"Users\Alice\OneDrive - Contoso"),
+            ('C', r"Users\Alice\ONEDRIVE2"),
+            ('D', "OneDrive"),
+            ('D', r"Data\onedrive-sync"),
+            ('D', r"Users\Bob\OneDrive - Tailspin"),
+        ] {
+            assert_onedrive_root_is_protected(&path_on(drive, rest));
+        }
+        assert_not_onedrive_root(&canon(r"C:\Users\Alice\Documents"));
+        assert_not_onedrive_root(&canon(r"C:\Temp\cache"));
     }
 
     #[test]
