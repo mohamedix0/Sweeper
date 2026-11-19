@@ -663,6 +663,24 @@ function Test-SelfTestGeigerUnsafeConfinement([ref]$ok) {
     Assert-SelfTest ($audit.Offenders[0] -match 'sweeper-core') "offender must name sweeper-core" $ok
   }
 
+  # Per-crate summary boundaries: only owned sweeper crates, sorted, with their own counts.
+  $summaryLines = @($audit.Summary)
+  Assert-SelfTest ($summaryLines.Count -eq 2) "summary must cover only sweeper workspace crates" $ok
+  Assert-SelfTest ($summaryLines[0] -like 'sweeper-core=*') "summary must be sorted and include sweeper-core" $ok
+  Assert-SelfTest ($summaryLines[1] -like 'sweeper-winfs=*') "summary must include approved sweeper-winfs" $ok
+  $thirdParty = @($audit.Summary | Where-Object { $_ -match 'windows-sys' })
+  Assert-SelfTest ($thirdParty.Count -eq 0) "third-party unsafe must be excluded from summary" $ok
+
+  # Unsafe is counted from the 'unused' section too, matching 'used' handling.
+  $unusedOnly = @'
+[
+  { "package": { "id": { "name": "sweeper-core" } },
+    "unsafety": { "unused": { "exprs": { "unsafe_": 3 } } } }
+]
+'@
+  $unusedAudit = Get-GeigerUnsafeAudit ($unusedOnly | ConvertFrom-Json)
+  Assert-SelfTest ($unusedAudit.Ok -and $unusedAudit.Offenders.Count -eq 1) "unsafe in unused section must be counted" $ok
+
   $winfsOnly = $fixture -replace '"unsafe_": 2', '"unsafe_": 0'
   $safeAudit = Get-GeigerUnsafeAudit ($winfsOnly | ConvertFrom-Json)
   Assert-SelfTest ($safeAudit.Offenders.Count -eq 0) "winfs-only unsafe must not be reported" $ok

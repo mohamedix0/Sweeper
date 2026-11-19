@@ -319,10 +319,44 @@ function Invoke-GeigerForManifest([string]$manifest) {
   }
 }
 
+function Get-GeigerEntryUnsafeCount($entry) {
+  # Parse one crate's geiger entry: sum unsafe across both used and unused sections.
+  # Third-party unsafe is not owned by this repo; only sweeper-* entries reach this helper.
+  $metricNames = @('functions', 'exprs', 'item_impls', 'item_traits', 'methods')
+  $total = 0
+  foreach ($sectionName in @('used', 'unused')) {
+    $section = $entry.unsafety.PSObject.Properties[$sectionName]
+    if ($null -eq $section) { continue }
+    foreach ($metricName in $metricNames) {
+      $metric = $section.Value.PSObject.Properties[$metricName]
+      if ($null -eq $metric) { continue }
+      $unsafe = $metric.Value.PSObject.Properties['unsafe_']
+      if ($null -eq $unsafe) { continue }
+      $value = 0
+      if ([int]::TryParse([string]$unsafe.Value, [ref]$value)) { $total += $value }
+    }
+  }
+  return $total
+}
+
+function Test-IsGeigerOffender([string]$name, [int]$total) {
+  # sweeper-winfs is the sole crate allowed to contain unsafe code (ADR 0003).
+  if ($name -eq 'sweeper-winfs') { return $false }
+  return ($total -gt 0)
+}
+
+function Format-GeigerAuditResult($summary, $offenders, [int]$auditedCount) {
+  # An empty/malformed report must never silently pass the gate.
+  $result = @{ Ok = $false; Offenders = @(); Summary = @() }
+  if ($auditedCount -eq 0) { return $result }
+  $result.Ok = $true
+  $result.Offenders = @($offenders)
+  $result.Summary = @($summary | Sort-Object)
+  return $result
+}
+
 function Get-GeigerUnsafeAudit($entries) {
   # Counts unsafe in OUR workspace crates only (third-party unsafe is not owned by this repo).
-  # Both used and unused unsafe are counted; sweeper-winfs is the sole allowed crate (ADR 0003).
-  $result = @{ Ok = $false; Offenders = @(); Summary = @() }
   $summary = @()
   $offenders = @()
   $seen = @{}
@@ -330,31 +364,13 @@ function Get-GeigerUnsafeAudit($entries) {
     $name = [string]$entry.package.id.name
     if (($name -notlike 'sweeper-*') -or $seen.ContainsKey($name)) { continue }
     $seen[$name] = $true
-    $total = 0
-    foreach ($sectionName in @('used', 'unused')) {
-      $section = $entry.unsafety.PSObject.Properties[$sectionName]
-      if ($null -eq $section) { continue }
-      foreach ($metricName in @('functions', 'exprs', 'item_impls', 'item_traits', 'methods')) {
-        $metric = $section.Value.PSObject.Properties[$metricName]
-        if ($null -eq $metric) { continue }
-        $unsafe = $metric.Value.PSObject.Properties['unsafe_']
-        if ($null -eq $unsafe) { continue }
-        $value = 0
-        if ([int]::TryParse([string]$unsafe.Value, [ref]$value)) { $total += $value }
-      }
-    }
+    $total = Get-GeigerEntryUnsafeCount $entry
     $summary += ("{0}={1}" -f $name, $total)
-    if (($name -ne 'sweeper-winfs') -and ($total -gt 0)) {
+    if (Test-IsGeigerOffender $name $total) {
       $offenders += "$name (unsafe count $total)"
     }
   }
-
-  # An empty/malformed report must never silently pass the gate.
-  if ($seen.Count -eq 0) { return $result }
-  $result.Ok = $true
-  $result.Offenders = $offenders
-  $result.Summary = @($summary | Sort-Object)
-  return $result
+  return Format-GeigerAuditResult $summary $offenders $seen.Count
 }
 
 function Invoke-CargoGeiger([string]$root) {
