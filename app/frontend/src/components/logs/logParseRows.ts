@@ -1,5 +1,6 @@
 import type { AuditRow } from './logParseTypes';
-import { cleanOutcomeRecords, detectCleanScan, isScanSummaryRecord, parseLogObjects, rowSizeText } from './logParseUtils';
+import { cleanOutcomeRecords, countFrom, detectCleanScan, isScanSummaryRecord, parseLogObjects, rowSizeText } from './logParseUtils';
+import { pluralize } from '../../utils/format';
 import {
   addCleanedAggregate,
   cleanedTargetRow,
@@ -45,9 +46,7 @@ function cleanRowsFromJournal(objs: Record<string, unknown>[]): AuditRow[] {
 function fallbackCleanLocation(outcome: Record<string, unknown> | null): string {
   const deleted = outcome?.deletedCount;
   if (deleted == null) return 'Completed cleanup';
-  const n = Number(deleted);
-  const label = n === 1 ? 'item' : 'items';
-  return `${n} ${label} removed`;
+  return `${pluralize({ count: countFrom(deleted), singular: 'item', plural: 'items' })} removed`;
 }
 
 function fallbackCleanRow(outcome: Record<string, unknown> | null, intent: Record<string, unknown> | null): AuditRow {
@@ -58,9 +57,9 @@ function fallbackCleanRow(outcome: Record<string, unknown> | null, intent: Recor
 
 function fallbackScanRow(outcome: Record<string, unknown> | null): AuditRow {
   const scan = outcome && isScanSummaryRecord(outcome) ? outcome : null;
-  const cats = scan?.categories_count ?? scan?.categoriesCount ?? 0;
+  const cats = countFrom(scan?.categories_count ?? scan?.categoriesCount);
   const size = scan ? scan.total_reclaimable_bytes ?? scan.eligible_bytes ?? scan.totalBytes ?? 0 : 0;
-  return { type: 'Category', category: 'System Scan', location: `${cats} categories`, size: rowSizeText(size), outcome: 'Safe', outcomeTone: 'eligible', kind: 'Category', sublabel: 'Category' };
+  return { type: 'Category', category: 'System Scan', location: pluralize({ count: cats, singular: 'category', plural: 'categories' }), size: rowSizeText(size), outcome: 'Safe', outcomeTone: 'eligible', kind: 'Category', sublabel: 'Category' };
 }
 
 function fallbackRows(flags: ReturnType<typeof detectCleanScan>): AuditRow[] {
