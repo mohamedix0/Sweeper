@@ -726,6 +726,27 @@ function Test-SelfTestOwnedBuildScriptExemption([ref]$ok) {
   Assert-SelfTest (Test-OwnedBuildScript $coreBuild $neutralRoot) "non-winfs backend build script must not be exempt" $ok
 }
 
+function Test-SelfTestOwnedBuildScriptAlternateRoot([ref]$ok) {
+  # Discovery must forward its own $root to Test-OwnedBuildScript. Otherwise scanning another
+  # checkout or a temp fixture tree cannot strip that root, so the sweeper-winfs build script
+  # loses its ADR 0003 exemption and its approved unsafe is wrongly flagged. Get-ChildItem is
+  # mocked so no real filesystem or machine paths are involved.
+  $alternateRoot = Join-Path 'elsewhere' 'checkout'
+  $winfsBuild = Join-Path $alternateRoot 'app\backend\sweeper-winfs\build.rs'
+  $coreBuild = Join-Path $alternateRoot 'app\backend\sweeper-core\build.rs'
+  function Get-ChildItem {
+    [CmdletBinding()]
+    param([string]$Path, [switch]$Recurse, [string]$Filter, [switch]$File)
+    return @(
+      [pscustomobject]@{ FullName = $winfsBuild },
+      [pscustomobject]@{ FullName = $coreBuild }
+    )
+  }
+  $paths = @(Get-OwnedBuildScriptPaths $alternateRoot)
+  Assert-SelfTest ($paths -notcontains $winfsBuild) "alternate-root scan must keep sweeper-winfs build script exempt" $ok
+  Assert-SelfTest ($paths -contains $coreBuild) "alternate-root scan must still include non-winfs owned build scripts" $ok
+}
+
 function Test-SelfTestGeigerOmittedOwnedCrates([ref]$ok) {
   # One audited owned crate plus one owned crate in packages_without_metrics. The gate's Fail
   # branch is driven by Get-GeigerOmittedOwnedCrates, so a non-empty result means Gate A fails.
@@ -821,6 +842,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestGeigerUnsafeConfinement $okRef
   Test-SelfTestBuildScriptUnsafe $okRef
   Test-SelfTestOwnedBuildScriptExemption $okRef
+  Test-SelfTestOwnedBuildScriptAlternateRoot $okRef
   Test-SelfTestGeigerOmittedOwnedCrates $okRef
   Test-SelfTestGeigerGateFailure $okRef
   if ($ok) {

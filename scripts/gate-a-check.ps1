@@ -314,7 +314,9 @@ function Get-OwnedBuildScriptPaths([string]$root) {
   $paths = @()
   foreach ($appRoot in @((Join-Path $root 'app\backend'), (Join-Path $root 'app\bridge'))) {
     $found = @(Get-ChildItem -Path $appRoot -Recurse -Filter 'build.rs' -File -ErrorAction SilentlyContinue |
-      Where-Object { Test-OwnedBuildScript $_.FullName } |
+      # Forward this scan root so the repo-relative ADR 0003 exemption still applies when $root
+      # is another checkout or a temporary fixture tree rather than $repoRoot.
+      Where-Object { Test-OwnedBuildScript $_.FullName $root } |
       ForEach-Object { $_.FullName })
     $paths += $found
   }
