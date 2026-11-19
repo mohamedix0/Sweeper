@@ -1334,6 +1334,57 @@ mod tests {
         );
     }
 
+    /// Report a setup failure as a clean skip (insufficient privilege) or a hard
+    /// failure. Returns `true` when the test should skip.
+    fn skip_or_panic(context: &str, error: &impl std::fmt::Display) -> bool {
+        if is_insufficient_privilege_error(error) {
+            eprintln!("skipping attribute-only swap test ({context}): {error}");
+            true
+        } else {
+            panic!("{context} failed: {error}");
+        }
+    }
+
+    /// Map a fallible setup step to `Some(value)`, skipping cleanly when the
+    /// host lacks the privilege and panicking on any unexpected error.
+    fn setup_step<T>(result: Result<T, impl std::fmt::Display>, context: &str) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                skip_or_panic(context, &error);
+                None
+            }
+        }
+    }
+
+    /// Open the deepest pinned ancestor with attribute-only access and install
+    /// a junction on that very handle. Returns `false` when the host skipped.
+    fn try_attribute_only_swap(real: &std::path::Path, target: &std::path::Path) -> bool {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use sweeper_testkit::set_junction_on_open_handle;
+
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let Some(handle) = setup_step(
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES | SYNCHRONIZE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(real),
+            "attribute-only open of pinned ancestor",
+        ) else {
+            return false;
+        };
+        setup_step(
+            set_junction_on_open_handle(handle.as_raw_handle(), target),
+            "install junction via attribute-only handle",
+        )
+        .is_some()
+    }
+
     /// Review 5969166919: the pin's `FILE_SHARE_READ` is only defence in depth —
     /// Windows does not apply share modes to `FILE_WRITE_ATTRIBUTES` access, and
     /// that is all `FSCTL_SET_REPARSE_POINT` needs. While the pin is held, open
@@ -1345,14 +1396,7 @@ mod tests {
     #[cfg(windows)]
     fn read_log_rejects_attribute_only_junction_swap_while_pinned() {
         use std::cell::Cell;
-        use std::os::windows::fs::OpenOptionsExt;
-        use std::os::windows::io::AsRawHandle;
-        use sweeper_testkit::{create_junction, set_junction_on_open_handle};
-
-        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
-        const SYNCHRONIZE: u32 = 0x0010_0000;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        use sweeper_testkit::create_junction;
 
         let outer = tempfile::tempdir().expect("tempdir");
         let sandbox = Sandbox::new_in(outer.path());
@@ -1370,38 +1414,20 @@ mod tests {
         // Probe junction privilege before any mutation, skipping cleanly on a
         // sandbox that cannot create junctions (same helper as sibling tests).
         let probe = sandbox.guarded_path("junction-privilege-probe-attr");
-        if let Err(e) = create_junction(&probe, &outside) {
-            if is_insufficient_privilege_error(&e) {
-                eprintln!("skipping attribute-only swap test (insufficient privilege): {e}");
-                return;
-            }
-            panic!("junction privilege probe failed: {e}");
+        if setup_step(
+            create_junction(&probe, &outside),
+            "junction privilege probe",
+        )
+        .is_none()
+        {
+            return;
         }
 
+        // The attribute-only open is expected to SUCCEED despite the pin holding
+        // `real` with FILE_SHARE_READ: share modes do not gate attribute access.
         let swapped = Cell::new(false);
         let install_attribute_junction = || {
-            // This open is expected to SUCCEED despite the pin holding
-            // `real` with FILE_SHARE_READ: share modes do not gate attribute
-            // access. If this host denies it, skip instead of failing the test.
-            let handle = match std::fs::OpenOptions::new()
-                .access_mode(FILE_WRITE_ATTRIBUTES | SYNCHRONIZE)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-                .open(&real)
-            {
-                Ok(handle) => handle,
-                Err(e) if is_insufficient_privilege_error(&e) => {
-                    eprintln!("skipping attribute-only swap test (open denied): {e}");
-                    return;
-                }
-                Err(e) => panic!("attribute-only open of pinned ancestor failed: {e}"),
-            };
-            match set_junction_on_open_handle(handle.as_raw_handle(), &outside) {
-                Ok(()) => swapped.set(true),
-                Err(e) if is_insufficient_privilege_error(&e) => {
-                    eprintln!("skipping attribute-only swap test (FSCTL denied): {e}");
-                }
-                Err(e) => panic!("install junction via attribute-only handle failed: {e}"),
-            }
+            swapped.set(try_attribute_only_swap(&real, &outside));
         };
 
         let err = super::read_log_in_dir_with_hooks(
