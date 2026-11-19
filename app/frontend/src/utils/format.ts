@@ -12,13 +12,59 @@ interface PrefixInfo { isUnc: boolean; hasDrive: boolean; prefixParts: string[] 
 interface JoinMiddleOptions { prefix: string; tail: string[] }
 interface TryPrefixOptions { parts: string[]; prefixParts: string[]; leaf: string; maxLen: number }
 interface LeafTruncateOptions { prefixForLeaf: string; leaf: string; maxLen: number }
-interface ValueOptions { value: string }
+
+// Small value objects for the concepts that flow through this module. Passing
+// these instead of bare primitives makes each argument's meaning explicit and
+// keeps the module's argument surface strongly typed.
+interface TextValue { readonly value: string }
+interface TakeText { readonly value: string; readonly count: number }
+interface Glyphs { readonly clusters: string[]; readonly length: number }
+interface ByteMagnitude { readonly value: bigint }
+interface TimeAmount { readonly amount: number }
+interface PathSegments { readonly parts: string[] }
 
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER);
 const DASH = '\u2014';
 const ELLIPSIS = '\u2026';
+
+interface GraphemeSegmenter {
+  segment(input: string): Iterable<{ segment: string }>;
+}
+type GraphemeSegmenterCtor = new (
+  locales?: string | string[],
+  options?: { granularity?: 'grapheme' | 'word' | 'sentence' },
+) => GraphemeSegmenter;
+
+const SegmenterCtor = (Intl as unknown as { Segmenter?: GraphemeSegmenterCtor }).Segmenter;
+
+// Display text is measured as a sequence of grapheme clusters so an emoji or
+// combining sequence is never cut in half. Array.from is a surrogate-safe
+// fallback for runtimes without Segmenter (it splits by code point).
+function glyphsOf(args: TextValue): Glyphs {
+  const value = args.value;
+  if (SegmenterCtor) {
+    const segmenter = new SegmenterCtor(undefined, { granularity: 'grapheme' });
+    const clusters: string[] = [];
+    for (const part of segmenter.segment(value)) clusters.push(part.segment);
+    return { clusters, length: clusters.length };
+  }
+  const clusters = Array.from(value);
+  return { clusters, length: clusters.length };
+}
+
+function glyphLength(args: TextValue): number {
+  return glyphsOf(args).length;
+}
+
+function takeGlyphs(args: TakeText): string {
+  return glyphsOf({ value: args.value }).clusters.slice(0, args.count).join('');
+}
+
+function takeLastGlyphs(args: TakeText): string {
+  return glyphsOf({ value: args.value }).clusters.slice(-args.count).join('');
+}
 
 export function toBigInt(args: ToBigIntOptions): bigint {
   const { value } = args;
@@ -30,11 +76,13 @@ export function toBigInt(args: ToBigIntOptions): bigint {
 }
 
 export function sumDecimalStrings(args: SumOptions): bigint {
-  return args.values.reduce<bigint>((acc, value) => acc + toBigInt({ value }), 0n);
+  let total = 0n;
+  for (const value of args.values) total += toBigInt({ value });
+  return total;
 }
 
-function scaleBytes(value: bigint): { unitIndex: number; whole: bigint; frac: bigint } {
-  let n = value;
+function scaleBytes(args: ByteMagnitude): { unitIndex: number; whole: bigint; frac: bigint } {
+  let n = args.value;
   let unitIndex = 0;
   let frac = 0n;
   while (n >= 1024n && unitIndex < UNITS.length - 1) {
@@ -68,9 +116,9 @@ export function formatBytes(args: BytesOptions): string {
   let parsed: bigint | null = null;
   try { parsed = toBigInt({ value: args.bytes }); } catch { parsed = null; }
   if (parsed == null) return '0 B';
-  if (parsed < 0n) return formatScaled({ negative: true, ...scaleBytes(-parsed) });
+  if (parsed < 0n) return formatScaled({ negative: true, ...scaleBytes({ value: -parsed }) });
   if (parsed === 0n) return '0 B';
-  return formatScaled({ negative: false, ...scaleBytes(parsed) });
+  return formatScaled({ negative: false, ...scaleBytes({ value: parsed }) });
 }
 
 function safeMsFromSecs(args: UnixSecsOptions): number | null {
@@ -94,25 +142,25 @@ export function formatUnixSeconds(args: UnixSecsOptions): string {
   return d.toLocaleString();
 }
 
-function relativeFromHours(hours: number): string {
-  if (hours < 24) return `${hours}h ago`;
-  return relativeFromDays(Math.floor(hours / 24));
+function relativeFromHours(args: TimeAmount): string {
+  if (args.amount < 24) return `${args.amount}h ago`;
+  return relativeFromDays({ amount: Math.floor(args.amount / 24) });
 }
 
-function relativeFromMinutes(minutes: number): string {
-  if (minutes < 2) return 'just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  return relativeFromHours(Math.floor(minutes / 60));
+function relativeFromMinutes(args: TimeAmount): string {
+  if (args.amount < 2) return 'just now';
+  if (args.amount < 60) return `${args.amount}m ago`;
+  return relativeFromHours({ amount: Math.floor(args.amount / 60) });
 }
 
-function relativeFromMonths(days: number): string {
-  if (days >= 365) return `${Math.floor(days / 365)}y ago`;
-  return `${Math.floor(days / 30)}mo ago`;
+function relativeFromMonths(args: TimeAmount): string {
+  if (args.amount >= 365) return `${Math.floor(args.amount / 365)}y ago`;
+  return `${Math.floor(args.amount / 30)}mo ago`;
 }
 
-function relativeFromDays(days: number): string {
-  if (days < 30) return `${days}d ago`;
-  return relativeFromMonths(days);
+function relativeFromDays(args: TimeAmount): string {
+  if (args.amount < 30) return `${args.amount}d ago`;
+  return relativeFromMonths(args);
 }
 
 export function relativeAge(args: RelativeAgeOptions): string {
@@ -122,7 +170,7 @@ export function relativeAge(args: RelativeAgeOptions): string {
   if (ms == null) return DASH;
   const diff = nowMs - ms;
   if (diff <= 0) return 'just now';
-  return relativeFromMinutes(Math.floor(diff / 60000));
+  return relativeFromMinutes({ amount: Math.floor(diff / 60000) });
 }
 
 export function pluralize(args: PluralizeOptions): string {
@@ -131,7 +179,8 @@ export function pluralize(args: PluralizeOptions): string {
   return `${args.count} ${plural}`;
 }
 
-function splitNormalizedPath(path: string): { prefix: string; rest: string } {
+function splitNormalizedPath(args: TextValue): { prefix: string; rest: string } {
+  const path = args.value;
   if (/^\\\\\?\\UNC\\/i.test(path)) return { prefix: path.slice(0, 8), rest: path.slice(8) };
   if (/^\\\\\?\\/i.test(path)) return { prefix: path.slice(0, 4), rest: path.slice(4) };
   if (path.startsWith('\\\\')) return { prefix: '\\\\', rest: path.slice(2) };
@@ -140,16 +189,15 @@ function splitNormalizedPath(path: string): { prefix: string; rest: string } {
 
 export function normalizeDisplayPath(args: PathOptions): string {
   const normalized = args.p.replace(/\//g, '\\');
-  const split = splitNormalizedPath(normalized);
+  const split = splitNormalizedPath({ value: normalized });
   return split.prefix + split.rest.replace(/\\+/g, '\\');
 }
 
-function normalizeSlashes(args: ValueOptions): string {
-  return args.value.replace(/\\{2,}/g, (m, offset, str) => {
-    if (!str.startsWith('\\\\')) return '\\';
-    if (offset === 0) return '\\\\';
-    return '\\';
-  });
+function normalizeSlashes(args: TextValue): string {
+  const value = args.value;
+  const leading = /^\\{2,}/.exec(value)?.[0] ?? '';
+  const rest = value.slice(leading.length).replace(/\\{2,}/g, '\\');
+  return (leading ? '\\\\' : '') + rest;
 }
 
 function joinMiddle(args: JoinMiddleOptions): string {
@@ -159,41 +207,41 @@ function joinMiddle(args: JoinMiddleOptions): string {
   return `${cleanPrefix}${ELLIPSIS}\\${tailStr}`;
 }
 
-function usersPrefix(parts: string[]): string[] | null {
-  const first = parts[1] ?? '';
+function usersPrefix(args: PathSegments): string[] | null {
+  const first = args.parts[1] ?? '';
   if (first.toLowerCase() !== 'users') return null;
-  if (parts.length < 3) return null;
-  return parts.slice(0, 3);
+  if (args.parts.length < 3) return null;
+  return args.parts.slice(0, 3);
 }
 
-function drivePrefix(parts: string[]): string[] {
-  return usersPrefix(parts) ?? [parts[0]];
+function drivePrefix(args: PathSegments): string[] {
+  return usersPrefix(args) ?? [args.parts[0]];
 }
 
-function uncPrefix(parts: string[]): string[] {
-  return parts.slice(0, Math.min(4, parts.length));
+function uncPrefix(args: PathSegments): string[] {
+  return args.parts.slice(0, Math.min(4, args.parts.length));
 }
 
 function splitPathPrefix(args: PrefixSplitOptions): PrefixInfo {
   const isUnc = args.path.startsWith('\\\\');
-  if (isUnc) return { isUnc, hasDrive: false, prefixParts: uncPrefix(args.parts) };
+  if (isUnc) return { isUnc, hasDrive: false, prefixParts: uncPrefix({ parts: args.parts }) };
   const hasDrive = /^[A-Za-z]:$/.test(args.parts[0] || '');
-  if (hasDrive) return { isUnc: false, hasDrive: true, prefixParts: drivePrefix(args.parts) };
+  if (hasDrive) return { isUnc: false, hasDrive: true, prefixParts: drivePrefix({ parts: args.parts }) };
   return { isUnc: false, hasDrive: false, prefixParts: [args.parts[0]] };
 }
 
-function prefixStr(parts: string[]): string {
-  return `${parts.join('\\')}\\`;
+function prefixStr(args: PathSegments): string {
+  return `${args.parts.join('\\')}\\`;
 }
 
 function fitsLength(args: { candidate: string; maxLen: number }): boolean {
-  return args.candidate.length <= args.maxLen;
+  return glyphLength({ value: args.candidate }) <= args.maxLen;
 }
 
 function tryTailCount(args: TryPrefixOptions & { tailCount: number }): string | null {
   const tailParts = args.parts.slice(-args.tailCount);
   if (args.prefixParts.length + tailParts.length > args.parts.length) return null;
-  const joined = joinMiddle({ prefix: prefixStr(args.prefixParts), tail: tailParts });
+  const joined = joinMiddle({ prefix: prefixStr({ parts: args.prefixParts }), tail: tailParts });
   const candidate = normalizeSlashes({ value: joined });
   if (fitsLength({ candidate, maxLen: args.maxLen })) return candidate;
   return null;
@@ -206,7 +254,7 @@ function hasLeafRoom(args: TryPrefixOptions): boolean {
 
 function tryLeafOnly(args: TryPrefixOptions): string | null {
   if (!hasLeafRoom(args)) return null;
-  const joined = joinMiddle({ prefix: prefixStr(args.prefixParts), tail: [args.leaf] });
+  const joined = joinMiddle({ prefix: prefixStr({ parts: args.prefixParts }), tail: [args.leaf] });
   const candidate = normalizeSlashes({ value: joined });
   if (fitsLength({ candidate, maxLen: args.maxLen })) return candidate;
   return null;
@@ -221,9 +269,10 @@ function tailCounts(args: TryPrefixOptions): number[] {
 }
 
 function tryWithPrefix(args: TryPrefixOptions): string | null {
-  const candidates = tailCounts(args).map((tailCount) => tryTailCount({ ...args, tailCount }));
-  const found = candidates.find((candidate): candidate is string => candidate != null);
-  if (found) return found;
+  for (const tailCount of tailCounts(args)) {
+    const candidate = tryTailCount({ ...args, tailCount });
+    if (candidate != null) return candidate;
+  }
   return tryLeafOnly(args);
 }
 
@@ -231,22 +280,29 @@ function leafParts(args: LeafTruncateOptions): { core: string; ext: string } {
   const extMatch = args.leaf.match(/(\.[^.\\]{1,10})$/);
   const ext = extMatch?.[1] ?? '';
   if (ext === '') return { core: args.leaf, ext };
-  return { core: args.leaf.slice(0, -ext.length), ext };
+  // Slice by code-unit length rather than subtracting independently measured
+  // grapheme counts. A grapheme with the Unicode Prepend property (e.g. U+0600)
+  // clusters with the following '.', so a count-based split drops it and
+  // corrupts the extension boundary. A direct slice keeps core + ext === leaf.
+  return { core: args.leaf.slice(0, args.leaf.length - ext.length), ext };
 }
 
 function truncatedLeaf(args: LeafTruncateOptions): string | null {
-  const budget = args.maxLen - args.prefixForLeaf.length;
+  const budget = args.maxLen - glyphLength({ value: args.prefixForLeaf });
   if (budget < 8) return null;
   const parts = leafParts(args);
-  const tailKeep = Math.min(parts.ext.length + 4, Math.max(3, Math.floor(budget / 2)));
+  const tailKeep = Math.min(glyphLength({ value: parts.ext }) + 4, Math.max(3, Math.floor(budget / 2)));
   const headKeep = Math.max(2, budget - tailKeep - 1);
-  const middle = `${parts.core.slice(0, Math.max(1, headKeep))}${ELLIPSIS}${(parts.core + parts.ext).slice(-Math.max(1, tailKeep))}`;
+  // Select both head and tail from the ORIGINAL leaf so the grapheme at the
+  // extension boundary (e.g. a Prepend character before '.') is never
+  // reconstructed from a count-derived core that may have lost it.
+  const middle = `${takeGlyphs({ value: args.leaf, count: Math.max(1, headKeep) })}${ELLIPSIS}${takeLastGlyphs({ value: args.leaf, count: Math.max(1, tailKeep) })}`;
   const candidate = normalizeSlashes({ value: `${args.prefixForLeaf}${middle}` });
-  if (candidate.length > args.maxLen) return null;
+  if (glyphLength({ value: candidate }) > args.maxLen) return null;
   return candidate;
 }
 
-function minimalPrefix(args: PrefixInfo & { parts: string[] }): string[] {
+function minimalPrefix(args: PrefixInfo & PathSegments): string[] {
   if (args.hasDrive) return [args.parts[0]];
   if (args.isUnc) return args.parts.slice(0, Math.min(4, args.parts.length));
   return [args.parts[0]];
@@ -254,9 +310,9 @@ function minimalPrefix(args: PrefixInfo & { parts: string[] }): string[] {
 
 function leafOnlyCandidate(args: { minimalPrefixParts: string[]; leaf: string; maxLen: number }): string | null {
   if (!args.leaf) return null;
-  const joined = joinMiddle({ prefix: prefixStr(args.minimalPrefixParts), tail: [args.leaf] });
+  const joined = joinMiddle({ prefix: prefixStr({ parts: args.minimalPrefixParts }), tail: [args.leaf] });
   const candidate = normalizeSlashes({ value: joined });
-  if (candidate.length > args.maxLen) return null;
+  if (glyphLength({ value: candidate }) > args.maxLen) return null;
   return candidate;
 }
 
@@ -266,16 +322,19 @@ function keepEmptySegment(args: { path: string; index: number }): boolean {
   return false;
 }
 
-function pathParts(path: string): string[] {
-  return path.split('\\').filter((seg, index) => {
-    if (seg.length > 0) return true;
-    return keepEmptySegment({ path, index });
-  });
+function pathParts(args: TextValue): string[] {
+  const parts: string[] = [];
+  const segments = args.value.split('\\');
+  for (let index = 0; index < segments.length; index += 1) {
+    const seg = segments[index];
+    if (seg.length > 0 || keepEmptySegment({ path: args.value, index })) parts.push(seg);
+  }
+  return parts;
 }
 
 function truncatedFallback(args: { minPrefix: string[]; leaf: string; maxLen: number }): string | null {
   if (!args.leaf) return null;
-  return truncatedLeaf({ prefixForLeaf: `${prefixStr(args.minPrefix)}${ELLIPSIS}\\`, leaf: args.leaf, maxLen: args.maxLen });
+  return truncatedLeaf({ prefixForLeaf: `${prefixStr({ parts: args.minPrefix })}${ELLIPSIS}\\`, leaf: args.leaf, maxLen: args.maxLen });
 }
 
 function middleTruncateFallback(args: { p: string; parts: string[]; leaf: string; info: PrefixInfo; maxLen: number }): string {
@@ -286,15 +345,15 @@ function middleTruncateFallback(args: { p: string; parts: string[]; leaf: string
   if (leafOnly) return leafOnly;
   const truncated = truncatedFallback({ minPrefix, leaf: args.leaf, maxLen: args.maxLen });
   if (truncated) return truncated;
-  return `${ELLIPSIS}${args.p.slice(-(args.maxLen - 1))}`;
+  return `${ELLIPSIS}${takeLastGlyphs({ value: args.p, count: args.maxLen - 1 })}`;
 }
 
 export function middleTruncatePath(args: TruncateOptions): string {
   const maxLen = args.maxLen ?? 38;
   const p = normalizeDisplayPath({ p: args.path });
-  if (p.length <= maxLen) return p;
-  const parts = pathParts(p);
-  if (parts.length === 0) return p.slice(0, maxLen);
+  if (glyphLength({ value: p }) <= maxLen) return p;
+  const parts = pathParts({ value: p });
+  if (parts.length === 0) return takeGlyphs({ value: p, count: maxLen });
   const leaf = parts[parts.length - 1] || '';
   const info = splitPathPrefix({ path: p, parts });
   const preferred = tryWithPrefix({ parts, prefixParts: info.prefixParts, leaf, maxLen });
