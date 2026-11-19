@@ -12,7 +12,7 @@ pub fn now() -> SystemTime {
     SystemTime::now()
 }
 
-#[allow(dead_code)] // used by gate_d_remover.rs, not by the accounting suite
+#[allow(dead_code)] // shared helper; not every test binary uses it
 pub fn unix_now() -> u64 {
     now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
@@ -28,6 +28,7 @@ pub fn canonical_str(p: &Path) -> String {
         .to_string()
 }
 
+#[allow(dead_code)] // shared helper; not every test binary uses it
 pub fn path_str_for_item(p: &Path) -> String {
     if p.exists() {
         // Link points are valid deletion targets as entries; from_existing_path rejects them.
@@ -41,6 +42,7 @@ pub fn path_str_for_item(p: &Path) -> String {
         .to_string()
 }
 
+#[allow(dead_code)] // shared helper; not every test binary uses it
 pub fn make_item(id: &str, target_root: &Path, path: &Path, size: u64) -> remover::ValidatedItem {
     let root = canonical_str(target_root);
     let p = path_str_for_item(path);
@@ -55,7 +57,7 @@ pub fn make_item(id: &str, target_root: &Path, path: &Path, size: u64) -> remove
     )
 }
 
-#[allow(dead_code)] // used by gate_d_remover.rs, not by the accounting suite
+#[allow(dead_code)] // shared helper; not every test binary uses it
 pub fn clean_one(
     item: remover::ValidatedItem,
     preview_estimated_bytes: u64,
