@@ -9,7 +9,7 @@ import { AnalyzerToolbar } from './AnalyzerViewParts';
 import type { AnalyzerStatusFilter, FlatAnalyzerRow } from './analyzerHelpers';
 import type { ExplainState, PreviewResult } from '../cleanShared';
 import type { PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
-import { showAllButtonDomId, treeItemDomId } from './analyzerTreeA11y';
+import { activeDescendantFor, consumePendingShowAllFocus, handleTreeKeyDown, resolveActiveId } from './analyzerTreeKeyboard';
 
 type ResultsProps = {
   rows: FlatAnalyzerRow[];
@@ -77,10 +77,16 @@ function focusDomElement(id: string | null) {
   document.getElementById(id)?.focus();
 }
 
-function rowIdForArrowKey(ids: string[], index: number, key: string): string | null {
-  if (key === 'ArrowDown') return ids[Math.min(index + 1, ids.length - 1)];
-  if (key === 'ArrowUp') return ids[Math.max(index - 1, 0)];
-  return null;
+function masterCheckboxLabel(allVisibleSelectableSelected: boolean): string {
+  return allVisibleSelectableSelected ? 'Deselect all visible selectable nodes' : 'Select all visible selectable nodes';
+}
+
+function masterCheckboxIndeterminate(visibleSelectedCount: number, visibleSelectableCount: number): boolean {
+  return visibleSelectedCount > 0 && visibleSelectedCount < visibleSelectableCount;
+}
+
+function emptyTreeState(rowCount: number) {
+  return rowCount === 0 ? <div className="muted analyzer-empty">No nodes.</div> : null;
 }
 
 export function AnalyzerResults(props: ResultsProps) {
@@ -89,18 +95,12 @@ export function AnalyzerResults(props: ResultsProps) {
   const rowIds = useMemo(() => props.rows.map((row) => row.node.id), [props.rows]);
 
   useEffect(() => {
-    if (rowIds.length === 0) {
-      if (activeId !== null) setActiveId(null);
-      return;
-    }
-    if (activeId === null || !rowIds.includes(activeId)) setActiveId(rowIds[0]);
+    const next = resolveActiveId(rowIds, activeId);
+    if (next !== activeId) setActiveId(next);
   }, [rowIds, activeId]);
 
   useLayoutEffect(() => {
-    const parentId = pendingShowAllFocusRef.current;
-    if (!parentId) return;
-    pendingShowAllFocusRef.current = null;
-    focusDomElement(showAllButtonDomId(parentId));
+    focusDomElement(consumePendingShowAllFocus(pendingShowAllFocusRef));
   }, [props.rows]);
 
   function handleShowMore(args: { parentId: string }) {
@@ -109,22 +109,12 @@ export function AnalyzerResults(props: ResultsProps) {
   }
 
   function onTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    // DOM focus stays on the role=tree container; only its own key events move
-    // the active descendant. Key events from inner buttons are left alone.
-    if (e.target !== e.currentTarget || rowIds.length === 0) return;
-    const currentId = activeId && rowIds.includes(activeId) ? activeId : rowIds[0];
-    const nextId = rowIdForArrowKey(rowIds, rowIds.indexOf(currentId), e.key);
-    if (!nextId) return;
-    e.preventDefault();
-    setActiveId(nextId);
+    handleTreeKeyDown(e, rowIds, activeId, setActiveId);
   }
 
-  const activeDescendant = activeId && rowIds.includes(activeId) ? treeItemDomId(activeId) : undefined;
-  const indeterminate = props.visibleSelectedCount > 0 && props.visibleSelectedCount < props.visibleSelectableCount;
-  function checkboxLabel(): string {
-    if (props.allVisibleSelectableSelected) return 'Deselect all visible selectable nodes';
-    return 'Select all visible selectable nodes';
-  }
+  const activeDescendant = activeDescendantFor(rowIds, activeId);
+  const indeterminate = masterCheckboxIndeterminate(props.visibleSelectedCount, props.visibleSelectableCount);
+  const checkboxLabel = masterCheckboxLabel(props.allVisibleSelectableSelected);
   return (
     <>
       <section className="master-detail analyzer-layout scan-layout-with-bar" aria-label="Analyzer results">
@@ -134,8 +124,8 @@ export function AnalyzerResults(props: ResultsProps) {
           <div className="analyzer-col-headers">
             <span className="analyzer-col-h-name">
               <span className="analyzer-header-master-slot">
-                <label className="checkbox analyzer-master-check" aria-label={checkboxLabel()}>
-                  <input type="checkbox" aria-label={checkboxLabel()} checked={props.allVisibleSelectableSelected} ref={(el) => setIndeterminate(el, indeterminate)} disabled={masterCheckboxDisabled({ analyzing: props.analyzing, cleaning: props.cleaning, count: props.visibleSelectableCount })} onChange={props.onToggleSelectAll} />
+                <label className="checkbox analyzer-master-check" aria-label={checkboxLabel}>
+                  <input type="checkbox" aria-label={checkboxLabel} checked={props.allVisibleSelectableSelected} ref={(el) => setIndeterminate(el, indeterminate)} disabled={masterCheckboxDisabled({ analyzing: props.analyzing, cleaning: props.cleaning, count: props.visibleSelectableCount })} onChange={props.onToggleSelectAll} />
                 </label>
               </span>
               <span aria-hidden="true">Name</span>
@@ -145,7 +135,7 @@ export function AnalyzerResults(props: ResultsProps) {
           <div className="pane-body flush">
             <div className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" aria-activedescendant={activeDescendant} tabIndex={0} onKeyDown={onTreeKeyDown}>
               {props.rows.map((row) => <AnalyzerTreeRow key={row.node.id} row={row} rootTotalBytes={props.rootTotalBytes} expanded={props.expanded} selectedIds={props.selectedIds} inspectedId={props.inspectedId} allowDeleteUnknown={props.allowDeleteUnknown} cleaning={props.cleaning} onToggleExpand={props.onToggleExpand} onToggleSelect={props.onToggleSelect} onInspect={props.onInspect} onShowMore={handleShowMore} onDrill={props.onDrill} />)}
-              {props.rows.length === 0 && <div className="muted analyzer-empty">No nodes.</div>}
+              {emptyTreeState(props.rows.length)}
             </div>
           </div>
         </div>
