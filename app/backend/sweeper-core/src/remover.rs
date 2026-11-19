@@ -678,6 +678,302 @@ fn norm_path_key(path: &Path) -> String {
     path.to_string_lossy().to_ascii_lowercase()
 }
 
+/// Mutable state accumulated while cleaning a directory's contents.
+///
+/// Keeping this in one place lets the traversal helpers stay small: each one
+/// only records bytes/dirs and decides whether the caller must stop early.
+struct ContentsState {
+    /// Bytes deleted by this contents-clean so far (partial results).
+    deleted_bytes: u64,
+    /// Directories whose contents changed, used to bypass the emptied-dir age check.
+    mutated_dirs: HashSet<String>,
+    /// Child directories to remove bottom-up after the file sweep.
+    postorder: Vec<PathBuf>,
+    /// Normalized key of the contents root.
+    root_key: String,
+}
+
+impl ContentsState {
+    fn new(root: &str) -> Self {
+        Self {
+            deleted_bytes: 0,
+            mutated_dirs: HashSet::new(),
+            postorder: Vec::new(),
+            root_key: norm_path_key(Path::new(root)),
+        }
+    }
+
+    fn root_mutated(&self) -> bool {
+        self.mutated_dirs.contains(&self.root_key)
+    }
+
+    fn aborted(&self, reason: String) -> CleanContentsResult {
+        CleanContentsResult {
+            outcome: ProcessOutcome::Aborted(reason),
+            root_mutated: self.root_mutated(),
+        }
+    }
+
+    fn skipped(&self, reason: String) -> CleanContentsResult {
+        CleanContentsResult {
+            outcome: ProcessOutcome::Skipped(reason),
+            root_mutated: self.root_mutated(),
+        }
+    }
+
+    fn deleted(&self) -> CleanContentsResult {
+        CleanContentsResult {
+            outcome: ProcessOutcome::Deleted(self.deleted_bytes),
+            root_mutated: self.root_mutated(),
+        }
+    }
+}
+
+/// A failed target-root recheck during traversal stops the whole clean.
+fn check_root(item: &ValidatedItem, state: &ContentsState) -> Option<CleanContentsResult> {
+    ensure_target_root_safe(&item.target_root)
+        .err()
+        .map(|reason| state.aborted(reason))
+}
+
+/// Apply the deletions already completed, then propagate a fatal error.
+///
+/// This is what keeps the two-children partial-result guarantee: a later
+/// intent/outcome write failure must not erase earlier successful deletions.
+fn fail_after_partial<T>(
+    item: &ValidatedItem,
+    state: &ContentsState,
+    report: &mut CleanReport,
+    err: impl Into<CleanError>,
+) -> Result<T, CleanError> {
+    apply_process_outcome(item, ProcessOutcome::Deleted(state.deleted_bytes), report);
+    Err(err.into())
+}
+
+/// Journal an intent plus a Skipped outcome for one entry (unreadable dir or
+/// reparse placeholder). A fatal write preserves already-completed deletions.
+fn journal_skip(
+    item: &ValidatedItem,
+    journal: &mut JournalWriter,
+    path: &str,
+    size: u64,
+    reason: &str,
+    state: &ContentsState,
+    report: &mut CleanReport,
+) -> Result<(), CleanError> {
+    if let Err(err) = journal.write_intent(&journal::intent_record(&item.id, path, size, None)) {
+        return fail_after_partial(item, state, report, err);
+    }
+    if let Err(err) = journal.write_outcome(&journal::outcome_record(
+        &item.id, path, 0, "Skipped", reason, None,
+    )) {
+        return fail_after_partial(item, state, report, err);
+    }
+    Ok(())
+}
+
+/// Delete one entry and fold its outcome into the traversal state.
+///
+/// Returns `Some(result)` only when the caller must stop (abort or the 120%
+/// circuit breaker). `mutated_dir` marks the directory whose contents changed.
+#[allow(clippy::too_many_arguments)]
+fn delete_and_apply(
+    item: &ValidatedItem,
+    path_str: &str,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+    mutated_dir: Option<&Path>,
+    ignore_emptied_dir_age: bool,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    let outcome = match delete_path_entry_with_options(
+        item,
+        path_str,
+        opts,
+        journal,
+        deleted_total,
+        false,
+        None,
+        ignore_emptied_dir_age,
+    ) {
+        Ok(outcome) => outcome,
+        Err(err) => return fail_after_partial(item, state, report, err),
+    };
+    match outcome {
+        ProcessOutcome::Deleted(bytes) => {
+            state.deleted_bytes = state.deleted_bytes.saturating_add(bytes);
+            if let Some(dir) = mutated_dir {
+                state.mutated_dirs.insert(norm_path_key(dir));
+            }
+            if circuit_breaker_exceeded(opts.preview_estimated_bytes, *deleted_total) {
+                return Ok(Some(
+                    state.aborted("aborted: 120% circuit breaker exceeded".to_string()),
+                ));
+            }
+        }
+        ProcessOutcome::Aborted(reason) => return Ok(Some(state.aborted(reason))),
+        ProcessOutcome::Skipped(_) => {}
+    }
+    Ok(None)
+}
+
+/// Classify and handle one enumerated entry: unlink link points (never
+/// traverse them), skip reparse placeholders, queue real child dirs, delete
+/// real files.
+#[allow(clippy::too_many_arguments)]
+fn apply_entry(
+    item: &ValidatedItem,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+    stack: &mut Vec<PathBuf>,
+    dir: &Path,
+    ent: sweeper_winfs::DirEntry,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    match ent.reparse {
+        // Unlink only the link entry itself.
+        ReparseTagClass::LinkPoint => delete_and_apply(
+            item,
+            &ent.path.to_string_lossy(),
+            opts,
+            journal,
+            deleted_total,
+            report,
+            state,
+            Some(dir),
+            false,
+        ),
+        // Cloud/unknown reparse points are always Skipped and never traversed.
+        ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
+            journal_skip(
+                item,
+                journal,
+                &ent.path.to_string_lossy(),
+                ent.size,
+                "Skipped: reparse point (cloud/unknown)",
+                state,
+                report,
+            )?;
+            Ok(None)
+        }
+        ReparseTagClass::NotReparse => {
+            if ent.is_dir {
+                stack.push(ent.path);
+                Ok(None)
+            } else {
+                delete_and_apply(
+                    item,
+                    &ent.path.to_string_lossy(),
+                    opts,
+                    journal,
+                    deleted_total,
+                    report,
+                    state,
+                    Some(dir),
+                    false,
+                )
+            }
+        }
+    }
+}
+
+/// Iteratively sweep files/link entries without following link points.
+fn sweep_entries(
+    item: &ValidatedItem,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    while let Some(dir) = stack.pop() {
+        if let Some(result) = check_root(item, state) {
+            return Ok(Some(result));
+        }
+        let entries = match sweeper_winfs::read_dir_entries(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                let reason = format!("Skipped: unreadable directory during contents clean: {e}");
+                journal_skip(
+                    item,
+                    journal,
+                    &dir.to_string_lossy(),
+                    0,
+                    &reason,
+                    state,
+                    report,
+                )?;
+                return Ok(Some(state.skipped(reason)));
+            }
+        };
+        // Only child directories (not the root itself) are deletion candidates.
+        if !paths_equal_str(&dir.to_string_lossy(), &item.path) {
+            state.postorder.push(dir.clone());
+        }
+        for ent in entries {
+            if let Some(result) = apply_entry(
+                item,
+                opts,
+                journal,
+                deleted_total,
+                report,
+                state,
+                stack,
+                &dir,
+                ent,
+            )? {
+                return Ok(Some(result));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Remove now-empty child directories bottom-up, revalidating safety each time.
+fn delete_empty_dirs(
+    item: &ValidatedItem,
+    opts: &CleanOptions,
+    journal: &mut JournalWriter,
+    deleted_total: &mut u64,
+    report: &mut CleanReport,
+    state: &mut ContentsState,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    let postorder = std::mem::take(&mut state.postorder);
+    for dir in postorder.into_iter().rev() {
+        if let Some(result) = check_root(item, state) {
+            return Ok(Some(result));
+        }
+        // Skip directories that are not empty.
+        if !sweeper_winfs::read_dir_entries(&dir)
+            .map(|v| v.is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let ignore_emptied_dir_age = state.mutated_dirs.contains(&norm_path_key(&dir));
+        let parent = dir.parent().map(Path::to_path_buf);
+        if let Some(result) = delete_and_apply(
+            item,
+            &dir.to_string_lossy(),
+            opts,
+            journal,
+            deleted_total,
+            report,
+            state,
+            parent.as_deref(),
+            ignore_emptied_dir_age,
+        )? {
+            return Ok(Some(result));
+        }
+    }
+    Ok(None)
+}
+
 fn clean_directory_contents(
     item: &ValidatedItem,
     opts: &CleanOptions,
@@ -685,241 +981,26 @@ fn clean_directory_contents(
     deleted_total: &mut u64,
     report: &mut CleanReport,
 ) -> Result<CleanContentsResult, CleanError> {
-    // Iterative traversal of contents, deleting files and empty dirs/link entries without following link points.
+    let mut state = ContentsState::new(&item.path);
     let mut stack: Vec<PathBuf> = vec![PathBuf::from(&item.path)];
-    let mut postorder: Vec<PathBuf> = Vec::new();
-    let mut any_deleted_bytes: u64 = 0;
-    let mut mutated_dirs: HashSet<String> = HashSet::new();
-    let root_key = norm_path_key(Path::new(&item.path));
 
-    while let Some(dir) = stack.pop() {
-        // Re-check root safety during traversal.
-        if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-            return Ok(CleanContentsResult {
-                outcome: ProcessOutcome::Aborted(reason),
-                root_mutated: mutated_dirs.contains(&root_key),
-            });
-        }
-        let entries = match sweeper_winfs::read_dir_entries(&dir) {
-            Ok(e) => e,
-            Err(e) => {
-                if let Err(err) = journal.write_intent(&journal::intent_record(
-                    &item.id,
-                    &dir.to_string_lossy(),
-                    0,
-                    None,
-                )) {
-                    // A fatal journal failure must not discard child deletions
-                    // that already completed in this directory.
-                    apply_process_outcome(item, ProcessOutcome::Deleted(any_deleted_bytes), report);
-                    return Err(err.into());
-                }
-                let reason = format!("Skipped: unreadable directory during contents clean: {e}");
-                if let Err(err) = journal.write_outcome(&journal::outcome_record(
-                    &item.id,
-                    &dir.to_string_lossy(),
-                    0,
-                    "Skipped",
-                    &reason,
-                    None,
-                )) {
-                    apply_process_outcome(item, ProcessOutcome::Deleted(any_deleted_bytes), report);
-                    return Err(err.into());
-                }
-                return Ok(CleanContentsResult {
-                    outcome: ProcessOutcome::Skipped(reason),
-                    root_mutated: mutated_dirs.contains(&root_key),
-                });
-            }
-        };
-        // Record directory for possible deletion later only if it is not the root itself.
-        if !paths_equal_str(&dir.to_string_lossy(), &item.path) {
-            postorder.push(dir.clone());
-        }
-        for ent in entries {
-            match ent.reparse {
-                ReparseTagClass::LinkPoint => {
-                    // Unlink only the link entry itself.
-                    match delete_path_entry(
-                        item,
-                        &ent.path.to_string_lossy(),
-                        opts,
-                        journal,
-                        deleted_total,
-                    ) {
-                        Err(err) => {
-                            apply_process_outcome(
-                                item,
-                                ProcessOutcome::Deleted(any_deleted_bytes),
-                                report,
-                            );
-                            return Err(err);
-                        }
-                        Ok(ProcessOutcome::Deleted(b)) => {
-                            any_deleted_bytes = any_deleted_bytes.saturating_add(b);
-                            mutated_dirs.insert(norm_path_key(&dir));
-                            if circuit_breaker_exceeded(
-                                opts.preview_estimated_bytes,
-                                *deleted_total,
-                            ) {
-                                return Ok(CleanContentsResult {
-                                    outcome: ProcessOutcome::Aborted(
-                                        "aborted: 120% circuit breaker exceeded".to_string(),
-                                    ),
-                                    root_mutated: mutated_dirs.contains(&root_key),
-                                });
-                            }
-                        }
-                        Ok(ProcessOutcome::Aborted(r)) => {
-                            return Ok(CleanContentsResult {
-                                outcome: ProcessOutcome::Aborted(r),
-                                root_mutated: mutated_dirs.contains(&root_key),
-                            })
-                        }
-                        Ok(ProcessOutcome::Skipped(_)) => {}
-                    }
-                }
-                ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
-                    // Skip reparse entries (cloud/other). Do not traverse.
-                    if let Err(err) = journal.write_intent(&journal::intent_record(
-                        &item.id,
-                        &ent.path.to_string_lossy(),
-                        ent.size,
-                        None,
-                    )) {
-                        apply_process_outcome(
-                            item,
-                            ProcessOutcome::Deleted(any_deleted_bytes),
-                            report,
-                        );
-                        return Err(err.into());
-                    }
-                    let reason = "Skipped: reparse point (cloud/unknown)".to_string();
-                    if let Err(err) = journal.write_outcome(&journal::outcome_record(
-                        &item.id,
-                        &ent.path.to_string_lossy(),
-                        0,
-                        "Skipped",
-                        &reason,
-                        None,
-                    )) {
-                        apply_process_outcome(
-                            item,
-                            ProcessOutcome::Deleted(any_deleted_bytes),
-                            report,
-                        );
-                        return Err(err.into());
-                    }
-                }
-                ReparseTagClass::NotReparse => {
-                    if ent.is_dir {
-                        stack.push(ent.path);
-                    } else {
-                        match delete_path_entry(
-                            item,
-                            &ent.path.to_string_lossy(),
-                            opts,
-                            journal,
-                            deleted_total,
-                        ) {
-                            Err(err) => {
-                                apply_process_outcome(
-                                    item,
-                                    ProcessOutcome::Deleted(any_deleted_bytes),
-                                    report,
-                                );
-                                return Err(err);
-                            }
-                            Ok(ProcessOutcome::Deleted(b)) => {
-                                any_deleted_bytes = any_deleted_bytes.saturating_add(b);
-                                mutated_dirs.insert(norm_path_key(&dir));
-                                if circuit_breaker_exceeded(
-                                    opts.preview_estimated_bytes,
-                                    *deleted_total,
-                                ) {
-                                    return Ok(CleanContentsResult {
-                                        outcome: ProcessOutcome::Aborted(
-                                            "aborted: 120% circuit breaker exceeded".to_string(),
-                                        ),
-                                        root_mutated: mutated_dirs.contains(&root_key),
-                                    });
-                                }
-                            }
-                            Ok(ProcessOutcome::Aborted(r)) => {
-                                return Ok(CleanContentsResult {
-                                    outcome: ProcessOutcome::Aborted(r),
-                                    root_mutated: mutated_dirs.contains(&root_key),
-                                })
-                            }
-                            Ok(ProcessOutcome::Skipped(_)) => {}
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(result) = sweep_entries(
+        item,
+        opts,
+        journal,
+        deleted_total,
+        report,
+        &mut state,
+        &mut stack,
+    )? {
+        return Ok(result);
     }
-
-    // Delete now-empty child directories bottom-up (skip if not empty or revalidated unsafe).
-    for dir in postorder.into_iter().rev() {
-        if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-            return Ok(CleanContentsResult {
-                outcome: ProcessOutcome::Aborted(reason),
-                root_mutated: mutated_dirs.contains(&root_key),
-            });
-        }
-        // Skip if directory not empty.
-        let is_empty = sweeper_winfs::read_dir_entries(&dir)
-            .map(|v| v.is_empty())
-            .unwrap_or(false);
-        if !is_empty {
-            continue;
-        }
-        let dir_key = norm_path_key(&dir);
-        let ignore_emptied_dir_age = mutated_dirs.contains(&dir_key);
-        // Delete directory entry itself (must remain within target root and pass revalidation).
-        match delete_path_entry_with_options(
-            item,
-            &dir.to_string_lossy(),
-            opts,
-            journal,
-            deleted_total,
-            false,
-            None,
-            ignore_emptied_dir_age,
-        ) {
-            Err(err) => {
-                apply_process_outcome(item, ProcessOutcome::Deleted(any_deleted_bytes), report);
-                return Err(err);
-            }
-            Ok(ProcessOutcome::Deleted(b)) => {
-                any_deleted_bytes = any_deleted_bytes.saturating_add(b);
-                if let Some(parent) = dir.parent() {
-                    mutated_dirs.insert(norm_path_key(parent));
-                }
-                if circuit_breaker_exceeded(opts.preview_estimated_bytes, *deleted_total) {
-                    return Ok(CleanContentsResult {
-                        outcome: ProcessOutcome::Aborted(
-                            "aborted: 120% circuit breaker exceeded".to_string(),
-                        ),
-                        root_mutated: mutated_dirs.contains(&root_key),
-                    });
-                }
-            }
-            Ok(ProcessOutcome::Aborted(r)) => {
-                return Ok(CleanContentsResult {
-                    outcome: ProcessOutcome::Aborted(r),
-                    root_mutated: mutated_dirs.contains(&root_key),
-                })
-            }
-            Ok(ProcessOutcome::Skipped(_)) => {}
-        }
+    if let Some(result) = delete_empty_dirs(item, opts, journal, deleted_total, report, &mut state)?
+    {
+        return Ok(result);
     }
-
-    // Represent contents-clean as deleted summary for the root item context.
-    Ok(CleanContentsResult {
-        outcome: ProcessOutcome::Deleted(any_deleted_bytes),
-        root_mutated: mutated_dirs.contains(&root_key),
-    })
+    // Represent contents-clean as a deleted summary for the root item context.
+    Ok(state.deleted())
 }
 
 fn delete_path_entry(
