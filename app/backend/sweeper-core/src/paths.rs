@@ -187,6 +187,32 @@ impl CanonicalPath {
     pub fn segments(&self) -> impl Iterator<Item = &str> {
         self.segments.iter().map(|s| s.as_str())
     }
+
+    /// Return the parent directory path, or `None` for a drive root.
+    ///
+    /// Operates on the already-parsed segments (no filesystem access and no
+    /// re-parsing), so an on-disk path observed through a handle always yields
+    /// a well-formed parent for containment comparisons.
+    pub fn parent(&self) -> Option<CanonicalPath> {
+        if self.segments.is_empty() {
+            return None;
+        }
+        let segments = self.segments[..self.segments.len() - 1].to_vec();
+        // `drive_prefix()` includes the colon (e.g. "C:"); use just the drive
+        // letter so the rebuilt root is "C:\", not "C::\".
+        let drive_letter = &self.normalized[..1];
+        let normalized = if segments.is_empty() {
+            format!("{drive_letter}:\\")
+        } else {
+            format!("{drive_letter}:\\{}", segments.join("\\"))
+        };
+        let folded = normalized.to_ascii_uppercase();
+        Some(CanonicalPath {
+            normalized,
+            folded,
+            segments,
+        })
+    }
 }
 
 impl fmt::Display for CanonicalPath {

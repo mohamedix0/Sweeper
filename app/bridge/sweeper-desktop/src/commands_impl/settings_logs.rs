@@ -317,6 +317,20 @@ fn is_direct_log_child(logs_dir: &CanonicalPath, resolved: &CanonicalPath) -> bo
         .eq_ignore_ascii_case(logs_dir.drive_prefix())
 }
 
+/// Exact path equality except for the drive-letter case.
+///
+/// `is_direct_log_child` folds case, which is correct for ordinary Windows
+/// paths but lets a case-variant sibling (e.g. `LOGS` vs `logs`) pass on a
+/// filesystem with per-directory case sensitivity when the logs base itself is
+/// a junction. Comparing the handle-derived parent to the validated base
+/// byte-for-byte (after the drive prefix) closes that gap.
+fn same_path_exact_except_drive(a: &CanonicalPath, b: &CanonicalPath) -> bool {
+    if !a.drive_prefix().eq_ignore_ascii_case(b.drive_prefix()) {
+        return false;
+    }
+    a.as_str()[2..] == b.as_str()[2..]
+}
+
 /// Open a candidate log file without following reparse points.
 ///
 /// Uses the same `FILE_FLAG_OPEN_REPARSE_POINT` no-follow pattern as
@@ -378,6 +392,49 @@ fn canonical_path_from_handle_final(final_path: &str) -> Option<CanonicalPath> {
     CanonicalPath::parse_lexical(stripped).ok()
 }
 
+/// Reject a configured logs path whose ANCESTORS include a reparse point
+/// (junction, symlink, or mount point).
+///
+/// `FILE_FLAG_OPEN_REPARSE_POINT` suppresses reparse processing only for the
+/// FINAL path component; ancestor junctions are still traversed when a handle is
+/// opened, and `GetFinalPathNameByHandle` then reports the redirected target.
+/// That would silently move the containment root away from the directory the
+/// configured path actually names. 8.3 short names are NOT reparse points, so
+/// genuine short-name segments remain allowed by this check. The logs directory
+/// itself (the final component) is deliberately not examined here; case-variant
+/// junction bases are handled by the exact-parent check in `validate_log_handle`.
+///
+/// Returns `true` when an ancestor is a reparse point OR cannot be inspected
+/// (fail closed).
+fn logs_path_has_reparse_ancestor(dir: &Path) -> bool {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+    let mut current = dir;
+    while let Some(parent) = current.parent() {
+        // `Path::parent()` on a drive root returns None, so every visited
+        // prefix is a real directory to inspect.
+        let Ok(file) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(parent)
+        else {
+            return true; // fail closed if an ancestor cannot be opened
+        };
+        let Ok(meta) = file.metadata() else {
+            return true; // fail closed if an ancestor cannot be inspected
+        };
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || meta.is_symlink() {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
 /// Resolve the configured logs directory to its final (long-name) path via a
 /// no-follow handle, so containment compares like-for-like with the file-handle
 /// final path produced by `validate_log_handle`.
@@ -430,6 +487,15 @@ fn validate_log_handle(logs_dir: &CanonicalPath, file: &fs::File) -> Result<(), 
     if !is_direct_log_child(logs_dir, &resolved) {
         return Err(invalid_log_id());
     }
+    // `is_direct_log_child` folds case; a case-variant sibling under a junction
+    // base could pass that check on a case-sensitive directory. Require the
+    // handle-derived parent to equal the validated base exactly (drive prefix
+    // case aside). Both are long-name, handle-derived paths, so genuine 8.3
+    // short names already match here.
+    let parent = resolved.parent().ok_or_else(invalid_log_id)?;
+    if !same_path_exact_except_drive(&parent, logs_dir) {
+        return Err(invalid_log_id());
+    }
     Ok(())
 }
 
@@ -459,8 +525,10 @@ fn log_file_too_large() -> ContractError {
 /// Read a log through the already-opened handle with a hard byte cap.
 ///
 /// The declared size is checked first, but the read also goes one byte beyond the
-/// cap and the resulting content is checked again. A file that grows during the
-/// read therefore fails instead of returning a truncated JSON record.
+/// cap and the raw byte count is checked again BEFORE decoding. A file that grows
+/// during the read therefore fails instead of returning a truncated JSON record,
+/// and a multibyte character split at the cap boundary is reported as "too large"
+/// rather than as a UTF-8 (NotFound) error.
 fn read_bounded_log_content<R: Read>(
     reader: R,
     declared_size: u64,
@@ -468,17 +536,19 @@ fn read_bounded_log_content<R: Read>(
     if declared_size > MAX_LOG_READ_BYTES {
         return Err(log_file_too_large());
     }
-    let mut content = String::new();
+    let mut raw = Vec::new();
     reader
         .take(MAX_LOG_READ_BYTES + 1)
-        .read_to_string(&mut content)
+        .read_to_end(&mut raw)
         .map_err(|_| ContractError::NotFound {
             reason: "log not found".into(),
         })?;
-    if content.len() as u64 > MAX_LOG_READ_BYTES {
+    if raw.len() as u64 > MAX_LOG_READ_BYTES {
         return Err(log_file_too_large());
     }
-    Ok(content)
+    String::from_utf8(raw).map_err(|_| ContractError::NotFound {
+        reason: "log not found".into(),
+    })
 }
 
 /// `read_log` in a specific directory (testable).
@@ -498,6 +568,13 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
             reason: "log not found".into(),
         });
     };
+
+    // A reparse-point ancestor would redirect the containment root away from
+    // the directory this path names (GetFinalPathNameByHandle follows ancestor
+    // junctions). Fail closed rather than falling back to a lexical base.
+    if logs_path_has_reparse_ancestor(dir) {
+        return Err(invalid_log_id());
+    }
 
     // Resolve the base to long names so the handle final path check below
     // compares like-for-like; a short-name base (8.3 alias in `%TEMP%`) would
@@ -671,12 +748,13 @@ mod tests {
     /// between, the second open saw a benign direct child and passed while the
     /// original handle still read a secret outside the logs directory. The fix
     /// resolves the final path of the ORIGINAL handle, so the swap cannot change
-    /// what containment observes.
+    /// what containment observes. A positive control (the benign replacement)
+    /// proves the containment comparison itself still works against the real
+    /// resolved base.
     #[test]
     #[cfg(windows)]
     fn read_log_rejects_original_handle_after_ancestor_junction_swap() {
         use std::io::Read;
-        use sweeper_core::paths::CanonicalPath;
         use sweeper_testkit::create_junction;
 
         let outer = tempfile::tempdir().expect("tempdir");
@@ -686,7 +764,6 @@ mod tests {
             .write_file("outside/victim.jsonl", b"LEAK")
             .expect("secret outside logs dir");
         let logs = sandbox.guarded_path("logs");
-        let logs_dir = CanonicalPath::parse_lexical(&logs.to_string_lossy()).expect("logs dir");
 
         // `logs` is a junction pointing OUTSIDE when the read handle is opened.
         if let Err(e) = create_junction(&logs, &outside) {
@@ -722,20 +799,22 @@ mod tests {
         std::fs::rename(&logs, &swapped_away).expect("move junction aside");
         std::fs::create_dir_all(&logs).expect("create real logs dir");
         std::fs::write(&candidate, b"benign").expect("write benign direct child");
-        // Use the lexical parser here (not `from_existing_path`) to illustrate
-        // the old path-based check: on runners whose temp path contains an 8.3
-        // short-name segment, `from_existing_path` rejects it as a short-name
-        // alias, which is unrelated to the junction-swap behaviour under test.
-        let path_based = CanonicalPath::parse_lexical(&candidate.to_string_lossy())
-            .expect("benign file should resolve by path after swap");
-        assert!(
-            super::is_direct_log_child(&logs_dir, &path_based),
-            "this is why the old second-open check was fooled by the swap"
-        );
 
-        // The fix validates the ORIGINAL handle: its final path still points to
-        // the outside secret, so it is rejected after the swap.
-        let err = super::validate_log_handle(&logs_dir, &file)
+        // Resolve the real (post-swap) base the way `read_log_in_dir` does, so
+        // the comparison uses a handle-derived, long-name path rather than the
+        // lexical spelling saved before the swap.
+        let real_base = super::canonicalize_logs_dir(&logs).expect("resolve real logs base");
+
+        // POSITIVE CONTROL: a handle on the benign direct child must PASS
+        // containment against that base. This proves the exact-parent comparison
+        // works and is not rejecting everything.
+        let benign = super::open_log_file_no_follow(&candidate).expect("open benign child");
+        super::validate_log_handle(&real_base, &benign)
+            .expect("benign direct child must pass containment against the resolved base");
+
+        // The original handle still points at the outside secret, so it must
+        // FAIL against the very same base.
+        let err = super::validate_log_handle(&real_base, &file)
             .expect_err("original out-of-directory handle must be rejected after swap");
         assert!(
             matches!(err, ContractError::InvalidInput { .. }),
@@ -772,43 +851,116 @@ mod tests {
         );
     }
 
-    /// Regression for the CI Gate-A failures (run 44375028741): on GitHub's
-    /// Windows runner the temp directory contains an 8.3 short-name segment
-    /// (e.g. `RUNNER~1`). `GetFinalPathNameByHandle` returns the long name while
-    /// the lexical logs-dir path keeps the short name, so the final-path
-    /// containment check rejected valid direct children. A junction ancestor
-    /// named with `~` reproduces that alias deterministically without depending
-    /// on the runner's 8.3-name registry settings.
+    /// A case-variant sibling of the logs base must not pass containment. The
+    /// folded `is_self_or_ancestor_of` check accepts both spellings; the exact
+    /// parent comparison rejects the `LOGS` variant. This is purely lexical, so
+    /// it needs no case-sensitive-filesystem privileges.
+    #[test]
+    fn exact_parent_check_rejects_case_variant_sibling() {
+        use sweeper_core::paths::CanonicalPath;
+
+        let base = CanonicalPath::parse_lexical(r"C:\Temp\logs").expect("base");
+        let good_child = CanonicalPath::parse_lexical(r"C:\Temp\logs\app.jsonl").expect("good");
+        let bad_child = CanonicalPath::parse_lexical(r"C:\Temp\LOGS\app.jsonl").expect("bad");
+
+        // The folded check alone cannot tell them apart.
+        assert!(base.is_self_or_ancestor_of(&good_child));
+        assert!(base.is_self_or_ancestor_of(&bad_child));
+
+        // The exact comparison accepts only the literal base spelling.
+        assert!(super::same_path_exact_except_drive(
+            &good_child.parent().expect("good parent"),
+            &base
+        ));
+        assert!(!super::same_path_exact_except_drive(
+            &bad_child.parent().expect("bad parent"),
+            &base
+        ));
+    }
+
+    /// A file one byte over the cap whose extra byte is the first byte of a
+    /// multibyte UTF-8 character must be reported as "too large", not as a
+    /// UTF-8 decode (NotFound) error. The byte cap is enforced before decoding.
+    #[test]
+    fn read_log_rejects_multibyte_char_split_at_read_cap() {
+        let mut bytes = vec![b'a'; MAX_LOG_READ_BYTES as usize];
+        bytes.push(0xC3); // leading byte of a 2-byte sequence; partner absent
+        let err = read_bounded_log_content(
+            std::io::Cursor::new(bytes),
+            MAX_LOG_READ_BYTES, // declared size looks legal
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "over-cap bytes must be rejected before UTF-8 decoding, got {err:?}"
+        );
+    }
+
+    /// Valid UTF-8 that ends exactly at the cap still succeeds.
+    #[test]
+    fn read_log_accepts_valid_utf8_exactly_at_read_cap() {
+        let mut bytes = vec![b'a'; (MAX_LOG_READ_BYTES - 2) as usize];
+        bytes.extend_from_slice("ü".as_bytes()); // 2 bytes -> exactly MAX
+        assert_eq!(bytes.len(), MAX_LOG_READ_BYTES as usize);
+        let content = read_bounded_log_content(std::io::Cursor::new(bytes), MAX_LOG_READ_BYTES)
+            .expect("valid UTF-8 exactly at cap must succeed");
+        assert_eq!(content.len(), MAX_LOG_READ_BYTES as usize);
+        assert!(content.ends_with('ü'));
+    }
+
+    /// A `~` segment in the logs path must not be treated as a reparse point:
+    /// genuine 8.3 short names are ordinary directories, not junctions. This
+    /// models the CI runner's `RUNNER~1` temp segment deterministically using a
+    /// REAL directory whose literal name contains `~` (no junction involved).
     #[test]
     #[cfg(windows)]
-    fn read_log_resolves_short_name_alias_in_logs_dir_ancestor() {
+    fn read_log_allows_tilde_segment_without_junction() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let tilde_root = outer.path().join("ROOTA~1");
+        std::fs::create_dir_all(&tilde_root).expect("tilde-named directory");
+
+        let logs = tilde_root.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
+
+        let resp = read_log_in_dir(Some(&logs), "good")
+            .expect("a literal ~ segment must be allowed (short names are not reparse points)");
+        assert_eq!(resp.id, "good");
+        assert_eq!(resp.content, "ok");
+    }
+
+    /// A junction ANCESTOR must be rejected: `FILE_FLAG_OPEN_REPARSE_POINT` only
+    /// suppresses reparse processing for the final component, so an ancestor
+    /// junction would otherwise redirect the containment root via
+    /// `GetFinalPathNameByHandle`.
+    #[test]
+    #[cfg(windows)]
+    fn read_log_rejects_junction_ancestor_of_logs_dir() {
         use sweeper_testkit::create_junction;
 
         let outer = tempfile::tempdir().expect("tempdir");
         let real_root = outer.path().join("real-root");
         std::fs::create_dir_all(&real_root).expect("real root");
         let alias_root = outer.path().join("ROOTA~1");
-        match create_junction(&alias_root, &real_root) {
-            Ok(()) => {}
-            Err(e) => {
-                if is_insufficient_privilege_error(&e) {
-                    eprintln!("skipping alias regression test (insufficient privilege): {e}");
-                    return;
-                }
-                panic!("create junction failed: {e}");
+        if let Err(e) = create_junction(&alias_root, &real_root) {
+            if is_insufficient_privilege_error(&e) {
+                eprintln!(
+                    "skipping ancestor-junction regression test (insufficient privilege): {e}"
+                );
+                return;
             }
+            panic!("create junction failed: {e}");
         }
 
-        // The logs directory is below the alias junction, so the input path has
-        // a `~` ancestor exactly like `%TEMP%` on the CI runner.
         let logs = alias_root.join("logs");
         std::fs::create_dir_all(&logs).expect("logs dir");
         std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
 
-        let resp = read_log_in_dir(Some(&logs), "good")
-            .expect("short-name alias in logs path must still resolve");
-        assert_eq!(resp.id, "good");
-        assert_eq!(resp.content, "ok");
+        let err = read_log_in_dir(Some(&logs), "good").unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "a reparse-point ancestor must redirect-containment rejected, got {err:?}"
+        );
     }
 
     #[test]
