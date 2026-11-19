@@ -14,6 +14,8 @@ const ISOLATION_SCRIPT = resolve(
   'isolation',
   'index.js',
 );
+// Generated contract bindings (single source of truth for the command surface).
+const BINDINGS_FILE = resolve(process.cwd(), 'src', 'contract', 'bindings.ts');
 
 type IsolationHook = (message: unknown) => unknown;
 
@@ -47,20 +49,63 @@ const VALID_ARGUMENTS: Record<string, unknown> = {
   relaunch_elevated: {},
 };
 
+/** Command names generated into bindings.ts (the contract's IPC surface). */
+function contractCommandNames(): Set<string> {
+  const source = readFileSync(BINDINGS_FILE, 'utf8');
+  return new Set(
+    [...source.matchAll(/TAURI_INVOKE\(\s*"([a-z][a-z0-9_]*)"/g)].map((match) => match[1]),
+  );
+}
+
+/** Command names hard-coded in the isolation script's own allow-list. */
+function isolationAllowedCommands(): Set<string> {
+  const source = readFileSync(ISOLATION_SCRIPT, 'utf8');
+  const block = source.match(/const ALLOWED_COMMANDS = new Set\(\[([\s\S]*?)\]\)/);
+  expect(block, 'ALLOWED_COMMANDS block must exist').not.toBeNull();
+  return new Set([...block![1].matchAll(/'([a-z][a-z0-9_]*)'/g)].map((match) => match[1]));
+}
+
 describe('Tauri isolation IPC boundary', () => {
-  it('forwards all 14 allow-listed app commands with well-shaped arguments', () => {
+  it('forwards every generated-contract command with well-shaped arguments', () => {
     const hook = loadHook();
-    expect(Object.keys(VALID_ARGUMENTS)).toHaveLength(14);
-    for (const [cmd, payload] of Object.entries(VALID_ARGUMENTS)) {
-      const message = invoke(cmd, payload);
+    const contractCommands = contractCommandNames();
+    expect(contractCommands.size).toBeGreaterThan(0);
+    for (const cmd of contractCommands) {
+      expect(
+        Object.prototype.hasOwnProperty.call(VALID_ARGUMENTS, cmd),
+        `missing argument-shape fixture for generated command ${cmd}`,
+      ).toBe(true);
+      const message = invoke(cmd, VALID_ARGUMENTS[cmd]);
       expect(hook(message), `command ${cmd} should be forwarded`).toEqual(message);
     }
   });
 
-  it('forwards Tauri event-plugin messages used for progress subscriptions', () => {
+  it('fails on contract-surface drift between bindings, fixtures and the isolation allow-list', () => {
+    const contractCommands = contractCommandNames();
+    expect([...Object.keys(VALID_ARGUMENTS)].sort()).toEqual([...contractCommands].sort());
+    expect([...isolationAllowedCommands()].sort()).toEqual([...contractCommands].sort());
+  });
+
+  it('forwards the four event subcommands carrying a string event name', () => {
     const hook = loadHook();
-    const message = invoke('plugin:event|listen', { event: 'scan-progress' });
-    expect(hook(message)).toEqual(message);
+    for (const subcommand of ['listen', 'unlisten', 'emit', 'once']) {
+      const message = invoke(`plugin:event|${subcommand}`, { event: 'scan-progress' });
+      expect(hook(message), `plugin:event|${subcommand} should be forwarded`).toEqual(message);
+    }
+  });
+
+  it('drops event messages with an unknown subcommand or missing/non-string event', () => {
+    const hook = loadHook();
+    expect(() =>
+      hook(invoke('plugin:event|emit_to', { event: 'scan-progress' })),
+    ).toThrow(/invalid event message/);
+    expect(() =>
+      hook(invoke('plugin:event|bogus', { event: 'scan-progress' })),
+    ).toThrow(/invalid event message/);
+    expect(() => hook(invoke('plugin:event|listen', {}))).toThrow(/invalid event message/);
+    expect(() => hook(invoke('plugin:event|once', { event: 42 }))).toThrow(
+      /invalid event message/,
+    );
   });
 
   it('drops an unknown command instead of forwarding it', () => {

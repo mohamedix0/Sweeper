@@ -133,7 +133,7 @@ impl JournalWriter {
     pub fn open_in(base_dir: &Path) -> Result<Self, JournalError> {
         let log_dir = resolve_log_dir(base_dir);
         fs::create_dir_all(&log_dir)?;
-        rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
+        let rotation_failures = rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
         let ts = unix_now_secs();
         let pid = std::process::id();
         let nanos = SystemTime::now()
@@ -149,7 +149,7 @@ impl JournalWriter {
         Ok(Self {
             path,
             file,
-            deferred_errors: Vec::new(),
+            deferred_errors: rotation_failures,
             valid_len: 0,
             poisoned: false,
         })
@@ -336,22 +336,23 @@ fn trim_ascii_whitespace_bytes(mut bytes: &[u8]) -> &[u8] {
 
 /// Rotate activity log files in `log_dir`, retaining only the newest `max_files`
 /// matching clean/scan JSONL logs.
-pub fn rotate_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError> {
-    if max_files == 0 {
-        return Ok(());
+pub fn rotate_logs(log_dir: &Path, max_files: usize) -> Result<Vec<String>, JournalError> {
+    if max_files == 0 || !log_dir.exists() {
+        return Ok(Vec::new());
     }
-    if !log_dir.exists() {
-        return Ok(());
-    }
-    enforce_max_logs(log_dir, max_files.saturating_sub(1).max(1))?;
-    enforce_max_logs(log_dir, max_files)?;
-    Ok(())
+    let mut failures = enforce_max_logs(log_dir, max_files.saturating_sub(1).max(1))?;
+    failures.extend(enforce_max_logs(log_dir, max_files)?);
+    Ok(failures)
 }
 
 /// Rotate logs before writing a new activity log file, leaving room for it.
-pub fn rotate_logs_for_new_file(log_dir: &Path, max_files: usize) -> Result<(), JournalError> {
+/// Returns any retirement failures so callers can report them.
+pub fn rotate_logs_for_new_file(
+    log_dir: &Path,
+    max_files: usize,
+) -> Result<Vec<String>, JournalError> {
     if max_files == 0 || !log_dir.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let keep = max_files.saturating_sub(1).max(1);
     enforce_max_logs(log_dir, keep)
@@ -414,7 +415,13 @@ pub fn outcome_record(
     }
 }
 
-fn enforce_max_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError> {
+/// Enforce at most `max_files` activity logs, returning any retirement failures.
+///
+/// Retirement is best effort: one locked or malformed log must not abort rotation
+/// of the remaining files. Failures are returned so callers can surface them
+/// through the journal's deferred-error channel instead of silently discarding
+/// them (issue #56 residual).
+fn enforce_max_logs(log_dir: &Path, max_files: usize) -> Result<Vec<String>, JournalError> {
     let mut entries: Vec<(SystemTime, PathBuf)> = Vec::new();
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
@@ -429,16 +436,19 @@ fn enforce_max_logs(log_dir: &Path, max_files: usize) -> Result<(), JournalError
         entries.push((modified, path));
     }
     if entries.len() <= max_files {
-        return Ok(());
+        return Ok(Vec::new());
     }
     entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let mut failures = Vec::new();
     for (_, path) in entries.into_iter().skip(max_files) {
         if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
             #[allow(clippy::disallowed_methods)]
-            let _ = sweeper_winfs::retire_sweeper_log_file(log_dir, name);
+            if let Err(err) = sweeper_winfs::retire_sweeper_log_file(log_dir, name) {
+                failures.push(format!("failed to retire log '{name}': {err}"));
+            }
         }
     }
-    Ok(())
+    Ok(failures)
 }
 
 fn is_activity_log_file(path: &Path) -> bool {
@@ -462,7 +472,12 @@ pub fn write_scan_log(
 ) -> Result<PathBuf, JournalError> {
     let log_dir = resolve_log_dir(base_dir);
     fs::create_dir_all(&log_dir)?;
-    rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
+    let rotation_failures = rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
+    if !rotation_failures.is_empty() {
+        return Err(JournalError::Io(std::io::Error::other(
+            rotation_failures.join("; "),
+        )));
+    }
     let ts = unix_now_secs();
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -634,6 +649,56 @@ mod tests {
         // Scan logs must be eligible for retirement, otherwise they grow without bound.
         let count = count_logs_after_rotating("scan");
         assert!(count <= 30, "scan logs were not retired: count={count}");
+    }
+
+    /// A log name counted for retention but rejected by the winfs retirement
+    /// validator (`clean-bad-shape.jsonl` has no numeric `<secs>-<pid>-<nanos>`
+    /// stem) fails to retire. The failure must be surfaced by rotation and
+    /// carried into the journal's deferred errors instead of being discarded.
+    #[test]
+    fn rotation_surfaces_and_defers_retirement_failures() {
+        use std::fs::FileTimes;
+
+        let dir = tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let bad_name = "clean-bad-shape.jsonl";
+        let bad = log_dir.join(bad_name);
+        fs::write(&bad, b"x\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&bad)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+            .unwrap();
+        // 30 valid + 1 malformed log: rotation to 29 must attempt to retire the
+        // malformed (oldest) file, whose retirement fails validation.
+        for i in 0..30 {
+            let name = format!("clean-1700000000-1-{i}.jsonl");
+            let path = log_dir.join(&name);
+            fs::write(&path, b"x\n").unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(100 + i)))
+                .unwrap();
+        }
+
+        let failures = rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS).unwrap();
+        assert!(
+            failures.iter().any(|message| message.contains(bad_name)),
+            "retirement failure must be surfaced: {failures:?}"
+        );
+
+        // open_in resolves <base>/logs and seeds deferred errors from rotation.
+        let mut writer = JournalWriter::open_in(dir.path()).unwrap();
+        let deferred = writer.take_deferred_errors();
+        assert!(
+            deferred.iter().any(|message| message.contains(bad_name)),
+            "retirement failure must be deferred: {deferred:?}"
+        );
     }
 
     #[test]

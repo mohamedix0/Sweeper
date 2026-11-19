@@ -244,15 +244,45 @@ fn is_user_profile_data_subtree(path: &CanonicalPath) -> bool {
     )
 }
 
-/// OneDrive sync-root recognition (Knowledge Base rule `OneDrive*`).
+/// True when `segment` is an actual OneDrive sync-root folder name.
 ///
-/// Drive- and profile-location-independent: any path segment whose uppercased form
-/// starts with `ONEDRIVE` is treated as a protected sync root. This covers the
-/// default `OneDrive`, tenant names (`OneDrive - Contoso`), and variants such as
-/// `OneDrive2`, on any drive or at any depth (audit F8).
+/// OneDrive names its sync roots `OneDrive`, `OneDrive - <tenant>`, `OneDrive2`,
+/// `onedrive-sync`, etc.: "OneDrive" is either the whole name or is followed by a
+/// non-letter. Benign folders such as `OneDriveCache` / `OneDriveCLI` append a
+/// letter and must not be mistaken for a sync root.
+fn is_onedrive_root_segment(segment: &str) -> bool {
+    let upper = segment.to_ascii_uppercase();
+    let Some(rest) = upper.strip_prefix("ONEDRIVE") else {
+        return false;
+    };
+    rest.is_empty() || !rest.as_bytes()[0].is_ascii_alphabetic()
+}
+
+/// OneDrive sync-root recognition (Knowledge Base rule `OneDrive*`), restricted to
+/// real sync-root positions.
+///
+/// A segment must be a genuine OneDrive root folder name (see
+/// [`is_onedrive_root_segment`)) *and* sit in a recognised sync-root position:
+/// - `<drive>:\Users\<name>\OneDrive*` — the classic profile-relative location; or
+/// - a known/moved root at the drive root or one level beneath it
+///   (`<drive>:\OneDrive`, `<drive>:\Data\onedrive-sync`).
+///
+/// A segment merely starting with `ONEDRIVE` at any depth (e.g.
+/// `OneDriveCache\Temp`, `repo\OneDriveCLI\cache`) no longer qualifies, while
+/// genuine roots and everything beneath them stay subtree-protected (audit F8).
 fn is_onedrive_sync_root(path: &CanonicalPath) -> bool {
-    path.segments()
-        .any(|segment| segment.to_ascii_uppercase().starts_with("ONEDRIVE"))
+    let segs: Vec<&str> = path.segments().collect();
+    segs.iter().enumerate().any(|(idx, seg)| {
+        if !is_onedrive_root_segment(seg) {
+            return false;
+        }
+        // Classic location: <drive>:\Users\<name>\OneDrive*
+        if idx == 2 {
+            return segs[0].eq_ignore_ascii_case("Users");
+        }
+        // Known / moved root at the drive root or one level beneath it.
+        idx <= 1
+    })
 }
 
 fn matches_ci_any(s: &str, opts: &[&str]) -> bool {
@@ -755,6 +785,46 @@ mod tests {
         }
         assert_not_onedrive_root(&canon(r"C:\Users\Alice\Documents"));
         assert_not_onedrive_root(&canon(r"C:\Temp\cache"));
+    }
+
+    #[test]
+    fn onedrive_prefix_in_benign_folder_is_not_subtree_protected() {
+        // Audit #108 item 1: a segment merely starting with "ONEDRIVE" is not a
+        // sync root. These benign folders must stay selectable/cleanable. Paths
+        // are assembled at runtime to keep fixtures machine-neutral.
+        let path_on = |drive: char, rest: &str| canon(&format!("{drive}:\\{rest}"));
+        for (drive, rest) in [
+            ('D', r"OneDriveCache\Temp"),
+            ('C', r"repo\OneDriveCLI\cache"),
+            ('C', r"Users\Alice\OneDriveCache\cache"),
+            ('D', r"Data\OneDriveBackup\cache"),
+        ] {
+            let cp = path_on(drive, rest);
+            assert_not_onedrive_root(&cp);
+            assert!(
+                !is_subtree_protected(&cp),
+                "benign folder must not be subtree-protected: {cp}"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_onedrive_roots_still_protect_their_descendants() {
+        // Narrowing root recognition must not drop protection below real roots.
+        let path_on = |drive: char, rest: &str| canon(&format!("{drive}:\\{rest}"));
+        for (drive, rest) in [
+            ('C', r"Users\Alice\OneDrive\Documents"),
+            ('C', r"Users\Alice\OneDrive - Contoso\sub\leaf"),
+            ('D', r"OneDrive\sub\leaf"),
+            ('D', r"Data\onedrive-sync\sub\leaf"),
+        ] {
+            let cp = path_on(drive, rest);
+            assert_onedrive_root_is_protected(&cp);
+            assert!(
+                is_subtree_protected(&cp),
+                "descendant must stay protected: {cp}"
+            );
+        }
     }
 
     #[test]
