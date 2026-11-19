@@ -2,6 +2,7 @@ use super::walker::{DirRecord, FileInfo};
 use super::*;
 use crate::paths::CanonicalPath;
 use crate::policy;
+use crate::wildcard::segment_pattern_matches;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -944,22 +945,6 @@ fn resolve_target_roots_wildcard(
     roots
 }
 
-fn segment_pattern_matches(name: &str, pattern: &str) -> bool {
-    if !pattern.contains('*') {
-        return name.eq_ignore_ascii_case(pattern);
-    }
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    let (prefix, suffix) = (parts[0], parts[1]);
-    if name.len() < prefix.len() + suffix.len() {
-        return false;
-    }
-    name[..prefix.len()].eq_ignore_ascii_case(prefix)
-        && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-}
-
 pub(super) fn stable_node_id(path: &str) -> String {
     // Deterministic stable ID for a path (simple FNV-1a 64-bit hex), no extra deps.
     let key = canonical_key(path);
@@ -1050,4 +1035,22 @@ pub fn knowledge_explanation(item_id: &str) -> Option<(String, String, Risk)> {
         return Some((t.name, t.description, t.risk));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::segment_pattern_matches;
+
+    /// F6 regression: during `build_annotation_context`, a multi-byte directory
+    /// name can satisfy the old byte-length guard while the slice offset falls
+    /// mid-character. A verdict must be returned instead of a panic.
+    #[test]
+    fn multibyte_name_prefix_wildcard_returns_verdict_without_panic() {
+        // "aééé" is 7 bytes; "Opera " is 6 bytes -> old name[..6] panicked.
+        assert!(!segment_pattern_matches("a\u{e9}\u{e9}\u{e9}", "Opera *"));
+        assert!(segment_pattern_matches(
+            "Opera \u{e9}\u{e9}\u{e9}",
+            "OPERA *"
+        ));
+    }
 }

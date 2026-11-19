@@ -7,7 +7,9 @@ import { installPreviewCalloutMock } from './previewCalloutMock';
  * is performed and the standard Edge channel comes from playwright.config.ts.
  */
 const CALLOUT_GROUP = 'Elevated risk in this selection';
-const CAUTION_IDENTITY = 'Vendor Logs';
+const CAUTION_IDENTITY = 'C:\\Users\\Alice\\AppData\\Local\\npm-cache\\package-cache-tarballs';
+const CAUTION_KB_TITLE = 'Vendor Logs';
+const CUSTOM_PATH_IDENTITY = 'C:\\Users\\Alice\\CustomCleanup\\old.bin';
 const CAUTION_DESCRIPTION = 'Knowledge Base: vendor application log, regenerated on demand.';
 const CAUTION_CONSEQUENCE = 'Removing this item is permanent and it may be slow or costly to restore.';
 const NPM_ITEM_ID = 't-npm-item-1';
@@ -20,10 +22,10 @@ async function runScan(page: Page): Promise<void> {
   await expect(page.getByText('Ready to scan')).toHaveCount(0);
 }
 
-/** Clear the auto-selected Safe items, then select only the npm-cache item. */
+/** Unselect the auto-selected Safe items, then select only the npm-cache item. */
 async function selectOnlyNpmItem(page: Page): Promise<void> {
-  const clear = page.getByRole('button', { name: 'Clear' });
-  if (await clear.isVisible().catch(() => false)) await clear.click();
+  const unselectAll = page.getByRole('button', { name: 'Unselect all' });
+  if (await unselectAll.isVisible().catch(() => false)) await unselectAll.click();
 
   const group = page.getByRole('article').filter({ hasText: 'npm Package Cache' }).first();
   const expand = group.getByRole('button', { name: 'Expand npm Package Cache' });
@@ -36,7 +38,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await page.goto('/');
     await installPreviewCalloutMock(page, {
       elevatedItemId: NPM_ITEM_ID,
-      elevatedTitle: CAUTION_IDENTITY,
+      elevatedTitle: CAUTION_KB_TITLE,
       elevatedDescription: CAUTION_DESCRIPTION,
       skippedCount: '1',
       skippedReasons: [SKIPPED_REASON],
@@ -65,7 +67,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(skipped).toContainText(SKIPPED_REASON);
 
     // The callout is presentational: the normal Clean control stays available.
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
   });
 
   test('typed confirmation remains mandatory and the callout never enables Clean on its own', async ({ page }) => {
@@ -88,7 +90,7 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     const typed = page.getByLabel('Typed confirmation');
     await expect(typed).toBeVisible();
     await expect(review).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toHaveCount(0);
     await expect(page.getByRole('group', { name: CALLOUT_GROUP })).toHaveCount(0);
 
     await typed.fill('delete');
@@ -100,9 +102,9 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     // The selection that produced a callout still required the typed phrase.
     const callouts = page.getByRole('group', { name: CALLOUT_GROUP });
     await expect(callouts).toBeVisible();
-    await expect(callouts.getByRole('note', { name: 'Custom Path risk: Custom Path (Unknown)' })).toBeVisible();
+    await expect(callouts.getByRole('note', { name: `Custom Path risk: ${CUSTOM_PATH_IDENTITY}` })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Preview Breakdown' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
   });
 
   test('Safe-only selection renders no callout and the existing Preview flow is unchanged', async ({ page }) => {
@@ -117,14 +119,14 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(page.getByRole('group', { name: CALLOUT_GROUP })).toHaveCount(0);
     await expect(page.getByRole('note')).toHaveCount(0);
     await expect(page.getByLabel('Typed confirmation')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
   });
 
   test('cancelling a Preview that has callouts returns to the normal state', async ({ page }) => {
     await page.goto('/');
     await installPreviewCalloutMock(page, {
       elevatedItemId: NPM_ITEM_ID,
-      elevatedTitle: CAUTION_IDENTITY,
+      elevatedTitle: CAUTION_KB_TITLE,
       elevatedDescription: CAUTION_DESCRIPTION,
     });
 
@@ -137,12 +139,12 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
     await expect(group.getByRole('note', { name: `Caution risk: ${CAUTION_IDENTITY}` })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Preview Breakdown' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Clear' }).click();
+    await page.getByRole('button', { name: 'Unselect all' }).click();
 
     await expect(group).toHaveCount(0);
     await expect(page.getByRole('note')).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Preview Breakdown' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Clean Permanently' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Delete .* permanently/ })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Review & Clean' })).toBeVisible();
   });
 });

@@ -19,6 +19,7 @@ export function useScanState() {
   const [inspected, setInspected] = useState<ExplainState>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewProgress, setPreviewProgress] = useState<{ completed: number; total: number } | null>(null);
   const [confirmText, setConfirmText] = useState('');
   const [cleaning, setCleaning] = useState(false);
   const [cleanProgress, setCleanProgress] = useState<CleanProgressEvent | null>(null);
@@ -39,7 +40,7 @@ export function useScanState() {
     tier1, setTier1, tier2, setTier2, scanning, setScanning, scanStatus, setScanStatus, scanProgress, setScanProgress,
     sessionId, setSessionId, scanStartedAt, setScanStartedAt, results, setResults, selectedIds, setSelectedIds,
     collapsedTargets, setCollapsedTargets, toolbar, setToolbar, focus, setFocus, inspected, setInspected,
-    preview, setPreview, previewLoading, setPreviewLoading, confirmText, setConfirmText, cleaning, setCleaning,
+    preview, setPreview, previewLoading, setPreviewLoading, previewProgress, setPreviewProgress, confirmText, setConfirmText, cleaning, setCleaning,
     cleanProgress, setCleanProgress, cleanSummary, setCleanSummary, error, setError, info, setInfo,
     relaunching, setRelaunching, relaunchInfo, setRelaunchInfo, relaunchError, setRelaunchError,
     showAllGroups, setShowAllGroups, scanSettingsVersion, setScanSettingsVersion, setTick,

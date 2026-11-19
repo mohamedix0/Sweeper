@@ -60,8 +60,8 @@ pub use ops::{
 };
 #[cfg(windows)]
 pub use ops::{
-    create_file_symlink, filetime_now, read_ads, set_file_attributes, set_last_write_time,
-    to_extended_length_path, write_ads,
+    create_file_symlink, filetime_now, read_ads, set_file_attributes, set_junction_on_open_handle,
+    set_last_write_time, to_extended_length_path, write_ads,
 };
 pub use owner_lock::OWNER_LOCK_FILE_NAME;
 pub use paths::{default_sandbox_base, default_sandbox_base_checked, is_safe_sandbox_base};

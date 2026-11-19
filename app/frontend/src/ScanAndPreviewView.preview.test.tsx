@@ -54,7 +54,7 @@ async function runDiscardCase() {
   await user.click(boxes.cb2);
   resolvePreview({ sessionId: 'scan-1', previewToken: 'tok-stale', issuedAtUnixSecs: '1710000000', expiresAtUnixSecs: '1710000600', totalBytes: '200', totalItems: '2', requiresConfirmation: false, requiresElevation: false, perTarget: [] });
   await waitFor(() => expect(screen.getByRole('button', { name: /Review & Clean/ })).toBeInTheDocument());
-  expect(screen.queryByRole('button', { name: 'Clean Permanently' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Delete .* permanently/ })).not.toBeInTheDocument();
   expect(screen.queryByText('Preview Breakdown')).not.toBeInTheDocument();
 }
 
@@ -91,7 +91,7 @@ async function runClearsLoadingCase() {
   expect(within(breakdown).getAllByText(/100 B/).length).toBeGreaterThan(0);
   expect(within(breakdown).queryByText(/2 items/i)).not.toBeInTheDocument();
   expect(within(breakdown).queryByText(/200 B/)).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled();
 }
 
 describe('ScanAndPreviewView preview stale handling', () => {
@@ -142,8 +142,12 @@ async function selectElevatedItem(user: Awaited<ReturnType<typeof openScan>>) {
 function renderViewWithProbe(input: { client: SweeperClient; record: (disabled: boolean | null) => void }) {
   return render(
     <Profiler id="view" onRender={() => {
-      const button = screen.queryByRole('button', { name: 'Clean Permanently' }) as HTMLButtonElement | null;
-      input.record(button ? button.disabled : null);
+      const button = screen.queryByRole('button', { name: /Delete .* permanently/ }) as HTMLButtonElement | null;
+      if (!button) {
+        input.record(null);
+        return;
+      }
+      input.record(button.disabled);
     }}>
       <ScanAndPreviewView client={input.client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />
     </Profiler>,
@@ -165,13 +169,13 @@ describe('ScanAndPreviewView callout explanation gating', () => {
 
     await waitFor(() => expect(samples.some((value) => value !== null)).toBe(true));
     expect(samples.find((value) => value !== null)).toBe(true);
-    expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeDisabled();
 
     await act(async () => {
       resolveExplain({ itemId: 'i-elevated', title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
       await explainPromise;
     });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled());
   });
 
   it('ScanAndPreviewView keeps Clean disabled until a delayed explanation resolves, then shows the callout', async () => {
@@ -191,16 +195,16 @@ describe('ScanAndPreviewView callout explanation gating', () => {
     calloutMode = true;
     await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
     await waitFor(() => expect(calloutPromise).not.toBeNull());
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeDisabled());
     expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
 
     await act(async () => {
       resolveCallout({ itemId: 'i-elevated', title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
       await calloutPromise!;
     });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled());
     const group = screen.getByRole('group', { name: CALLOUT_GROUP });
-    expect(within(group).getByText('Cache entry')).toBeInTheDocument();
+    expect(within(group).getByText('C:\\Cache\\entry.tmp')).toBeInTheDocument();
   });
 
   it('ScanAndPreviewView re-gates Clean on a second Preview with the same selection while its explanation is delayed', async () => {
@@ -219,23 +223,23 @@ describe('ScanAndPreviewView callout explanation gating', () => {
     await selectElevatedItem(user);
 
     await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled());
 
-    // Clear the Preview and reopen it with the same selection. The resolved
+    // Unselect all and reopen the Preview with the same selection. The resolved
     // explanations from the first Preview must not carry over to the second.
-    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await user.click(screen.getByRole('button', { name: 'Unselect all' }));
     await selectElevatedItem(user);
     delayExplain = true;
     await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
     await waitFor(() => expect(secondExplain).not.toBeNull());
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeDisabled());
     expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
 
     await act(async () => {
       resolveSecond({ itemId: 'i-elevated', title: 'Cache entry', description: 'Cached data', risk: 'Caution' });
       await secondExplain!;
     });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled());
     expect(screen.getByRole('group', { name: CALLOUT_GROUP })).toBeInTheDocument();
   });
 
@@ -258,7 +262,7 @@ describe('ScanAndPreviewView callout explanation gating', () => {
       calloutMode = true;
       await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
       await waitFor(() => expect(calloutPromise).not.toBeNull());
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeDisabled());
+      await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeDisabled());
       expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
 
       await act(async () => {
@@ -271,7 +275,7 @@ describe('ScanAndPreviewView callout explanation gating', () => {
       expect(within(group).getByText(/Explanation unavailable/)).toBeInTheDocument();
       expect(screen.getByText(/Explanation unavailable for 1 selected item/)).toBeInTheDocument();
       expect(warnSpy).toHaveBeenCalled();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+      await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled());
     } finally {
       warnSpy.mockRestore();
     }
@@ -297,7 +301,7 @@ describe('ScanAndPreviewView callout explanation gating', () => {
 
       // The rejected explanation resolves (Clean is re-enabled) but the known
       // Safe Risk is preserved, so no elevated-Risk callout is invented.
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Clean Permanently' })).toBeEnabled());
+      await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled());
       expect(screen.queryByRole('group', { name: CALLOUT_GROUP })).not.toBeInTheDocument();
       expect(screen.queryByText(/Unknown risk:/)).not.toBeInTheDocument();
 
@@ -308,4 +312,85 @@ describe('ScanAndPreviewView callout explanation gating', () => {
       warnSpy.mockRestore();
     }
   });
+});
+
+describe('ScanAndPreviewView large-selection risk coverage', () => {
+  const TARGET_COUNT = 20;
+  const ITEMS_PER_TARGET = 5;
+
+  function manyCautionResults(sessionId: string): ScanResults {
+    const targets = Array.from({ length: TARGET_COUNT }, (_, t) => {
+      const targetId = `caution-${t}`;
+      return {
+        targetId, targetName: `Caution target ${t}`, tier: 'Tier2', risk: 'Caution',
+        resolvedPaths: [`C:\\Users\\Alice\\Temp\\${t}`], scanned: true, statusReason: null,
+        totalBytes: '500', eligibleBytes: '500', fileCount: String(ITEMS_PER_TARGET),
+        eligibleCount: String(ITEMS_PER_TARGET), skippedCount: '0',
+        items: Array.from({ length: ITEMS_PER_TARGET }, (_, i) => ({
+          id: `${targetId}::${i + 1}`, targetId,
+          path: `C:\\Users\\Alice\\Temp\\${t}\\item-${i + 1}`,
+          size: '100', mtimeUnixSecs: '1700000000', ageEligible: true,
+        })),
+      };
+    });
+    return { sessionId, startedUnixSecs: '1710000000', minAgeHours: 24, targets } as ScanResults;
+  }
+
+  it('shows a warning for every elevated-risk item beyond the explanation cap before Clean enables', async () => {
+    let explainCalls = 0;
+    const sessionId = 'scan-large-caution';
+    const client = {
+      startScan: async () => ({ sessionId }),
+      getScanResults: async () => manyCautionResults(sessionId),
+      explainItem: async (itemId: any) => {
+        explainCalls += 1;
+        return { itemId, title: String(itemId), description: 'Knowledge Base entry', risk: 'Caution' as const };
+      },
+      previewClean: async () => ({
+        sessionId, previewToken: 'tok', issuedAtUnixSecs: '1710000000', expiresAtUnixSecs: '1710000600',
+        totalBytes: '10000', totalItems: '100', requiresConfirmation: false, requiresElevation: false, perTarget: [],
+        breakdown: [], totalSelectedCount: '100', totalSelectedBytes: '10000',
+      }),
+    } as unknown as SweeperClient;
+
+    const results = manyCautionResults(sessionId);
+    const expectedIdentities = new Set(results.targets.flatMap((t) => t.items.map((i) => i.path)));
+    const enabledCommits: string[][] = [];
+    const user = userEvent.setup();
+    render(
+      <Profiler id="risk-coverage" onRender={() => {
+        const cta = screen.queryByRole('button', { name: /Delete .* permanently/ }) as HTMLButtonElement | null;
+        if (!cta) return;
+        if (cta.disabled) return;
+        const group = screen.queryByRole('group', { name: CALLOUT_GROUP });
+        const notes = group ? within(group).queryAllByRole('note') : [];
+        // An enabled commit with missing warnings is a safety regression.
+        enabledCommits.push(notes.map((note) => (note.getAttribute('aria-label') ?? '').replace(/^Caution risk: /, '')));
+      }}>
+        <ScanAndPreviewView client={client} settings={{ allowDeleteUnknown: false } as any} settingsVersion={0} elevationStatus={{ isElevated: false }} elevationError={null} onOpenLog={() => {}} />
+      </Profiler>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await screen.findByRole('heading', { name: 'Inspector' });
+    explainCalls = 0; // discard the scan-time auto-inspect explanation
+    for (let t = 0; t < TARGET_COUNT; t += 1) {
+      await user.click(screen.getByLabelText(`Select all eligible items in Caution target ${t}`));
+    }
+    await user.click(screen.getByRole('button', { name: /Review & Clean/ }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Delete .* permanently/ })).toBeEnabled(), { timeout: 10_000 });
+    const group = screen.getByRole('group', { name: CALLOUT_GROUP });
+    expect(within(group).getAllByRole('note')).toHaveLength(TARGET_COUNT * ITEMS_PER_TARGET);
+    expect(explainCalls).toBeLessThanOrEqual(16);
+
+    // Every commit where Clean was enabled already had complete warning coverage.
+    expect(enabledCommits.length).toBeGreaterThan(0);
+    for (const identities of enabledCommits) {
+      expect(identities).toHaveLength(TARGET_COUNT * ITEMS_PER_TARGET);
+    }
+    const finalIdentities = enabledCommits[enabledCommits.length - 1];
+    expect(new Set(finalIdentities)).toEqual(expectedIdentities);
+    // Target 19 is beyond the 16-task explanation cap: its item still warns.
+    expect(finalIdentities).toContain('C:\\Users\\Alice\\Temp\\19\\item-5');
+  }, 20_000);
 });

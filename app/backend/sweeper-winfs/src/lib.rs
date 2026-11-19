@@ -27,8 +27,8 @@ use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ENVVAR_NOT_FOUND, ERROR_FILE_NOT_FOUND,
-    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES,
-    ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
+    ERROR_NOT_SUPPORTED, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DeleteFileW, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
@@ -314,27 +314,99 @@ pub fn open_for_delete(path: &Path) -> Result<SafeHandle> {
     Ok(SafeHandle(handle))
 }
 
-/// Resolve canonical path for an opened handle via `GetFinalPathNameByHandleW`.
-pub fn get_final_path(handle: &SafeHandle) -> Result<String> {
+/// Resolve the final path of an already-open, caller-owned handle via
+/// `GetFinalPathNameByHandleW` without taking ownership or closing it.
+///
+/// Use this when the caller already holds a live handle (for example a
+/// `std::fs::File`) and must validate its on-disk identity without reopening the
+/// path. Reopening by path would create a TOCTOU window in which an ancestor
+/// junction can be swapped between the two opens.
+pub fn get_final_path_from_raw_handle(raw: std::os::windows::io::RawHandle) -> Result<String> {
+    let handle = raw as HANDLE;
     // VOLUME_NAME_DOS = 0x0, FILE_NAME_NORMALIZED = 0x0
     const VOLUME_NAME_DOS: u32 = 0;
     const FILE_NAME_NORMALIZED: u32 = 0;
     let flags = VOLUME_NAME_DOS | FILE_NAME_NORMALIZED;
-    // SAFETY: querying required length with null buffer and size 0 is valid for a live handle.
-    let needed = unsafe { GetFinalPathNameByHandleW(handle.raw(), std::ptr::null_mut(), 0, flags) };
-    if needed == 0 {
-        return Err(last_error("GetFinalPathNameByHandleW(len)"));
+
+    // Both closures capture the SAME borrowed handle, so the length query and the
+    // fill call can never observe different files (no reopen-by-path TOCTOU).
+    resolve_final_path_from_queries(
+        || {
+            // SAFETY: querying the required length with a null buffer and size 0
+            // is valid for a live handle owned by the caller for this call.
+            let needed =
+                unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, flags) };
+            if needed == 0 {
+                Err(last_error("GetFinalPathNameByHandleW(len)"))
+            } else {
+                Ok(needed as usize)
+            }
+        },
+        |buf| {
+            // SAFETY: `buf` is writable for `buf.len()` UTF-16 code units and
+            // `handle` is a live, caller-owned handle valid for this call.
+            let written = unsafe {
+                GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), buf.len() as u32, flags)
+            };
+            if written == 0 {
+                Err(last_error("GetFinalPathNameByHandleW"))
+            } else {
+                Ok(written as usize)
+            }
+        },
+    )
+}
+
+/// Drive the two-call `GetFinalPathNameByHandleW` protocol behind injectable
+/// queries so the buffer-growth path can be regression-tested without a real
+/// filesystem race.
+///
+/// `len_query` returns the required buffer size (including the terminating null).
+/// `fill` returns the number of characters written on success (excluding the
+/// null), or the NEW required buffer size when the buffer is too small. A
+/// nonzero value >= the buffer size therefore means "insufficient buffer", not
+/// success -- slicing with it would panic. In that case the path grew between
+/// the two calls and we retry, on the same handle, with a bounded resize.
+fn resolve_final_path_from_queries<Len, Fill>(mut len_query: Len, mut fill: Fill) -> Result<String>
+where
+    Len: FnMut() -> Result<usize>,
+    Fill: FnMut(&mut [u16]) -> Result<usize>,
+{
+    const MAX_ATTEMPTS: usize = 4;
+    // NTFS paths are at most 32_767 UTF-16 units; allow one extra for the null.
+    const MAX_PATH_UNITS: usize = 32_768;
+
+    let mut buf: Vec<u16> = Vec::new();
+    for _ in 0..MAX_ATTEMPTS {
+        let needed = len_query()?;
+        if needed == 0 || needed > MAX_PATH_UNITS {
+            return Err(WinfsError::Win32 {
+                context: "GetFinalPathNameByHandleW(len)",
+                code: ERROR_INSUFFICIENT_BUFFER,
+            });
+        }
+        buf.resize(needed, 0);
+        let written = fill(&mut buf)?;
+        // A nonzero return >= the buffer size is the required size (insufficient
+        // buffer), NOT the character count. Never slice with it.
+        if written >= buf.len() {
+            // The path grew between the length query and the fill call. Retry
+            // with the freshly reported size; still on the same handle.
+            continue;
+        }
+        return String::from_utf16(&buf[..written])
+            .map_err(|e| WinfsError::InvalidEncoding(e.to_string()));
     }
-    let mut buf = vec![0u16; needed as usize];
-    // SAFETY: `buf` is writable for `needed` UTF-16 code units and `handle` is valid/open.
-    let written =
-        unsafe { GetFinalPathNameByHandleW(handle.raw(), buf.as_mut_ptr(), needed, flags) };
-    if written == 0 {
-        return Err(last_error("GetFinalPathNameByHandleW"));
-    }
-    let len = written as usize;
-    let slice = &buf[..len];
-    String::from_utf16(slice).map_err(|e| WinfsError::InvalidEncoding(e.to_string()))
+    // The path kept growing past the bounded number of retries.
+    Err(WinfsError::Win32 {
+        context: "GetFinalPathNameByHandleW(resize)",
+        code: ERROR_INSUFFICIENT_BUFFER,
+    })
+}
+
+/// Resolve canonical path for an opened handle via `GetFinalPathNameByHandleW`.
+pub fn get_final_path(handle: &SafeHandle) -> Result<String> {
+    get_final_path_from_raw_handle(handle.raw())
 }
 
 /// Get file identity (volume serial + file index) via `GetFileInformationByHandle`.
@@ -428,6 +500,19 @@ pub fn inspect_handle(handle: &SafeHandle) -> Result<HandleInspection> {
     })
 }
 
+/// Decode the reparse tag (the first DWORD, little-endian) from an FSCTL output buffer.
+///
+/// Returns `None` when the device reported fewer than four bytes. Reading through an
+/// aligned byte conversion avoids the unaligned `u32` pointer dereference, which was
+/// formal undefined behaviour on this live path (audit F40).
+fn reparse_tag_from_buffer(buf: &[u8], bytes_returned: u32) -> Option<u32> {
+    if (bytes_returned as usize) < std::mem::size_of::<u32>() {
+        return None;
+    }
+    let tag_bytes: [u8; 4] = buf.get(..4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(tag_bytes))
+}
+
 fn query_reparse_tag(handle: &SafeHandle) -> Result<Option<u32>> {
     let mut buf = vec![0u8; 16 * 1024];
     let mut bytes_returned: u32 = 0;
@@ -457,11 +542,10 @@ fn query_reparse_tag(handle: &SafeHandle) -> Result<Option<u32>> {
             code: err,
         });
     }
-    if (bytes_returned as usize) < std::mem::size_of::<u32>() {
-        return Ok(Some(0));
-    }
-    // SAFETY: at least 4 bytes returned; first DWORD of reparse data buffer is the reparse tag.
-    let tag = unsafe { *(buf.as_ptr() as *const u32) };
+    let tag = match reparse_tag_from_buffer(&buf, bytes_returned) {
+        Some(tag) => tag,
+        None => return Ok(Some(0)),
+    };
     Ok(Some(tag))
 }
 
@@ -764,11 +848,10 @@ pub fn inspect_reparse_point(handle: &SafeHandle) -> Result<ReparseTagClass> {
             code: err,
         });
     }
-    if (bytes_returned as usize) < std::mem::size_of::<u32>() {
-        return Ok(ReparseTagClass::OtherReparse(0));
-    }
-    // SAFETY: buffer contains at least 4 bytes; first field of reparse data buffer is the tag.
-    let tag = unsafe { *(buf.as_ptr() as *const u32) };
+    let tag = match reparse_tag_from_buffer(&buf, bytes_returned) {
+        Some(tag) => tag,
+        None => return Ok(ReparseTagClass::OtherReparse(0)),
+    };
     Ok(classify_reparse_tag(tag))
 }
 
@@ -1168,18 +1251,11 @@ fn is_path_direct_child_of_dir(path: &str, dir: &Path) -> bool {
         && !name.to_string_lossy().is_empty()
 }
 
-/// Create an NTFS directory junction (mount point reparse point) at `link` targeting `target`.
-///
-/// Test/support helper. The created link entry is a reparse point; callers must never traverse it
-/// as a directory during deletion/scanning of target contents.
-///
-/// # Safety and semantics
-/// - `link` must not already exist as a file/directory/junction (this function creates the link directory).
-/// - `target` is canonicalized and converted to an absolute NT path form for the substitute name.
+/// Build the `IO_REPARSE_TAG_MOUNT_POINT` buffer that redirects to `target`.
 #[cfg(any(test, feature = "test-support"))]
-pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
+fn junction_reparse_buffer(target: &Path) -> Result<Vec<u8>> {
     let target_abs = std::fs::canonicalize(target).map_err(|e| WinfsError::Win32 {
-        context: "canonicalize(create_directory_junction target)",
+        context: "canonicalize(junction_reparse_buffer target)",
         code: e.raw_os_error().unwrap_or(0) as u32,
     })?;
     let target_text = target_abs
@@ -1230,6 +1306,58 @@ pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
         let off = path_buf_start + print_offset + i * 2;
         buf[off..off + 2].copy_from_slice(&ch.to_le_bytes());
     }
+    Ok(buf)
+}
+
+/// Install a directory junction on an ALREADY-OPEN handle (test/support helper).
+///
+/// The caller is responsible for opening `raw` with `FILE_WRITE_ATTRIBUTES`
+/// access (and `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`).
+/// This deliberately models the attribute-only reparse swap from the log
+/// containment threat model: Windows does not gate `FILE_WRITE_ATTRIBUTES`
+/// access (nor `FSCTL_SET_REPARSE_POINT`) by the handle's share mode, so a
+/// directory pinned with `FILE_SHARE_READ` can still be converted in place.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_directory_junction_on_open_handle(
+    raw: std::os::windows::io::RawHandle,
+    target: &Path,
+) -> Result<()> {
+    let buf = junction_reparse_buffer(target)?;
+    let mut bytes_returned: u32 = 0;
+    // SAFETY: `raw` is a live caller-owned handle opened with FILE_WRITE_ATTRIBUTES
+    // and FILE_FLAG_OPEN_REPARSE_POINT; `buf` is a valid mount-point reparse buffer
+    // whose declared lengths/offsets match its PathBuffer contents.
+    let ok = unsafe {
+        DeviceIoControl(
+            raw as HANDLE,
+            FSCTL_SET_REPARSE_POINT,
+            buf.as_ptr() as *const _,
+            buf.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(last_error(
+            "DeviceIoControl(FSCTL_SET_REPARSE_POINT on open handle)",
+        ));
+    }
+    Ok(())
+}
+
+/// Create an NTFS directory junction (mount point reparse point) at `link` targeting `target`.
+///
+/// Test/support helper. The created link entry is a reparse point; callers must never traverse it
+/// as a directory during deletion/scanning of target contents.
+///
+/// # Safety and semantics
+/// - `link` must not already exist as a file/directory/junction (this function creates the link directory).
+/// - `target` is canonicalized and converted to an absolute NT path form for the substitute name.
+#[cfg(any(test, feature = "test-support"))]
+pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
+    let buf = junction_reparse_buffer(target)?;
 
     std::fs::create_dir(link).map_err(|e| WinfsError::Win32 {
         context: "CreateDirectory(create_directory_junction link)",
@@ -1319,7 +1447,9 @@ pub fn set_last_write_time(path: &Path, filetime: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_sweeper_journal_log_name;
+    use super::{
+        is_sweeper_journal_log_name, reparse_tag_from_buffer, resolve_final_path_from_queries,
+    };
 
     #[test]
     fn journal_log_name_accepts_clean_and_scan_shapes() {
@@ -1337,5 +1467,98 @@ mod tests {
         assert!(!is_sweeper_journal_log_name("scan-1700000000-123.jsonl"));
         assert!(!is_sweeper_journal_log_name("scan-1700000000-123-456.txt"));
         assert!(!is_sweeper_journal_log_name("scan-..-123-456.jsonl"));
+    }
+
+    #[test]
+    fn reparse_tag_is_decoded_as_little_endian_dword() {
+        // 0xA000_000C (IO_REPARSE_TAG_SYMLINK) in little-endian byte order.
+        let buf = [0x0C, 0x00, 0x00, 0xA0, 0xDE, 0xAD, 0xBE, 0xEF];
+        assert_eq!(reparse_tag_from_buffer(&buf, 8), Some(0xA000_000C));
+    }
+
+    #[test]
+    fn reparse_tag_decode_respects_bytes_returned_guard() {
+        let buf = [0x0C, 0x00, 0x00, 0xA0];
+        // Fewer than four bytes reported -> no tag (callers use their safe fallback).
+        assert_eq!(reparse_tag_from_buffer(&buf, 0), None);
+        assert_eq!(reparse_tag_from_buffer(&buf, 3), None);
+        // Short backing buffer must not panic or over-read.
+        assert_eq!(reparse_tag_from_buffer(&[0x0C, 0x00], 4), None);
+        assert_eq!(reparse_tag_from_buffer(&buf, 4), Some(0xA000_000C));
+    }
+
+    /// A path that grows between the length query and the fill call makes the
+    /// second call return the required size (including the null) rather than the
+    /// character count. Treating that as a count would slice past `buf` and
+    /// panic; the helper must retry with the reported size instead.
+    #[test]
+    fn final_path_retries_when_path_grows_between_api_calls() {
+        let text: Vec<u16> = "C:\\Temp\\grown-path".encode_utf16().collect();
+        let mut len_calls = 0usize;
+        let mut fill_calls = 0usize;
+
+        let result = resolve_final_path_from_queries(
+            || {
+                len_calls += 1;
+                // First query sees the short path (4 chars + null = 5); the
+                // retry sees the grown path.
+                if len_calls == 1 {
+                    Ok(5)
+                } else {
+                    Ok(text.len() + 1)
+                }
+            },
+            |buf| {
+                fill_calls += 1;
+                if fill_calls == 1 {
+                    // Buffer too small: report the NEW required size, which is
+                    // >= buf.len(). A naive implementation would slice here.
+                    Ok(text.len() + 1)
+                } else {
+                    let n = text.len().min(buf.len() - 1);
+                    buf[..n].copy_from_slice(&text[..n]);
+                    Ok(n) // success excludes the null terminator
+                }
+            },
+        );
+
+        assert_eq!(
+            result.expect("grown path must resolve"),
+            "C:\\Temp\\grown-path"
+        );
+        assert_eq!(fill_calls, 2, "exactly one bounded retry expected");
+    }
+
+    /// If the path keeps growing every time, the helper fails closed with an
+    /// error instead of panicking or looping forever.
+    #[test]
+    fn final_path_fails_closed_when_growth_exceeds_retry_budget() {
+        let result = resolve_final_path_from_queries(
+            || Ok(5),
+            |buf| {
+                // Always report "insufficient buffer" with a size >= the buffer.
+                Ok(buf.len() + 1)
+            },
+        );
+        assert!(result.is_err(), "unbounded growth must be rejected");
+    }
+
+    /// Sanity: a normal two-call exchange (size includes null, count excludes
+    /// it) still resolves without any retry.
+    #[test]
+    fn final_path_resolves_on_normal_two_call_exchange() {
+        let text: Vec<u16> = "C:\\Temp".encode_utf16().collect();
+        let mut fill_calls = 0usize;
+        let result = resolve_final_path_from_queries(
+            || Ok(text.len() + 1),
+            |buf| {
+                fill_calls += 1;
+                let n = text.len();
+                buf[..n].copy_from_slice(&text[..n]);
+                Ok(n)
+            },
+        );
+        assert_eq!(result.expect("normal path must resolve"), "C:\\Temp");
+        assert_eq!(fill_calls, 1);
     }
 }

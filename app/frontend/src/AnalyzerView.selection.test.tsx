@@ -90,8 +90,8 @@ async function runBlockingCase() {
   const firstCheckbox = screen.getByLabelText('Select analyzer node C:\\Bulk\\f-0.tmp') as HTMLInputElement;
   await user.click(firstCheckbox);
   await user.click(screen.getByRole('button', { name: 'Review & Clean' }));
-  await screen.findByRole('button', { name: 'Clean Permanently' });
-  await user.click(screen.getByRole('button', { name: 'Clean Permanently' }));
+  await screen.findByRole('button', { name: /Delete .* permanently/ });
+  await user.click(screen.getByRole('button', { name: /Delete .* permanently/ }));
   const row = firstCheckbox.closest('[role="treeitem"]') as HTMLElement;
   await user.click(row);
   fireEvent.keyDown(firstCheckbox, { key: 'Enter', code: 'Enter', bubbles: true });

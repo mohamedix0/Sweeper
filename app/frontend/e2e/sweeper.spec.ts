@@ -145,7 +145,7 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
     await expect(page.getByText('Preview Breakdown')).toBeVisible();
     await expect(page.getByText(/Permanent deletion \(bypasses Recycle Bin\)/)).toBeVisible();
 
-    await page.getByRole('button', { name: 'Clean Permanently' }).click();
+    await page.getByRole('button', { name: /Delete .* permanently/ }).click();
     await expect(page.getByRole('heading', { name: 'Clean Summary' })).toBeVisible();
   });
 

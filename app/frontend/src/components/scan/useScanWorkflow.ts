@@ -90,6 +90,7 @@ export function useScanWorkflow(args: WorkflowArgs) {
     targets, visibleBaseTargets: visibleBase, visibleTargets, isSessionExpired: expired, hasActiveScanScope,
     invalidatePreviewRequest: invalidate, inspectReqIdRef: state.inspectReqIdRef, activePreviewRequestRef: state.activePreviewRequestRef,
     previewRevisionRef: state.previewRevisionRef, inspectItem: inspect, resetForInvalidSession: reset, runScan,
+    previewProgress: state.previewProgress, setPreviewProgress: state.setPreviewProgress,
     setPreview: state.setPreview, setResults: state.setResults,
   };
 }

@@ -47,6 +47,10 @@ function clearSelectionState(state: ScanState) {
 function clearPreviewState(state: ScanState) {
   state.setPreview(null);
   state.setConfirmText('');
+  // A new Scan / reset advances the Preview request ID via invalidate(), so the
+  // in-flight request can no longer clear its own determinate progress in its
+  // finally block. Clear it here or "Preparing preview… N / N" stays visible.
+  state.setPreviewProgress(null);
   state.setCleanProgress(null);
   state.setScanProgress(null);
   state.setScanStatus('');
@@ -54,7 +58,7 @@ function clearPreviewState(state: ScanState) {
   state.setInspected(null);
 }
 
-function clearForReset(state: ScanState, invalidate: () => void) {
+export function clearForReset(state: ScanState, invalidate: () => void) {
   invalidate();
   state.inspectReqIdRef.current += 1;
   state.setPreviewLoading(false);
