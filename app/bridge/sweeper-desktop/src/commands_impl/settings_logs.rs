@@ -392,6 +392,18 @@ fn canonical_path_from_handle_final(final_path: &str) -> Option<CanonicalPath> {
     CanonicalPath::parse_lexical(stripped).ok()
 }
 
+/// Outcome of the preliminary ancestor check.
+#[derive(Debug)]
+enum AncestorCheck {
+    /// No reparse-point ancestor was observed.
+    Safe,
+    /// A reparse point was seen, or an ancestor could not be inspected (fail closed).
+    Unsafe,
+    /// Another process holds a conflicting handle (ERROR_SHARING_VIOLATION).
+    /// A valid log id must not be reported as invalid for this reason.
+    Contention,
+}
+
 /// Reject a configured logs path whose ANCESTORS include a reparse point
 /// (junction, symlink, or mount point).
 ///
@@ -404,89 +416,142 @@ fn canonical_path_from_handle_final(final_path: &str) -> Option<CanonicalPath> {
 /// itself (the final component) is deliberately not examined here; case-variant
 /// junction bases are handled by the exact-parent check in `validate_log_handle`.
 ///
-/// Returns `true` when an ancestor is a reparse point OR cannot be inspected
-/// (fail closed).
-fn logs_path_has_reparse_ancestor(dir: &Path) -> bool {
+/// A sharing violation is reported separately from an inspection failure so the
+/// caller can classify it as retryable contention instead of an invalid log id.
+fn check_logs_path_ancestors(dir: &Path) -> AncestorCheck {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
 
     let mut current = dir;
     while let Some(parent) = current.parent() {
         // `Path::parent()` on a drive root returns None, so every visited
         // prefix is a real directory to inspect.
-        let Ok(file) = fs::OpenOptions::new()
+        let file = match fs::OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
             .open(parent)
-        else {
-            return true; // fail closed if an ancestor cannot be opened
+        {
+            Ok(file) => file,
+            Err(e) => {
+                return if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                    AncestorCheck::Contention
+                } else {
+                    AncestorCheck::Unsafe
+                };
+            }
         };
         let Ok(meta) = file.metadata() else {
-            return true; // fail closed if an ancestor cannot be inspected
+            return AncestorCheck::Unsafe; // fail closed if an ancestor cannot be inspected
         };
         if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || meta.is_symlink() {
-            return true;
+            return AncestorCheck::Unsafe;
         }
         current = parent;
     }
-    false
+    AncestorCheck::Safe
 }
 
-/// Open handles that pin every ancestor of the logs directory from the moment
-/// they are checked until the containment base and the log file have been read.
+/// Open handles that pin every real ancestor of the logs directory from the
+/// moment they are checked until the containment base and the log file have
+/// been read.
 ///
-/// `logs_path_has_reparse_ancestor` is a cheap preliminary check whose handles
-/// are closed on return, so an attacker with write access to their own
-/// `LOCALAPPDATA` tree could replace an ancestor with a junction before base
-/// resolution. `FILE_FLAG_OPEN_REPARSE_POINT` suppresses reparse processing only
-/// for the FINAL component, so `canonicalize_logs_dir` would then follow that
-/// junction and `GetFinalPathNameByHandle` would report the redirected target as
-/// the containment base. Opening each ancestor again here and holding it WITHOUT
-/// `FILE_SHARE_DELETE` denies the rename/delete needed for that swap, and the
-/// reparse attribute is re-checked on these very handles. Windows then refuses
-/// to move any pinned ancestor for the rest of the read, closing the gap between
-/// the preliminary check, base resolution, and the candidate file open.
+/// Two independent TOCTOU gaps are closed here:
 ///
-/// `None` means an ancestor is a reparse point or cannot be opened/inspected; the
-/// caller fails closed. 8.3 short names are ordinary directories, not reparse
-/// points, so genuine short-name aliases remain accepted.
+/// 1. `check_logs_path_ancestors` is a cheap preliminary check whose
+///    handles are closed on return, so an attacker with write access to their
+///    own `LOCALAPPDATA` tree could replace an ancestor with a junction before
+///    base resolution. `FILE_FLAG_OPEN_REPARSE_POINT` suppresses reparse
+///    processing only for the FINAL component, so `canonicalize_logs_dir` would
+///    then follow that junction and `GetFinalPathNameByHandle` would report the
+///    redirected target as the containment base.
+/// 2. Setting a reparse point needs WRITE access to the target directory, not
+///    DELETE access. Denying only `FILE_SHARE_DELETE` would still let another
+///    process open a pinned ancestor for write and convert it in place during
+///    the pin window.
+///
+/// Ancestors are acquired ROOT-TO-LEAF: each component is opened only after its
+/// parent is pinned, so every later absolute-path open resolves beneath a fixed,
+/// already-pinned directory and no higher ancestor can be swapped between pins.
+/// The volume root itself is an immutable traversal anchor (it cannot be renamed
+/// or made a reparse point) and is therefore not pinned. Every handle is opened
+/// with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS` and
+/// `FILE_SHARE_READ` only: read sharing is kept so ordinary reads and ancestor
+/// traversal still work, while WRITE (needed to set a junction) and DELETE
+/// (needed to rename/delete) sharing are denied. The reparse attribute is
+/// re-checked on these very handles, so a chain of non-reparse ancestors pinned
+/// root-to-leaf matches the path `canonicalize_logs_dir` subsequently resolves.
+///
+/// `Err(PinError::Unsafe)` means a reparse point was observed or an ancestor
+/// could not be opened/inspected; the caller fails closed.
+/// `Err(PinError::SharingViolation)` means another process briefly holds a
+/// conflicting handle; the caller fails closed for this attempt but reports a
+/// distinct, retryable contention error. 8.3 short names are ordinary
+/// directories, not reparse points, so genuine short-name aliases remain
+/// accepted.
 #[expect(
     dead_code,
-    reason = "RAII guard: the handles are held open (without FILE_SHARE_DELETE) to pin ancestor identities; their contents are intentionally never read"
+    reason = "RAII guard: the handles are held open (denying WRITE/DELETE sharing) to pin ancestor identities; their contents are intentionally never read"
 )]
 struct PinnedAncestors(Vec<fs::File>);
 
-fn open_pinned_ancestors(dir: &Path) -> Option<PinnedAncestors> {
+/// Why an ancestor pin could not be acquired.
+#[derive(Debug)]
+enum PinError {
+    /// A reparse point was seen, or an ancestor could not be opened/inspected.
+    Unsafe,
+    /// Another process holds a handle whose access conflicts with our
+    /// restrictive share mode (ERROR_SHARING_VIOLATION).
+    SharingViolation,
+}
+
+fn open_pinned_ancestors(dir: &Path) -> Result<PinnedAncestors, PinError> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
     const FILE_SHARE_READ: u32 = 0x0000_0001;
-    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
 
-    let mut handles = Vec::new();
-    let mut current = dir;
-    while let Some(parent) = current.parent() {
+    // `ancestors()` is leaf-first. Drop `dir` itself, then drop the volume root
+    // (whose `parent()` is None) because it cannot be swapped, and reverse so
+    // acquisition is root-to-leaf. Each open therefore traverses only parents
+    // that are already pinned.
+    let ancestors: Vec<&Path> = dir
+        .ancestors()
+        .skip(1)
+        .take_while(|p| p.parent().is_some())
+        .collect();
+    let ancestors: Vec<&Path> = ancestors.into_iter().rev().collect();
+
+    let mut handles = Vec::with_capacity(ancestors.len());
+    for ancestor in ancestors {
         let file = fs::OpenOptions::new()
             .read(true)
-            // Deliberately no FILE_SHARE_DELETE: this is what pins the ancestor
-            // identity against a junction swap for the rest of the read.
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            // Keep READ sharing for reads/traversal; deny WRITE (needed to set a
+            // junction) and DELETE (needed to rename/delete) sharing so a pinned
+            // ancestor cannot be swapped or converted for the rest of the read.
+            .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-            .open(parent)
-            .ok()?;
-        let meta = file.metadata().ok()?;
+            .open(ancestor)
+            .map_err(|e| {
+                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                    PinError::SharingViolation
+                } else {
+                    PinError::Unsafe
+                }
+            })?;
+        let meta = file.metadata().map_err(|_| PinError::Unsafe)?;
         if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || meta.is_symlink() {
-            return None;
+            return Err(PinError::Unsafe);
         }
         handles.push(file);
-        current = parent;
     }
-    Some(PinnedAncestors(handles))
+    Ok(PinnedAncestors(handles))
 }
 
 /// Resolve the configured logs directory to its final (long-name) path via a
@@ -613,20 +678,62 @@ fn read_bounded_log_content<R: Read>(
 /// Defense in depth (audit F38 / CodeRabbit 4618617742 / 4618853361): the ID is
 /// restricted to a file name, the candidate path is parsed with the canonical path
 /// parser, and the parsed path must lie exactly one segment below the logs directory.
-/// The file is opened without following reparse points, its final path is resolved
-/// from that same read handle (never by reopening the path, which would allow an
-/// ancestor-junction TOCTOU swap), and content is read through the same handle.
-/// Reads are size-bounded and files that grow past the cap are rejected instead of
-/// returning a partial record.
+/// Ancestors are pinned root-to-leaf with WRITE/DELETE sharing denied before base
+/// resolution. The file is opened without following reparse points, its final path
+/// is resolved from that same read handle (never by reopening the path, which would
+/// allow an ancestor-junction TOCTOU swap), and content is read through the same
+/// handle. Reads are size-bounded and files that grow past the cap are rejected
+/// instead of returning a partial record.
 pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadResponse, ContractError> {
     read_log_in_dir_after_check(dir, log_id, || ())
+}
+
+/// Maximum attempts to acquire the ancestor pins. A sharing violation is often
+/// transient (another process briefly holding a conflicting handle), so each
+/// retry starts over from ancestor validation before trying the pin again.
+const MAX_PIN_ATTEMPTS: usize = 3;
+
+/// A distinct, retryable contention error. A sharing violation while pinning is
+/// NOT an invalid log id: the ID can be perfectly valid while another process
+/// momentarily holds a conflicting handle on an ordinary ancestor.
+fn contention_error() -> ContractError {
+    ContractError::Internal {
+        reason: "logs directory is busy; retry the read".into(),
+    }
+}
+
+/// Acquire the authoritative ancestor pins, bounded-retrying a sharing violation
+/// and restarting from ancestor validation on every attempt.
+fn pin_ancestors_with_retry(dir: &Path) -> Result<PinnedAncestors, ContractError> {
+    let mut attempt = 0;
+    loop {
+        // Restart from ancestor validation: if an ancestor became a reparse
+        // point between attempts, fail closed instead of pinning through it.
+        match check_logs_path_ancestors(dir) {
+            AncestorCheck::Safe => {}
+            AncestorCheck::Unsafe => return Err(invalid_log_id()),
+            AncestorCheck::Contention if attempt + 1 < MAX_PIN_ATTEMPTS => {
+                attempt += 1;
+                continue;
+            }
+            AncestorCheck::Contention => return Err(contention_error()),
+        }
+        match open_pinned_ancestors(dir) {
+            Ok(pinned) => return Ok(pinned),
+            Err(PinError::Unsafe) => return Err(invalid_log_id()),
+            Err(PinError::SharingViolation) if attempt + 1 < MAX_PIN_ATTEMPTS => {
+                attempt += 1;
+            }
+            Err(PinError::SharingViolation) => return Err(contention_error()),
+        }
+    }
 }
 
 /// Testable core of `read_log_in_dir`.
 ///
 /// `after_ancestor_check` runs after the preliminary ancestor check but before
 /// the authoritative pinned re-check and base resolution. Production passes a
-/// no-op; the junction-swap regression installs a junction in this window to
+/// no-op; the junction-swap regressions install a junction in this window to
 /// prove that the pinned re-check rejects it instead of resolving a redirected
 /// containment base.
 fn read_log_in_dir_after_check<F: FnOnce()>(
@@ -643,18 +750,20 @@ fn read_log_in_dir_after_check<F: FnOnce()>(
 
     // A reparse-point ancestor would redirect the containment root away from
     // the directory this path names (GetFinalPathNameByHandle follows ancestor
-    // junctions). Fail closed rather than falling back to a lexical base.
-    if logs_path_has_reparse_ancestor(dir) {
+    // junctions). Fail closed rather than falling back to a lexical base. A
+    // sharing violation here is retryable contention, not an invalid id; the
+    // bounded pin helper re-runs this check on every attempt.
+    if matches!(check_logs_path_ancestors(dir), AncestorCheck::Unsafe) {
         return Err(invalid_log_id());
     }
 
     after_ancestor_check();
 
-    // Authoritative re-check: pin every ancestor with a handle that denies
-    // DELETE and reject any reparse point seen on those handles. Holding these
-    // handles until the end of this function prevents the check-then-use swap
-    // that the preliminary check alone could not stop.
-    let _pinned = open_pinned_ancestors(dir).ok_or_else(invalid_log_id)?;
+    // Authoritative root-to-leaf pin with a bounded, validation-restarting retry
+    // on sharing violation. Holding these handles until the end of this function
+    // prevents the check-then-use swap that the preliminary check alone could not
+    // stop. A contention failure is reported distinctly, never as an invalid id.
+    let _pinned = pin_ancestors_with_retry(dir)?;
 
     // Resolve the base to long names so the handle final path check below
     // compares like-for-like; a short-name base (8.3 alias in `%TEMP%`) would
@@ -1079,6 +1188,22 @@ mod tests {
             "ok"
         );
 
+        // Probe junction creation BEFORE renaming the ancestor. If this sandbox
+        // lacks the required privilege, skip cleanly instead of leaving `real`
+        // renamed away (which would panic at `create_junction(...).expect(...)`).
+        let probe = sandbox.guarded_path("junction-privilege-probe");
+        if let Err(e) = create_junction(&probe, &outside) {
+            if is_insufficient_privilege_error(&e) {
+                eprintln!(
+                    "skipping ancestor-junction swap regression test (insufficient privilege): {e}"
+                );
+                return;
+            }
+            panic!("junction privilege probe failed: {e}");
+        }
+        // The throwaway probe junction lives in `outer` and is cleaned up with
+        // the TempDir; no explicit removal is needed (Gate A forbids fs::remove_dir).
+
         // Install the junction at the ancestor after the preliminary check but
         // before base resolution. `rename` moves only the directory entry; it
         // does not traverse into the target.
@@ -1111,7 +1236,7 @@ mod tests {
         std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
 
         assert!(
-            super::open_pinned_ancestors(&logs).is_some(),
+            super::open_pinned_ancestors(&logs).is_ok(),
             "a ~-named directory is not a reparse point and must be pinned/accepted"
         );
         assert_eq!(
@@ -1131,8 +1256,211 @@ mod tests {
         let logs = outer.path().join("logs");
         std::fs::create_dir_all(&logs).expect("logs dir");
         assert!(
-            super::open_pinned_ancestors(&logs).is_some(),
+            super::open_pinned_ancestors(&logs).is_ok(),
             "ordinary ancestors must be accepted by the pinned re-check"
+        );
+    }
+
+    /// A pinned ancestor must deny WRITE sharing. Setting a junction needs WRITE
+    /// access to the directory, so granting WRITE sharing would let another
+    /// process convert a pinned ancestor in place during the pin window (the
+    /// bug fixed here). READ sharing stays enabled so reads/traversal still work.
+    #[test]
+    #[cfg(windows)]
+    fn pinned_ancestors_deny_write_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let real = outer.path().join("real");
+        std::fs::create_dir_all(&real).expect("real dir");
+        let logs = real.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        // Control: WRITE access to the ancestor is grantable when nothing pins it.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&real)
+            .expect("control: unpinned ancestor must be openable for write");
+
+        let pinned = super::open_pinned_ancestors(&logs).expect("pin ancestors");
+
+        // While pinned, the WRITE open is refused with a sharing violation: an
+        // attacker cannot get the write handle needed to set a reparse point.
+        let write = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&real);
+        assert_eq!(
+            write.err().and_then(|e| e.raw_os_error()),
+            Some(ERROR_SHARING_VIOLATION),
+            "a pinned ancestor must deny WRITE sharing (junction install needs write access)"
+        );
+
+        // READ sharing is preserved; reads and ancestor traversal still work.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&real)
+            .expect("read sharing must remain enabled on pinned ancestors");
+
+        drop(pinned);
+    }
+
+    /// Another process holding a conflicting handle on an ordinary ancestor
+    /// makes Windows reject the pin even though nothing moved. That must surface
+    /// as a distinct, retryable contention error, NOT as "invalid log id".
+    #[test]
+    #[cfg(windows)]
+    fn read_log_reports_sharing_violation_as_retryable_contention() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let real = outer.path().join("real");
+        std::fs::create_dir_all(&real).expect("real dir");
+        let logs = real.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
+
+        // Hold WRITE access on the `real` ancestor with READ-only sharing. The
+        // preliminary check (read, share-all) still succeeds, but the restrictive
+        // pin (read, share-read-only) is rejected with ERROR_SHARING_VIOLATION.
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&real)
+            .expect("hold conflicting write handle on ancestor");
+
+        let err = read_log_in_dir(Some(&logs), "good").unwrap_err();
+        assert!(
+            matches!(err, ContractError::Internal { .. }),
+            "sharing violation must be distinct retryable contention, not invalid log id: {err:?}"
+        );
+        if let ContractError::Internal { reason } = &err {
+            assert!(
+                reason.to_lowercase().contains("retr"),
+                "contention reason should advise retry: {reason}"
+            );
+        }
+
+        drop(holder);
+        assert_eq!(
+            read_log_in_dir(Some(&logs), "good")
+                .expect("read must succeed once contention clears")
+                .content,
+            "ok"
+        );
+    }
+
+    /// A sharing violation in the PRELIMINARY ancestor check (before the pin)
+    /// must also surface as retryable contention, not "invalid log id". This is
+    /// the same misclassification shape as the pin case, one step earlier.
+    #[test]
+    #[cfg(windows)]
+    fn read_log_reports_precheck_sharing_violation_as_contention() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let real = outer.path().join("real");
+        std::fs::create_dir_all(&real).expect("real dir");
+        let logs = real.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
+
+        // This handle's share mode denies READ, so the preliminary ancestor
+        // check's read open fails with a sharing violation (before the pin).
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&real)
+            .expect("hold read-denying handle on ancestor");
+
+        let err = read_log_in_dir(Some(&logs), "good").unwrap_err();
+        assert!(
+            matches!(err, ContractError::Internal { .. }),
+            "preliminary sharing violation must be contention, not invalid log id: {err:?}"
+        );
+
+        drop(holder);
+        assert_eq!(
+            read_log_in_dir(Some(&logs), "good")
+                .expect("read must succeed once contention clears")
+                .content,
+            "ok"
+        );
+    }
+
+    /// A junction swapped into a HIGHER ancestor after the preliminary check
+    /// must be caught by the root-to-leaf pin re-check. Without root-to-leaf
+    /// acquisition, a deeper absolute-path open traverses that higher ancestor
+    /// without checking it, so the redirected base could pass containment.
+    #[test]
+    #[cfg(windows)]
+    fn read_log_rejects_higher_ancestor_junction_installed_after_check() {
+        use sweeper_testkit::create_junction;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = Sandbox::new_in(outer.path());
+
+        // `root/real/logs` is the configured logs directory. The victim lives
+        // under `outside/root/real/logs`, exposed only if the higher `root`
+        // ancestor is replaced by a junction to `outside/root`.
+        let root = sandbox.create_dir("root").expect("higher ancestor");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("parent dir");
+        let logs = real.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("benign log");
+
+        let outside = sandbox.create_dir("outside").expect("outside dir");
+        let outside_root = outside.join("root");
+        let outside_logs = outside_root.join("real").join("logs");
+        std::fs::create_dir_all(&outside_logs).expect("outside logs dir");
+        std::fs::write(outside_logs.join("victim.jsonl"), b"LEAK").expect("victim");
+
+        assert_eq!(
+            read_log_in_dir(Some(&logs), "good")
+                .expect("ordinary logs dir must still read")
+                .content,
+            "ok"
+        );
+
+        // Probe junction privilege before any rename (see sibling tests).
+        let probe = sandbox.guarded_path("junction-privilege-probe-higher");
+        if let Err(e) = create_junction(&probe, &outside) {
+            if is_insufficient_privilege_error(&e) {
+                eprintln!("skipping higher-ancestor swap test (insufficient privilege): {e}");
+                return;
+            }
+            panic!("junction privilege probe failed: {e}");
+        }
+        // The throwaway probe junction is cleaned up with the TempDir.
+
+        let swapped_away = sandbox.guarded_path("root-swapped-away");
+        let install_higher_junction = || {
+            std::fs::rename(&root, &swapped_away).expect("rename higher ancestor aside");
+            create_junction(&root, &outside_root).expect("install higher-ancestor junction");
+        };
+
+        let err =
+            super::read_log_in_dir_after_check(Some(&logs), "victim", install_higher_junction)
+                .unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "higher-ancestor junction installed after the check must be rejected, got {err:?}"
         );
     }
 
