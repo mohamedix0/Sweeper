@@ -319,22 +319,34 @@ function Invoke-GeigerForManifest([string]$manifest) {
   }
 }
 
+function Get-GeigerMetricUnsafeValue($metric) {
+  # Parse one metric; an absent or non-numeric unsafe_ contributes zero.
+  if ($null -eq $metric) { return 0 }
+  $unsafe = $metric.Value.PSObject.Properties['unsafe_']
+  if ($null -eq $unsafe) { return 0 }
+  $value = 0
+  if ([int]::TryParse([string]$unsafe.Value, [ref]$value)) { return $value }
+  return 0
+}
+
+function Get-GeigerSectionUnsafeCount($section) {
+  # Sum one section (used or unused) across all unsafe metrics.
+  if ($null -eq $section) { return 0 }
+  $total = 0
+  foreach ($metricName in @('functions', 'exprs', 'item_impls', 'item_traits', 'methods')) {
+    $metric = $section.Value.PSObject.Properties[$metricName]
+    $total += Get-GeigerMetricUnsafeValue $metric
+  }
+  return $total
+}
+
 function Get-GeigerEntryUnsafeCount($entry) {
-  # Parse one crate's geiger entry: sum unsafe across both used and unused sections.
+  # Sum both used and unused unsafe counts for one crate's geiger entry.
   # Third-party unsafe is not owned by this repo; only sweeper-* entries reach this helper.
-  $metricNames = @('functions', 'exprs', 'item_impls', 'item_traits', 'methods')
   $total = 0
   foreach ($sectionName in @('used', 'unused')) {
     $section = $entry.unsafety.PSObject.Properties[$sectionName]
-    if ($null -eq $section) { continue }
-    foreach ($metricName in $metricNames) {
-      $metric = $section.Value.PSObject.Properties[$metricName]
-      if ($null -eq $metric) { continue }
-      $unsafe = $metric.Value.PSObject.Properties['unsafe_']
-      if ($null -eq $unsafe) { continue }
-      $value = 0
-      if ([int]::TryParse([string]$unsafe.Value, [ref]$value)) { $total += $value }
-    }
+    $total += Get-GeigerSectionUnsafeCount $section
   }
   return $total
 }
