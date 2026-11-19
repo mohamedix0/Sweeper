@@ -13,6 +13,19 @@ pub fn create_junction(link: &Path, target: &Path) -> Result<()> {
         .map_err(|e| TestkitError::Io(std::io::Error::other(e.to_string())))
 }
 
+/// Install a directory junction via an already-open (attribute-access) handle.
+///
+/// `raw` must be a live handle opened with `FILE_WRITE_ATTRIBUTES` and
+/// `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`.
+#[cfg(windows)]
+pub fn set_junction_on_open_handle(
+    raw: std::os::windows::io::RawHandle,
+    target: &Path,
+) -> Result<()> {
+    sweeper_winfs::set_directory_junction_on_open_handle(raw, target)
+        .map_err(|e| TestkitError::Io(std::io::Error::other(e.to_string())))
+}
+
 /// Create a directory junction at `link` pointing to `target` (non-Windows stub).
 #[cfg(not(windows))]
 pub fn create_junction(link: &Path, target: &Path) -> Result<()> {

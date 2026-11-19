@@ -6,9 +6,11 @@
 //! settings/log command module focused on command handling.
 
 use std::fs;
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
 use sweeper_contract::ContractError;
+use sweeper_core::paths::get_final_path_from_raw_handle;
 
 use super::settings_logs::invalid_log_id;
 
@@ -59,10 +61,14 @@ enum PinAttempt {
 ///    only for the FINAL component, so base resolution would then follow that
 ///    junction and `GetFinalPathNameByHandle` would report the redirected target
 ///    as the containment base.
-/// 2. Setting a reparse point needs WRITE access to the target directory, not
-///    DELETE access. Denying only `FILE_SHARE_DELETE` would still let another
-///    process open a pinned ancestor for write and convert it in place during
-///    the pin window.
+/// 2. A second process could install a junction on a pinned ancestor DURING the
+///    pin window. The restrictive share mode is only defence in depth: Windows
+///    does NOT apply share modes to `FILE_WRITE_ATTRIBUTES` access, which is all
+///    `FSCTL_SET_REPARSE_POINT` needs. Even an ancestor opened with
+///    `FILE_SHARE_READ` can therefore be converted in place. The AUTHORITATIVE
+///    guarantee is the component-by-component ancestor-chain comparison the
+///    caller performs after base resolution against the long-name final paths
+///    recorded here at pin time (see `resolved_base_matches_pins`).
 ///
 /// Ancestors are acquired ROOT-TO-LEAF: each component is opened only after its
 /// parent is pinned, so every later absolute-path open resolves beneath a fixed,
@@ -71,18 +77,29 @@ enum PinAttempt {
 /// or made a reparse point) and is therefore not pinned. Every handle is opened
 /// with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS` and
 /// `FILE_SHARE_READ` only: read sharing is kept so ordinary reads and ancestor
-/// traversal still work, while WRITE (needed to set a junction) and DELETE
-/// (needed to rename/delete) sharing are denied. The reparse attribute is
-/// re-checked on these very handles, so a chain of non-reparse ancestors pinned
-/// root-to-leaf matches the path base resolution subsequently resolves.
+/// traversal still work, while WRITE/DELETE sharing are denied as defence in
+/// depth. The reparse attribute is re-checked on these very handles, and their
+/// final paths are captured as the trusted baseline for the post-resolution check.
 ///
 /// 8.3 short names are ordinary directories, not reparse points, so genuine
-/// short-name aliases remain accepted.
-#[expect(
-    dead_code,
-    reason = "RAII guard: the handles are held open (denying WRITE/DELETE sharing) to pin ancestor identities; their contents are intentionally never read"
-)]
-pub(super) struct PinnedAncestors(Vec<fs::File>);
+/// short-name aliases remain accepted (both the baseline and the resolved base
+/// are handle-derived long names).
+pub(super) struct PinnedAncestors {
+    /// Handles held open for the lifetime of the read. Never read: keeping them
+    /// alive IS the pin, and their share mode is defence in depth only.
+    _handles: Vec<fs::File>,
+    /// Long-name final paths of each pinned ancestor (root-to-leaf), captured
+    /// at pin time before any swap window. Authoritative baseline for the
+    /// post-resolution ancestor-chain comparison.
+    ancestor_final_paths: Vec<String>,
+}
+
+impl PinnedAncestors {
+    /// Long-name final paths of the pinned ancestors, root-to-leaf.
+    pub(super) fn ancestor_final_paths(&self) -> &[String] {
+        &self.ancestor_final_paths
+    }
+}
 
 /// A distinct, retryable contention error. A sharing violation while pinning is
 /// NOT an invalid log id: the ID can be perfectly valid while another process
@@ -165,13 +182,18 @@ pub(super) fn open_pinned_ancestors(dir: &Path) -> Result<PinnedAncestors, PinEr
         .collect();
     let ancestors: Vec<&Path> = ancestors.into_iter().rev().collect();
 
-    let mut handles = Vec::with_capacity(ancestors.len());
+    let mut pinned = PinnedAncestors {
+        _handles: Vec::with_capacity(ancestors.len()),
+        ancestor_final_paths: Vec::with_capacity(ancestors.len()),
+    };
     for ancestor in ancestors {
         let file = fs::OpenOptions::new()
             .read(true)
-            // Keep READ sharing for reads/traversal; deny WRITE (needed to set a
-            // junction) and DELETE (needed to rename/delete) sharing so a pinned
-            // ancestor cannot be swapped or converted for the rest of the read.
+            // Keep READ sharing for reads/traversal; deny WRITE and DELETE
+            // sharing as defence in depth. This is NOT the guarantee: Windows
+            // does not apply share modes to FILE_WRITE_ATTRIBUTES access, which
+            // suffices to install a junction. The authoritative check is the
+            // ancestor-chain comparison performed after base resolution.
             .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
             .open(ancestor)
@@ -186,9 +208,14 @@ pub(super) fn open_pinned_ancestors(dir: &Path) -> Result<PinnedAncestors, PinEr
         if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || meta.is_symlink() {
             return Err(PinError::Unsafe);
         }
-        handles.push(file);
+        // Capture the long-name identity NOW, before any swap window. This is
+        // the trusted baseline the post-resolution check compares against.
+        let final_path =
+            get_final_path_from_raw_handle(file.as_raw_handle()).map_err(|_| PinError::Unsafe)?;
+        pinned.ancestor_final_paths.push(final_path);
+        pinned._handles.push(file);
     }
-    Ok(PinnedAncestors(handles))
+    Ok(pinned)
 }
 
 /// Perform one pin attempt, restarting from ancestor validation.

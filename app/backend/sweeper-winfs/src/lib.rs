@@ -1246,18 +1246,11 @@ fn is_path_direct_child_of_dir(path: &str, dir: &Path) -> bool {
         && !name.to_string_lossy().is_empty()
 }
 
-/// Create an NTFS directory junction (mount point reparse point) at `link` targeting `target`.
-///
-/// Test/support helper. The created link entry is a reparse point; callers must never traverse it
-/// as a directory during deletion/scanning of target contents.
-///
-/// # Safety and semantics
-/// - `link` must not already exist as a file/directory/junction (this function creates the link directory).
-/// - `target` is canonicalized and converted to an absolute NT path form for the substitute name.
+/// Build the `IO_REPARSE_TAG_MOUNT_POINT` buffer that redirects to `target`.
 #[cfg(any(test, feature = "test-support"))]
-pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
+fn junction_reparse_buffer(target: &Path) -> Result<Vec<u8>> {
     let target_abs = std::fs::canonicalize(target).map_err(|e| WinfsError::Win32 {
-        context: "canonicalize(create_directory_junction target)",
+        context: "canonicalize(junction_reparse_buffer target)",
         code: e.raw_os_error().unwrap_or(0) as u32,
     })?;
     let target_text = target_abs
@@ -1308,6 +1301,58 @@ pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
         let off = path_buf_start + print_offset + i * 2;
         buf[off..off + 2].copy_from_slice(&ch.to_le_bytes());
     }
+    Ok(buf)
+}
+
+/// Install a directory junction on an ALREADY-OPEN handle (test/support helper).
+///
+/// The caller is responsible for opening `raw` with `FILE_WRITE_ATTRIBUTES`
+/// access (and `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`).
+/// This deliberately models the attribute-only reparse swap from the log
+/// containment threat model: Windows does not gate `FILE_WRITE_ATTRIBUTES`
+/// access (nor `FSCTL_SET_REPARSE_POINT`) by the handle's share mode, so a
+/// directory pinned with `FILE_SHARE_READ` can still be converted in place.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_directory_junction_on_open_handle(
+    raw: std::os::windows::io::RawHandle,
+    target: &Path,
+) -> Result<()> {
+    let buf = junction_reparse_buffer(target)?;
+    let mut bytes_returned: u32 = 0;
+    // SAFETY: `raw` is a live caller-owned handle opened with FILE_WRITE_ATTRIBUTES
+    // and FILE_FLAG_OPEN_REPARSE_POINT; `buf` is a valid mount-point reparse buffer
+    // whose declared lengths/offsets match its PathBuffer contents.
+    let ok = unsafe {
+        DeviceIoControl(
+            raw as HANDLE,
+            FSCTL_SET_REPARSE_POINT,
+            buf.as_ptr() as *const _,
+            buf.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(last_error(
+            "DeviceIoControl(FSCTL_SET_REPARSE_POINT on open handle)",
+        ));
+    }
+    Ok(())
+}
+
+/// Create an NTFS directory junction (mount point reparse point) at `link` targeting `target`.
+///
+/// Test/support helper. The created link entry is a reparse point; callers must never traverse it
+/// as a directory during deletion/scanning of target contents.
+///
+/// # Safety and semantics
+/// - `link` must not already exist as a file/directory/junction (this function creates the link directory).
+/// - `target` is canonicalized and converted to an absolute NT path form for the substitute name.
+#[cfg(any(test, feature = "test-support"))]
+pub fn create_directory_junction(link: &Path, target: &Path) -> Result<()> {
+    let buf = junction_reparse_buffer(target)?;
 
     std::fs::create_dir(link).map_err(|e| WinfsError::Win32 {
         context: "CreateDirectory(create_directory_junction link)",

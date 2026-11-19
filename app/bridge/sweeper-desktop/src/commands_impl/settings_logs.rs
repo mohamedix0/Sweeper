@@ -19,7 +19,9 @@ use crate::AppState;
 
 #[cfg(test)]
 use super::log_ancestors::open_pinned_ancestors;
-use super::log_ancestors::{check_logs_path_ancestors, pin_ancestors_with_retry, AncestorCheck};
+use super::log_ancestors::{
+    check_logs_path_ancestors, pin_ancestors_with_retry, AncestorCheck, PinnedAncestors,
+};
 use super::shared::lock_state_error;
 
 /// `get_settings` implementation.
@@ -428,6 +430,36 @@ fn canonicalize_logs_dir(dir: &Path) -> Option<CanonicalPath> {
     canonical_path_from_handle_final(&final_path)
 }
 
+/// Authoritative post-resolution check for attribute-level ancestor swaps.
+///
+/// The restrictive pin share mode is only defence in depth: Windows does NOT
+/// apply share modes to `FILE_WRITE_ATTRIBUTES` access, and that access is all
+/// `FSCTL_SET_REPARSE_POINT` needs. A process can therefore turn a pinned
+/// ancestor into a junction DURING the pin window. When that happens the base
+/// resolved by `canonicalize_logs_dir` travels through the junction and its
+/// ancestor chain no longer matches the chain captured by the pinned handles.
+/// Compare every component and fail closed. Both sides are handle-derived
+/// long names, so genuine 8.3 short names compare equal.
+fn resolved_base_matches_pins(pinned: &PinnedAncestors, base: &CanonicalPath) -> bool {
+    let expected = pinned.ancestor_final_paths();
+    let mut actual: Vec<CanonicalPath> = Vec::with_capacity(expected.len());
+    let mut current = base.clone();
+    while let Some(parent) = current.parent() {
+        if parent.is_drive_root() {
+            break;
+        }
+        actual.push(parent.clone());
+        current = parent;
+    }
+    if actual.len() != expected.len() {
+        return false;
+    }
+    actual.reverse();
+    actual.iter().zip(expected).all(|(segment, recorded)| {
+        canonical_path_from_handle_final(recorded).is_some_and(|recorded| segment == &recorded)
+    })
+}
+
 /// Validate the already-open READ handle without reopening its path.
 ///
 /// Containment is resolved from this very handle. `GetFinalPathNameByHandle`
@@ -525,6 +557,17 @@ fn read_bounded_log_content<R: Read>(
 /// allow an ancestor-junction TOCTOU swap), and content is read through the same
 /// handle. Reads are size-bounded and files that grow past the cap are rejected
 /// instead of returning a partial record.
+///
+/// Review 5969166919 (self-review of the whole chain): the pin's share mode is
+/// NOT the guarantee — `FILE_WRITE_ATTRIBUTES` access bypasses share modes and
+/// suffices for `FSCTL_SET_REPARSE_POINT`. The AUTHORITATIVE check is
+/// `resolved_base_matches_pins`, which compares the freshly resolved base's
+/// ancestor chain to the chain captured at pin time. All other swap windows are
+/// covered by existing handle-derived checks: a junction on the base itself or
+/// on any ancestor AFTER resolution makes the file handle's final-path parent
+/// differ from the base (`validate_log_handle`), and a reparse-point file is
+/// rejected by `handle_is_reparse_point`. Both sides are long-name, handle-derived
+/// paths, so genuine 8.3 short names stay valid.
 pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadResponse, ContractError> {
     read_log_in_dir_after_check(dir, log_id, || ())
 }
@@ -540,6 +583,19 @@ fn read_log_in_dir_after_check<F: FnOnce()>(
     dir: Option<&Path>,
     log_id: &str,
     after_ancestor_check: F,
+) -> Result<LogReadResponse, ContractError> {
+    read_log_in_dir_with_hooks(dir, log_id, after_ancestor_check, || ())
+}
+
+/// Testable core with an additional hook that runs AFTER the pin is established
+/// but before base resolution. Production passes a no-op; the attribute-only
+/// junction-swap regression uses it to convert a pinned ancestor in place and
+/// prove that the post-resolution chain comparison rejects the redirected base.
+fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
+    dir: Option<&Path>,
+    log_id: &str,
+    after_ancestor_check: F,
+    after_pin: G,
 ) -> Result<LogReadResponse, ContractError> {
     validate_log_id(log_id)?;
     let Some(dir) = dir else {
@@ -565,10 +621,24 @@ fn read_log_in_dir_after_check<F: FnOnce()>(
     // stop. A contention failure is reported distinctly, never as an invalid id.
     let _pinned = pin_ancestors_with_retry(dir)?;
 
+    after_pin();
+
     // Resolve the base to long names so the handle final path check below
     // compares like-for-like; a short-name base (8.3 alias in `%TEMP%`) would
     // otherwise reject valid direct children on the CI Windows runner.
-    let logs_dir = canonicalize_logs_dir(dir)
+    let resolved = canonicalize_logs_dir(dir);
+    // AUTHORITATIVE check (review 5969166919): a pinned ancestor can be
+    // converted to a junction via FILE_WRITE_ATTRIBUTES access, which share
+    // modes cannot deny. If that happened, the freshly resolved base now sits
+    // under a different ancestor chain; compare it to the chain captured at pin
+    // time and fail closed on ANY component change. This does not rely on share
+    // modes at all.
+    if let Some(resolved_dir) = &resolved {
+        if !resolved_base_matches_pins(&_pinned, resolved_dir) {
+            return Err(invalid_log_id());
+        }
+    }
+    let logs_dir = resolved
         .or_else(|| CanonicalPath::parse_lexical(&dir.to_string_lossy()).ok())
         .ok_or_else(invalid_log_id)?;
 
@@ -1261,6 +1331,94 @@ mod tests {
         assert!(
             matches!(err, ContractError::InvalidInput { .. }),
             "higher-ancestor junction installed after the check must be rejected, got {err:?}"
+        );
+    }
+
+    /// Review 5969166919: the pin's `FILE_SHARE_READ` is only defence in depth —
+    /// Windows does not apply share modes to `FILE_WRITE_ATTRIBUTES` access, and
+    /// that is all `FSCTL_SET_REPARSE_POINT` needs. While the pin is held, open
+    /// the deepest pinned ancestor with attribute-only access, install a junction
+    /// on it, and assert the post-resolution ancestor-chain check rejects the
+    /// redirected base. The deepest ancestor is left empty at pin time so the
+    /// reparse point can be installed in place (no rename/delete needed).
+    #[test]
+    #[cfg(windows)]
+    fn read_log_rejects_attribute_only_junction_swap_while_pinned() {
+        use std::cell::Cell;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use sweeper_testkit::{create_junction, set_junction_on_open_handle};
+
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = Sandbox::new_in(outer.path());
+
+        // `real/logs` is the configured logs dir; `real` is the deepest pinned
+        // ancestor and is intentionally empty at pin time. `outside/logs/victim`
+        // is exposed only if `real` becomes a junction to `outside`.
+        let real = sandbox.create_dir("real").expect("real dir");
+        let logs = real.join("logs");
+        let outside = sandbox.create_dir("outside").expect("outside dir");
+        let outside_logs = outside.join("logs");
+        std::fs::create_dir_all(&outside_logs).expect("outside logs dir");
+        std::fs::write(outside_logs.join("victim.jsonl"), b"LEAK").expect("victim");
+
+        // Probe junction privilege before any mutation, skipping cleanly on a
+        // sandbox that cannot create junctions (same helper as sibling tests).
+        let probe = sandbox.guarded_path("junction-privilege-probe-attr");
+        if let Err(e) = create_junction(&probe, &outside) {
+            if is_insufficient_privilege_error(&e) {
+                eprintln!("skipping attribute-only swap test (insufficient privilege): {e}");
+                return;
+            }
+            panic!("junction privilege probe failed: {e}");
+        }
+
+        let swapped = Cell::new(false);
+        let install_attribute_junction = || {
+            // This open is expected to SUCCEED despite the pin holding
+            // `real` with FILE_SHARE_READ: share modes do not gate attribute
+            // access. If this host denies it, skip instead of failing the test.
+            let handle = match std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES | SYNCHRONIZE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&real)
+            {
+                Ok(handle) => handle,
+                Err(e) if is_insufficient_privilege_error(&e) => {
+                    eprintln!("skipping attribute-only swap test (open denied): {e}");
+                    return;
+                }
+                Err(e) => panic!("attribute-only open of pinned ancestor failed: {e}"),
+            };
+            match set_junction_on_open_handle(handle.as_raw_handle(), &outside) {
+                Ok(()) => swapped.set(true),
+                Err(e) if is_insufficient_privilege_error(&e) => {
+                    eprintln!("skipping attribute-only swap test (FSCTL denied): {e}");
+                }
+                Err(e) => panic!("install junction via attribute-only handle failed: {e}"),
+            }
+        };
+
+        let err = super::read_log_in_dir_with_hooks(
+            Some(&logs),
+            "victim",
+            || (),
+            install_attribute_junction,
+        )
+        .unwrap_err();
+        if !swapped.get() {
+            // The bypass could not be demonstrated on this host: skip the
+            // assertion rather than reporting a false failure.
+            return;
+        }
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "attribute-only ancestor junction installed after the pin must be rejected, got {err:?}"
         );
     }
 
