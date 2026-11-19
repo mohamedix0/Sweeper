@@ -435,6 +435,60 @@ fn logs_path_has_reparse_ancestor(dir: &Path) -> bool {
     false
 }
 
+/// Open handles that pin every ancestor of the logs directory from the moment
+/// they are checked until the containment base and the log file have been read.
+///
+/// `logs_path_has_reparse_ancestor` is a cheap preliminary check whose handles
+/// are closed on return, so an attacker with write access to their own
+/// `LOCALAPPDATA` tree could replace an ancestor with a junction before base
+/// resolution. `FILE_FLAG_OPEN_REPARSE_POINT` suppresses reparse processing only
+/// for the FINAL component, so `canonicalize_logs_dir` would then follow that
+/// junction and `GetFinalPathNameByHandle` would report the redirected target as
+/// the containment base. Opening each ancestor again here and holding it WITHOUT
+/// `FILE_SHARE_DELETE` denies the rename/delete needed for that swap, and the
+/// reparse attribute is re-checked on these very handles. Windows then refuses
+/// to move any pinned ancestor for the rest of the read, closing the gap between
+/// the preliminary check, base resolution, and the candidate file open.
+///
+/// `None` means an ancestor is a reparse point or cannot be opened/inspected; the
+/// caller fails closed. 8.3 short names are ordinary directories, not reparse
+/// points, so genuine short-name aliases remain accepted.
+#[expect(
+    dead_code,
+    reason = "RAII guard: the handles are held open (without FILE_SHARE_DELETE) to pin ancestor identities; their contents are intentionally never read"
+)]
+struct PinnedAncestors(Vec<fs::File>);
+
+fn open_pinned_ancestors(dir: &Path) -> Option<PinnedAncestors> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+
+    let mut handles = Vec::new();
+    let mut current = dir;
+    while let Some(parent) = current.parent() {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            // Deliberately no FILE_SHARE_DELETE: this is what pins the ancestor
+            // identity against a junction swap for the rest of the read.
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(parent)
+            .ok()?;
+        let meta = file.metadata().ok()?;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || meta.is_symlink() {
+            return None;
+        }
+        handles.push(file);
+        current = parent;
+    }
+    Some(PinnedAncestors(handles))
+}
+
 /// Resolve the configured logs directory to its final (long-name) path via a
 /// no-follow handle, so containment compares like-for-like with the file-handle
 /// final path produced by `validate_log_handle`.
@@ -446,9 +500,12 @@ fn logs_path_has_reparse_ancestor(dir: &Path) -> bool {
 /// valid direct children. Resolving the directory through a
 /// `FILE_FLAG_OPEN_REPARSE_POINT` handle (so Link Points in the directory path
 /// are never followed) keeps both sides in the same namespace without relaxing
-/// any reparse-point/junction containment check. `None` means the handle could
-/// not be opened or the final path could not be parsed; the caller then falls
-/// back to the lexical form and still enforces containment (fail closed).
+/// any reparse-point/junction containment check. The caller must hold the
+/// handles from `open_pinned_ancestors` across this call so the ancestors that
+/// `GetFinalPathNameByHandle` traverses cannot be swapped for junctions first.
+/// `None` means the handle could not be opened or the final path could not be
+/// parsed; the caller then falls back to the lexical form and still enforces
+/// containment (fail closed).
 fn canonicalize_logs_dir(dir: &Path) -> Option<CanonicalPath> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
@@ -562,6 +619,21 @@ fn read_bounded_log_content<R: Read>(
 /// Reads are size-bounded and files that grow past the cap are rejected instead of
 /// returning a partial record.
 pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadResponse, ContractError> {
+    read_log_in_dir_after_check(dir, log_id, || ())
+}
+
+/// Testable core of `read_log_in_dir`.
+///
+/// `after_ancestor_check` runs after the preliminary ancestor check but before
+/// the authoritative pinned re-check and base resolution. Production passes a
+/// no-op; the junction-swap regression installs a junction in this window to
+/// prove that the pinned re-check rejects it instead of resolving a redirected
+/// containment base.
+fn read_log_in_dir_after_check<F: FnOnce()>(
+    dir: Option<&Path>,
+    log_id: &str,
+    after_ancestor_check: F,
+) -> Result<LogReadResponse, ContractError> {
     validate_log_id(log_id)?;
     let Some(dir) = dir else {
         return Err(ContractError::NotFound {
@@ -575,6 +647,14 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
     if logs_path_has_reparse_ancestor(dir) {
         return Err(invalid_log_id());
     }
+
+    after_ancestor_check();
+
+    // Authoritative re-check: pin every ancestor with a handle that denies
+    // DELETE and reject any reparse point seen on those handles. Holding these
+    // handles until the end of this function prevents the check-then-use swap
+    // that the preliminary check alone could not stop.
+    let _pinned = open_pinned_ancestors(dir).ok_or_else(invalid_log_id)?;
 
     // Resolve the base to long names so the handle final path check below
     // compares like-for-like; a short-name base (8.3 alias in `%TEMP%`) would
@@ -960,6 +1040,99 @@ mod tests {
         assert!(
             matches!(err, ContractError::InvalidInput { .. }),
             "a reparse-point ancestor must redirect-containment rejected, got {err:?}"
+        );
+    }
+
+    /// Regression for review 5967742829: an ancestor junction installed AFTER
+    /// the preliminary ancestor check must be caught by the authoritative
+    /// pinned re-check at base resolution. Without the fix, `canonicalize_logs_dir`
+    /// followed that junction and `GetFinalPathNameByHandle` reported the
+    /// redirected target as the base, so `victim.jsonl` passed containment.
+    ///
+    /// Fully deterministic: the swap is a real rename + junction creation in the
+    /// test's own sandbox, with no registry or 8.3-short-name dependence.
+    #[test]
+    #[cfg(windows)]
+    fn read_log_rejects_ancestor_junction_installed_after_ancestor_check() {
+        use sweeper_testkit::create_junction;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = Sandbox::new_in(outer.path());
+
+        // `real/logs` is the configured logs directory. `outside/logs` holds a
+        // victim file that a successful swap would expose as a direct child.
+        let real = sandbox.create_dir("real").expect("real dir");
+        let logs = real.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("benign log");
+
+        let outside = sandbox.create_dir("outside").expect("outside dir");
+        let outside_logs = outside.join("logs");
+        std::fs::create_dir_all(&outside_logs).expect("outside logs dir");
+        std::fs::write(outside_logs.join("victim.jsonl"), b"LEAK").expect("victim");
+
+        // Ordinary success control: the benign direct child reads before swap.
+        assert_eq!(
+            read_log_in_dir(Some(&logs), "good")
+                .expect("ordinary logs dir must still read")
+                .content,
+            "ok"
+        );
+
+        // Install the junction at the ancestor after the preliminary check but
+        // before base resolution. `rename` moves only the directory entry; it
+        // does not traverse into the target.
+        let swapped_away = sandbox.guarded_path("real-swapped-away");
+        let install_junction = || {
+            std::fs::rename(&real, &swapped_away).expect("rename real ancestor aside");
+            create_junction(&real, &outside).expect("install ancestor junction");
+        };
+
+        let err = super::read_log_in_dir_after_check(Some(&logs), "victim", install_junction)
+            .unwrap_err();
+        assert!(
+            matches!(err, ContractError::InvalidInput { .. }),
+            "ancestor junction installed after the check must be rejected, got {err:?}"
+        );
+    }
+
+    /// A genuine 8.3 short-name alias is an ordinary directory, not a reparse
+    /// point. A real directory with a `~` in its name is a deterministic
+    /// stand-in (no registry dependence) and must stay accepted by the pinned
+    /// ancestor check, and reads below it must keep working.
+    #[test]
+    #[cfg(windows)]
+    fn pinned_ancestors_accept_tilde_named_directory() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let tilde_root = outer.path().join("ROOTA~1");
+        std::fs::create_dir_all(&tilde_root).expect("tilde-named directory");
+        let logs = tilde_root.join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(logs.join("good.jsonl"), b"ok").expect("write log");
+
+        assert!(
+            super::open_pinned_ancestors(&logs).is_some(),
+            "a ~-named directory is not a reparse point and must be pinned/accepted"
+        );
+        assert_eq!(
+            read_log_in_dir(Some(&logs), "good")
+                .expect("short-name alias must keep working")
+                .content,
+            "ok"
+        );
+    }
+
+    /// Ordinary (non-junction) ancestors must pin successfully so the safety
+    /// check does not reject normal logs directories.
+    #[test]
+    #[cfg(windows)]
+    fn pinned_ancestors_accept_ordinary_logs_dir() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let logs = outer.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        assert!(
+            super::open_pinned_ancestors(&logs).is_some(),
+            "ordinary ancestors must be accepted by the pinned re-check"
         );
     }
 
