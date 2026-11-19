@@ -650,6 +650,47 @@ fn read_bounded_clean_log_content<R: Read>(
     Ok(annotate_unreconciled_clean_log(content))
 }
 
+/// Resolve the logs directory to its handle-derived (long-name) base, then
+/// verify that base still sits under the exact ancestor chain captured by the
+/// pinned handles. A pinned ancestor can be turned into a junction via
+/// FILE_WRITE_ATTRIBUTES access, which share modes cannot deny; comparing the
+/// freshly resolved base to the captured chain (review 5969166919) is the
+/// authoritative swap check and fails closed on ANY component change. The
+/// lexical fallback is still containment-checked by `validate_log_handle`.
+///
+/// The caller must keep the `PinnedAncestors` alive across the whole read (the
+/// handles are borrowed here, not consumed) so ancestors cannot be swapped
+/// between this resolution and the file open.
+fn resolve_validated_logs_base(
+    pinned: &PinnedAncestors,
+    dir: &Path,
+) -> Result<CanonicalPath, ContractError> {
+    let resolved = canonicalize_logs_dir(dir);
+    if let Some(resolved_dir) = &resolved {
+        if !resolved_base_matches_pins(pinned, resolved_dir) {
+            return Err(invalid_log_id());
+        }
+    }
+    resolved
+        .or_else(|| CanonicalPath::parse_lexical(&dir.to_string_lossy()).ok())
+        .ok_or_else(invalid_log_id)
+}
+
+/// Read content through an already-validated handle. Clean journals use the
+/// torn-tail-tolerant read plus unmatched-intent reconciliation; generic logs
+/// keep the strict UTF-8 bounded read.
+fn read_log_candidate_content(
+    path: &Path,
+    file: fs::File,
+    size: u64,
+) -> Result<String, ContractError> {
+    if is_clean_log_file_name(path) {
+        read_bounded_clean_log_content(file, size)
+    } else {
+        read_bounded_log_content(file, size)
+    }
+}
+
 /// `read_log` in a specific directory (testable).
 ///
 /// Defense in depth (audit F38 / CodeRabbit 4618617742 / 4618853361): the ID is
@@ -729,22 +770,9 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
 
     // Resolve the base to long names so the handle final path check below
     // compares like-for-like; a short-name base (8.3 alias in `%TEMP%`) would
-    // otherwise reject valid direct children on the CI Windows runner.
-    let resolved = canonicalize_logs_dir(dir);
-    // AUTHORITATIVE check (review 5969166919): a pinned ancestor can be
-    // converted to a junction via FILE_WRITE_ATTRIBUTES access, which share
-    // modes cannot deny. If that happened, the freshly resolved base now sits
-    // under a different ancestor chain; compare it to the chain captured at pin
-    // time and fail closed on ANY component change. This does not rely on share
-    // modes at all.
-    if let Some(resolved_dir) = &resolved {
-        if !resolved_base_matches_pins(&_pinned, resolved_dir) {
-            return Err(invalid_log_id());
-        }
-    }
-    let logs_dir = resolved
-        .or_else(|| CanonicalPath::parse_lexical(&dir.to_string_lossy()).ok())
-        .ok_or_else(invalid_log_id)?;
+    // otherwise reject valid direct children on the CI Windows runner. The
+    // authoritative pinned-ancestor chain check is part of this step.
+    let logs_dir = resolve_validated_logs_base(&_pinned, dir)?;
 
     // Try the same extensions as `list_logs`, plus the bare ID.
     let candidates = [
@@ -762,13 +790,7 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
             continue;
         };
         let size = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
-        // Clean journals get torn-tail-tolerant reading plus unmatched-intent
-        // reconciliation; generic logs keep the strict UTF-8 bounded read.
-        let content = if is_clean_log_file_name(Path::new(resolved.as_str())) {
-            read_bounded_clean_log_content(file, size)?
-        } else {
-            read_bounded_log_content(file, size)?
-        };
+        let content = read_log_candidate_content(Path::new(resolved.as_str()), file, size)?;
         return Ok(LogReadResponse {
             id: log_id.to_string(),
             content,
