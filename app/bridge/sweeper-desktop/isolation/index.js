@@ -25,8 +25,10 @@ const ALLOWED_COMMANDS = new Set([
 
 // Tauri's event-plugin messages carry progress events emitted by the backend.
 // They are gated by Tauri's own capability system; forwarding them here keeps
-// scan/clean/analyzer progress subscriptions working.
+// scan/clean/analyzer progress subscriptions working. Only the subcommands the
+// frontend actually uses are forwarded; everything else is blocked here.
 const INTERNAL_COMMAND_PREFIX = 'plugin:event|';
+const ALLOWED_EVENT_SUBCOMMANDS = new Set(['listen', 'unlisten', 'emit', 'once']);
 
 function reject(reason) {
   throw new Error(`Blocked IPC message: ${reason}`);
@@ -77,6 +79,18 @@ function hasValidArguments(cmd, payload) {
   return Object.entries(shape).every(([key, predicate]) => predicate(args[key]));
 }
 
+// Every supported event-plugin subcommand carries a string `event` name (the
+// @tauri-apps/api event module always supplies it, including for unlisten).
+// Defence in depth only: Rust validates the event name authoritatively.
+function isAllowedEventMessage(cmd, payload) {
+  const subcommand = cmd.slice(INTERNAL_COMMAND_PREFIX.length);
+  return (
+    ALLOWED_EVENT_SUBCOMMANDS.has(subcommand) &&
+    isRecord(payload) &&
+    isString(payload.event)
+  );
+}
+
 window.__TAURI_ISOLATION_HOOK__ = (message) => {
   if (!isRecord(message)) {
     reject('malformed message');
@@ -86,6 +100,9 @@ window.__TAURI_ISOLATION_HOOK__ = (message) => {
     reject('missing command name');
   }
   if (cmd.startsWith(INTERNAL_COMMAND_PREFIX)) {
+    if (!isAllowedEventMessage(cmd, message.payload)) {
+      reject(`invalid event message for '${cmd}'`);
+    }
     return message;
   }
   if (!ALLOWED_COMMANDS.has(cmd)) {

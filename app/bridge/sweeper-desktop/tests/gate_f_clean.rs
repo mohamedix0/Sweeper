@@ -158,7 +158,8 @@ fn clean_log_id_is_not_hijacked_by_a_scan_log_written_during_clean() {
                     logs_base.path(),
                     &serde_json::json!({ "kind": "scan" }),
                 )
-                .unwrap();
+                .unwrap()
+                .path;
                 sweeper_testkit::set_last_write_time(
                     &scan_path,
                     sweeper_testkit::filetime_from_unix_secs(2_000_000_000),

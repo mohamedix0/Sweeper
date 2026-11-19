@@ -171,7 +171,14 @@ fn write_scan_activity_log(
         "categories_count": categories.len(),
         "targets": categories,
     });
-    let _ = sweeper_core::journal::write_scan_log(&scan_logs_base_dir(), &record);
+    match sweeper_core::journal::write_scan_log(&scan_logs_base_dir(), &record) {
+        Ok(outcome) => {
+            for warning in outcome.retirement_warnings {
+                eprintln!("scan activity log retirement warning: {warning}");
+            }
+        }
+        Err(err) => eprintln!("failed to write scan activity log: {err}"),
+    }
 }
 
 enum ScanTerminal {
