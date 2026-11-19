@@ -197,7 +197,13 @@ fn accumulate_clean_log_state(content: &str) -> CleanLogScanState {
 /// record are kept (decoded lossily) so corruption there stays distinguishable
 /// from the benign incomplete tail.
 fn read_complete_records(path: &Path) -> Option<Vec<u8>> {
-    let bytes = fs::read(path).ok()?;
+    // Listing inspection must obey the same cap as `read_log`: a runaway or
+    // tampered clean log must not exhaust memory while the list is opening.
+    // An over-cap file yields None here, and `should_include_log_file` already
+    // keeps the entry when inspection fails.
+    let size = fs::metadata(path).ok()?.len();
+    let file = fs::File::open(path).ok()?;
+    let bytes = read_bounded_bytes(file, size).ok()?;
     Some(complete_records_bytes(bytes))
 }
 
@@ -884,6 +890,32 @@ mod tests {
         assert!(
             matches!(err, ContractError::InvalidInput { .. }),
             "oversized log must be rejected, got: {err:?}"
+        );
+    }
+
+    /// Listing inspection uses the bounded reader too. An oversized clean log
+    /// must not be loaded into memory just to decide whether to surface it;
+    /// inspection returns None and the listing keeps the entry.
+    #[test]
+    fn list_logs_inspection_refuses_oversized_clean_log_but_keeps_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("create logs dir");
+        let oversized = vec![b'x'; (MAX_LOG_READ_BYTES + 1) as usize];
+        let path = logs.join("clean-huge.jsonl");
+        std::fs::write(&path, &oversized).expect("write oversized clean log");
+
+        // The bounded reader refuses the over-cap file instead of loading it.
+        assert!(
+            inspect_clean_log(&path).is_none(),
+            "oversized clean log must not be fully read during listing"
+        );
+
+        // Inspection failure must not hide the entry from the activity list.
+        let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
+        assert!(
+            listed.iter().any(|entry| entry.name == "clean-huge.jsonl"),
+            "an uninspectable log stays listed: {listed:?}"
         );
     }
 

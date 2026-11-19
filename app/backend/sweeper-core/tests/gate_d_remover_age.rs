@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use sweeper_core::remover::{self, CleanOptions};
 use sweeper_testkit::Sandbox;
@@ -58,7 +58,19 @@ fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
 
     let item = make_item("root", &target_root, &target_root, 1024);
     let journal_dir = sb.create_dir("journal").unwrap();
-    let _report = clean_one(item, 10 * 1024, min_age, &journal_dir);
+    // Pin the Clean clock to the fixture timestamp so the boundary file's age is
+    // exactly min_age. A later SystemTime sample would make it older than 3600s
+    // and hide a regression from `<` to `<=` in the age check.
+    let _report = remover::execute_clean(
+        vec![item],
+        CleanOptions {
+            preview_estimated_bytes: 10 * 1024,
+            min_age,
+            now: UNIX_EPOCH + Duration::from_secs(t),
+            journal_base_dir: Some(journal_dir),
+        },
+    )
+    .unwrap();
 
     assert!(!readonly.exists(), "readonly should be handled/deleted");
     assert!(!hidden.exists(), "hidden should be deleted in valid target");

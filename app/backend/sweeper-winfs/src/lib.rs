@@ -1205,9 +1205,14 @@ pub fn retire_sweeper_log_file(logs_dir: &Path, file_name: &str) -> Result<()> {
 
 fn is_sweeper_journal_log_name(file_name: &str) -> bool {
     // Both Clean journals and scan summary logs participate in rotation.
-    let Some(rest) = file_name
+    // `is_activity_log_file` counts names case-insensitively for retention, so
+    // the retirement validator must use the same casing rule or uppercase logs
+    // stay beyond the cap forever. The original name is retained by the caller
+    // for the file operation; only this check is case-folded.
+    let folded = file_name.to_ascii_lowercase();
+    let Some(rest) = folded
         .strip_prefix("clean-")
-        .or_else(|| file_name.strip_prefix("scan-"))
+        .or_else(|| folded.strip_prefix("scan-"))
     else {
         return false;
     };
@@ -1457,6 +1462,12 @@ mod tests {
             "clean-1700000000-123-456.jsonl"
         ));
         assert!(is_sweeper_journal_log_name("scan-1700000000-123-456.jsonl"));
+        // Rotation counts activity logs case-insensitively; retirement must match
+        // so an uppercase-named log is not stranded beyond the retention cap.
+        assert!(is_sweeper_journal_log_name("SCAN-1700000000-123-456.JSONL"));
+        assert!(is_sweeper_journal_log_name(
+            "CLEAN-1700000000-123-456.JsonL"
+        ));
 
         // Other prefixes, malformed numeric segments, traversal and wrong extensions
         // must remain ineligible for retirement.

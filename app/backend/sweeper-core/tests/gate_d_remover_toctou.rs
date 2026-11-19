@@ -17,6 +17,32 @@ use sweeper_testkit::{CanaryTree, Sandbox};
 mod common;
 use common::*;
 
+/// Stops and joins the swap worker on any exit path, including a panic from
+/// `execute_clean(...).unwrap()`. Dropping a `JoinHandle` would detach the
+/// thread, leaving it mutating the sandbox while teardown runs.
+struct WorkerGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl WorkerGuard {
+    fn new(stop: Arc<AtomicBool>, handle: thread::JoinHandle<()>) -> Self {
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[test]
 fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() {
     let sb = Sandbox::new();
@@ -58,6 +84,9 @@ fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() 
                 let _ = sweeper_testkit::create_junction(&sub_bg, &canary_root);
             }
         });
+        // Join on both success and unwind: a panic in execute_clean must not
+        // leave the worker detaching and mutating the sandbox during teardown.
+        let worker = WorkerGuard::new(stop, handle);
 
         let item = make_item(&format!("i_{iter}"), &target_root, &sub, 1024);
         let _report = remover::execute_clean(
@@ -71,8 +100,7 @@ fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() 
         )
         .unwrap();
 
-        stop.store(true, Ordering::Relaxed);
-        handle.join().unwrap();
+        drop(worker); // sets stop + joins before the canary check
 
         assert!(
             canary.verify().is_ok(),
