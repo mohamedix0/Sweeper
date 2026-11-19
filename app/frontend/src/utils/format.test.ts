@@ -119,3 +119,58 @@ describe('normalizeDisplayPath and middleTruncatePath', () => {
     expect(out.includes('\\server\\...')).toBe(false);
   });
 });
+
+describe('middleTruncatePath (grapheme-aware)', () => {
+  const ELLIPSIS = '\u2026';
+  const BROOM = '\u{1F9F9}'; // one grapheme, one surrogate pair
+  const FAMILY = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}'; // one ZWJ grapheme
+
+  function hasLoneSurrogate(value: string): boolean {
+    for (let i = 0; i < value.length; i += 1) {
+      const code = value.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = value.charCodeAt(i + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+        i += 1;
+      } else if (code >= 0xdc00 && code <= 0xdfff) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  it('preserves ASCII truncation behavior', () => {
+    const path = 'C:\\Users\\Alice\\AppData\\Local\\Temp\\deep\\nested\\cache-file-with-a-long-name.tmp';
+    const out = middleTruncatePath({ path, maxLen: 40 });
+    expect(out.startsWith('C:\\')).toBe(true);
+    expect(out.endsWith('.tmp')).toBe(true);
+    expect(out).toContain(ELLIPSIS);
+    expect(out.length).toBeLessThanOrEqual(40);
+  });
+
+  it('counts a single emoji filename as one grapheme at the limit', () => {
+    const path = `C:\\Temp\\cache\\${BROOM}`;
+    const out = middleTruncatePath({ path, maxLen: 15 });
+    expect(out).toBe(path);
+    expect(out).toContain(BROOM);
+    expect(hasLoneSurrogate(out)).toBe(false);
+  });
+
+  it('does not split an emoji surrogate pair when truncating a leaf', () => {
+    const path = `C:\\Temp\\cache\\${BROOM.repeat(24)}report.bin`;
+    const out = middleTruncatePath({ path, maxLen: 22 });
+    expect(out).toContain(ELLIPSIS);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(out.split(BROOM).length - 1).toBeGreaterThan(0);
+    expect(Array.from(out).length).toBeLessThanOrEqual(22);
+  });
+
+  it('keeps multi-code-point emoji clusters intact', () => {
+    const path = `C:\\Temp\\cache\\${FAMILY.repeat(20)}archive.zip`;
+    const out = middleTruncatePath({ path, maxLen: 24 });
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(out.split(FAMILY).length - 1).toBeGreaterThan(0);
+    // A whole family has three ZWJ joiners; a cut cluster would leave 1 or 2.
+    expect((out.split('\u200D').length - 1) % 3).toBe(0);
+  });
+});

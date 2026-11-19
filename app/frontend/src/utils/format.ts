@@ -20,6 +20,41 @@ const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER);
 const DASH = '\u2014';
 const ELLIPSIS = '\u2026';
 
+interface GraphemeSegmenter {
+  segment(input: string): Iterable<{ segment: string }>;
+}
+type GraphemeSegmenterCtor = new (
+  locales?: string | string[],
+  options?: { granularity?: 'grapheme' | 'word' | 'sentence' },
+) => GraphemeSegmenter;
+
+const SegmenterCtor = (Intl as unknown as { Segmenter?: GraphemeSegmenterCtor }).Segmenter;
+
+// Path display counts grapheme clusters (Intl.Segmenter-style) so an emoji or
+// combining sequence is never cut in half. Array.from is a surrogate-safe
+// fallback for runtimes without Segmenter (it splits by code point).
+function splitGraphemes(value: string): string[] {
+  if (SegmenterCtor) {
+    const segmenter = new SegmenterCtor(undefined, { granularity: 'grapheme' });
+    const clusters: string[] = [];
+    for (const part of segmenter.segment(value)) clusters.push(part.segment);
+    return clusters;
+  }
+  return Array.from(value);
+}
+
+function graphemeLength(value: string): number {
+  return splitGraphemes(value).length;
+}
+
+function takeGraphemes(value: string, count: number): string {
+  return splitGraphemes(value).slice(0, count).join('');
+}
+
+function takeLastGraphemes(value: string, count: number): string {
+  return splitGraphemes(value).slice(-count).join('');
+}
+
 export function toBigInt(args: ToBigIntOptions): bigint {
   const { value } = args;
   if (typeof value === 'bigint') return value;
@@ -187,7 +222,7 @@ function prefixStr(parts: string[]): string {
 }
 
 function fitsLength(args: { candidate: string; maxLen: number }): boolean {
-  return args.candidate.length <= args.maxLen;
+  return graphemeLength(args.candidate) <= args.maxLen;
 }
 
 function tryTailCount(args: TryPrefixOptions & { tailCount: number }): string | null {
@@ -231,18 +266,18 @@ function leafParts(args: LeafTruncateOptions): { core: string; ext: string } {
   const extMatch = args.leaf.match(/(\.[^.\\]{1,10})$/);
   const ext = extMatch?.[1] ?? '';
   if (ext === '') return { core: args.leaf, ext };
-  return { core: args.leaf.slice(0, -ext.length), ext };
+  return { core: takeGraphemes(args.leaf, graphemeLength(args.leaf) - graphemeLength(ext)), ext };
 }
 
 function truncatedLeaf(args: LeafTruncateOptions): string | null {
-  const budget = args.maxLen - args.prefixForLeaf.length;
+  const budget = args.maxLen - graphemeLength(args.prefixForLeaf);
   if (budget < 8) return null;
   const parts = leafParts(args);
-  const tailKeep = Math.min(parts.ext.length + 4, Math.max(3, Math.floor(budget / 2)));
+  const tailKeep = Math.min(graphemeLength(parts.ext) + 4, Math.max(3, Math.floor(budget / 2)));
   const headKeep = Math.max(2, budget - tailKeep - 1);
-  const middle = `${parts.core.slice(0, Math.max(1, headKeep))}${ELLIPSIS}${(parts.core + parts.ext).slice(-Math.max(1, tailKeep))}`;
+  const middle = `${takeGraphemes(parts.core, Math.max(1, headKeep))}${ELLIPSIS}${takeLastGraphemes(parts.core + parts.ext, Math.max(1, tailKeep))}`;
   const candidate = normalizeSlashes({ value: `${args.prefixForLeaf}${middle}` });
-  if (candidate.length > args.maxLen) return null;
+  if (graphemeLength(candidate) > args.maxLen) return null;
   return candidate;
 }
 
@@ -256,7 +291,7 @@ function leafOnlyCandidate(args: { minimalPrefixParts: string[]; leaf: string; m
   if (!args.leaf) return null;
   const joined = joinMiddle({ prefix: prefixStr(args.minimalPrefixParts), tail: [args.leaf] });
   const candidate = normalizeSlashes({ value: joined });
-  if (candidate.length > args.maxLen) return null;
+  if (graphemeLength(candidate) > args.maxLen) return null;
   return candidate;
 }
 
@@ -286,15 +321,15 @@ function middleTruncateFallback(args: { p: string; parts: string[]; leaf: string
   if (leafOnly) return leafOnly;
   const truncated = truncatedFallback({ minPrefix, leaf: args.leaf, maxLen: args.maxLen });
   if (truncated) return truncated;
-  return `${ELLIPSIS}${args.p.slice(-(args.maxLen - 1))}`;
+  return `${ELLIPSIS}${takeLastGraphemes(args.p, args.maxLen - 1)}`;
 }
 
 export function middleTruncatePath(args: TruncateOptions): string {
   const maxLen = args.maxLen ?? 38;
   const p = normalizeDisplayPath({ p: args.path });
-  if (p.length <= maxLen) return p;
+  if (graphemeLength(p) <= maxLen) return p;
   const parts = pathParts(p);
-  if (parts.length === 0) return p.slice(0, maxLen);
+  if (parts.length === 0) return takeGraphemes(p, maxLen);
   const leaf = parts[parts.length - 1] || '';
   const info = splitPathPrefix({ path: p, parts });
   const preferred = tryWithPrefix({ parts, prefixParts: info.prefixParts, leaf, maxLen });
