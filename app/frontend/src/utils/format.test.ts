@@ -139,6 +139,16 @@ describe('middleTruncatePath (grapheme-aware)', () => {
     return false;
   }
 
+  function graphemeLength(value: string): number {
+    const Segmenter = (Intl as unknown as {
+      Segmenter?: new (locales?: string, options?: { granularity?: 'grapheme' }) => {
+        segment(input: string): Iterable<unknown>;
+      };
+    }).Segmenter;
+    if (!Segmenter) return Array.from(value).length;
+    return Array.from(new Segmenter(undefined, { granularity: 'grapheme' }).segment(value)).length;
+  }
+
   it('preserves ASCII truncation behavior', () => {
     const path = 'C:\\Users\\Alice\\AppData\\Local\\Temp\\deep\\nested\\cache-file-with-a-long-name.tmp';
     const out = middleTruncatePath({ path, maxLen: 40 });
@@ -172,5 +182,17 @@ describe('middleTruncatePath (grapheme-aware)', () => {
     expect(out.split(FAMILY).length - 1).toBeGreaterThan(0);
     // A whole family has three ZWJ joiners; a cut cluster would leave 1 or 2.
     expect((out.split('\u200D').length - 1) % 3).toBe(0);
+  });
+
+  it('preserves a Unicode Prepend grapheme at the extension boundary', () => {
+    const PREPEND = '\u0600'; // Arabic number sign: Prepend property, clusters with the following '.'
+    const path = `C:\\Temp\\cache\\${'a'.repeat(30)}${PREPEND}.txt`;
+    const out = middleTruncatePath({ path, maxLen: 22 });
+    expect(out).toContain(ELLIPSIS);
+    // U+0600 and the dot form one grapheme; it must survive intact, not be dropped
+    // or split when the tail is selected across the extension boundary.
+    expect(out).toContain(`${PREPEND}.`);
+    expect(out.endsWith('.txt')).toBe(true);
+    expect(graphemeLength(out)).toBeLessThanOrEqual(22);
   });
 });

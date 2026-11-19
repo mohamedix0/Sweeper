@@ -280,7 +280,11 @@ function leafParts(args: LeafTruncateOptions): { core: string; ext: string } {
   const extMatch = args.leaf.match(/(\.[^.\\]{1,10})$/);
   const ext = extMatch?.[1] ?? '';
   if (ext === '') return { core: args.leaf, ext };
-  return { core: takeGlyphs({ value: args.leaf, count: glyphLength({ value: args.leaf }) - glyphLength({ value: ext }) }), ext };
+  // Slice by code-unit length rather than subtracting independently measured
+  // grapheme counts. A grapheme with the Unicode Prepend property (e.g. U+0600)
+  // clusters with the following '.', so a count-based split drops it and
+  // corrupts the extension boundary. A direct slice keeps core + ext === leaf.
+  return { core: args.leaf.slice(0, args.leaf.length - ext.length), ext };
 }
 
 function truncatedLeaf(args: LeafTruncateOptions): string | null {
@@ -289,7 +293,10 @@ function truncatedLeaf(args: LeafTruncateOptions): string | null {
   const parts = leafParts(args);
   const tailKeep = Math.min(glyphLength({ value: parts.ext }) + 4, Math.max(3, Math.floor(budget / 2)));
   const headKeep = Math.max(2, budget - tailKeep - 1);
-  const middle = `${takeGlyphs({ value: parts.core, count: Math.max(1, headKeep) })}${ELLIPSIS}${takeLastGlyphs({ value: parts.core + parts.ext, count: Math.max(1, tailKeep) })}`;
+  // Select the tail from the ORIGINAL leaf so the grapheme at the extension
+  // boundary (e.g. a Prepend character before '.') is never reconstructed from
+  // a count-derived core that may have lost it.
+  const middle = `${takeGlyphs({ value: parts.core, count: Math.max(1, headKeep) })}${ELLIPSIS}${takeLastGlyphs({ value: args.leaf, count: Math.max(1, tailKeep) })}`;
   const candidate = normalizeSlashes({ value: `${args.prefixForLeaf}${middle}` });
   if (glyphLength({ value: candidate }) > args.maxLen) return null;
   return candidate;
