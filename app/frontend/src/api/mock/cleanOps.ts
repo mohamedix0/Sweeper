@@ -6,7 +6,8 @@ import type { ScanItemInfo } from './data';
 
 type Tally = { deletedBytes: bigint; deletedCount: bigint; skippedCount: bigint; completed: bigint; reasons: Record<string, bigint> };
 type ProgressInput = { onProgress?: (event: CleanProgressEvent) => void; previewToken: string; targetId: string; completed: bigint; total: number; deletedBytes: bigint; ok: boolean };
-type CleanOutcome = { targetId: string; ok: boolean; bytes: bigint };
+type CleanOutcome = { targetId: string; ok: boolean; bytes: bigint; skipReason?: string };
+type Revalidation = MockCtx['revalidation'];
 
 function validatePreviewToken(input: { ctx: MockCtx; previewToken: string }): PreviewState {
   const preview = input.ctx.previews.get(input.previewToken);
@@ -77,13 +78,22 @@ function outcomeTargetId(input: { item?: ScanItemInfo; node?: AnalyzerNodeDto })
   return input.item?.targetId ?? input.node?.targetId ?? 'custom-path';
 }
 
-function resolveOutcome(input: { scan?: ScanSessionState; analyzer?: AnalyzerSessionState; itemId: string; allowDeleteUnknown: boolean }): CleanOutcome {
+function skippedReason(reason: string): string {
+  return `Skipped: ${reason}`;
+}
+
+function resolveOutcome(input: { scan?: ScanSessionState; analyzer?: AnalyzerSessionState; itemId: string; allowDeleteUnknown: boolean; revalidation: Revalidation }): CleanOutcome {
   const item = input.scan?.itemsById.get(input.itemId);
   const node = input.analyzer?.nodesById.get(input.itemId);
+  const targetId = outcomeTargetId({ item, node });
+  const invalidation = input.revalidation.get(input.itemId);
+  if (invalidation) {
+    return { targetId, ok: false, bytes: 0n, skipReason: skippedReason(invalidation.reason) };
+  }
   const ok = entryCleanable({ item, node, allowDeleteUnknown: input.allowDeleteUnknown });
   if (ok && input.scan) removeScanItem({ session: input.scan, itemId: input.itemId });
   return {
-    targetId: outcomeTargetId({ item, node }),
+    targetId,
     ok,
     bytes: outcomeBytes({ ok, size: item?.size ?? node?.sizeBytes }),
   };
@@ -113,7 +123,7 @@ function applyOutcome(input: { tally: Tally; outcome: CleanOutcome }) {
     return;
   }
   input.tally.skippedCount += 1n;
-  const key = 'Skipped: not eligible';
+  const key = input.outcome.skipReason ?? 'Skipped: not eligible';
   input.tally.reasons[key] = (input.tally.reasons[key] ?? 0n) + 1n;
 }
 
@@ -121,7 +131,7 @@ function runCleanItems(input: { ctx: MockCtx; previewToken: string; ids: string[
   const tally: Tally = { deletedBytes: 0n, deletedCount: 0n, skippedCount: 0n, completed: 0n, reasons: {} };
   const allowDeleteUnknown = input.ctx.mutable.settingsState.allowDeleteUnknown;
   for (const itemId of input.ids) {
-    const outcome = resolveOutcome({ scan: input.scan, analyzer: input.analyzer, itemId, allowDeleteUnknown });
+    const outcome = resolveOutcome({ scan: input.scan, analyzer: input.analyzer, itemId, allowDeleteUnknown, revalidation: input.ctx.revalidation });
     applyOutcome({ tally, outcome });
     tally.completed += 1n;
     reportProgress({ onProgress: input.onProgress, previewToken: input.previewToken, targetId: outcome.targetId, completed: tally.completed, total: input.ids.length, deletedBytes: tally.deletedBytes, ok: outcome.ok });
@@ -140,6 +150,18 @@ function buildCleanLog(input: { ctx: MockCtx; itemIds: string[]; deletedCount: b
   return { id, name, modifiedUnixSecs: ts, sizeBytes: String(content.length), content };
 }
 
+function abortedClean(reason: string) {
+  return {
+    bytesFreed: '0',
+    deletedCount: '0',
+    skippedCount: '1',
+    skippedReasons: [{ reason: skippedReason(reason), count: '1' }],
+    aborted: true,
+    abortReason: `aborted: ${reason}`,
+    logId: null,
+  };
+}
+
 function executeClean(input: { ctx: MockCtx; previewToken: string; onProgress?: (event: CleanProgressEvent) => void }) {
   const preview = validatePreviewToken({ ctx: input.ctx, previewToken: input.previewToken });
   validatePreviewSession({ ctx: input.ctx, preview });
@@ -148,6 +170,8 @@ function executeClean(input: { ctx: MockCtx; previewToken: string; onProgress?: 
   const scan = input.ctx.sessions.get(preview.sessionId);
   const analyzer = input.ctx.analyzerSessions.get(preview.sessionId);
   const ids = resolveExecuteIds({ preview, analyzerSession: analyzer });
+  const abortEntry = ids.map((id) => input.ctx.revalidation.get(id)).find((entry) => entry?.abort === true);
+  if (abortEntry) return abortedClean(abortEntry.reason);
   const tally = runCleanItems({ ctx: input.ctx, previewToken: input.previewToken, ids, scan, analyzer, onProgress: input.onProgress });
   const log = buildCleanLog({ ctx: input.ctx, itemIds: preview.itemIds, deletedCount: tally.deletedCount, deletedBytes: tally.deletedBytes });
   input.ctx.logs.unshift(log);

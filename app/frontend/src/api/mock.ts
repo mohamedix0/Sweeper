@@ -86,6 +86,8 @@ export type PreviewCleanResult = {
   breakdown: PreviewTargetBreakdownDto[];
   totalSelectedCount: string;
   totalSelectedBytes: string;
+  skippedCount?: string;
+  skippedReasons?: string[];
 };
 
 export type ExplainResult = { itemId: string; title: string; description: string; risk: RiskDto };
@@ -98,6 +100,7 @@ export type MockController = SweeperClient & {
   invalidateSettings: () => void;
   setElevationStatus: (status: { isElevated: boolean }) => void;
   setRelaunchResult: (result: { launched: boolean } | { error: ContractError }) => void;
+  invalidateItem: (itemId: string, options?: { reason?: string; abort?: boolean }) => void;
   reset: () => void;
 };
 
