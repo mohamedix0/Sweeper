@@ -9,8 +9,10 @@
  * and `is_protected_for_selection`. Keep this file in sync with those rules.
  *
  * Policy comparisons are expressed over `PathSegment` domain values rather than
- * raw strings: a segment owns its case-insensitive identity, so no helper needs
- * to be handed loose strings just to compare them.
+ * raw strings: a segment owns its ASCII case-insensitive identity, so no helper
+ * needs to be handed loose strings just to compare them. The backend folds with
+ * `to_ascii_uppercase`/`eq_ignore_ascii_case`, never Unicode casing (`ß` -> `SS`,
+ * `K` -> `k`), so the folded identities here are ASCII-only too.
  */
 
 /** Synthetic segment: the path does not exist on disk in the mock. */
@@ -18,9 +20,19 @@ export const MISSING_SEGMENT = 'missing';
 /** Synthetic segment: the path is a Link Point in the mock. */
 export const LINK_POINT_SEGMENT = 'linkpoint';
 
-/** A single path segment as a domain value (case-insensitive by Policy rule). */
-type PathSegment = { readonly text: string };
-const seg = (text: string): PathSegment => ({ text });
+/** A single path segment as a domain value (ASCII case-insensitive by Policy rule). */
+type PathSegment = {
+  readonly text: string;
+  /** ASCII-lowercase identity: mirrors Rust `eq_ignore_ascii_case`. */
+  readonly folded: string;
+  /** ASCII-uppercase identity: mirrors Rust `to_ascii_uppercase`. */
+  readonly upper: string;
+};
+const seg = (text: string): PathSegment => ({
+  text,
+  folded: text.replace(/[A-Z]/g, (c) => c.toLowerCase()),
+  upper: text.replace(/[a-z]/g, (c) => c.toUpperCase()),
+});
 
 /** Parsed, normalized view of a Windows path consumed by the policy checks. */
 type ParsedMockPath = { readonly normalized: string; readonly segments: readonly PathSegment[] };
@@ -48,7 +60,6 @@ const SECRET_SEGMENTS = [seg('.git'), seg('.ssh'), seg('.gnupg'), seg('.aws'), s
 const OTHER_PROTECTED_SEGMENTS = [seg('Recovery'), seg('System Volume Information')] as const;
 /** OS system files: subtree-protected by final segment. */
 const OS_FILE_NAMES = [seg('pagefile.sys'), seg('hiberfil.sys'), seg('swapfile.sys')] as const;
-const OS_FILE_NAMES_UPPER = OS_FILE_NAMES.map((n) => seg(n.text.toUpperCase()));
 
 const USERS_SEGMENT = seg('Users');
 const USER_DATA_CONTAINER_SEGMENT = seg('User Data');
@@ -57,19 +68,30 @@ const MISSING_VALUE = seg(MISSING_SEGMENT);
 
 export type CustomPathVerdict = { path: string; allowed: boolean; reason: string };
 
-/** Case-insensitive equality of two path segments. */
-const eq = (a: PathSegment, b: PathSegment): boolean => a.text.toLowerCase() === b.text.toLowerCase();
+/** ASCII case-insensitive equality of two path segments. */
+const eq = (a: PathSegment, b: PathSegment): boolean => a.folded === b.folded;
 const equalsAny = (value: PathSegment, options: readonly PathSegment[]): boolean => options.some((o) => eq(value, o));
 const hasSegment = (segments: readonly PathSegment[], name: PathSegment): boolean => segments.some((s) => eq(s, name));
 
-/** Normalize a Windows path into drive prefix + segments, or null for invalid syntax. */
+/** Parse a Windows path into drive prefix + segments, or null for invalid syntax. */
 function parseMockPath(input: string): ParsedMockPath | null {
   if (!/^[A-Za-z]:[\\/]/.test(input)) return null;
-  const parts = input.replace(/\//g, '\\').replace(/\\+$/, '').split('\\').filter(Boolean);
-  const drive = parts.shift();
-  if (!drive) return null;
+  // Normalize separators once, then validate the raw structure. Empty or
+  // malformed components are never filtered/trimmed into a valid-looking path.
+  const replaced = input.replace(/\//g, '\\');
+  const drive = replaced.slice(0, 2);
+  const rest = replaced.slice(3);
+  // Backend `lexical_parse` rejects empty components before normalization:
+  // `C:\a\\b` and `C:\a\b\` are EmptySegment errors. A bare drive root (`C:\`)
+  // is the only empty "rest" and is left to the depth guard, as before.
+  if (rest !== '' && rest.split('\\').some((s) => s === '')) return null;
+  // Backend rejects any ':' outside the drive position (Alternate Data Stream).
+  if (replaced.indexOf(':', 2) !== -1) return null;
+  const parts = rest === '' ? [] : rest.split('\\');
   const segments: readonly PathSegment[] = parts.map(seg);
   if (segments.some((s) => s.text === '.' || s.text === '..')) return null;
+  // Backend `validate_segment` rejects trailing dots and spaces per segment.
+  if (segments.some((s) => /[. ]$/.test(s.text))) return null;
   const normalized = segments.length
     ? [drive.toUpperCase(), ...segments.map((s) => s.text)].join('\\')
     : `${drive.toUpperCase()}\\`;
@@ -89,7 +111,7 @@ function isAncestorOfFixedSubtreeProtected(segments: readonly PathSegment[]): bo
 }
 
 function isOneDriveRootSegment(segment: PathSegment): boolean {
-  const upper = segment.text.toUpperCase();
+  const upper = segment.upper;
   if (!upper.startsWith('ONEDRIVE')) return false;
   const rest = upper.slice('ONEDRIVE'.length);
   return rest === '' || !/[A-Z]/.test(rest[0]);
@@ -104,8 +126,7 @@ function isSubtreeProtected(segments: readonly PathSegment[]): boolean {
   if (segments.some((s) => equalsAny(s, [...SECRET_SEGMENTS, ...OTHER_PROTECTED_SEGMENTS]))) return true;
   const last = segments[segments.length - 1];
   if (last) {
-    const upper = last.text.toUpperCase();
-    if (upper.startsWith('NTUSER.DAT') || equalsAny(seg(upper), OS_FILE_NAMES_UPPER)) return true;
+    if (last.folded.startsWith('ntuser.dat') || equalsAny(last, OS_FILE_NAMES)) return true;
   }
   return isUserProfileDataSubtree(segments) || segments.some(isOneDriveRootSegment);
 }

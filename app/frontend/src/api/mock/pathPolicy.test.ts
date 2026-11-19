@@ -74,6 +74,49 @@ describe('mock Custom Path validation mirrors Policy', () => {
   });
 });
 
+describe('mock Custom Path validation matches backend syntax and ASCII folding', () => {
+  it('folds case ASCII-only, never Unicode (no ß -> SS, no Kelvin-sign -> k)', () => {
+    // Backend `to_ascii_uppercase` leaves ß unchanged, so `OneDriveß` is a sync
+    // root boundary (Subtree-Protected). The mock previously allowed it because
+    // `toUpperCase()` turned it into `ONEDRIVESS`, a benign look-alike.
+    const sharpS = verdict('C:\\Temp\\OneDriveß\\Cache');
+    expect(sharpS.allowed).toBe(false);
+    expect(sharpS.reason).toContain('Subtree-Protected Path');
+
+    // Backend `eq_ignore_ascii_case` never folds U+212A KELVIN SIGN to 'k', so
+    // `.Kube` is not the protected `.kube` segment. The mock previously
+    // rejected it because `toLowerCase()` folded it to `.kube`.
+    const kelvin = verdict('C:\\Temp\\.\u212Aube\\Cache');
+    expect(kelvin.allowed).toBe(true);
+    expect(kelvin.reason).toBe('ok');
+    expect(protectionReason(['Temp', '.\u212Aube', 'Cache'])).toBeNull();
+  });
+
+  it('rejects empty components before normalization', () => {
+    // Backend `lexical_parse` rejects both forms as EmptySegment. The mock
+    // previously repaired them with `.filter(Boolean)` / trailing-separator trim.
+    for (const path of ['C:\\Temp\\\\Cache\\Logs', 'C:\\Temp\\Cache\\Logs\\']) {
+      expect(verdict(path).allowed, path).toBe(false);
+    }
+  });
+
+  it('rejects segment syntax the backend rejects (trailing dot and ADS)', () => {
+    // Backend `validate_segment` rejects segments ending in '.', and
+    // `lexical_parse` rejects ':' outside the drive position (ADS).
+    for (const path of ['C:\\Temp\\.git.\\objects', 'C:\\Temp\\Cache:stream\\Logs']) {
+      expect(verdict(path).allowed, path).toBe(false);
+    }
+  });
+
+  it('still accepts a well-formed path mixing / and \\ separators', () => {
+    expect(verdict('C:/Temp\\Cache/Logs')).toEqual({
+      path: 'C:\\Temp\\Cache\\Logs',
+      allowed: true,
+      reason: 'ok',
+    });
+  });
+});
+
 describe('mock validateCustomPath command', () => {
   it('throws a typed InvalidInput error on empty input', async () => {
     const controller = createMockController();

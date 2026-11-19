@@ -95,3 +95,33 @@ test('Settings surfaces the mirrored rejection reason', async ({ page }) => {
   await page.getByRole('button', { name: 'Add Folder' }).click();
   await expect(page.getByRole('alert')).toContainText(/Custom Path rejected.*Link Point/i);
 });
+
+test('mirrors backend syntax checks and ASCII-only case folding', async ({ page }) => {
+  await openApp(page);
+
+  // ASCII-only folding: `ß` is not folded to `SS`, so OneDriveß is a genuine
+  // sync root; U+212A KELVIN SIGN is not folded to `k`, so `.Kube` is not `.kube`.
+  const sharpS = await verdictFor(page, 'C:\\Temp\\OneDriveß\\Cache');
+  expect(sharpS.allowed).toBe(false);
+  expect(sharpS.reason).toContain('Subtree-Protected Path');
+  const kelvin = await verdictFor(page, 'C:\\Temp\\.\u212Aube\\Cache');
+  expect(kelvin.allowed).toBe(true);
+  expect(kelvin.reason).toBe('ok');
+
+  // Malformed syntax is rejected before protection evaluation.
+  for (const path of [
+    'C:\\Temp\\\\Cache\\Logs',
+    'C:\\Temp\\Cache\\Logs\\',
+    'C:\\Temp\\.git.\\objects',
+    'C:\\Temp\\Cache:stream\\Logs',
+  ]) {
+    expect((await verdictFor(page, path)).allowed, path).toBe(false);
+  }
+
+  // Well-formed mixed-separator paths stay accepted.
+  expect(await verdictFor(page, 'C:/Temp\\Cache/Logs')).toEqual({
+    path: 'C:\\Temp\\Cache\\Logs',
+    allowed: true,
+    reason: 'ok',
+  });
+});
