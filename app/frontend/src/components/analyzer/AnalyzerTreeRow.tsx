@@ -2,7 +2,8 @@ import type { MouseEvent, KeyboardEvent } from 'react';
 import { ChevronDownIcon, ChevronRightIcon, CloudIcon, DriveIcon, FileIcon, FolderIcon, HardDriveIcon, LinkIcon, ShieldIcon } from '../Icons';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import { formatBytes, middleTruncatePath, normalizeDisplayPath } from '../../utils/format';
-import { analyzerStatusPill, analyzerStatusText, isDriveRoot, isMoreRowId, isNodeSelectable, moreRowParentId, nodeTypeTag, shareBarFillPx, formatSharePercent, type FlatAnalyzerRow } from './analyzerHelpers';
+import { analyzerStatusPill, analyzerStatusText, isDriveRoot, isFewerRowId, isMoreRowId, isNodeSelectable, showAllRowParentId, nodeTypeTag, shareBarFillPx, formatSharePercent, type FlatAnalyzerRow } from './analyzerHelpers';
+import { showAllButtonDomId, treeItemDomId } from './analyzerTreeA11y';
 
 type RowProps = {
   row: FlatAnalyzerRow;
@@ -12,6 +13,7 @@ type RowProps = {
   inspectedId: string | null;
   allowDeleteUnknown: boolean;
   cleaning: boolean;
+  active: boolean;
   onToggleExpand: (node: AnalyzerNodeDto) => void;
   onToggleSelect: (node: AnalyzerNodeDto) => void;
   onInspect: (args: { id: string }) => void;
@@ -48,13 +50,13 @@ function IndentGuide(input: { depth: number }) {
   );
 }
 
-function MoreRow(props: { node: AnalyzerNodeDto; depth: number; onShowMore: (args: { parentId: string }) => void }) {
-  const parentId = moreRowParentId(props.node.id);
+function MoreRow(props: { node: AnalyzerNodeDto; depth: number; active: boolean; onShowMore: (args: { parentId: string }) => void }) {
+  const parentId = showAllRowParentId(props.node.id);
   return (
-    <div className="analyzer-row analyzer-more-row" role="treeitem" aria-level={props.depth + 1} aria-selected={false} tabIndex={0}>
+    <div id={treeItemDomId(props.node.id)} className="analyzer-row analyzer-more-row" role="treeitem" aria-level={props.depth + 1} aria-selected={false} tabIndex={props.active ? 0 : -1}>
       <div className="analyzer-col-main tree-cell-name">
         <IndentGuide depth={props.depth} />
-        <button type="button" className="btn small subtle-btn analyzer-show-more-btn" onClick={() => props.onShowMore({ parentId })}>{props.node.name}</button>
+        <button type="button" id={showAllButtonDomId(parentId)} className="btn small subtle-btn analyzer-show-more-btn" onClick={() => props.onShowMore({ parentId })}>{props.node.name}</button>
       </div>
       <div className="analyzer-col-share tree-cell-share" /><div className="analyzer-col-count muted num" /><div className="analyzer-col-sizecell num" /><div className="analyzer-col-guard" />
     </div>
@@ -262,11 +264,11 @@ function expandedAttr(input: { hasChildren: boolean; expanded: boolean }): boole
 
 export function AnalyzerTreeRow(props: RowProps) {
   const { node, depth } = props.row;
-  if (isMoreRowId(node.id)) return <MoreRow node={node} depth={depth} onShowMore={props.onShowMore} />;
+  if (isMoreRowId(node.id) || isFewerRowId(node.id)) return <MoreRow node={node} depth={depth} active={props.active} onShowMore={props.onShowMore} />;
   const vm = buildVm({ props, node, depth });
   const h = rowHandlers({ props, node, vm });
   return (
-    <div role="treeitem" aria-expanded={expandedAttr({ hasChildren: vm.hasChildren, expanded: vm.isExpanded })} aria-selected={vm.checked} aria-level={depth + 1} tabIndex={0} className={rowClassName({ inspected: vm.inspectedMatch, depth })} data-depth={depth} title={drillTitle({ canDrill: vm.canDrill })} onClick={h.onRowClick} onDoubleClick={h.onRowDoubleClick} onKeyDown={h.onRowKeyDown}>
+    <div id={treeItemDomId(node.id)} role="treeitem" aria-expanded={expandedAttr({ hasChildren: vm.hasChildren, expanded: vm.isExpanded })} aria-selected={vm.checked} aria-level={depth + 1} tabIndex={props.active ? 0 : -1} className={rowClassName({ inspected: vm.inspectedMatch, depth })} data-depth={depth} title={drillTitle({ canDrill: vm.canDrill })} onClick={h.onRowClick} onDoubleClick={h.onRowDoubleClick} onKeyDown={h.onRowKeyDown}>
       <RowMain node={node} depth={depth} vm={vm} cleaning={props.cleaning} onExpand={h.onExpand} onDrill={h.onDrill} onToggleSelect={() => props.onToggleSelect(node)} />
       <div className="analyzer-col-share tree-cell-share"><ShareCell shareFillWidthPx={vm.shareFillWidthPx} shareLabel={vm.shareLabel} /></div>
       <div className="analyzer-col-count muted num">{node.itemCount}</div>
