@@ -384,18 +384,28 @@ where
 
     for item in items {
         if report.aborted {
-            record_post_abort_skip(
+            if let Err(err) = record_post_abort_skip(
                 &mut journal,
                 &mut report,
                 &item,
                 &mut completed,
                 total_items,
                 &mut on_progress,
-            )?;
+            ) {
+                return Ok(stop_after_journal_failure(&mut journal, report, err));
+            }
             continue;
         }
 
-        let outcome = process_item(&item, &opts, &mut journal, &mut deleted_total, &report)?;
+        let outcome = match process_item(&item, &opts, &mut journal, &mut deleted_total, &report) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // An intent-write failure stops further deletion, but the
+                // deletions already completed and all journal errors collected
+                // so far must still reach the caller in a partial report.
+                return Ok(stop_after_journal_failure(&mut journal, report, err));
+            }
+        };
         let status = apply_process_outcome(&item, outcome, &mut report);
         completed = completed.saturating_add(1);
         emit_item_progress(
@@ -422,6 +432,21 @@ fn open_clean_journal(opts: &CleanOptions) -> Result<JournalWriter, CleanError> 
         .clone()
         .unwrap_or_else(journal::default_logs_base_dir);
     Ok(JournalWriter::open_in(&base_dir)?)
+}
+
+/// Stop a clean batch after a fatal journal failure while preserving the
+/// deletions that already completed and every journal error collected so far.
+fn stop_after_journal_failure(
+    journal: &mut JournalWriter,
+    mut report: CleanReport,
+    err: CleanError,
+) -> CleanReport {
+    let mut errors = journal.take_deferred_errors();
+    errors.push(format!("clean stopped: {err}"));
+    report.journal_errors = errors;
+    report.aborted = true;
+    report.abort_reason = Some(format!("clean stopped after journal failure: {err}"));
+    report
 }
 
 /// Build a fresh, empty report for a Clean run of `item_count` items.

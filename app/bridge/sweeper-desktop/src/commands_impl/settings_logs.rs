@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use sweeper_contract::{
@@ -165,15 +164,33 @@ fn inspect_clean_log_line(state: &mut CleanLogScanState, line: &str) {
     inspect_clean_log_value(state, &value);
 }
 
-fn accumulate_clean_log_state(reader: BufReader<fs::File>) -> CleanLogScanState {
+fn accumulate_clean_log_state(content: &str) -> CleanLogScanState {
     let mut state = CleanLogScanState {
         all_sandbox: true,
         ..CleanLogScanState::default()
     };
-    for line in reader.lines().map_while(Result::ok) {
-        inspect_clean_log_line(&mut state, &line);
+    for line in content.lines() {
+        inspect_clean_log_line(&mut state, line);
     }
     state
+}
+
+/// Read the complete, newline-terminated records of a JSONL log as raw bytes.
+///
+/// A torn trailing fragment (no terminating newline, possibly invalid UTF-8 from
+/// a failed mid-character write) is dropped. Reading raw bytes first prevents a
+/// torn UTF-8 tail from making `fs::read_to_string` reject the entire file and
+/// hide valid records that precede it. Malformed bytes inside a *terminated*
+/// record are kept (decoded lossily) so corruption there stays distinguishable
+/// from the benign incomplete tail.
+fn read_complete_records(path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    let end = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    Some(bytes[..end].to_vec())
 }
 
 fn is_clean_log_file_name(path: &Path) -> bool {
@@ -187,8 +204,9 @@ fn is_clean_log_file_name(path: &Path) -> bool {
 }
 
 fn inspect_clean_log(path: &Path) -> Option<CleanLogScanState> {
-    let file = fs::File::open(path).ok()?;
-    Some(accumulate_clean_log_state(BufReader::new(file)))
+    let bytes = read_complete_records(path)?;
+    let content = String::from_utf8_lossy(&bytes);
+    Some(accumulate_clean_log_state(&content))
 }
 
 fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool) -> bool {
@@ -210,10 +228,11 @@ fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool
 }
 
 /// Append a reconciliation note for intent-without-outcome records to the log view.
-fn annotate_unreconciled_clean_log(path: &Path, content: String) -> String {
-    let Some(state) = inspect_clean_log(path) else {
-        return content;
-    };
+///
+/// Reconciliation runs on the same retained complete records used for display, so
+/// a torn UTF-8 tail cannot suppress the note for a valid intent that precedes it.
+fn annotate_unreconciled_clean_log(content: String) -> String {
+    let state = accumulate_clean_log_state(&content);
     let unreconciled = state.intent_without_outcome();
     if unreconciled == 0 {
         return content;
@@ -335,11 +354,12 @@ pub fn read_log_in_dir(dir: Option<&Path>, log_id: &str) -> Result<LogReadRespon
     ];
     for p in candidates {
         if p.is_file() {
-            let content = fs::read_to_string(&p).map_err(|_| ContractError::NotFound {
+            let bytes = read_complete_records(&p).ok_or_else(|| ContractError::NotFound {
                 reason: "log not found".into(),
             })?;
+            let content = String::from_utf8_lossy(&bytes).into_owned();
             let content = if is_clean_log_file_name(&p) {
-                annotate_unreconciled_clean_log(&p, content)
+                annotate_unreconciled_clean_log(content)
             } else {
                 content
             };
@@ -408,5 +428,56 @@ mod tests {
 
         let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
         assert!(!read.content.contains("\"record\":\"reconciliation\""));
+    }
+
+    #[test]
+    fn torn_utf8_tail_does_not_hide_complete_records_or_reconciliation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-3-3";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let mut bytes =
+            b"{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\a.tmp\"}\n"
+                .to_vec();
+        // Outcome write stopped inside a multi-byte UTF-8 character, with no
+        // terminating newline. `read_to_string` would reject the whole file.
+        bytes.extend_from_slice(b"{\"record\":\"outcome\",\"path\":\"\xC3");
+        std::fs::write(&path, &bytes).expect("write log");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("torn tail must be tolerated");
+        assert!(
+            read.content.contains("\"record\":\"intent\""),
+            "complete record must be displayed"
+        );
+        assert!(
+            !read.content.contains("\"record\":\"outcome\""),
+            "incomplete trailing record must be dropped"
+        );
+        assert!(
+            read.content.contains("\"record\":\"reconciliation\"")
+                && read.content.contains("\"intent_without_outcome\":1"),
+            "reconciliation must run on the retained complete records: {}",
+            read.content
+        );
+    }
+
+    #[test]
+    fn malformed_terminated_record_is_retained_unlike_torn_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_id = "clean-1700000000-4-4";
+        let path = dir.path().join(format!("{log_id}.jsonl"));
+        let mut bytes =
+            b"{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"C:\\\\Temp\\\\a.tmp\"}\n"
+                .to_vec();
+        // A newline-terminated record containing invalid UTF-8 is corruption, not
+        // a torn tail: it is retained lossily so it stays visible/distinguishable.
+        bytes.extend_from_slice(b"\xFF\xFE\n");
+        std::fs::write(&path, &bytes).expect("write log");
+
+        let read = read_log_in_dir(Some(dir.path()), log_id).expect("read log");
+        assert!(
+            read.content.contains('\u{FFFD}'),
+            "malformed terminated record must be preserved lossily: {}",
+            read.content
+        );
     }
 }

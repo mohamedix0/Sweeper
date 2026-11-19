@@ -894,7 +894,7 @@ fn gate_d_post_delete_journal_failure_returns_honest_partial_report() {
     let journal_dir = sb.create_dir("journal").unwrap();
 
     // Simulate a journal write failure *after* the handle-based deletion succeeds.
-    journal::fail_next_best_effort_outcome();
+    journal::fail_next_best_effort_outcome(journal::WriteFailure::BeforeWrite);
     let report = remover::execute_clean(
         vec![item],
         CleanOptions {
@@ -919,6 +919,68 @@ fn gate_d_post_delete_journal_failure_returns_honest_partial_report() {
     assert!(
         !report.journal_errors.is_empty(),
         "post-delete journal failure must be recorded and surfaced"
+    );
+    assert_sentinel_intact(&sb);
+}
+
+#[test]
+fn gate_d_persistent_outcome_repair_failure_stops_batch_with_partial_report() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("target").unwrap();
+    let victim_a = target_root.join("a.txt");
+    let victim_b = target_root.join("b.txt");
+    write_file(&victim_a, b"delete A");
+    write_file(&victim_b, b"keep B");
+    set_filetime(&victim_a, old_mtime_secs());
+    set_filetime(&victim_b, old_mtime_secs());
+    let item_a = make_item("item-a", &target_root, &victim_a, 8, Some(old_mtime_secs()));
+    let item_b = make_item("item-b", &target_root, &victim_b, 6, Some(old_mtime_secs()));
+    let journal_dir = sb.create_dir("journal").unwrap();
+
+    // A's outcome write tears a record and its repair fails, so the journal is
+    // persistently unusable. B's intent write then fails naturally (no one-shot
+    // injection needed) and must stop the batch while keeping A's result.
+    journal::fail_next_best_effort_outcome(journal::WriteFailure::AfterPrefix);
+    journal::fail_outcome_repair_once();
+
+    let report = remover::execute_clean(
+        vec![item_a, item_b],
+        CleanOptions {
+            preview_estimated_bytes: 1024 * 1024,
+            min_age: Duration::from_secs(24 * 3600),
+            now: now(),
+            journal_base_dir: Some(journal_dir),
+        },
+    )
+    .expect("persistent journal failure must still return the honest partial report");
+
+    assert!(!victim_a.exists(), "A must have been deleted");
+    assert!(
+        victim_b.exists(),
+        "B must not be deleted once the journal became unusable"
+    );
+    assert_eq!(
+        report.items.len(),
+        1,
+        "A's completed deletion must be preserved"
+    );
+    assert_eq!(report.items[0].id, "item-a");
+    assert_eq!(report.items[0].status, "deleted");
+    assert!(
+        report
+            .journal_errors
+            .iter()
+            .any(|e| e.contains("repair failed")),
+        "the persistent outcome/repair error must be surfaced: {:?}",
+        report.journal_errors
+    );
+    assert!(
+        report
+            .journal_errors
+            .iter()
+            .any(|e| e.contains("journal unavailable after a failed repair")),
+        "the fatal intent error must be surfaced: {:?}",
+        report.journal_errors
     );
     assert_sentinel_intact(&sb);
 }
