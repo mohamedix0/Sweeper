@@ -78,13 +78,17 @@ function outcomeTargetId(input: { item?: ScanItemInfo; node?: AnalyzerNodeDto })
   return input.item?.targetId ?? input.node?.targetId ?? 'custom-path';
 }
 
+function skippedReason(reason: string): string {
+  return `Skipped: ${reason}`;
+}
+
 function resolveOutcome(input: { scan?: ScanSessionState; analyzer?: AnalyzerSessionState; itemId: string; allowDeleteUnknown: boolean; revalidation: Revalidation }): CleanOutcome {
   const item = input.scan?.itemsById.get(input.itemId);
   const node = input.analyzer?.nodesById.get(input.itemId);
   const targetId = outcomeTargetId({ item, node });
   const invalidation = input.revalidation.get(input.itemId);
   if (invalidation) {
-    return { targetId, ok: false, bytes: 0n, skipReason: `Skipped: ${invalidation.reason}` };
+    return { targetId, ok: false, bytes: 0n, skipReason: skippedReason(invalidation.reason) };
   }
   const ok = entryCleanable({ item, node, allowDeleteUnknown: input.allowDeleteUnknown });
   if (ok && input.scan) removeScanItem({ session: input.scan, itemId: input.itemId });
@@ -151,7 +155,7 @@ function abortedClean(reason: string) {
     bytesFreed: '0',
     deletedCount: '0',
     skippedCount: '1',
-    skippedReasons: [{ reason: `Skipped: ${reason}`, count: '1' }],
+    skippedReasons: [{ reason: skippedReason(reason), count: '1' }],
     aborted: true,
     abortReason: `aborted: ${reason}`,
     logId: null,
