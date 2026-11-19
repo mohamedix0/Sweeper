@@ -465,19 +465,27 @@ pub fn scan_log_filename(ts_secs: u64, pid: u32, nanos: u32) -> String {
     format!("{SCAN_LOG_PREFIX}{ts_secs}-{pid}-{nanos}.{LOG_EXT}")
 }
 
+/// Outcome of writing a scan summary log.
+pub struct ScanLogWriteOutcome {
+    /// Path of the written `scan-*.jsonl` file.
+    pub path: PathBuf,
+    /// Best-effort log-retirement warnings. The scan record was still written;
+    /// callers should surface these instead of discarding them.
+    pub retirement_warnings: Vec<String>,
+}
+
 /// Write a completed scan summary log (`scan-*.jsonl`) and rotate activity logs.
+///
+/// Log retirement is best effort: a non-retirable old log produces a warning in
+/// [`ScanLogWriteOutcome::retirement_warnings`] but never prevents the scan record
+/// from being written. A failure to write the scan record itself remains fatal.
 pub fn write_scan_log(
     base_dir: &Path,
     record: &serde_json::Value,
-) -> Result<PathBuf, JournalError> {
+) -> Result<ScanLogWriteOutcome, JournalError> {
     let log_dir = resolve_log_dir(base_dir);
     fs::create_dir_all(&log_dir)?;
-    let rotation_failures = rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
-    if !rotation_failures.is_empty() {
-        return Err(JournalError::Io(std::io::Error::other(
-            rotation_failures.join("; "),
-        )));
-    }
+    let retirement_warnings = rotate_logs_for_new_file(&log_dir, MAX_RETAINED_LOGS)?;
     let ts = unix_now_secs();
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -488,7 +496,10 @@ pub fn write_scan_log(
     let mut line = serde_json::to_string(record)?;
     line.push('\n');
     fs::write(&path, line)?;
-    Ok(path)
+    Ok(ScanLogWriteOutcome {
+        path,
+        retirement_warnings,
+    })
 }
 
 fn unix_now_secs() -> u64 {
@@ -698,6 +709,63 @@ mod tests {
         assert!(
             deferred.iter().any(|message| message.contains(bad_name)),
             "retirement failure must be deferred: {deferred:?}"
+        );
+    }
+
+    /// A permanently non-retirable oldest log must not stop a later scan from
+    /// writing its record. The retirement failure is a non-fatal warning and the
+    /// `scan-*.jsonl` record is still written with the unchanged JSONL format.
+    #[test]
+    fn scan_record_written_even_when_log_retirement_fails() {
+        use std::fs::FileTimes;
+
+        let dir = tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let bad_name = "clean-bad-shape.jsonl";
+        let bad = log_dir.join(bad_name);
+        fs::write(&bad, b"x\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&bad)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+            .unwrap();
+        // 30 valid logs + the oldest malformed one: rotating to keep 29 must
+        // attempt (and fail) to retire the malformed file.
+        for i in 0..30 {
+            let name = format!("clean-1700000000-1-{i}.jsonl");
+            let path = log_dir.join(&name);
+            fs::write(&path, b"x\n").unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(100 + i)))
+                .unwrap();
+        }
+
+        let record = serde_json::json!({ "kind": "scan", "event": "scan" });
+        let outcome = write_scan_log(dir.path(), &record).unwrap();
+
+        assert!(
+            outcome
+                .retirement_warnings
+                .iter()
+                .any(|message| message.contains(bad_name)),
+            "retirement failure must be surfaced as a warning: {:?}",
+            outcome.retirement_warnings
+        );
+        assert!(
+            outcome.path.exists(),
+            "scan record must be written despite retirement failure"
+        );
+        let written = fs::read_to_string(&outcome.path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(written.trim_end()).unwrap();
+        assert_eq!(
+            parsed, record,
+            "on-disk scan record format must be unchanged"
         );
     }
 

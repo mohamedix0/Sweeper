@@ -258,31 +258,17 @@ fn is_onedrive_root_segment(segment: &str) -> bool {
     rest.is_empty() || !rest.as_bytes()[0].is_ascii_alphabetic()
 }
 
-/// OneDrive sync-root recognition (Knowledge Base rule `OneDrive*`), restricted to
-/// real sync-root positions.
+/// OneDrive sync-root recognition (Knowledge Base rule `OneDrive*`), independent
+/// of drive or profile location (audit F8).
 ///
-/// A segment must be a genuine OneDrive root folder name (see
-/// [`is_onedrive_root_segment`)) *and* sit in a recognised sync-root position:
-/// - `<drive>:\Users\<name>\OneDrive*` — the classic profile-relative location; or
-/// - a known/moved root at the drive root or one level beneath it
-///   (`<drive>:\OneDrive`, `<drive>:\Data\onedrive-sync`).
-///
-/// A segment merely starting with `ONEDRIVE` at any depth (e.g.
-/// `OneDriveCache\Temp`, `repo\OneDriveCLI\cache`) no longer qualifies, while
-/// genuine roots and everything beneath them stay subtree-protected (audit F8).
+/// Any genuine OneDrive sync-root folder name (see [`is_onedrive_root_segment`])
+/// keeps the path subtree-protected at any depth — e.g. a moved root at
+/// `<drive>:\Data\Cloud\OneDrive\invoice.txt`. Deleting synced placeholders
+/// propagates to the cloud regardless of where the root lives, so no location
+/// exception applies. Benign look-alikes such as `OneDriveCache`/`OneDriveCLI`
+/// are rejected by the name-boundary check and remain unprotected.
 fn is_onedrive_sync_root(path: &CanonicalPath) -> bool {
-    let segs: Vec<&str> = path.segments().collect();
-    segs.iter().enumerate().any(|(idx, seg)| {
-        if !is_onedrive_root_segment(seg) {
-            return false;
-        }
-        // Classic location: <drive>:\Users\<name>\OneDrive*
-        if idx == 2 {
-            return segs[0].eq_ignore_ascii_case("Users");
-        }
-        // Known / moved root at the drive root or one level beneath it.
-        idx <= 1
-    })
+    path.segments().any(is_onedrive_root_segment)
 }
 
 fn matches_ci_any(s: &str, opts: &[&str]) -> bool {
@@ -798,12 +784,35 @@ mod tests {
             ('C', r"repo\OneDriveCLI\cache"),
             ('C', r"Users\Alice\OneDriveCache\cache"),
             ('D', r"Data\OneDriveBackup\cache"),
+            // Deep, arbitrary locations must not turn a benign look-alike into a root.
+            ('D', r"Data\Cloud\OneDriveCache\invoice.txt"),
+            ('C', r"x\y\z\OneDriveCLI\cache"),
         ] {
             let cp = path_on(drive, rest);
             assert_not_onedrive_root(&cp);
             assert!(
                 !is_subtree_protected(&cp),
                 "benign folder must not be subtree-protected: {cp}"
+            );
+        }
+    }
+
+    /// A genuine OneDrive root must stay subtree-protected at ANY location, not
+    /// only under Users\<name> or at the drive root/one level down (finding
+    /// dbId 4626788591). Removing synced placeholders propagates to the cloud.
+    #[test]
+    fn genuine_onedrive_root_at_arbitrary_depth_is_protected() {
+        let path_on = |drive: char, rest: &str| canon(&format!("{drive}:\\{rest}"));
+        for (drive, rest) in [
+            ('D', r"Data\Cloud\OneDrive\invoice.txt"), // OneDrive at index 2, not under Users
+            ('C', r"a\b\c\d\OneDrive - Contoso\leaf"), // deep, arbitrary location
+            ('D', r"x\y\z\onedrive-sync\sub\leaf"),
+        ] {
+            let cp = path_on(drive, rest);
+            assert_onedrive_root_is_protected(&cp);
+            assert!(
+                is_subtree_protected(&cp),
+                "descendant of a genuine root must stay protected: {cp}"
             );
         }
     }
