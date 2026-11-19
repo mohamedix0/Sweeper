@@ -737,6 +737,43 @@ function Test-SelfTestGeigerOmittedOwnedCrates([ref]$ok) {
   Assert-SelfTest ($stringOmitted.Count -eq 1) "string-form owned omission must also be detected" $ok
 }
 
+function New-GeigerMockReport([string[]]$omittedNames) {
+  # One audited owned crate carrying (zero) unsafe metrics plus the requested omissions.
+  $owned = [pscustomobject]@{
+    package  = [pscustomobject]@{ id = [pscustomobject]@{ name = 'sweeper-core' } }
+    unsafety = [pscustomobject]@{ used = [pscustomobject]@{ exprs = [pscustomobject]@{ 'unsafe_' = 0 } } }
+  }
+  $omitted = @($omittedNames | ForEach-Object {
+    [pscustomobject]@{ name = $_; version = '0.1.0'; source = [pscustomobject]@{} }
+  })
+  return [pscustomobject]@{ packages = @($owned); packages_without_metrics = $omitted }
+}
+
+function Test-SelfTestGeigerGateFailure([ref]$ok) {
+  # End-to-end: prove Invoke-CargoGeiger calls Fail when an owned crate is omitted from geiger
+  # metrics, and that a third-party-only omission keeps the gate green. Helpers are mocked in this
+  # scope so no real cargo/manifest access occurs; the real Fail message is asserted via the mock.
+  $mockGeigerReport = $null
+  $failMessages = [System.Collections.Generic.List[string]]::new()
+  function Get-GeigerWorkspaceManifests([string]$root) { return @('mock-manifest') }
+  function Invoke-GeigerForManifest([string]$manifest) { return $mockGeigerReport }
+  function Fail([string]$msg) { $failMessages.Add($msg) }
+
+  $mockGeigerReport = New-GeigerMockReport @('sweeper-knowledge', 'windows-sys')
+  $failMessages.Clear()
+  Invoke-CargoGeiger 'mock-root'
+  Assert-SelfTest ($failMessages.Count -eq 1) "omitted owned crate must make Invoke-CargoGeiger call Fail once" $ok
+  if ($failMessages.Count -ge 1) {
+    Assert-SelfTest ($failMessages[0] -match 'no unsafe metrics for owned workspace crate') "gate failure message must explain omitted owned crate" $ok
+    Assert-SelfTest ($failMessages[0] -match 'sweeper-knowledge') "gate failure message must name the omitted owned crate" $ok
+  }
+
+  $mockGeigerReport = New-GeigerMockReport @('windows-sys')
+  $failMessages.Clear()
+  Invoke-CargoGeiger 'mock-root'
+  Assert-SelfTest ($failMessages.Count -eq 0) "third-party-only omission must not make the gate fail" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -760,6 +797,7 @@ function Invoke-GateASelfTests {
   Test-SelfTestGeigerUnsafeConfinement $okRef
   Test-SelfTestBuildScriptUnsafe $okRef
   Test-SelfTestGeigerOmittedOwnedCrates $okRef
+  Test-SelfTestGeigerGateFailure $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return
