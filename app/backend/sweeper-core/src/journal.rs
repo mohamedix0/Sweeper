@@ -606,15 +606,20 @@ mod tests {
         let dir = tempdir().unwrap();
         let log_dir = dir.path().join("logs");
         fs::create_dir_all(&log_dir).unwrap();
+        let mut seeded = Vec::new();
         for i in 0..35 {
-            let p = log_dir.join(format!("{prefix}-{}-{}-0.jsonl", 1_700_000_000u64 + i, i));
+            let name = format!("{prefix}-{}-{}-0.jsonl", 1_700_000_000u64 + i, i);
+            let p = log_dir.join(&name);
             fs::write(&p, format!("{{\"i\":{i}}}\n")).unwrap();
+            seeded.push(name);
         }
         rotate_logs(&log_dir, 30).unwrap();
-        fs::read_dir(&log_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| is_activity_log_file(&e.path()))
+        // Count the exact filenames seeded, independently of the
+        // is_activity_log_file predicate that rotation itself relies on. If
+        // scan logs were not retired, all 35 seeded files still exist here.
+        seeded
+            .iter()
+            .filter(|name| log_dir.join(name).exists())
             .count()
     }
 

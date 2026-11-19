@@ -10,7 +10,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use sweeper_core::journal::{self, JournalRecord};
 use sweeper_core::paths::CanonicalPath;
@@ -18,17 +18,8 @@ use sweeper_core::remover::{self, CleanOptions, CleanReport, ValidatedSource};
 use sweeper_testkit::{CanaryTree, Sandbox};
 use sweeper_winfs::ReparseTagClass;
 
-fn now() -> SystemTime {
-    SystemTime::now()
-}
-
-fn unix_now() -> u64 {
-    now().duration_since(UNIX_EPOCH).unwrap().as_secs()
-}
-
-fn old_mtime_secs() -> u64 {
-    unix_now().saturating_sub(48 * 3600)
-}
+mod common;
+use common::*;
 
 // Small assertion helpers keep contiguous assertion blocks below CodeScene's
 // threshold of four without dropping any behavioural coverage.
@@ -37,12 +28,6 @@ fn assert_single_deleted_item(report: &CleanReport, id: &str, bytes: u64) {
     assert_eq!(report.items.len(), 1, "partial report must keep one item");
     assert_eq!(report.items[0].id, id);
     assert_eq!(report.bytes_freed, bytes);
-}
-
-fn assert_single_item_status(report: &CleanReport, id: &str, status: &str) {
-    assert_eq!(report.items.len(), 1, "partial report must keep one item");
-    assert_eq!(report.items[0].id, id);
-    assert_eq!(report.items[0].status, status);
 }
 
 fn assert_journal_error_contains(report: &CleanReport, needle: &str, why: &str) {
@@ -82,80 +67,6 @@ fn assert_recent_and_future_skipped(recent: &Path, future: &Path) {
     assert!(future.exists(), "future mtime must be skipped as recent");
 }
 
-fn canonical_str(p: &Path) -> String {
-    CanonicalPath::from_existing_path(&p.to_string_lossy())
-        .unwrap()
-        .as_str()
-        .to_string()
-}
-
-fn path_str_for_item(p: &Path) -> String {
-    if p.exists() {
-        // Link points are valid deletion targets as entries; from_existing_path rejects them.
-        if let Ok(v) = CanonicalPath::from_existing_path(&p.to_string_lossy()) {
-            return v.as_str().to_string();
-        }
-    }
-    CanonicalPath::parse_lexical(&p.to_string_lossy())
-        .unwrap()
-        .as_str()
-        .to_string()
-}
-
-fn make_item(
-    id: &str,
-    target_root: &Path,
-    path: &Path,
-    size: u64,
-    mtime: Option<u64>,
-) -> remover::ValidatedItem {
-    let root = canonical_str(target_root);
-    let p = path_str_for_item(path);
-    remover::validated_item_for_tests(
-        id,
-        "test-target",
-        root,
-        p,
-        size,
-        mtime,
-        ValidatedSource::CustomPath,
-    )
-}
-
-fn clean_one(
-    item: remover::ValidatedItem,
-    preview_estimated_bytes: u64,
-    min_age: Duration,
-    journal_base: &Path,
-) -> remover::CleanReport {
-    remover::execute_clean(
-        vec![item],
-        CleanOptions {
-            preview_estimated_bytes,
-            min_age,
-            now: now(),
-            journal_base_dir: Some(journal_base.to_path_buf()),
-        },
-    )
-    .unwrap()
-}
-
-fn assert_sentinel_intact(sb: &Sandbox) {
-    sb.assert_sentinel_present();
-}
-
-fn write_file(path: &Path, contents: &[u8]) {
-    if let Some(p) = path.parent() {
-        fs::create_dir_all(p).unwrap();
-    }
-    fs::write(path, contents).unwrap();
-}
-
-fn set_filetime(path: &Path, secs: u64) {
-    let ft = sweeper_testkit::filetime_from_unix_secs(secs);
-    sweeper_testkit::set_last_write_time(path, ft).unwrap();
-}
-
 #[test]
 fn gate_d_junction_or_symlink_inside_target_unlinks_entry_and_preserves_canary() {
     let sb = Sandbox::new();
@@ -170,7 +81,7 @@ fn gate_d_junction_or_symlink_inside_target_unlinks_entry_and_preserves_canary()
     assert!(link.exists());
     set_filetime(&link, old_mtime_secs());
 
-    let item = make_item("i1", &target_root, &link, 0, Some(old_mtime_secs()));
+    let item = make_item("i1", &target_root, &link, 0);
     let journal_dir = sb.create_dir("journal").unwrap();
     // Age not the focus of this safety test; link point timestamps can be hard to set portably.
     let report = remover::execute_clean(
@@ -232,13 +143,7 @@ fn gate_d_toctou_swap_directory_for_junction_canaries_survive_1000_iterations() 
             }
         });
 
-        let item = make_item(
-            &format!("i_{iter}"),
-            &target_root,
-            &sub,
-            1024,
-            Some(old_mtime_secs()),
-        );
+        let item = make_item(&format!("i_{iter}"), &target_root, &sub, 1024);
         let _report = remover::execute_clean(
             vec![item],
             CleanOptions {
@@ -322,13 +227,7 @@ fn gate_d_hard_link_to_outside_file_outside_intact() {
     sweeper_testkit::create_hard_link(&link_in_target, &outside_file).unwrap();
     set_filetime(&link_in_target, old_mtime_secs());
 
-    let item = make_item(
-        "i1",
-        &target_root,
-        &link_in_target,
-        10,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("i1", &target_root, &link_in_target, 10);
     let journal_dir = sb.create_dir("journal").unwrap();
     let report = clean_one(item, 1024, Duration::from_secs(3600), &journal_dir);
 
@@ -358,13 +257,7 @@ fn gate_d_locked_file_skipped_remaining_eligible_cleaned() {
         .open(&locked)
         .unwrap();
 
-    let item = make_item(
-        "root",
-        &target_root,
-        &target_root,
-        100,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("root", &target_root, &target_root, 100);
     let journal_dir = sb.create_dir("journal").unwrap();
     let _report = clean_one(item, 1024, Duration::from_secs(3600), &journal_dir);
 
@@ -407,13 +300,7 @@ fn gate_d_readonly_hidden_system_and_age_boundary_and_future_mtime() {
     sweeper_testkit::set_file_attributes(&hidden, 0x2).unwrap();
     sweeper_testkit::set_file_attributes(&system, 0x4).unwrap();
 
-    let item = make_item(
-        "root",
-        &target_root,
-        &target_root,
-        1024,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("root", &target_root, &target_root, 1024);
     let journal_dir = sb.create_dir("journal").unwrap();
     let _report = clean_one(item, 10 * 1024, min_age, &journal_dir);
 
@@ -487,13 +374,7 @@ fn run_long_path_clean(
     target_root: &std::path::Path,
     journal_dir: std::path::PathBuf,
 ) -> sweeper_core::remover::CleanReport {
-    let item = make_item(
-        "root",
-        target_root,
-        target_root,
-        1024 * 1024,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("root", target_root, target_root, 1024 * 1024);
     remover::execute_clean(
         vec![item],
         CleanOptions {
@@ -537,13 +418,7 @@ fn gate_d_volume_mount_point_directory_junction_never_traversed() {
     sweeper_testkit::create_junction(&junction, canary.root()).unwrap();
     assert!(junction.exists());
 
-    let item = make_item(
-        "root",
-        &target_root,
-        &target_root,
-        1024,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("root", &target_root, &target_root, 1024);
     let journal_dir = sb.create_dir("journal").unwrap();
     let report = clean_one(item, 1024 * 1024, Duration::from_secs(3600), &journal_dir);
 
@@ -600,13 +475,7 @@ fn gate_d_reparse_tag_matrix_cloud_and_unknown_skipped() {
         Some(ReparseTagClass::OtherReparse(0xE000_0001)),
     );
 
-    let item = make_item(
-        "root",
-        &target_root,
-        &target_root,
-        1024,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("root", &target_root, &target_root, 1024);
     let journal_dir = sb.create_dir("journal").unwrap();
     let report = clean_one(item, 1024, Duration::from_secs(3600), &journal_dir);
 
@@ -682,13 +551,7 @@ fn gate_d_120_percent_circuit_breaker_aborts_cleanly() {
         write_file(&p, &vec![b'x'; 1024]);
         set_filetime(&p, old_mtime_secs());
     }
-    let item = make_item(
-        "root",
-        &target_root,
-        &target_root,
-        10 * 1024,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("root", &target_root, &target_root, 10 * 1024);
     let journal_dir = sb.create_dir("journal").unwrap();
     let report = remover::execute_clean(
         vec![item],
@@ -775,7 +638,7 @@ fn gate_d_mid_clean_termination_recovery_truncated_journal_and_rotation() {
     let victim = target_root.join("v.txt");
     write_file(&victim, b"bye");
     set_filetime(&victim, old_mtime_secs());
-    let item = make_item("i", &target_root, &victim, 3, Some(old_mtime_secs()));
+    let item = make_item("i", &target_root, &victim, 3);
     let _ = clean_one(item, 1024, Duration::from_secs(3600), &journal_base);
     assert!(!victim.exists());
     assert_sentinel_intact(&sb);
@@ -874,7 +737,7 @@ fn gate_d_age_checks_still_skip_unemptied_or_non_emptied_entries() {
         ("recent_file", &recent_file),
         ("has_recent", &has_recent),
     ] {
-        let item = make_item(id, &target_root, path, 1, Some(old_mtime_secs()));
+        let item = make_item(id, &target_root, path, 1);
         let report = remover::execute_clean(
             vec![item],
             CleanOptions {
@@ -924,13 +787,7 @@ fn gate_d_post_delete_journal_failure_returns_honest_partial_report() {
     let victim = target_root.join("journal-failure.txt");
     write_file(&victim, b"delete me");
     set_filetime(&victim, old_mtime_secs());
-    let item = make_item(
-        "post-delete-journal",
-        &target_root,
-        &victim,
-        9,
-        Some(old_mtime_secs()),
-    );
+    let item = make_item("post-delete-journal", &target_root, &victim, 9);
     let journal_dir = sb.create_dir("journal").unwrap();
 
     // Simulate a journal write failure *after* the handle-based deletion succeeds.
@@ -968,8 +825,8 @@ fn gate_d_persistent_outcome_repair_failure_stops_batch_with_partial_report() {
     write_file(&victim_b, b"keep B");
     set_filetime(&victim_a, old_mtime_secs());
     set_filetime(&victim_b, old_mtime_secs());
-    let item_a = make_item("item-a", &target_root, &victim_a, 8, Some(old_mtime_secs()));
-    let item_b = make_item("item-b", &target_root, &victim_b, 6, Some(old_mtime_secs()));
+    let item_a = make_item("item-a", &target_root, &victim_a, 8);
+    let item_b = make_item("item-b", &target_root, &victim_b, 6);
     let journal_dir = sb.create_dir("journal").unwrap();
 
     // A's outcome write tears a record and its repair fails, so the journal is
@@ -994,12 +851,20 @@ fn gate_d_persistent_outcome_repair_failure_stops_batch_with_partial_report() {
         victim_b.exists(),
         "B must not be deleted once the journal became unusable"
     );
-    assert_single_item_status(&report, "item-a", "deleted");
+
+    let rows: Vec<_> = report
+        .items
+        .iter()
+        .map(|r| (r.id.as_str(), r.status.as_str()))
+        .collect();
+    assert_eq!(rows, vec![("item-a", "deleted"), ("item-b", "Skipped")]);
+
     assert_journal_error_contains(
         &report,
         "repair failed",
         "the persistent outcome/repair error must be surfaced",
     );
+
     assert_journal_error_contains(
         &report,
         "journal unavailable after a failed repair",
@@ -1019,13 +884,7 @@ fn gate_d_directory_child_deletion_partial_result_survives_next_child_intent_fai
     set_filetime(&child_a, old_mtime_secs());
     set_filetime(&child_b, old_mtime_secs());
     // A custom-path root item exercises contents-only directory cleaning.
-    let dir_item = make_item(
-        "dir",
-        &target_root,
-        &target_root,
-        18,
-        Some(old_mtime_secs()),
-    );
+    let dir_item = make_item("dir", &target_root, &target_root, 18);
     let journal_dir = sb.create_dir("journal").unwrap();
 
     // The first child's outcome write tears a record and its repair fails,
