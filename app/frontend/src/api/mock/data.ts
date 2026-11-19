@@ -32,7 +32,14 @@ function toScanItem(item: ScanItemInfo): ScanItemDto {
 }
 
 export function buildTarget(input: { targetId: string; targetName: string; tier: TierDto; risk: RiskDto; description: string; rawItems: Array<Omit<ScanItemDto, 'id' | 'targetId'> & { targetId?: string }> }) {
-  const items = input.rawItems.map((it, i) => ({ ...it, id: input.targetId + '-item-' + String(i + 1), risk: input.risk, targetName: input.targetName, description: input.description })) as ScanItemInfo[];
+  const items: ScanItemInfo[] = input.rawItems.map((it, i) => ({
+    ...it,
+    targetId: it.targetId ?? input.targetId,
+    id: input.targetId + '-item-' + String(i + 1),
+    risk: input.risk,
+    targetName: input.targetName,
+    description: input.description,
+  }));
   const s = itemStats(items);
   const firstPath = items.length ? items[0].path.replace(/\\[^\\]+$/, '') : '';
   const resolvedPaths = firstPath ? [firstPath] : [];

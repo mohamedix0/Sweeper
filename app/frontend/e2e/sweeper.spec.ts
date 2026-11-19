@@ -112,13 +112,13 @@ test.describe('Sweeper Phase 5 (mock sandbox)', () => {
     await page.getByRole('button', { name: 'Add Folder' }).click();
     await expect(page.getByRole('alert')).toContainText(/Custom Path rejected/i);
 
-    await page.getByLabel('Add Custom Path').fill('C:\\Users\\Alice\\CustomCleanup');
+    await page.getByLabel('Add Custom Path').fill('C:\\Temp\\CustomCleanup\\Cache');
     await page.getByRole('button', { name: 'Add Folder' }).click();
     await expect(page.getByText(/Settings saved/i)).toBeVisible();
-    await expect(page.getByText('C:\\Users\\Alice\\CustomCleanup')).toBeVisible();
+    await expect(page.getByText('C:\\Temp\\CustomCleanup\\Cache')).toBeVisible();
 
     await page.getByRole('button', { name: 'Remove' }).click();
-    await expect(page.getByText('C:\\Users\\Alice\\CustomCleanup')).toHaveCount(0);
+    await expect(page.getByText('C:\\Temp\\CustomCleanup\\Cache')).toHaveCount(0);
   });
 
   test('Analyzer Unknown gating and typed confirmation end-to-end', async ({ page }) => {

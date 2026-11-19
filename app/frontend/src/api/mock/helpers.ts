@@ -4,7 +4,7 @@ import type { ScanItemInfo } from './data';
 
 export function err(input: { code: 'unknownItem'; count: string } | { code: Exclude<ContractError['code'], 'unknownItem'>; reason: string }): never {
   if (input.code === 'unknownItem') throw { code: input.code, details: { count: input.count } } satisfies ContractError;
-  throw { code: input.code, details: { reason: input.reason } } as ContractError;
+  throw { code: input.code, details: { reason: input.reason } } satisfies ContractError;
 }
 
 export function enabledTiers(settingsState: Settings, tiers: TierDto[] | null): Set<TierDto> {

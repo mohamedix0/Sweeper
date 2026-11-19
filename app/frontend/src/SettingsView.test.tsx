@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { SettingsView } from './components/SettingsView';
 import { mockController } from './api/mock';
-import type { Settings } from './api/client';
+import type { Settings, SweeperClient } from './api/client';
 
 function setup() {
   return { user: userEvent.setup(), ...render(<App />) };
@@ -58,14 +58,14 @@ describe('Sweeper frontend', () => {
     // Custom path add
     const input = screen.getByLabelText('Add Custom Path');
     await user.clear(input);
-    await user.type(input, 'C:\\Users\\Alice\\CustomCleanup');
+    await user.type(input, 'C:\\Temp\\CustomCleanup\\Cache');
     await user.click(screen.getByRole('button', { name: 'Add Folder' }));
     await screen.findByText(/Settings saved/i);
-    expect(await screen.findByText('C:\\Users\\Alice\\CustomCleanup')).toBeInTheDocument();
+    expect(await screen.findByText('C:\\Temp\\CustomCleanup\\Cache')).toBeInTheDocument();
 
     // Remove
     await user.click(screen.getByRole('button', { name: 'Remove' }));
-    await waitFor(() => expect(screen.queryByText('C:\\Users\\Alice\\CustomCleanup')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('C:\\Temp\\CustomCleanup\\Cache')).not.toBeInTheDocument());
   });
 
   it('SettingsView shows Recycle Bin as Deep Cleanup sub-item and exposes neutral custom path preset', async () => {
@@ -109,17 +109,20 @@ describe('Sweeper frontend', () => {
 
   it('preserves unrelated draft edits while custom path validation is pending', async () => {
     const user = userEvent.setup();
-    const pending = deferred<any>();
-    const client = { ...mockController, validateCustomPath: vi.fn(() => pending.promise), updateSettings: vi.fn(async (s: Settings) => s) } as any;
+    type ValidateResult = Awaited<ReturnType<SweeperClient['validateCustomPath']>>;
+    const pending = deferred<ValidateResult>();
+    const updateSettings = vi.fn(async (s: Settings) => s);
+    const validateCustomPath = vi.fn(() => pending.promise);
+    const client: SweeperClient = { ...mockController, validateCustomPath, updateSettings };
     render(<SettingsView client={client} settings={baseSettings()} elevationStatus={{ isElevated: false }} elevationError={null} onSaved={() => {}} />);
     await user.type(screen.getByLabelText('Add Custom Path'), 'C:\\Temp\\MyCache');
     await user.click(screen.getByRole('button', { name: 'Add Folder' }));
     const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
     await user.clear(minAge);
     await user.type(minAge, '12');
-    pending.resolve({ allowed: true, path: 'C:\\Temp\\MyCache', reason: null });
-    await waitFor(() => expect(client.updateSettings).toHaveBeenCalled());
-    const saved = client.updateSettings.mock.calls[0][0] as Settings;
+    pending.resolve({ allowed: true, path: 'C:\\Temp\\MyCache', reason: 'ok' });
+    await waitFor(() => expect(updateSettings).toHaveBeenCalled());
+    const saved = updateSettings.mock.calls[0][0];
     expect(saved.customPaths).toContain('C:\\Temp\\MyCache');
     expect(saved.minAgeHours).toBe(12);
   });
@@ -127,7 +130,8 @@ describe('Sweeper frontend', () => {
   it('preserves post-submit edits while updateSettings is in flight', async () => {
     const user = userEvent.setup();
     const pending = deferred<Settings>();
-    const client = { ...mockController, updateSettings: vi.fn(() => pending.promise) } as any;
+    const updateSettings = vi.fn(() => pending.promise);
+    const client: SweeperClient = { ...mockController, updateSettings };
     render(<SettingsView client={client} settings={baseSettings()} elevationStatus={{ isElevated: false }} elevationError={null} onSaved={() => {}} />);
     const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
     await user.clear(minAge);
