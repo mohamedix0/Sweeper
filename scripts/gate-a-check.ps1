@@ -279,19 +279,118 @@ function Test-WinfsSafetyComments([string]$root) {
   foreach ($f in $files) { Assert-WinfsFileSafety $f.FullName }
 }
 
-function Invoke-CargoGeiger([string]$root) {
-  Write-Host "GATE-A: running cargo geiger..."
-  Push-Location (Join-Path $root 'app')
-  try {
-    & cargo geiger --locked 2>&1 | Write-Host
-    if ($LASTEXITCODE -ne 0) { Fail "cargo geiger reported issues (exit code $LASTEXITCODE)." }
-  } finally { Pop-Location }
+function Test-IsCIEnvironment([string]$ci, [string]$githubActions) {
+  # GitHub Actions sets both CI and GITHUB_ACTIONS to "true". Accept either so a fork
+  # or a local CI emulator that sets only one of them is still treated as CI.
+  return (($ci -ieq 'true') -or ($githubActions -ieq 'true'))
 }
 
-function Invoke-OptionalCargoGeiger([string]$root) {
+function Get-GeigerWorkspaceManifests([string]$root) {
+  # cargo-geiger requires a concrete package manifest (a virtual workspace manifest is rejected).
+  # Enumerate the workspace members directly from the crate folders so new crates are covered.
+  $roots = @((Join-Path $root 'app\backend'), (Join-Path $root 'app\bridge'))
+  $manifests = @(Get-ChildItem -Path $roots -Recurse -Filter 'Cargo.toml' -File -ErrorAction SilentlyContinue |
+    Where-Object { Test-NotTargetPath $_.FullName } | ForEach-Object { $_.FullName })
+  return @($manifests | Sort-Object -Unique)
+}
+
+function Invoke-GeigerForManifest([string]$manifest) {
+  # Native stderr must not be promoted to a terminating error under $ErrorActionPreference='Stop'.
+  # It is diagnostic noise from cargo; the report itself is on stdout.
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $jsonText = (& cargo geiger --locked --output-format Json --manifest-path $manifest 2>$null | Out-String)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+  if ($exitCode -ne 0) {
+    Fail "cargo geiger failed for $manifest (exit code $exitCode)."
+    return $null
+  }
+  if ([string]::IsNullOrWhiteSpace($jsonText)) {
+    Fail "cargo geiger produced no unsafe-audit output for $manifest."
+    return $null
+  }
+  try { return ($jsonText | ConvertFrom-Json) } catch {
+    Fail "cargo geiger output for $manifest could not be parsed as JSON."
+    return $null
+  }
+}
+
+function Get-GeigerUnsafeAudit($entries) {
+  # Counts unsafe in OUR workspace crates only (third-party unsafe is not owned by this repo).
+  # Both used and unused unsafe are counted; sweeper-winfs is the sole allowed crate (ADR 0003).
+  $result = @{ Ok = $false; Offenders = @(); Summary = @() }
+  $summary = @()
+  $offenders = @()
+  $seen = @{}
+  foreach ($entry in @($entries)) {
+    $name = [string]$entry.package.id.name
+    if (($name -notlike 'sweeper-*') -or $seen.ContainsKey($name)) { continue }
+    $seen[$name] = $true
+    $total = 0
+    foreach ($sectionName in @('used', 'unused')) {
+      $section = $entry.unsafety.PSObject.Properties[$sectionName]
+      if ($null -eq $section) { continue }
+      foreach ($metricName in @('functions', 'exprs', 'item_impls', 'item_traits', 'methods')) {
+        $metric = $section.Value.PSObject.Properties[$metricName]
+        if ($null -eq $metric) { continue }
+        $unsafe = $metric.Value.PSObject.Properties['unsafe_']
+        if ($null -eq $unsafe) { continue }
+        $value = 0
+        if ([int]::TryParse([string]$unsafe.Value, [ref]$value)) { $total += $value }
+      }
+    }
+    $summary += ("{0}={1}" -f $name, $total)
+    if (($name -ne 'sweeper-winfs') -and ($total -gt 0)) {
+      $offenders += "$name (unsafe count $total)"
+    }
+  }
+
+  # An empty/malformed report must never silently pass the gate.
+  if ($seen.Count -eq 0) { return $result }
+  $result.Ok = $true
+  $result.Offenders = $offenders
+  $result.Summary = @($summary | Sort-Object)
+  return $result
+}
+
+function Invoke-CargoGeiger([string]$root) {
+  Write-Host "GATE-A: running cargo geiger unsafe audit for workspace crates..."
+  $manifests = @(Get-GeigerWorkspaceManifests $root)
+  if ($manifests.Count -eq 0) {
+    Fail "No workspace crate manifests found for the cargo geiger audit."
+    return
+  }
+  $entries = @()
+  foreach ($manifest in $manifests) {
+    $report = Invoke-GeigerForManifest $manifest
+    if ($null -eq $report) { return }
+    $entries += @($report.packages)
+  }
+
+  $audit = Get-GeigerUnsafeAudit $entries
+  if (-not $audit.Ok) {
+    Fail "Could not parse cargo geiger output or no sweeper workspace crates were audited; unsafe confinement could not be verified."
+    return
+  }
+  Write-Host "GATE-A: cargo geiger unsafe-audit output (workspace crate unsafe counts):"
+  foreach ($line in $audit.Summary) { Write-Host "  $line" }
+  if ($audit.Offenders.Count -gt 0) {
+    Fail "cargo geiger found unsafe code outside sweeper-winfs: $($audit.Offenders -join ', '). Unsafe must be confined to sweeper-winfs (ADR 0003)."
+  }
+}
+
+function Invoke-RequiredCargoGeiger([string]$root) {
   $geiger = Get-Command cargo-geiger -ErrorAction SilentlyContinue
   if ($null -eq $geiger) {
-    Write-Host "GATE-A: cargo-geiger not found in PATH; skipping cargo geiger check (static checks still enforced)." -ForegroundColor Yellow
+    if (Test-IsCIEnvironment $env:CI $env:GITHUB_ACTIONS) {
+      Fail "cargo-geiger is required in CI but was not found in PATH. Ensure the 'Install cargo-geiger' step in .github/workflows/ci.yml runs before Gate A."
+    } else {
+      Write-Host "GATE-A: cargo-geiger not found in PATH; skipping unsafe-count audit locally (CI enforces it)." -ForegroundColor Yellow
+    }
     return
   }
   Invoke-CargoGeiger $root
@@ -635,7 +734,7 @@ function Invoke-GateAChecks {
   Invoke-CheckDesktopCargoDeps
   Test-ForbidUnsafeCode $repoRoot
   Test-WinfsSafetyComments $repoRoot
-  Invoke-OptionalCargoGeiger $repoRoot
+  Invoke-RequiredCargoGeiger $repoRoot
   Invoke-PrivacyScrubChecks
   if ($failed) { exit 1 }
   Write-Host "GATE-A checks passed." -ForegroundColor Green

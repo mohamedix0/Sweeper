@@ -619,6 +619,57 @@ function Test-SelfTestForeignCheckoutUnderAllowedRoot([ref]$ok) {
   }
 }
 
+function Test-SelfTestCIGeigerRequirement([ref]$ok) {
+  Assert-SelfTest (Test-IsCIEnvironment 'true' '') "CI=true must be detected as CI" $ok
+  Assert-SelfTest (Test-IsCIEnvironment '' 'true') "GITHUB_ACTIONS=true must be detected as CI" $ok
+  Assert-SelfTest (Test-IsCIEnvironment 'TRUE' 'false') "CI detection must be case-insensitive" $ok
+  Assert-SelfTest (-not (Test-IsCIEnvironment 'false' 'false')) "explicit false values must not be detected as CI" $ok
+  Assert-SelfTest (-not (Test-IsCIEnvironment '' '')) "empty environment must not be detected as CI" $ok
+}
+
+function Test-SelfTestGeigerUnsafeConfinement([ref]$ok) {
+  # Synthetic geiger packages: the only offending workspace crate is sweeper-core.
+  # sweeper-winfs (approved) and a third-party dependency (not owned) may contain unsafe.
+  $fixture = @'
+[
+  {
+    "package": { "id": { "name": "sweeper-core" } },
+    "unsafety": {
+      "used": { "exprs": { "unsafe_": 2 }, "functions": { "unsafe_": 0 }, "item_impls": { "unsafe_": 0 }, "item_traits": { "unsafe_": 0 }, "methods": { "unsafe_": 0 } },
+      "unused": { "exprs": { "unsafe_": 0 } }
+    }
+  },
+  {
+    "package": { "id": { "name": "sweeper-winfs" } },
+    "unsafety": {
+      "used": { "exprs": { "unsafe_": 4 } },
+      "unused": { "exprs": { "unsafe_": 0 } }
+    }
+  },
+  {
+    "package": { "id": { "name": "windows-sys" } },
+    "unsafety": {
+      "used": { "exprs": { "unsafe_": 100 } },
+      "unused": { "exprs": { "unsafe_": 0 } }
+    }
+  }
+]
+'@
+  $entries = $fixture | ConvertFrom-Json
+  $audit = Get-GeigerUnsafeAudit $entries
+  Assert-SelfTest $audit.Ok "valid geiger entries must be accepted" $ok
+  Assert-SelfTest ($audit.Offenders.Count -eq 1) "only one offending workspace crate must be reported" $ok
+  if ($audit.Offenders.Count -ge 1) {
+    Assert-SelfTest ($audit.Offenders[0] -match 'sweeper-core') "offender must name sweeper-core" $ok
+  }
+
+  $winfsOnly = $fixture -replace '"unsafe_": 2', '"unsafe_": 0'
+  $safeAudit = Get-GeigerUnsafeAudit ($winfsOnly | ConvertFrom-Json)
+  Assert-SelfTest ($safeAudit.Offenders.Count -eq 0) "winfs-only unsafe must not be reported" $ok
+
+  Assert-SelfTest (-not (Get-GeigerUnsafeAudit @()).Ok) "empty audit must be rejected" $ok
+}
+
 function Invoke-GateASelfTests {
   $ok = $true
   $okRef = [ref]$ok
@@ -638,6 +689,8 @@ function Invoke-GateASelfTests {
   Test-SelfTestEscapedLowercaseContinuations $okRef
   Test-SelfTestEscapedContinuedAndNonAscii $okRef
   Test-SelfTestForeignCheckoutUnderAllowedRoot $okRef
+  Test-SelfTestCIGeigerRequirement $okRef
+  Test-SelfTestGeigerUnsafeConfinement $okRef
   if ($ok) {
     Write-Host "GATE-A self-tests passed." -ForegroundColor Green
     return

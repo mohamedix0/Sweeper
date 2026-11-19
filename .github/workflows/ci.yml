@@ -40,6 +40,12 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --manifest-path app/Cargo.toml --all -- --check
 
+      # Gate A enforces the unsafe-count audit, so the tool must be present before it runs.
+      - name: Install cargo-geiger
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-geiger
+
       - name: Gate A checks
         run: ./scripts/gate-a-check.ps1
 
