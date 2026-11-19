@@ -5,7 +5,7 @@ import { buildPreviewApi } from './previewOps';
 import { buildCleanApi } from './cleanOps';
 import { buildConfigApi, defaultSettings } from './configOps';
 import { buildTestApi } from './testOps';
-import type { AnalyzerSessionState, LogEntry, PreviewState, ScanSessionState } from './types';
+import type { AnalyzerSessionState, LogEntry, PreviewState, RevalidationEntry, ScanSessionState } from './types';
 
 export type { MockCtx } from './types';
 export type MockController = ReturnType<typeof createMockController>;
@@ -24,6 +24,7 @@ export function createMockController(): SweeperClient & {
   invalidateSettings: () => void;
   setElevationStatus: (status: { isElevated: boolean }) => void;
   setRelaunchResult: (result: { launched: boolean } | { error: ContractError }) => void;
+  invalidateItem: (itemId: string, options?: { reason?: string; abort?: boolean }) => void;
   reset: () => void;
 } {
   const init = initialInit();
@@ -40,6 +41,7 @@ export function createMockController(): SweeperClient & {
     analyzerSessions: new Map<string, AnalyzerSessionState>(),
     previews: new Map<string, PreviewState>(),
     logs: defaultSeedLogs({ nowMs: state.nowMs }) as LogEntry[],
+    revalidation: new Map<string, RevalidationEntry>(),
     bumpSettings: () => {
       state.settingsGeneration += 1;
     },

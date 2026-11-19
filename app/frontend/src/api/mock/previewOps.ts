@@ -7,7 +7,15 @@ import type { ScanItemInfo } from './data';
 
 type Confirmations = { typedConfirmation: string | null } | null | undefined;
 type PreviewRequest = { ctx: MockCtx; sessionId: string; itemIds: string[]; confirmations: Confirmations };
-type PreviewBuild = { sessionId: string; storedIds: string[]; count: number; bytes: string; breakdown: PreviewCleanResult['breakdown'] };
+type PreviewBuild = {
+  sessionId: string;
+  storedIds: string[];
+  count: number;
+  bytes: string;
+  breakdown: PreviewCleanResult['breakdown'];
+  skippedCount?: string;
+  skippedReasons?: string[];
+};
 type ScanCandidate = { kind: 'scan'; item: ScanItemInfo };
 type AnalyzerCandidate = { kind: 'analyzer'; node: AnalyzerNodeDto };
 type Candidate = ScanCandidate | AnalyzerCandidate;
@@ -80,12 +88,24 @@ function findCandidate(input: { session: ScanSessionState | AnalyzerSessionState
   return node ? { kind: 'analyzer', node } : null;
 }
 
-type SelectionState = { selected: Candidate[]; unknownCount: number; needsConfirm: boolean };
+type SelectionState = { selected: Candidate[]; unknownCount: number; needsConfirm: boolean; skippedReasons: string[] };
+type SelectionResult = { selected: Candidate[]; skippedReasons: string[] };
+type Revalidation = MockCtx['revalidation'];
 
-function evaluateSelectedCandidate(input: { session: ScanSessionState | AnalyzerSessionState; itemId: string; selection: SelectionState; allowDeleteUnknown: boolean }) {
+function skippedPreviewFields(reasons: string[]): Pick<PreviewBuild, 'skippedCount' | 'skippedReasons'> {
+  if (reasons.length === 0) return {};
+  return { skippedCount: String(reasons.length), skippedReasons: reasons };
+}
+
+function evaluateSelectedCandidate(input: { session: ScanSessionState | AnalyzerSessionState; itemId: string; selection: SelectionState; allowDeleteUnknown: boolean; revalidation: Revalidation }) {
   const candidate = findCandidate({ session: input.session, itemId: input.itemId });
   if (!candidate) {
     input.selection.unknownCount += 1;
+    return;
+  }
+  const invalidation = input.revalidation.get(input.itemId);
+  if (invalidation) {
+    input.selection.skippedReasons.push(invalidation.reason);
     return;
   }
   assertCandidateAllowed({ candidate, allowDeleteUnknown: input.allowDeleteUnknown });
@@ -94,26 +114,28 @@ function evaluateSelectedCandidate(input: { session: ScanSessionState | Analyzer
   input.selection.needsConfirm = true;
 }
 
-function selectCandidates(input: { session: ScanSessionState | AnalyzerSessionState; itemIds: string[]; confirmations: Confirmations; allowDeleteUnknown: boolean }): Candidate[] {
+function selectCandidates(input: { session: ScanSessionState | AnalyzerSessionState; itemIds: string[]; confirmations: Confirmations; allowDeleteUnknown: boolean; revalidation: Revalidation }): SelectionResult {
   ensureSelectionPresent({ itemIds: input.itemIds });
-  const selection: SelectionState = { selected: [], unknownCount: 0, needsConfirm: false };
+  const selection: SelectionState = { selected: [], unknownCount: 0, needsConfirm: false, skippedReasons: [] };
   for (const itemId of input.itemIds) {
-    evaluateSelectedCandidate({ session: input.session, itemId, selection, allowDeleteUnknown: input.allowDeleteUnknown });
+    evaluateSelectedCandidate({ session: input.session, itemId, selection, allowDeleteUnknown: input.allowDeleteUnknown, revalidation: input.revalidation });
   }
   if (selection.unknownCount > 0) err({ code: 'unknownItem', count: String(selection.unknownCount) });
   if (selection.needsConfirm) requireTyped({ confirmations: input.confirmations });
-  return selection.selected;
+  return { selected: selection.selected, skippedReasons: selection.skippedReasons };
 }
 
-function buildSelection(input: { session: ScanSessionState | AnalyzerSessionState; itemIds: string[]; confirmations: Confirmations; allowDeleteUnknown: boolean }): PreviewBuild {
-  const selected = selectCandidates({ session: input.session, itemIds: input.itemIds, confirmations: input.confirmations, allowDeleteUnknown: input.allowDeleteUnknown });
+function buildSelection(input: { session: ScanSessionState | AnalyzerSessionState; itemIds: string[]; confirmations: Confirmations; allowDeleteUnknown: boolean; revalidation: Revalidation }): PreviewBuild {
+  const { selected, skippedReasons } = selectCandidates({ session: input.session, itemIds: input.itemIds, confirmations: input.confirmations, allowDeleteUnknown: input.allowDeleteUnknown, revalidation: input.revalidation });
+  const skipped = skippedPreviewFields(skippedReasons);
   if ('itemsById' in input.session) {
     const items = selected.flatMap((candidate) => (candidate.kind === 'scan' ? [candidate.item] : []));
     const { breakdown, totalBytes } = scanBreakdown(items.map((item) => ({ item })));
-    return { sessionId: input.session.id, storedIds: [...input.itemIds], count: items.length, bytes: totalBytes.toString(), breakdown };
+    const storedIds = selected.map((candidate) => (candidate.kind === 'scan' ? candidate.item.id : candidate.node.id));
+    return { sessionId: input.session.id, storedIds, count: items.length, bytes: totalBytes.toString(), breakdown, ...skipped };
   }
   const nodes = dedupeAnalyzerNodes(selected.flatMap((candidate) => (candidate.kind === 'analyzer' ? [candidate.node] : [])));
-  return { sessionId: input.session.id, storedIds: nodes.map((node) => node.id), count: nodes.length, bytes: sumNodeBytes(nodes), breakdown: analyzerBreakdown(nodes) };
+  return { sessionId: input.session.id, storedIds: nodes.map((node) => node.id), count: nodes.length, bytes: sumNodeBytes(nodes), breakdown: analyzerBreakdown(nodes), ...skipped };
 }
 
 function buildPreview(input: PreviewRequest): PreviewBuild {
@@ -121,11 +143,11 @@ function buildPreview(input: PreviewRequest): PreviewBuild {
   const itemIds = expandPreviewSelectionIds(input.itemIds);
   if (input.ctx.sessions.has(input.sessionId)) {
     const session = getValidSessionState({ ctx: input.ctx, sessions: input.ctx.sessions, sessionId: input.sessionId });
-    return buildSelection({ session, itemIds, confirmations: input.confirmations, allowDeleteUnknown });
+    return buildSelection({ session, itemIds, confirmations: input.confirmations, allowDeleteUnknown, revalidation: input.ctx.revalidation });
   }
   if (input.ctx.analyzerSessions.has(input.sessionId)) {
     const session = getValidSessionState({ ctx: input.ctx, sessions: input.ctx.analyzerSessions, sessionId: input.sessionId });
-    return buildSelection({ session, itemIds, confirmations: input.confirmations, allowDeleteUnknown });
+    return buildSelection({ session, itemIds, confirmations: input.confirmations, allowDeleteUnknown, revalidation: input.ctx.revalidation });
   }
   err({ code: 'sessionInvalid', reason: 'Session not found.' });
 }
@@ -152,6 +174,8 @@ function issuePreview(input: { ctx: MockCtx; build: PreviewBuild }): PreviewClea
     breakdown: input.build.breakdown,
     totalSelectedCount: BigInt(input.build.count).toString(),
     totalSelectedBytes: input.build.bytes,
+    skippedCount: input.build.skippedCount,
+    skippedReasons: input.build.skippedReasons,
   };
 }
 

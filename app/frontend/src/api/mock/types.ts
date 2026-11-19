@@ -29,6 +29,12 @@ export type PreviewState = {
   previewEstimatedBytes: string;
 };
 
+/** Test-controlled re-validation state for one selected item. */
+export type RevalidationEntry = {
+  reason: string;
+  abort: boolean;
+};
+
 export type LogEntry = { id: string; name: string; modifiedUnixSecs: string; sizeBytes: string; content: string };
 
 export type MockCtx = {
@@ -39,5 +45,6 @@ export type MockCtx = {
   analyzerSessions: Map<string, AnalyzerSessionState>;
   previews: Map<string, PreviewState>;
   logs: LogEntry[];
+  revalidation: Map<string, RevalidationEntry>;
   bumpSettings: () => void;
 };

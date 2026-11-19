@@ -16,6 +16,7 @@ export function resetMockCtx(ctx: MockCtx) {
   ctx.mutable.settingsState = defaultSettings();
   ctx.mutable.elevationStatus = { isElevated: false };
   ctx.mutable.relaunchResult = { launched: true };
+  ctx.revalidation.clear();
   ctx.logs.length = 0;
   ctx.logs.push(...defaultSeedLogs({ nowMs: ctx.state.nowMs }));
 }
@@ -33,6 +34,12 @@ export function buildTestApi(ctx: MockCtx) {
     },
     setRelaunchResult(result: { launched: boolean } | { error: ContractError }) {
       ctx.mutable.relaunchResult = 'error' in result ? result : { ...result };
+    },
+    invalidateItem(itemId: string, options?: { reason?: string; abort?: boolean }) {
+      ctx.revalidation.set(itemId, {
+        reason: options?.reason ?? 'failed re-validation',
+        abort: options?.abort ?? false,
+      });
     },
     reset() {
       resetMockCtx(ctx);
