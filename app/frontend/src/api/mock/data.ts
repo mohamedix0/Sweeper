@@ -11,6 +11,17 @@ const SAMPLE_ITEMS_T1: Array<Omit<ScanItemDto, 'id'>> = [
 const SAMPLE_ITEMS_T2: Array<Omit<ScanItemDto, 'id'>> = [
   { targetId: 't-npm', path: 'C:\\Users\\Alice\\AppData\\Local\\npm-cache\\package-cache-tarballs', size: '7340032', mtimeUnixSecs: '1705000000', ageEligible: true },
 ];
+/** Genuine elevated-Risk (Caution) Target from the mock Knowledge Base. */
+const SAMPLE_ITEMS_T2_CAUTION: Array<Omit<ScanItemDto, 'id'>> = [
+  { targetId: 't-caution-vendor-logs', path: 'C:\\ProgramData\\Vendor\\Logs\\app.log', size: '131072', mtimeUnixSecs: '1700000000', ageEligible: true },
+];
+export const CAUTION_VENDOR_LOGS = {
+  targetId: 't-caution-vendor-logs',
+  targetName: 'Vendor Logs',
+  itemId: 't-caution-vendor-logs-item-1',
+  path: SAMPLE_ITEMS_T2_CAUTION[0].path,
+  description: 'Vendor application logs under ProgramData. Regenerated on demand; removal is safe but historical diagnostics are lost.',
+} as const;
 
 function itemStats(items: ScanItemInfo[]) {
   let total = 0n;
@@ -166,6 +177,7 @@ function tierDefs() {
     { tier: 'Tier1' as TierDto, build: () => buildTarget({ targetId: 't-user-temp', targetName: 'User Temp', tier: 'Tier1', risk: 'Safe', description: 'Temporary files regenerated automatically.', rawItems: SAMPLE_ITEMS_T1.slice(0, 2) }) },
     { tier: 'Tier1' as TierDto, build: () => buildTarget({ targetId: 't-crash', targetName: 'Crash Dumps & WER', tier: 'Tier1', risk: 'Safe', description: 'Local crash reports and error dumps.', rawItems: SAMPLE_ITEMS_T1.slice(2) }) },
     { tier: 'Tier2' as TierDto, build: () => buildTarget({ targetId: 't-npm', targetName: 'npm Package Cache', tier: 'Tier2', risk: 'Safe', description: 'Package manager download cache, redownloaded as needed.', rawItems: SAMPLE_ITEMS_T2 }) },
+    { tier: 'Tier2' as TierDto, build: () => buildTarget({ targetId: CAUTION_VENDOR_LOGS.targetId, targetName: CAUTION_VENDOR_LOGS.targetName, tier: 'Tier2', risk: 'Caution', description: CAUTION_VENDOR_LOGS.description, rawItems: SAMPLE_ITEMS_T2_CAUTION }) },
   ];
 }
 

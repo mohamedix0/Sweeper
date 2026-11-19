@@ -1,6 +1,7 @@
 import type { AuditRow, Flags } from './logParseTypes';
-import { bytesToString, isJournalPerItemOutcome, rowSizeText } from './logParseUtils';
+import { bytesToString, countFrom, isJournalPerItemOutcome, rowSizeText } from './logParseUtils';
 import { normalizeOutcome } from './logParseOutcome';
+import { pluralize } from '../../utils/format';
 
 function scanSummaryFieldPresent(o: Record<string, unknown>): boolean {
   if (o.categoriesCount != null) return true;
@@ -282,7 +283,7 @@ export function scanSummaryFallbackRow(scan: Record<string, unknown>): AuditRow 
   return {
     type: 'Category',
     category: 'System Scan',
-    location: `${scanSummaryCategories(scan)} categories`,
+    location: pluralize({ count: countFrom(scanSummaryCategories(scan)), singular: 'category', plural: 'categories' }),
     size: rowSizeText(scanSummaryBytes(scan)),
     outcome: 'Safe',
     outcomeTone: 'eligible',

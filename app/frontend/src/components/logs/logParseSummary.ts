@@ -1,19 +1,15 @@
 import type { BaseSummary, LogMeta, LogSummary } from './logParseTypes';
 import { baseSummary, bytesToString, cleanOutcomeRecords, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
-import { formatBytes } from '../../utils/format';
+import { formatBytes, pluralize } from '../../utils/format';
 
-function deletedText(count: number): string {
-  let suffix = 's';
-  if (count === 1) suffix = '';
-  return `${count} item${suffix}`;
-}
 function formatBytesString(value: string): string { return formatBytes({ bytes: value }); }
 function cleanTitle(args: { freed: string | null; count: number }): string {
+  const items = pluralize({ count: args.count, singular: 'item', plural: 'items' });
   if (args.freed) {
-    if (args.count > 0) return `Cleaned ${args.freed} \u00b7 ${deletedText(args.count)}`;
+    if (args.count > 0) return `Cleaned ${args.freed} \u00b7 ${items}`;
     return `Cleaned ${args.freed}`;
   }
-  if (args.count > 0) return `Cleaned ${deletedText(args.count)}`;
+  if (args.count > 0) return `Cleaned ${items}`;
   return 'Clean Operation';
 }
 function summarizeClean(objs: Record<string, unknown>[], base: BaseSummary): LogSummary {
@@ -45,16 +41,6 @@ function scanFilesCount(o: Record<string, unknown>): number | null {
   if (!Number.isFinite(n)) return null;
   return n;
 }
-function scanFilesWord(files: number): string {
-  if (files === 1) return 'file';
-  return 'files';
-}
-
-function scanCategoryWord(n: number): string {
-  if (n === 1) return 'category';
-  return 'categories';
-}
-
 function positiveCategoryCount(o: Record<string, unknown>): number | null {
   const cats = o.categories_count ?? o.categoriesCount;
   if (cats == null) return null;
@@ -65,7 +51,7 @@ function positiveCategoryCount(o: Record<string, unknown>): number | null {
 
 function scanTitleWithCounts(reclaim: string | null, files: number | null): string | null {
   if (reclaim && files != null) {
-    return `Scan Completed \u00b7 ${reclaim} \u00b7 ${files} ${scanFilesWord(files)}`;
+    return `Scan Completed \u00b7 ${reclaim} \u00b7 ${pluralize({ count: files, singular: 'file', plural: 'files' })}`;
   }
   if (reclaim) return `Scan Completed \u00b7 ${reclaim}`;
   return null;
@@ -77,7 +63,7 @@ function scanTitle(o: Record<string, unknown>): string {
   const withCounts = scanTitleWithCounts(reclaim, files);
   if (withCounts) return withCounts;
   const n = positiveCategoryCount(o);
-  if (n != null) return `Scan Completed \u00b7 ${n} ${scanCategoryWord(n)}`;
+  if (n != null) return `Scan Completed \u00b7 ${pluralize({ count: n, singular: 'category', plural: 'categories' })}`;
   return 'Scan Completed';
 }
 function summarizeScan(objs: Record<string, unknown>[], base: BaseSummary): LogSummary {

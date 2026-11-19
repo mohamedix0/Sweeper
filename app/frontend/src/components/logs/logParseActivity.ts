@@ -1,12 +1,8 @@
 import type { ActivitySummary, AuditRow, Flags } from './logParseTypes';
-import { bytesToString, cleanOutcomeRecords, detectCleanScan, formatMaybeBytes, isScanSummaryRecord, modeFor, parseLogObjects } from './logParseUtils';
+import { bytesToString, cleanOutcomeRecords, countFrom, detectCleanScan, formatMaybeBytes, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
 import { parseAuditRows } from './logParseRows';
+import { pluralize } from '../../utils/format';
 
-function pluralize(args: { n: number; one: string; many: string }): string {
-  let word = args.many;
-  if (args.n === 1) word = args.one;
-  return `${args.n} ${word}`;
-}
 function emptyActivity(): ActivitySummary {
   return { primaryLabel: 'Space Reclaimed', primaryValue: '—', eligible: '—', skipped: '—', outcome: '—', mode: null };
 }
@@ -44,8 +40,8 @@ function cleanActivity(objs: Record<string, unknown>[]): ActivitySummary {
   return {
     primaryLabel: 'Space Reclaimed',
     primaryValue: formatMaybeBytes(freed.toString()),
-    eligible: `${pluralize({ n: deletedCount, one: 'file', many: 'files' })} · ${pluralize({ n: cleanedCats.size, one: 'category', many: 'categories' })}`,
-    skipped: `${pluralize({ n: skippedCount, one: 'file', many: 'files' })} · ${pluralize({ n: skippedCatsCount, one: 'category', many: 'categories' })}`,
+    eligible: `${pluralize({ count: deletedCount, singular: 'file', plural: 'files' })} · ${pluralize({ count: cleanedCats.size, singular: 'category', plural: 'categories' })}`,
+    skipped: `${pluralize({ count: skippedCount, singular: 'file', plural: 'files' })} · ${pluralize({ count: skippedCatsCount, singular: 'category', plural: 'categories' })}`,
     outcome: 'Completed',
     mode: 'Permanent Delete',
   };
@@ -62,17 +58,14 @@ function scanActivity(objs: Record<string, unknown>[]): ActivitySummary {
     ?? rev.find((o) => String(o.record ?? '') === 'outcome')
     ?? {};
   const reclaim = scan.total_reclaimable_bytes ?? scan.eligible_bytes ?? scan.totalBytes ?? '0';
-  const filesRaw = scan.total_eligible_files ?? scan.eligible_count ?? '0';
-  const skippedRaw = scan.total_skipped_files ?? '0';
-  const catsRaw = scan.categories_count ?? scan.categoriesCount ?? (Array.isArray(scan.targets) ? scan.targets.length : 0);
-  const files = Number(bytesToString(filesRaw) ?? '0') || 0;
-  const skipped = Number(bytesToString(skippedRaw) ?? '0') || 0;
-  const cats = Number(bytesToString(catsRaw) ?? String(catsRaw ?? 0)) || 0;
+  const files = countFrom(scan.total_eligible_files ?? scan.eligible_count);
+  const skipped = countFrom(scan.total_skipped_files);
+  const cats = countFrom(scan.categories_count ?? scan.categoriesCount ?? (Array.isArray(scan.targets) ? scan.targets.length : 0));
   return {
     primaryLabel: 'Space Found',
     primaryValue: formatMaybeBytes(reclaim),
-    eligible: `${pluralize({ n: files, one: 'file', many: 'files' })} · ${pluralize({ n: cats, one: 'category', many: 'categories' })}`,
-    skipped: `${pluralize({ n: skipped, one: 'file', many: 'files' })} · 0 categories`,
+    eligible: `${pluralize({ count: files, singular: 'file', plural: 'files' })} · ${pluralize({ count: cats, singular: 'category', plural: 'categories' })}`,
+    skipped: `${pluralize({ count: skipped, singular: 'file', plural: 'files' })} · ${pluralize({ count: 0, singular: 'category', plural: 'categories' })}`,
     outcome: 'Completed',
     mode: null,
   };

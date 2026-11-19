@@ -1,19 +1,22 @@
 import { expect, test, type Page } from '@playwright/test';
-import { installPreviewCalloutMock } from './previewCalloutMock';
+import { installPreviewSkippedMock } from './previewCalloutMock';
 
 /**
  * Mock-backend E2E coverage for the Preview per-item Risk callout (#44/#42).
- * Paths use the repository's canonical fictional user (Alice); no real Clean
- * is performed and the standard Edge channel comes from playwright.config.ts.
+ *
+ * The elevated item is a genuine Caution Risk Target from the mock Knowledge
+ * Base (`CAUTION_VENDOR_LOGS`), so its identity, Risk and explanation all come
+ * from the real mock backend with no `explainItem` override. Paths use the
+ * repository's canonical fictional user (Alice / ProgramData); no real Clean is
+ * performed and the standard Edge channel comes from playwright.config.ts.
  */
 const CALLOUT_GROUP = 'Elevated risk in this selection';
-const CAUTION_IDENTITY = 'C:\\Users\\Alice\\AppData\\Local\\npm-cache\\package-cache-tarballs';
-const CAUTION_KB_TITLE = 'Vendor Logs';
-const CUSTOM_PATH_IDENTITY = 'C:\\Users\\Alice\\CustomCleanup\\old.bin';
-const CAUTION_DESCRIPTION = 'Knowledge Base: vendor application log, regenerated on demand.';
+const CAUTION_GROUP_LABEL = 'Vendor Logs';
+const CAUTION_IDENTITY = 'C:\\ProgramData\\Vendor\\Logs\\app.log';
+const CAUTION_ITEM_LABEL = `Select ${CAUTION_IDENTITY}`;
+const CAUTION_DESCRIPTION = 'Vendor application logs under ProgramData. Regenerated on demand; removal is safe but historical diagnostics are lost.';
 const CAUTION_CONSEQUENCE = 'Removing this item is permanent and it may be slow or costly to restore.';
-const NPM_ITEM_ID = 't-npm-item-1';
-const NPM_ITEM_LABEL = 'Select C:\\Users\\Alice\\AppData\\Local\\npm-cache\\package-cache-tarballs';
+const CUSTOM_PATH_IDENTITY = 'C:\\Users\\Alice\\CustomCleanup\\old.bin';
 const SKIPPED_REASON = 'Recent file (locked) — Skipped';
 
 async function runScan(page: Page): Promise<void> {
@@ -22,30 +25,27 @@ async function runScan(page: Page): Promise<void> {
   await expect(page.getByText('Ready to scan')).toHaveCount(0);
 }
 
-/** Unselect the auto-selected Safe items, then select only the npm-cache item. */
-async function selectOnlyNpmItem(page: Page): Promise<void> {
+/** Unselect the auto-selected Safe items, then select only the genuine Caution item. */
+async function selectOnlyCautionItem(page: Page): Promise<void> {
   const unselectAll = page.getByRole('button', { name: 'Unselect all' });
   if (await unselectAll.isVisible().catch(() => false)) await unselectAll.click();
 
-  const group = page.getByRole('article').filter({ hasText: 'npm Package Cache' }).first();
-  const expand = group.getByRole('button', { name: 'Expand npm Package Cache' });
+  const group = page.getByRole('article').filter({ hasText: CAUTION_GROUP_LABEL }).first();
+  const expand = group.getByRole('button', { name: `Expand ${CAUTION_GROUP_LABEL}` });
   if (await expand.isVisible().catch(() => false)) await expand.click();
-  await group.getByLabel(NPM_ITEM_LABEL).check();
+  await group.getByLabel(CAUTION_ITEM_LABEL).check();
 }
 
 test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
-  test('Caution item shows a callout with accessible role and identity, beside the breakdown and skipped notice', async ({ page }) => {
+  test('genuine Caution item shows a callout with its Knowledge Base explanation, beside the breakdown and skipped notice', async ({ page }) => {
     await page.goto('/');
-    await installPreviewCalloutMock(page, {
-      elevatedItemId: NPM_ITEM_ID,
-      elevatedTitle: CAUTION_KB_TITLE,
-      elevatedDescription: CAUTION_DESCRIPTION,
+    await installPreviewSkippedMock(page, {
       skippedCount: '1',
       skippedReasons: [SKIPPED_REASON],
     });
 
     await runScan(page);
-    await selectOnlyNpmItem(page);
+    await selectOnlyCautionItem(page);
     await expect(page.getByRole('button', { name: 'Review & Clean' })).toBeEnabled();
     await page.getByRole('button', { name: 'Review & Clean' }).click();
 
@@ -124,14 +124,9 @@ test.describe('Sweeper Preview Risk callouts (mock sandbox)', () => {
 
   test('cancelling a Preview that has callouts returns to the normal state', async ({ page }) => {
     await page.goto('/');
-    await installPreviewCalloutMock(page, {
-      elevatedItemId: NPM_ITEM_ID,
-      elevatedTitle: CAUTION_KB_TITLE,
-      elevatedDescription: CAUTION_DESCRIPTION,
-    });
 
     await runScan(page);
-    await selectOnlyNpmItem(page);
+    await selectOnlyCautionItem(page);
     await page.getByRole('button', { name: 'Review & Clean' }).click();
 
     const group = page.getByRole('group', { name: CALLOUT_GROUP });

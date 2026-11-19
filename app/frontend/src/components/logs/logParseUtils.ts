@@ -126,6 +126,13 @@ export function bytesToString(raw: unknown): string | null {
   }
   return null;
 }
+/** Coerce a log count field to a non-negative integer for pluralization. */
+export function countFrom(raw: unknown): number {
+  const text = bytesToString(raw);
+  if (text == null) return 0;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : 0;
+}
 export function formatMaybeBytes(raw: unknown): string {
   const s = bytesToString(raw);
   if (s != null) return formatBytes({ bytes: s });
