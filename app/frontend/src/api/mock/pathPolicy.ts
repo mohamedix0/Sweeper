@@ -73,6 +73,23 @@ const eq = (a: PathSegment, b: PathSegment): boolean => a.folded === b.folded;
 const equalsAny = (value: PathSegment, options: readonly PathSegment[]): boolean => options.some((o) => eq(value, o));
 const hasSegment = (segments: readonly PathSegment[], name: PathSegment): boolean => segments.some((s) => eq(s, name));
 
+/** Raw, separator-normalized path text split into drive prefix and post-drive remainder. */
+type RawPath = { readonly replaced: string; readonly rest: string };
+
+/** Backend `lexical_parse` syntax checks that must run before normalization. */
+function hasInvalidRawSyntax({ replaced, rest }: RawPath): boolean {
+  // Empty components are EmptySegment errors (`C:\a\\b`, `C:\a\b\`). A bare
+  // drive root (`C:\`) is the only empty "rest" and is left to the depth guard.
+  if (rest !== '' && rest.split('\\').some((s) => s === '')) return true;
+  // Any ':' outside the drive position is an Alternate Data Stream.
+  return replaced.indexOf(':', 2) !== -1;
+}
+
+/** Backend `validate_segment` rejects '.', '..', trailing dots and spaces. */
+function hasInvalidSegment(segments: readonly PathSegment[]): boolean {
+  return segments.some((s) => s.text === '.' || s.text === '..' || /[. ]$/.test(s.text));
+}
+
 /** Parse a Windows path into drive prefix + segments, or null for invalid syntax. */
 function parseMockPath(input: string): ParsedMockPath | null {
   if (!/^[A-Za-z]:[\\/]/.test(input)) return null;
@@ -81,17 +98,10 @@ function parseMockPath(input: string): ParsedMockPath | null {
   const replaced = input.replace(/\//g, '\\');
   const drive = replaced.slice(0, 2);
   const rest = replaced.slice(3);
-  // Backend `lexical_parse` rejects empty components before normalization:
-  // `C:\a\\b` and `C:\a\b\` are EmptySegment errors. A bare drive root (`C:\`)
-  // is the only empty "rest" and is left to the depth guard, as before.
-  if (rest !== '' && rest.split('\\').some((s) => s === '')) return null;
-  // Backend rejects any ':' outside the drive position (Alternate Data Stream).
-  if (replaced.indexOf(':', 2) !== -1) return null;
+  if (hasInvalidRawSyntax({ replaced, rest })) return null;
   const parts = rest === '' ? [] : rest.split('\\');
   const segments: readonly PathSegment[] = parts.map(seg);
-  if (segments.some((s) => s.text === '.' || s.text === '..')) return null;
-  // Backend `validate_segment` rejects trailing dots and spaces per segment.
-  if (segments.some((s) => /[. ]$/.test(s.text))) return null;
+  if (hasInvalidSegment(segments)) return null;
   const normalized = segments.length
     ? [drive.toUpperCase(), ...segments.map((s) => s.text)].join('\\')
     : `${drive.toUpperCase()}\\`;
