@@ -3,6 +3,7 @@
 mod analyzer;
 mod clean;
 mod elevation;
+mod log_ancestors;
 mod scan;
 mod settings_logs;
 mod shared;
