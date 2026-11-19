@@ -105,7 +105,9 @@ export type MockController = SweeperClient & {
 };
 
 export function createMockController(): MockController {
-  return createMockControllerImpl() as unknown as MockController;
+  // The impl returns the same SweeperClient + test-control shape as MockController;
+  // letting TypeScript verify it catches any contract drift without an unsafe cast.
+  return createMockControllerImpl();
 }
 
 export const mockController = createMockController();

@@ -23,7 +23,7 @@ export function makeScanItem(options: { id: string; path: string; size?: string;
     size: options.size ?? '100',
     mtimeUnixSecs: options.mtimeUnixSecs ?? '1700000000',
     ageEligible: options.ageEligible ?? true,
-  } as ScanItemDto;
+  };
 }
 
 export function makeScanTarget(options: {
@@ -52,7 +52,7 @@ export function makeScanTarget(options: {
     eligibleCount: String(eligibleItems.length),
     skippedCount: String(options.items.length - eligibleItems.length),
     items: options.items,
-  } as TargetScanResultDto;
+  };
 }
 
 export function makeScanResults(options: { sessionId?: string; minAgeHours?: number; targets: TargetScanResultDto[] }): ScanResults {
@@ -99,7 +99,7 @@ export function makeAnalyzerNode(options: {
     displayOnly: options.displayOnly ?? false,
     selectable: options.selectable ?? false,
     children: options.children ?? [],
-  } as AnalyzerNodeDto;
+  };
 }
 
 export function makeAnalyzerResult(options: { sessionId?: string; rootPath?: string; root: AnalyzerNodeDto; totalBytes?: string; totalItems?: string }): StartAnalyzerResult {

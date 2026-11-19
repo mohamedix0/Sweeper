@@ -1,5 +1,7 @@
 import type { RiskDto, Settings } from '../client';
 import { err } from './helpers';
+import { evaluateCustomPath } from './pathPolicy';
+import type { CustomPathVerdict } from './pathPolicy';
 import type { MockCtx } from './types';
 
 export function defaultSettings(): Settings {
@@ -19,15 +21,12 @@ function cloneSettings(settings: Settings): Settings {
   return { ...settings, customPaths: [...settings.customPaths] };
 }
 
-function validatePath(input: { path: string }) {
+function validatePath(input: { path: string }): CustomPathVerdict {
   const trimmed = input.path.trim();
-  if (!trimmed) return { path: trimmed, allowed: false, reason: 'Path is required.' };
-  if (!/^[A-Za-z]:\\/.test(trimmed)) return { path: trimmed, allowed: false, reason: 'Path must be absolute.' };
-  const lower = trimmed.toLowerCase();
-  if (lower.startsWith('c:\\windows')) return { path: trimmed, allowed: false, reason: 'Protected Path (no fallback to parent).' };
-  if (lower.includes('\\missing')) return { path: trimmed, allowed: false, reason: 'Path does not exist (no fallback to parent).' };
-  if ((trimmed.match(/\\/g) || []).length < 2) return { path: trimmed, allowed: false, reason: 'Path must have depth >= 3 segments.' };
-  return { path: trimmed, allowed: true, reason: 'ok' };
+  // Mirrors the real `validate_custom_path` command: empty input is a typed
+  // InvalidInput error, not a denied verdict.
+  if (!trimmed) err({ code: 'invalidInput', reason: 'path is required' });
+  return evaluateCustomPath(trimmed);
 }
 
 function normalizeUpdatedSettings(settings: Settings): Settings {
