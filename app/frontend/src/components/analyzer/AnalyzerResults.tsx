@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import type { ExecuteCleanResponse, Settings, StartAnalyzerResult, SweeperClient } from '../../api/client';
@@ -77,28 +77,24 @@ function focusDomElement(id: string | null) {
   document.getElementById(id)?.focus();
 }
 
-function rowIdForMovementKey(ids: string[], index: number, key: string): string | null {
-  switch (key) {
-    case 'ArrowDown': return ids[Math.min(index + 1, ids.length - 1)];
-    case 'ArrowUp': return ids[Math.max(index - 1, 0)];
-    case 'Home': return ids[0];
-    case 'End': return ids[ids.length - 1];
-    default: return null;
-  }
+function rowIdForArrowKey(ids: string[], index: number, key: string): string | null {
+  if (key === 'ArrowDown') return ids[Math.min(index + 1, ids.length - 1)];
+  if (key === 'ArrowUp') return ids[Math.max(index - 1, 0)];
+  return null;
 }
 
 export function AnalyzerResults(props: ResultsProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const pendingShowAllFocusRef = useRef<string | null>(null);
+  const rowIds = useMemo(() => props.rows.map((row) => row.node.id), [props.rows]);
 
   useEffect(() => {
-    const ids = props.rows.map((row) => row.node.id);
-    if (ids.length === 0) {
+    if (rowIds.length === 0) {
       if (activeId !== null) setActiveId(null);
       return;
     }
-    if (activeId === null || !ids.includes(activeId)) setActiveId(ids[0]);
-  }, [props.rows, activeId]);
+    if (activeId === null || !rowIds.includes(activeId)) setActiveId(rowIds[0]);
+  }, [rowIds, activeId]);
 
   useLayoutEffect(() => {
     const parentId = pendingShowAllFocusRef.current;
@@ -113,32 +109,17 @@ export function AnalyzerResults(props: ResultsProps) {
   }
 
   function onTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    const target = e.target as HTMLElement;
-    if (target !== e.currentTarget && target.getAttribute('role') !== 'treeitem') return;
-    if (props.rows.length === 0) return;
-    const ids = props.rows.map((row) => row.node.id);
-    const currentId = activeId && ids.includes(activeId) ? activeId : ids[0];
-    const index = ids.indexOf(currentId);
-    const node = props.rows[index].node;
-
-    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-      const expandable = node.isDir && (node.children?.length ?? 0) > 0;
-      const shouldToggle = e.key === 'ArrowRight' ? expandable && !props.expanded.has(node.id) : expandable && props.expanded.has(node.id);
-      if (shouldToggle) {
-        e.preventDefault();
-        props.onToggleExpand(node);
-      }
-      return;
-    }
-
-    const nextId = rowIdForMovementKey(ids, index, e.key);
+    // DOM focus stays on the role=tree container; only its own key events move
+    // the active descendant. Key events from inner buttons are left alone.
+    if (e.target !== e.currentTarget || rowIds.length === 0) return;
+    const currentId = activeId && rowIds.includes(activeId) ? activeId : rowIds[0];
+    const nextId = rowIdForArrowKey(rowIds, rowIds.indexOf(currentId), e.key);
     if (!nextId) return;
     e.preventDefault();
     setActiveId(nextId);
-    focusDomElement(treeItemDomId(nextId));
   }
 
-  const activeDescendant = activeId && props.rows.some((row) => row.node.id === activeId) ? treeItemDomId(activeId) : undefined;
+  const activeDescendant = activeId && rowIds.includes(activeId) ? treeItemDomId(activeId) : undefined;
   const indeterminate = props.visibleSelectedCount > 0 && props.visibleSelectedCount < props.visibleSelectableCount;
   function checkboxLabel(): string {
     if (props.allVisibleSelectableSelected) return 'Deselect all visible selectable nodes';
@@ -162,8 +143,8 @@ export function AnalyzerResults(props: ResultsProps) {
             <span className="analyzer-col-h-share" aria-hidden="true">Share</span><span className="analyzer-col-h-items" aria-hidden="true">Files</span><span className="analyzer-col-h-size" aria-hidden="true">Size</span><span className="analyzer-col-h-status" aria-hidden="true">Status</span>
           </div>
           <div className="pane-body flush">
-            <div className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" aria-activedescendant={activeDescendant} tabIndex={-1} onKeyDown={onTreeKeyDown}>
-              {props.rows.map((row) => <AnalyzerTreeRow key={row.node.id} row={row} rootTotalBytes={props.rootTotalBytes} expanded={props.expanded} selectedIds={props.selectedIds} inspectedId={props.inspectedId} allowDeleteUnknown={props.allowDeleteUnknown} cleaning={props.cleaning} active={row.node.id === activeId} onToggleExpand={props.onToggleExpand} onToggleSelect={props.onToggleSelect} onInspect={props.onInspect} onShowMore={handleShowMore} onDrill={props.onDrill} />)}
+            <div className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" aria-activedescendant={activeDescendant} tabIndex={0} onKeyDown={onTreeKeyDown}>
+              {props.rows.map((row) => <AnalyzerTreeRow key={row.node.id} row={row} rootTotalBytes={props.rootTotalBytes} expanded={props.expanded} selectedIds={props.selectedIds} inspectedId={props.inspectedId} allowDeleteUnknown={props.allowDeleteUnknown} cleaning={props.cleaning} onToggleExpand={props.onToggleExpand} onToggleSelect={props.onToggleSelect} onInspect={props.onInspect} onShowMore={handleShowMore} onDrill={props.onDrill} />)}
               {props.rows.length === 0 && <div className="muted analyzer-empty">No nodes.</div>}
             </div>
           </div>

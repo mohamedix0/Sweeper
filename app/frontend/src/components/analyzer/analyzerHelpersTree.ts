@@ -2,19 +2,9 @@ import type { AnalyzerNodeDto } from '../../contract/bindings';
 import type { AnalyzerStatusFilter, FlatAnalyzerRow } from './analyzerHelpersTypes';
 import { analyzerStatusKey } from './analyzerHelpersStatus';
 import { normalizedAnalyzerPath } from './analyzerHelpersUtils';
+import { fewerRowId, moreRowId } from './analyzerTreeA11y';
 
 export const ANALYZER_CHILD_CAP = 25;
-const MORE_PREFIX = '__more__:';
-const FEWER_PREFIX = '__fewer__:';
-export function isMoreRowId(id: string): boolean { return id.startsWith(MORE_PREFIX); }
-export function moreRowParentId(id: string): string { return id.slice(MORE_PREFIX.length); }
-export function isFewerRowId(id: string): boolean { return id.startsWith(FEWER_PREFIX); }
-function fewerRowParentId(id: string): string { return id.slice(FEWER_PREFIX.length); }
-export function showAllRowParentId(id: string): string {
-  if (isMoreRowId(id)) return moreRowParentId(id);
-  if (isFewerRowId(id)) return fewerRowParentId(id);
-  return id;
-}
 
 function cmpSizeDesc(args: { a: AnalyzerNodeDto; b: AnalyzerNodeDto }): number {
   const sa = BigInt(args.a.sizeBytes || '0');
@@ -50,12 +40,12 @@ function showAllRow(args: { id: string; name: string }): AnalyzerNodeDto {
 }
 function moreRow(args: { parent: AnalyzerNodeDto }): AnalyzerNodeDto {
   return showAllRow({
-    id: `${MORE_PREFIX}${args.parent.id}`,
+    id: moreRowId(args.parent.id),
     name: `Showing top ${ANALYZER_CHILD_CAP} of ${args.parent.children.length} files · Show more`,
   });
 }
 function fewerRow(args: { parent: AnalyzerNodeDto }): AnalyzerNodeDto {
-  return showAllRow({ id: `${FEWER_PREFIX}${args.parent.id}`, name: 'Show fewer files' });
+  return showAllRow({ id: fewerRowId(args.parent.id), name: 'Show fewer files' });
 }
 function showAllTailRow(args: { parent: AnalyzerNodeDto; showAll: boolean; hidden: number; depth: number }): FlatAnalyzerRow | null {
   if (!args.showAll) return args.hidden > 0 ? { node: moreRow({ parent: args.parent }), depth: args.depth, siblingMax: 1n } : null;

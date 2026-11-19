@@ -60,31 +60,54 @@ async function openTree(result: StartAnalyzerResult) {
 }
 
 describe('Analyzer tree accessibility', () => {
-  it('exposes aria-activedescendant and moves DOM focus with the active tree item on arrow/Home/End keys', async () => {
+  it('keeps DOM focus on role=tree and tracks the active treeitem via aria-activedescendant on arrow keys', async () => {
     const { user, tree, rows } = await openTree(threeFileResult());
     expect(rows).toHaveLength(3);
 
-    const activeDescendant = tree.getAttribute('aria-activedescendant');
-    expect(activeDescendant).toBeTruthy();
-    expect(document.getElementById(activeDescendant ?? '')).toBe(rows[0]);
-    expect(rows.filter((r) => r.getAttribute('tabindex') === '0')).toHaveLength(1);
-    expect(rows[0].getAttribute('tabindex')).toBe('0');
-    expect(rows[1].getAttribute('tabindex')).toBe('-1');
+    // Single, coherent focus model: the role=tree container owns DOM focus and
+    // is the only tab stop; treeitems are never separately focused.
+    expect(tree.getAttribute('tabindex')).toBe('0');
+    expect(rows.every((row) => !row.hasAttribute('tabindex'))).toBe(true);
 
-    rows[0].focus();
+    tree.focus();
+    expect(document.activeElement).toBe(tree);
+
+    // aria-activedescendant resolves to a real treeitem, not just any node.
+    const activeItem = (): HTMLElement | null => {
+      const id = tree.getAttribute('aria-activedescendant');
+      const element = document.getElementById(id ?? '');
+      expect(element?.getAttribute('role')).toBe('treeitem');
+      return element;
+    };
+    expect(activeItem()).toBe(rows[0]);
+
     await user.keyboard('{ArrowDown}');
-    expect(document.activeElement).toBe(rows[1]);
-    expect(document.getElementById(tree.getAttribute('aria-activedescendant') ?? '')).toBe(rows[1]);
+    expect(document.activeElement).toBe(tree);
+    expect(activeItem()).toBe(rows[1]);
 
-    await user.keyboard('{End}');
-    expect(document.activeElement).toBe(rows[2]);
-    expect(document.getElementById(tree.getAttribute('aria-activedescendant') ?? '')).toBe(rows[2]);
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(tree);
+    expect(activeItem()).toBe(rows[2]);
 
-    await user.keyboard('{Home}');
-    expect(document.activeElement).toBe(rows[0]);
+    // Navigation clamps at the ends and never moves DOM focus off the tree.
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(tree);
+    expect(activeItem()).toBe(rows[2]);
 
     await user.keyboard('{ArrowUp}');
-    expect(document.activeElement).toBe(rows[0]);
+    expect(document.activeElement).toBe(tree);
+    expect(activeItem()).toBe(rows[1]);
+
+    await user.keyboard('{ArrowUp}');
+    expect(activeItem()).toBe(rows[0]);
+
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(tree);
+    expect(activeItem()).toBe(rows[0]);
+
+    // Focus and selection semantics stay consistent: the active treeitem is
+    // identified only by aria-activedescendant, never by a tabIndex on a row.
+    expect(rows.filter((row) => row.getAttribute('tabindex') === '0')).toHaveLength(0);
   });
 
   it('restores focus to the replacement Show fewer / Show more control after toggling', async () => {
