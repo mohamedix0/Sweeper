@@ -600,40 +600,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rotation_keeps_last_n_logs() {
+    /// Seed 35 activity logs of the given `prefix`, rotate to 30, and return
+    /// how many activity log files survived. Shared by the rotation regressions.
+    fn count_logs_after_rotating(prefix: &str) -> usize {
         let dir = tempdir().unwrap();
         let log_dir = dir.path().join("logs");
         fs::create_dir_all(&log_dir).unwrap();
         for i in 0..35 {
-            let p = log_dir.join(format!("clean-{}-{}-0.jsonl", 1_700_000_000u64 + i, i));
+            let p = log_dir.join(format!("{prefix}-{}-{}-0.jsonl", 1_700_000_000u64 + i, i));
             fs::write(&p, format!("{{\"i\":{i}}}\n")).unwrap();
         }
         rotate_logs(&log_dir, 30).unwrap();
-        let count = fs::read_dir(&log_dir)
+        fs::read_dir(&log_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| is_activity_log_file(&e.path()))
-            .count();
+            .count()
+    }
+
+    #[test]
+    fn rotation_keeps_last_n_logs() {
+        let count = count_logs_after_rotating("clean");
         assert!(count <= 30, "count={count}");
     }
 
     #[test]
     fn rotation_retires_scan_logs_as_well_as_clean_logs() {
-        let dir = tempdir().unwrap();
-        let log_dir = dir.path().join("logs");
-        fs::create_dir_all(&log_dir).unwrap();
         // Scan logs must be eligible for retirement, otherwise they grow without bound.
-        for i in 0..35 {
-            let p = log_dir.join(format!("scan-{}-{}-0.jsonl", 1_700_000_000u64 + i, i));
-            fs::write(&p, format!("{{\"i\":{i}}}\n")).unwrap();
-        }
-        rotate_logs(&log_dir, 30).unwrap();
-        let count = fs::read_dir(&log_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| is_activity_log_file(&e.path()))
-            .count();
+        let count = count_logs_after_rotating("scan");
         assert!(count <= 30, "scan logs were not retired: count={count}");
     }
 
