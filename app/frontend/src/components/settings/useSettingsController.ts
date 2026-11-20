@@ -45,6 +45,21 @@ function mergePreservingEdits(input: { saved: Settings; submitted: Settings; aft
   };
 }
 
+// Reconcile parent feedback skipped while saves were pending. `lastSubmitted`
+// is the exact value the controller last submitted; `draft` may additionally
+// hold a genuine user edit made after that submission. Fields still equal to
+// the submission adopt the parent value, while genuine edits and newer
+// submissions are preserved by mergePreservingEdits (the 02c5cb3 fix).
+function reconcileDeferredFeedback(input: {
+  settings: Settings;
+  lastSubmitted: Settings | null;
+  draft: Settings | null;
+}): Settings {
+  const submitted = input.lastSubmitted ?? input.settings;
+  const after = input.draft ?? input.settings;
+  return mergePreservingEdits({ saved: input.settings, submitted, after });
+}
+
 function hasPrefill(value: string | null | undefined): value is string {
   if (value == null) return false;
   return value !== '';
@@ -127,13 +142,13 @@ function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typ
     if (drained) {
       // The final queued save may have rejected, so no `onSaved` delivered the
       // earlier successful save's feedback that this controller skipped while
-      // saves were pending. Replay the parent's value now. Merge rather than
-      // replace so a genuine user edit made after the last submission (or a
-      // newer submission whose save already succeeded) is never overwritten by
-      // stale feedback — the bug fixed in 02c5cb3.
-      const submitted = refs.lastSubmittedRef.current ?? settings;
-      const after = refs.draftRef.current ?? settings;
-      setDraft(mergePreservingEdits({ saved: settings, submitted, after }));
+      // saves were pending. Replay the parent's value via a merge that keeps
+      // genuine edits and newer submissions (see reconcileDeferredFeedback).
+      setDraft(reconcileDeferredFeedback({
+        settings,
+        lastSubmitted: refs.lastSubmittedRef.current,
+        draft: refs.draftRef.current,
+      }));
       return;
     }
     setDraft(settings);

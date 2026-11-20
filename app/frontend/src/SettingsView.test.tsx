@@ -14,8 +14,9 @@ function setup() {
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((r) => { resolve = r; });
-  return { promise, resolve };
+  let reject!: (r?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 function baseSettings(): Settings {
@@ -335,30 +336,24 @@ describe('Sweeper frontend', () => {
   });
 
   it('replays deferred parent settings when the final queued save rejects after remount', async () => {
-    type SaveCall = {
-      submitted: Settings;
-      resolve: (value: Settings) => void;
-      reject: (reason?: unknown) => void;
-    };
-    const calls: SaveCall[] = [];
-    const updateSettings = vi.fn((submitted: Settings) => {
-      let resolve!: (value: Settings) => void;
-      let reject!: (reason?: unknown) => void;
-      const promise = new Promise<Settings>((res, rej) => { resolve = res; reject = rej; });
-      calls.push({ submitted, resolve, reject });
-      return promise;
-    });
-    const onSaved = vi.fn();
-    const client: SweeperClient = { ...mockController, updateSettings };
-    const initial = baseSettings();
-    const queued = { ...initial, minAgeHours: 11 };
+    // Bundle the controllable saves, callback spy and settings values into a
+    // single fixture; the two saves return their promises in call order.
+    const fixture = (() => {
+      const saves = [deferred<Settings>(), deferred<Settings>()];
+      let index = 0;
+      const updateSettings = vi.fn(() => saves[index++].promise);
+      const onSaved = vi.fn();
+      const initial = baseSettings();
+      const client: SweeperClient = { ...mockController, updateSettings };
+      return { saves, onSaved, initial, queued: { ...initial, minAgeHours: 11 }, client };
+    })();
 
     function Controller({ settings, onSave }: { settings: Settings | null; onSave: (s: Settings) => void }) {
-      const { draft, save } = useSettingsController({ client, settings, onSaved: onSave });
+      const { draft, save } = useSettingsController({ client: fixture.client, settings, onSaved: onSave });
       return (
         <>
           <output data-testid="draft-min-age">{draft?.minAgeHours ?? 'none'}</output>
-          <button onClick={() => void save(queued)}>save-queued</button>
+          <button onClick={() => void save(fixture.queued)}>save-queued</button>
         </>
       );
     }
@@ -366,8 +361,8 @@ describe('Sweeper frontend', () => {
     // The App keeps one settings state across a controller remount and feeds
     // every onSaved value back in as the controller's `settings` prop.
     function AppHarness({ phase }: { phase: 1 | 2 }) {
-      const [settings, setSettings] = useState<Settings | null>(initial);
-      const handleSaved = useCallback((s: Settings) => { onSaved(s); setSettings(s); }, []);
+      const [settings, setSettings] = useState<Settings | null>(fixture.initial);
+      const handleSaved = useCallback((s: Settings) => { fixture.onSaved(s); setSettings(s); }, []);
       return <Controller key={phase} settings={settings} onSave={handleSaved} />;
     }
 
@@ -378,7 +373,7 @@ describe('Sweeper frontend', () => {
     // flight, one queued behind it.
     await user.click(screen.getByRole('button', { name: 'save-queued' }));
     await user.click(screen.getByRole('button', { name: 'save-queued' }));
-    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(fixture.client.updateSettings).toHaveBeenCalledTimes(1);
 
     // Remount the controller with the parent still holding the original value
     // (24). With saves outstanding, the controller keeps showing 24.
@@ -388,16 +383,16 @@ describe('Sweeper frontend', () => {
 
     // The first save succeeds: parent/backend move to 11, but its feedback is
     // suppressed while the second save is still pending.
-    calls[0].resolve(queued);
-    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+    fixture.saves[0].resolve(fixture.queued);
+    await waitFor(() => expect(fixture.onSaved).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(fixture.client.updateSettings).toHaveBeenCalledTimes(2));
     expect(screen.getByTestId('draft-min-age')).toHaveTextContent('24');
 
     // The final save rejects, so no onSaved follows and the parent value (11)
     // never changes again. The queue-drain replay must still reconcile the
     // remounted controller to the persisted parent/backend value.
-    calls[1].reject(new Error('updateSettings failed'));
+    fixture.saves[1].reject(new Error('updateSettings failed'));
     await waitFor(() => expect(screen.getByTestId('draft-min-age')).toHaveTextContent('11'));
-    expect(onSaved).toHaveBeenCalledTimes(1);
+    expect(fixture.onSaved).toHaveBeenCalledTimes(1);
   });
 });
