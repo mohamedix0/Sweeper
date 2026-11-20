@@ -94,6 +94,7 @@ function emptyTreeState(rowCount: number) {
 export function AnalyzerResults(props: ResultsProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const pendingShowAllFocusRef = useRef<string | null>(null);
+  const revealTargetRef = useRef<string | null>(null);
   const rowIds = useMemo(() => props.rows.map((row) => row.node.id), [props.rows]);
 
   useEffect(() => {
@@ -107,9 +108,13 @@ export function AnalyzerResults(props: ResultsProps) {
 
   // Reveal the keyboard-active row: ArrowUp/ArrowDown call preventDefault, so
   // without this the viewport never scrolls and focus can land on invisible
-  // rows. jsdom has no scrollIntoView, hence the function guard.
+  // rows. Only arrow navigation reveals: a Show more / Show fewer replacement
+  // removes the activated pseudo-row, and resolving the fallback row here would
+  // scroll the viewport away from the focused replacement control.
+  // jsdom has no scrollIntoView, hence the function guard.
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId || revealTargetRef.current !== activeId) return;
+    revealTargetRef.current = null;
     const element = document.getElementById(treeItemDomId(activeId));
     if (typeof element?.scrollIntoView === 'function') element.scrollIntoView({ block: 'nearest' });
   }, [activeId]);
@@ -117,6 +122,10 @@ export function AnalyzerResults(props: ResultsProps) {
   function handleShowMore(args: { parentId: string }) {
     pendingShowAllFocusRef.current = args.parentId;
     props.onShowMore(args);
+  }
+
+  function onArrowNavigation(id: string) {
+    if (id !== activeId) revealTargetRef.current = id;
   }
 
   function onTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
@@ -129,7 +138,7 @@ export function AnalyzerResults(props: ResultsProps) {
       onToggleExpand: props.onToggleExpand,
       onShowMore: handleShowMore,
     });
-    handleTreeKeyDown(e, { rowIds, activeId, setActiveId, ...activations });
+    handleTreeKeyDown(e, { rowIds, activeId, setActiveId, onArrowNavigation, ...activations });
   }
 
   const activeDescendant = activeDescendantFor(rowIds, activeId);

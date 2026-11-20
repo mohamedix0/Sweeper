@@ -35,6 +35,8 @@ export type TreeKeyContext = {
   rowIds: readonly string[];
   activeId: string | null;
   setActiveId: (id: string) => void;
+  /** Mark an activeId change as arrow navigation so only those reveal a row. */
+  onArrowNavigation: (id: string) => void;
   activateRow: (id: string) => void;
   collapseRow: (id: string) => void;
 };
@@ -83,6 +85,7 @@ type ControlModeAction = (event: KeyboardEvent<HTMLDivElement>, target: HTMLElem
 function moveActiveRow(event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext, currentId: string): boolean {
   const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(currentId), event.key);
   if (!nextId) return false;
+  context.onArrowNavigation(nextId);
   context.setActiveId(nextId);
   return true;
 }
@@ -142,6 +145,7 @@ function navigateFromControl(event: KeyboardEvent<HTMLDivElement>, target: HTMLE
   if (!originId) return false;
   const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(originId), event.key);
   if (!nextId) return false;
+  context.onArrowNavigation(nextId);
   context.setActiveId(nextId);
   focusTree();
   return true;

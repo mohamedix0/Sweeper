@@ -179,6 +179,33 @@ describe('Analyzer tree accessibility', () => {
     expect(scrolled[scrolled.length - 1]).toEqual({ id: rows[0].id, arg: { block: 'nearest' } });
   });
 
+  it('does not reveal a fallback row after a keyboard Show more replacement', async () => {
+    const { user, tree, rows } = await openTree(manyChildrenResult(30));
+
+    // Make the trailing Show more pseudo-row the aria-activedescendant via the
+    // same arrow-key path a keyboard user takes. Its removal on activation is
+    // what used to make the reveal effect fall back to (and scroll) rowIds[0].
+    tree.focus();
+    for (let i = 0; i < rows.length - 1; i += 1) {
+      await user.keyboard('{ArrowDown}');
+    }
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[rows.length - 1].id);
+
+    // Start recording only after navigation: arrow keys legitimately reveal
+    // each active row, but the Show more replacement must not reveal a fallback
+    // row (which would scroll the viewport and push the focused control away).
+    const scrolled: Array<{ id: string; arg: unknown }> = [];
+    for (const row of within(tree).getAllByRole('treeitem') as HTMLElement[]) {
+      row.scrollIntoView = ((arg: unknown) => { scrolled.push({ id: row.id, arg }); }) as typeof row.scrollIntoView;
+    }
+
+    await user.keyboard('{Enter}');
+
+    const showFewer = screen.getByRole('button', { name: 'Show fewer files' });
+    expect(document.activeElement).toBe(showFewer);
+    expect(scrolled).toEqual([]);
+  });
+
   it('activates the active row with Enter and Space while DOM focus stays on the tree', async () => {
     const result = selectableFileResult();
     const explainItem = vi.fn(async (itemId: string) => ({ itemId, title: itemId, description: '', risk: 'Safe' as const }));
