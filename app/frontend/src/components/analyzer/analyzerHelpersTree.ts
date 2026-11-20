@@ -2,10 +2,9 @@ import type { AnalyzerNodeDto } from '../../contract/bindings';
 import type { AnalyzerStatusFilter, FlatAnalyzerRow } from './analyzerHelpersTypes';
 import { analyzerStatusKey } from './analyzerHelpersStatus';
 import { normalizedAnalyzerPath } from './analyzerHelpersUtils';
+import { fewerRowId, moreRowId } from './analyzerTreeA11y';
 
 export const ANALYZER_CHILD_CAP = 25;
-export function isMoreRowId(id: string): boolean { return id.startsWith('__more__:'); }
-export function moreRowParentId(id: string): string { return id.slice('__more__:'.length); }
 
 function cmpSizeDesc(args: { a: AnalyzerNodeDto; b: AnalyzerNodeDto }): number {
   const sa = BigInt(args.a.sizeBytes || '0');
@@ -31,13 +30,27 @@ function maxSiblingSize(kids: AnalyzerNodeDto[]): bigint {
   if (max === 0n) return 1n;
   return max;
 }
-function moreRow(args: { parent: AnalyzerNodeDto; hidden: number }): AnalyzerNodeDto {
+function showAllRow(args: { id: string; name: string }): AnalyzerNodeDto {
   return {
-    id: `__more__:${args.parent.id}`,
-    name: `Showing top ${ANALYZER_CHILD_CAP} of ${args.parent.children.length} files · Show more`,
+    id: args.id,
+    name: args.name,
     path: '', isDir: false, sizeBytes: '0', itemCount: '0', risk: 'Safe', description: '', reason: null,
     tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false, displayOnly: true, selectable: false, children: [],
   };
+}
+function moreRow(args: { parent: AnalyzerNodeDto }): AnalyzerNodeDto {
+  return showAllRow({
+    id: moreRowId(args.parent.id),
+    name: `Showing top ${ANALYZER_CHILD_CAP} of ${args.parent.children.length} files · Show more`,
+  });
+}
+function fewerRow(args: { parent: AnalyzerNodeDto }): AnalyzerNodeDto {
+  return showAllRow({ id: fewerRowId(args.parent.id), name: 'Show fewer files' });
+}
+function showAllTailRow(args: { parent: AnalyzerNodeDto; showAll: boolean; hidden: number; depth: number }): FlatAnalyzerRow | null {
+  if (!args.showAll) return args.hidden > 0 ? { node: moreRow({ parent: args.parent }), depth: args.depth, siblingMax: 1n } : null;
+  if (args.parent.children.length > ANALYZER_CHILD_CAP) return { node: fewerRow({ parent: args.parent }), depth: args.depth, siblingMax: 1n };
+  return null;
 }
 function pushRows(args: { rows: FlatAnalyzerRow[]; node: AnalyzerNodeDto; depth: number; siblingMax: bigint; expanded: Set<string>; showAllNodes: Set<string> }) {
   args.rows.push({ node: args.node, depth: args.depth, siblingMax: args.siblingMax });
@@ -45,21 +58,24 @@ function pushRows(args: { rows: FlatAnalyzerRow[]; node: AnalyzerNodeDto; depth:
   if (!args.expanded.has(args.node.id)) return;
   const allKids = args.node.children ?? [];
   if (allKids.length === 0) return;
-  const { kids, hidden } = visibleChildren({ children: allKids, showAll: args.showAllNodes.has(args.node.id) });
+  const showAll = args.showAllNodes.has(args.node.id);
+  const { kids, hidden } = visibleChildren({ children: allKids, showAll });
   const sibMax = maxSiblingSize(kids);
   const nextDepth = args.depth + 1;
   for (const c of kids) pushRows({ ...args, node: c, depth: nextDepth, siblingMax: sibMax });
-  if (hidden <= 0) return;
-  args.rows.push({ node: moreRow({ parent: args.node, hidden }), depth: nextDepth, siblingMax: 1n });
+  const tail = showAllTailRow({ parent: args.node, showAll, hidden, depth: nextDepth });
+  if (tail) args.rows.push(tail);
 }
 export function buildFlat(root: AnalyzerNodeDto, expanded: Set<string>, showAllNodes: Set<string>): FlatAnalyzerRow[] {
   const rows: FlatAnalyzerRow[] = [];
   const allKids = root.children ?? [];
   if (allKids.length === 0) return rows;
-  const { kids, hidden } = visibleChildren({ children: allKids, showAll: showAllNodes.has(root.id) });
+  const showAll = showAllNodes.has(root.id);
+  const { kids, hidden } = visibleChildren({ children: allKids, showAll });
   const sibMax = maxSiblingSize(kids);
   for (const c of kids) pushRows({ rows, node: c, depth: 0, siblingMax: sibMax, expanded, showAllNodes });
-  if (hidden > 0) rows.push({ node: moreRow({ parent: root, hidden }), depth: 0, siblingMax: 1n });
+  const tail = showAllTailRow({ parent: root, showAll, hidden, depth: 0 });
+  if (tail) rows.push(tail);
   return rows;
 }
 

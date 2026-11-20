@@ -2,7 +2,9 @@ import type { MouseEvent, KeyboardEvent } from 'react';
 import { ChevronDownIcon, ChevronRightIcon, CloudIcon, DriveIcon, FileIcon, FolderIcon, HardDriveIcon, LinkIcon, ShieldIcon } from '../Icons';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import { formatBytes, middleTruncatePath, normalizeDisplayPath } from '../../utils/format';
-import { analyzerStatusPill, analyzerStatusText, isDriveRoot, isMoreRowId, isNodeSelectable, moreRowParentId, nodeTypeTag, shareBarFillPx, formatSharePercent, type FlatAnalyzerRow } from './analyzerHelpers';
+import { analyzerStatusPill, analyzerStatusText, isDriveRoot, isNodeSelectable, nodeTypeTag, shareBarFillPx, formatSharePercent, type FlatAnalyzerRow } from './analyzerHelpers';
+import { isFewerRowId, isMoreRowId, showAllButtonDomId, showAllRowParentId, treeControlDomId, treeItemDomId } from './analyzerTreeA11y';
+import { activateAnalyzerRow } from './analyzerTreeActivation';
 
 type RowProps = {
   row: FlatAnalyzerRow;
@@ -10,6 +12,7 @@ type RowProps = {
   expanded: Set<string>;
   selectedIds: Set<string>;
   inspectedId: string | null;
+  active: boolean;
   allowDeleteUnknown: boolean;
   cleaning: boolean;
   onToggleExpand: (node: AnalyzerNodeDto) => void;
@@ -48,23 +51,24 @@ function IndentGuide(input: { depth: number }) {
   );
 }
 
-function MoreRow(props: { node: AnalyzerNodeDto; depth: number; onShowMore: (args: { parentId: string }) => void }) {
-  const parentId = moreRowParentId(props.node.id);
+function MoreRow(props: { node: AnalyzerNodeDto; depth: number; active: boolean; onShowMore: (args: { parentId: string }) => void }) {
+  const parentId = showAllRowParentId(props.node.id);
+  const className = props.active ? 'analyzer-row analyzer-more-row active' : 'analyzer-row analyzer-more-row';
   return (
-    <div className="analyzer-row analyzer-more-row" role="treeitem" aria-level={props.depth + 1} aria-selected={false} tabIndex={0}>
+    <div id={treeItemDomId(props.node.id)} className={className} role="treeitem" aria-level={props.depth + 1} aria-selected={false}>
       <div className="analyzer-col-main tree-cell-name">
         <IndentGuide depth={props.depth} />
-        <button type="button" className="btn small subtle-btn analyzer-show-more-btn" onClick={() => props.onShowMore({ parentId })}>{props.node.name}</button>
+        <button type="button" id={showAllButtonDomId(parentId)} className="btn small subtle-btn analyzer-show-more-btn" tabIndex={-1} data-tree-control="showmore" onClick={() => props.onShowMore({ parentId })}>{props.node.name}</button>
       </div>
       <div className="analyzer-col-share tree-cell-share" /><div className="analyzer-col-count muted num" /><div className="analyzer-col-sizecell num" /><div className="analyzer-col-guard" />
     </div>
   );
 }
 
-function SelectableInput(props: { path: string; checked: boolean; cleaning: boolean; onToggle: () => void }) {
+function SelectableInput(props: { path: string; nodeId: string; checked: boolean; cleaning: boolean; onToggle: () => void }) {
   return (
     <label className="checkbox analyzer-checkbox" title="Select for Review & Clean">
-      <input type="checkbox" aria-label={`Select analyzer node ${props.path}`} checked={props.checked} disabled={props.cleaning} onChange={props.onToggle} />
+      <input type="checkbox" id={treeControlDomId(props.nodeId, 'select')} data-tree-control="select" tabIndex={-1} aria-label={`Select analyzer node ${props.path}`} checked={props.checked} disabled={props.cleaning} onChange={props.onToggle} />
     </label>
   );
 }
@@ -78,8 +82,8 @@ function DisabledInput(props: { path: string; checked: boolean; statusText: stri
   );
 }
 
-function SelectionSlot(props: { path: string; selectable: boolean; checked: boolean; cleaning: boolean; statusText: string; onToggle: () => void }) {
-  if (props.selectable) return <SelectableInput path={props.path} checked={props.checked} cleaning={props.cleaning} onToggle={props.onToggle} />;
+function SelectionSlot(props: { path: string; nodeId: string; selectable: boolean; checked: boolean; cleaning: boolean; statusText: string; onToggle: () => void }) {
+  if (props.selectable) return <SelectableInput path={props.path} nodeId={props.nodeId} checked={props.checked} cleaning={props.cleaning} onToggle={props.onToggle} />;
   return <DisabledInput path={props.path} checked={props.checked} statusText={props.statusText} />;
 }
 
@@ -98,9 +102,10 @@ function ShareCell(props: { shareFillWidthPx: number; shareLabel: string }) {
   );
 }
 
-function rowClassName(args: { inspected: boolean; depth: number }): string {
+function rowClassName(args: { inspected: boolean; active: boolean; depth: number }): string {
   let cls = 'analyzer-row';
   if (args.inspected) cls += ' inspected';
+  if (args.active) cls += ' active';
   if (args.depth >= 1) cls += ' depth-child analyzer-child-row';
   return cls;
 }
@@ -158,9 +163,9 @@ function expandIcon(expanded: boolean) {
   return <ChevronRightIcon />;
 }
 
-function ExpandToggle(input: { hasChildren: boolean; expanded: boolean; name: string; onClick: (e: MouseEvent) => void }) {
+function ExpandToggle(input: { hasChildren: boolean; expanded: boolean; name: string; nodeId: string; onClick: (e: MouseEvent) => void }) {
   if (!input.hasChildren) return <span className="tree-toggle-spacer" aria-hidden="true" />;
-  return <button type="button" className="tree-toggle" onClick={input.onClick} aria-label={expandLabel({ expanded: input.expanded, name: input.name })}>{expandIcon(input.expanded)}</button>;
+  return <button type="button" id={treeControlDomId(input.nodeId, 'expand')} data-tree-control="expand" tabIndex={-1} className="tree-toggle" onClick={input.onClick} aria-label={expandLabel({ expanded: input.expanded, name: input.name })}>{expandIcon(input.expanded)}</button>;
 }
 
 function MaybeTypeTag(input: { typeTag: string | null }) {
@@ -170,7 +175,7 @@ function MaybeTypeTag(input: { typeTag: string | null }) {
 
 function MaybeDrillButton(input: { node: AnalyzerNodeDto; cleaning: boolean; onDrillClick: (e: MouseEvent) => void }) {
   if (!input.node.isDir) return null;
-  return <button type="button" className="analyzer-drill-btn" onClick={input.onDrillClick} aria-label={`Drill into ${input.node.name}`} title="Drill into folder" disabled={input.cleaning}>Drill</button>;
+  return <button type="button" id={treeControlDomId(input.node.id, 'drill')} data-tree-control="drill" tabIndex={-1} className="analyzer-drill-btn" onClick={input.onDrillClick} aria-label={`Drill into ${input.node.name}`} title="Drill into folder" disabled={input.cleaning}>Drill</button>;
 }
 
 function NameLine(input: { node: AnalyzerNodeDto; typeTag: string | null; cleaning: boolean; onDrillClick: (e: MouseEvent) => void }) {
@@ -201,9 +206,9 @@ function RowMain(props: { node: AnalyzerNodeDto; depth: number; vm: RowVm; clean
   return (
     <div className="analyzer-col-main tree-cell-name">
       <TreeIndent depth={props.depth} />
-      <span className="tree-slot tree-slot-chevron"><ExpandToggle hasChildren={props.vm.hasChildren} expanded={props.vm.isExpanded} name={props.node.name} onClick={props.onExpand} /></span>
+      <span className="tree-slot tree-slot-chevron"><ExpandToggle hasChildren={props.vm.hasChildren} expanded={props.vm.isExpanded} name={props.node.name} nodeId={props.node.id} onClick={props.onExpand} /></span>
       <span className={selectionSlotClass(props.vm.selectable)} onClick={(e) => e.stopPropagation()}>
-        <SelectionSlot path={props.node.path} selectable={props.vm.selectable} checked={props.vm.checked} cleaning={props.cleaning} statusText={props.vm.statusText} onToggle={props.onToggleSelect} />
+        <SelectionSlot path={props.node.path} nodeId={props.node.id} selectable={props.vm.selectable} checked={props.vm.checked} cleaning={props.cleaning} statusText={props.vm.statusText} onToggle={props.onToggleSelect} />
       </span>
       <span className="tree-slot tree-slot-icon analyzer-type-slot" aria-hidden="true">{semanticNodeIcon(props.node)}</span>
       <div className="analyzer-node-main">
@@ -225,16 +230,15 @@ function isActivateKey(key: string): boolean {
   return key === ' ';
 }
 
-function canToggleSelection(input: { vm: RowVm; cleaning: boolean }): boolean {
-  if (!input.vm.selectable) return false;
-  return !input.cleaning;
-}
-
 function rowHandlers(input: { props: RowProps; node: AnalyzerNodeDto; vm: RowVm }) {
-  const activate = () => {
-    input.props.onInspect({ id: input.node.id });
-    if (canToggleSelection({ vm: input.vm, cleaning: input.props.cleaning })) input.props.onToggleSelect(input.node);
-  };
+  const activate = () => activateAnalyzerRow({
+    row: input.props.row,
+    allowDeleteUnknown: input.props.allowDeleteUnknown,
+    cleaning: input.props.cleaning,
+    onInspect: input.props.onInspect,
+    onToggleSelect: input.props.onToggleSelect,
+    onShowMore: input.props.onShowMore,
+  });
   const onRowDoubleClick = (e: MouseEvent) => {
     if (!input.vm.canDrill) return;
     e.stopPropagation();
@@ -262,11 +266,11 @@ function expandedAttr(input: { hasChildren: boolean; expanded: boolean }): boole
 
 export function AnalyzerTreeRow(props: RowProps) {
   const { node, depth } = props.row;
-  if (isMoreRowId(node.id)) return <MoreRow node={node} depth={depth} onShowMore={props.onShowMore} />;
+  if (isMoreRowId(node.id) || isFewerRowId(node.id)) return <MoreRow node={node} depth={depth} active={props.active} onShowMore={props.onShowMore} />;
   const vm = buildVm({ props, node, depth });
   const h = rowHandlers({ props, node, vm });
   return (
-    <div role="treeitem" aria-expanded={expandedAttr({ hasChildren: vm.hasChildren, expanded: vm.isExpanded })} aria-selected={vm.checked} aria-level={depth + 1} tabIndex={0} className={rowClassName({ inspected: vm.inspectedMatch, depth })} data-depth={depth} title={drillTitle({ canDrill: vm.canDrill })} onClick={h.onRowClick} onDoubleClick={h.onRowDoubleClick} onKeyDown={h.onRowKeyDown}>
+    <div id={treeItemDomId(node.id)} role="treeitem" aria-expanded={expandedAttr({ hasChildren: vm.hasChildren, expanded: vm.isExpanded })} aria-selected={vm.checked} aria-level={depth + 1} className={rowClassName({ inspected: vm.inspectedMatch, active: props.active, depth })} data-depth={depth} title={drillTitle({ canDrill: vm.canDrill })} onClick={h.onRowClick} onDoubleClick={h.onRowDoubleClick} onKeyDown={h.onRowKeyDown}>
       <RowMain node={node} depth={depth} vm={vm} cleaning={props.cleaning} onExpand={h.onExpand} onDrill={h.onDrill} onToggleSelect={() => props.onToggleSelect(node)} />
       <div className="analyzer-col-share tree-cell-share"><ShareCell shareFillWidthPx={vm.shareFillWidthPx} shareLabel={vm.shareLabel} /></div>
       <div className="analyzer-col-count muted num">{node.itemCount}</div>

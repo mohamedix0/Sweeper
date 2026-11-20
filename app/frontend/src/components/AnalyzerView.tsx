@@ -46,7 +46,12 @@ export function AnalyzerView(props: ViewProps) {
   const entryCount = (w.result?.root.children ?? []).length;
   const handlers = {
     onInspect: (args: { id: string }) => void w.inspectNode(args),
-    onShowMore: (args: { parentId: string }) => w.setShowAllAnalyzerNodes((prev: Set<string>) => new Set([...prev, args.parentId])),
+    onShowMore: (args: { parentId: string }) => w.setShowAllAnalyzerNodes((prev: Set<string>) => {
+      const next = new Set(prev);
+      if (next.has(args.parentId)) next.delete(args.parentId);
+      else next.add(args.parentId);
+      return next;
+    }),
     onDrill: (args: { path: string }) => { w.setRootPath(args.path); void w.runAnalyzer({ path: args.path }); },
   };
   const resultsProps = buildAnalyzerResultsProps({ w, vm, onOpenLog, onOpenSettings, handlers });
