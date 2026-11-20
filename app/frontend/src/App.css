@@ -6825,3 +6825,16 @@ input[type="checkbox"]:indeterminate {
 .cleanup-deselect-btn {
   font-weight: 400;
 }
+
+/* Keyboard-active analyzer row (issue #103). The tree container owns DOM focus
+   and the global [tabindex]:focus-visible rule removes its outline, so the
+   aria-activedescendant row needs its own visible indicator. An inset outline
+   is used rather than box-shadow so the inspected-row border stays independent;
+   both theme colors clear 3:1 against the row background. */
+.analyzer-row.active {
+  outline: 2px solid var(--row-active-border-dark);
+  outline-offset: -2px;
+}
+[data-theme="light"] .analyzer-row.active {
+  outline-color: var(--row-active-border-light);
+}

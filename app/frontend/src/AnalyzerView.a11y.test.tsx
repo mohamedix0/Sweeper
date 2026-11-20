@@ -69,6 +69,14 @@ function selectableFileResult(): StartAnalyzerResult {
   ]);
 }
 
+function selectableThreeFileResult(): StartAnalyzerResult {
+  return tempFileTreeResult('a11y-control-origin', [
+    { id: 'a', sizeBytes: '300', selectable: true },
+    { id: 'b', sizeBytes: '200', selectable: true },
+    { id: 'c', sizeBytes: '100', selectable: true },
+  ]);
+}
+
 function interactionResult(): StartAnalyzerResult {
   const child = makeAnalyzerNode({ id: 'kid', name: 'kid.tmp', path: 'C:\\Temp\\kid.tmp', sizeBytes: '50', selectable: true, targetId: 't1' });
   const temp = makeAnalyzerNode({
@@ -217,5 +225,79 @@ describe('Analyzer tree accessibility', () => {
 
     await user.keyboard('{Escape}');
     expect(document.activeElement).toBe(tree);
+  });
+
+  it('shows a visible active class that follows aria-activedescendant independently of inspection', async () => {
+    const { user, tree, rows } = await openTree(threeFileResult());
+    expect(rows).toHaveLength(3);
+    tree.focus();
+
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[0].id);
+    expect(rows[0].classList.contains('active')).toBe(true);
+    expect(rows[1].classList.contains('active')).toBe(false);
+
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(tree);
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[1].id);
+    expect(rows[0].classList.contains('active')).toBe(false);
+    expect(rows[1].classList.contains('active')).toBe(true);
+
+    // Inspecting a different row must not couple the two visual states.
+    await user.click(rows[2]);
+    expect(rows[2].classList.contains('inspected')).toBe(true);
+    expect(rows[2].classList.contains('active')).toBe(false);
+    expect(rows[1].classList.contains('active')).toBe(true);
+  });
+
+  it('navigates from the focused control’s own row, not the tree’s active row', async () => {
+    const { user, tree, rows } = await openTree(selectableThreeFileResult());
+    expect(rows).toHaveLength(3);
+    tree.focus();
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[0].id);
+
+    const controlInLastRow = rows[2].querySelector<HTMLElement>('[data-tree-control]');
+    expect(controlInLastRow).not.toBeNull();
+    controlInLastRow!.focus();
+    expect(document.activeElement).toBe(controlInLastRow);
+
+    // The focused control lives on the last row; ArrowUp must move to the
+    // preceding row even though the tree's aria-activedescendant was row 0.
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(tree);
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[1].id);
+  });
+
+  it('synchronizes aria-activedescendant with the focused control’s row on Escape', async () => {
+    const { user, tree, rows } = await openTree(selectableThreeFileResult());
+    tree.focus();
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[0].id);
+
+    const controlInLastRow = rows[2].querySelector<HTMLElement>('[data-tree-control]');
+    expect(controlInLastRow).not.toBeNull();
+    controlInLastRow!.focus();
+
+    await user.keyboard('{Escape}');
+    expect(document.activeElement).toBe(tree);
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[2].id);
+  });
+
+  it('navigates from a replacement Show fewer control’s row', async () => {
+    const { user, tree } = await openTree(manyChildrenResult(30));
+    const showMore = screen.getByRole('button', { name: /Show more/ });
+    showMore.focus();
+    await user.click(showMore);
+
+    const showFewer = screen.getByRole('button', { name: 'Show fewer files' });
+    expect(document.activeElement).toBe(showFewer);
+
+    const expandedRows = within(tree).getAllByRole('treeitem') as HTMLElement[];
+    expect(expandedRows).toHaveLength(31);
+    expect(expandedRows[expandedRows.length - 1].contains(showFewer)).toBe(true);
+
+    // The replacement control owns the last (pseudo) row; ArrowUp must step
+    // to the row before it rather than from the tree's stale active row.
+    await user.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(tree);
+    expect(tree.getAttribute('aria-activedescendant')).toBe(expandedRows[expandedRows.length - 2].id);
   });
 });

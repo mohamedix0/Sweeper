@@ -12,6 +12,7 @@ type RowProps = {
   expanded: Set<string>;
   selectedIds: Set<string>;
   inspectedId: string | null;
+  active: boolean;
   allowDeleteUnknown: boolean;
   cleaning: boolean;
   onToggleExpand: (node: AnalyzerNodeDto) => void;
@@ -50,10 +51,11 @@ function IndentGuide(input: { depth: number }) {
   );
 }
 
-function MoreRow(props: { node: AnalyzerNodeDto; depth: number; onShowMore: (args: { parentId: string }) => void }) {
+function MoreRow(props: { node: AnalyzerNodeDto; depth: number; active: boolean; onShowMore: (args: { parentId: string }) => void }) {
   const parentId = showAllRowParentId(props.node.id);
+  const className = props.active ? 'analyzer-row analyzer-more-row active' : 'analyzer-row analyzer-more-row';
   return (
-    <div id={treeItemDomId(props.node.id)} className="analyzer-row analyzer-more-row" role="treeitem" aria-level={props.depth + 1} aria-selected={false}>
+    <div id={treeItemDomId(props.node.id)} className={className} role="treeitem" aria-level={props.depth + 1} aria-selected={false}>
       <div className="analyzer-col-main tree-cell-name">
         <IndentGuide depth={props.depth} />
         <button type="button" id={showAllButtonDomId(parentId)} className="btn small subtle-btn analyzer-show-more-btn" tabIndex={-1} data-tree-control="showmore" onClick={() => props.onShowMore({ parentId })}>{props.node.name}</button>
@@ -100,9 +102,10 @@ function ShareCell(props: { shareFillWidthPx: number; shareLabel: string }) {
   );
 }
 
-function rowClassName(args: { inspected: boolean; depth: number }): string {
+function rowClassName(args: { inspected: boolean; active: boolean; depth: number }): string {
   let cls = 'analyzer-row';
   if (args.inspected) cls += ' inspected';
+  if (args.active) cls += ' active';
   if (args.depth >= 1) cls += ' depth-child analyzer-child-row';
   return cls;
 }
@@ -263,11 +266,11 @@ function expandedAttr(input: { hasChildren: boolean; expanded: boolean }): boole
 
 export function AnalyzerTreeRow(props: RowProps) {
   const { node, depth } = props.row;
-  if (isMoreRowId(node.id) || isFewerRowId(node.id)) return <MoreRow node={node} depth={depth} onShowMore={props.onShowMore} />;
+  if (isMoreRowId(node.id) || isFewerRowId(node.id)) return <MoreRow node={node} depth={depth} active={props.active} onShowMore={props.onShowMore} />;
   const vm = buildVm({ props, node, depth });
   const h = rowHandlers({ props, node, vm });
   return (
-    <div id={treeItemDomId(node.id)} role="treeitem" aria-expanded={expandedAttr({ hasChildren: vm.hasChildren, expanded: vm.isExpanded })} aria-selected={vm.checked} aria-level={depth + 1} className={rowClassName({ inspected: vm.inspectedMatch, depth })} data-depth={depth} title={drillTitle({ canDrill: vm.canDrill })} onClick={h.onRowClick} onDoubleClick={h.onRowDoubleClick} onKeyDown={h.onRowKeyDown}>
+    <div id={treeItemDomId(node.id)} role="treeitem" aria-expanded={expandedAttr({ hasChildren: vm.hasChildren, expanded: vm.isExpanded })} aria-selected={vm.checked} aria-level={depth + 1} className={rowClassName({ inspected: vm.inspectedMatch, active: props.active, depth })} data-depth={depth} title={drillTitle({ canDrill: vm.canDrill })} onClick={h.onRowClick} onDoubleClick={h.onRowDoubleClick} onKeyDown={h.onRowKeyDown}>
       <RowMain node={node} depth={depth} vm={vm} cleaning={props.cleaning} onExpand={h.onExpand} onDrill={h.onDrill} onToggleSelect={() => props.onToggleSelect(node)} />
       <div className="analyzer-col-share tree-cell-share"><ShareCell shareFillWidthPx={vm.shareFillWidthPx} shareLabel={vm.shareLabel} /></div>
       <div className="analyzer-col-count muted num">{node.itemCount}</div>

@@ -61,6 +61,20 @@ function isFocusedTreeControl(value: EventTarget | null): value is HTMLElement {
   return document.activeElement === value;
 }
 
+/**
+ * Owning row id of a focused control, read from the DOM rather than from the
+ * tree's activeId. This also covers the replacement Show more / Show fewer
+ * button: its owning row is the pseudo-row that was just re-rendered.
+ */
+function rowIdForControl(target: HTMLElement, rowIds: readonly string[]): string | null {
+  const rowElement = target.closest('[role="treeitem"]');
+  if (!rowElement) return null;
+  const prefix = treeItemDomId('');
+  if (!rowElement.id.startsWith(prefix)) return null;
+  const rowId = rowElement.id.slice(prefix.length);
+  return rowIds.includes(rowId) ? rowId : null;
+}
+
 /** Actions report whether they handled a key, so prevention is applied once. */
 type TreeModeAction = (event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext, currentId: string) => boolean;
 type ControlModeAction = (event: KeyboardEvent<HTMLDivElement>, target: HTMLElement, context: TreeKeyContext) => boolean;
@@ -95,12 +109,14 @@ function collapseActiveRow(_event: KeyboardEvent<HTMLDivElement>, context: TreeK
   return true;
 }
 
-/** Returning focus from a control with Escape is always handled. */
+/** Escape returns focus to the tree with the control's row as the active row. */
 function returnFocusToTree(
   _event: KeyboardEvent<HTMLDivElement>,
-  _target: HTMLElement,
-  _context: TreeKeyContext,
+  target: HTMLElement,
+  context: TreeKeyContext,
 ): boolean {
+  const originId = rowIdForControl(target, context.rowIds);
+  if (originId) context.setActiveId(originId);
   focusTree();
   return true;
 }
@@ -120,11 +136,11 @@ function cycleRowControl(event: KeyboardEvent<HTMLDivElement>, target: HTMLEleme
   return true;
 }
 
-/** Up / Down while interacting exit to tree navigation on the adjacent row. */
-function navigateFromControl(event: KeyboardEvent<HTMLDivElement>, _target: HTMLElement, context: TreeKeyContext): boolean {
-  const currentId = resolveActiveId(context.rowIds, context.activeId);
-  if (!currentId) return false;
-  const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(currentId), event.key);
+/** Up / Down while interacting navigate from the focused control's own row. */
+function navigateFromControl(event: KeyboardEvent<HTMLDivElement>, target: HTMLElement, context: TreeKeyContext): boolean {
+  const originId = rowIdForControl(target, context.rowIds);
+  if (!originId) return false;
+  const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(originId), event.key);
   if (!nextId) return false;
   context.setActiveId(nextId);
   focusTree();

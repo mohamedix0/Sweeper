@@ -154,7 +154,7 @@ export function AnalyzerResults(props: ResultsProps) {
           </div>
           <div className="pane-body flush">
             <div id={ANALYZER_TREE_DOM_ID} className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" aria-activedescendant={activeDescendant} tabIndex={0} onKeyDown={onTreeKeyDown}>
-              {props.rows.map((row) => <AnalyzerTreeRow key={row.node.id} row={row} rootTotalBytes={props.rootTotalBytes} expanded={props.expanded} selectedIds={props.selectedIds} inspectedId={props.inspectedId} allowDeleteUnknown={props.allowDeleteUnknown} cleaning={props.cleaning} onToggleExpand={props.onToggleExpand} onToggleSelect={props.onToggleSelect} onInspect={props.onInspect} onShowMore={handleShowMore} onDrill={props.onDrill} />)}
+              {props.rows.map((row) => <AnalyzerTreeRow key={row.node.id} row={row} rootTotalBytes={props.rootTotalBytes} expanded={props.expanded} selectedIds={props.selectedIds} inspectedId={props.inspectedId} active={row.node.id === activeId} allowDeleteUnknown={props.allowDeleteUnknown} cleaning={props.cleaning} onToggleExpand={props.onToggleExpand} onToggleSelect={props.onToggleSelect} onInspect={props.onInspect} onShowMore={handleShowMore} onDrill={props.onDrill} />)}
               {emptyTreeState(props.rows.length)}
             </div>
           </div>
