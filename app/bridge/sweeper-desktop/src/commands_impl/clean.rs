@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 
 use sweeper_contract::{CleanProgressEvent, ContractError, ExecuteCleanResponse};
 
@@ -28,8 +28,15 @@ where
     }
 
     // Hold a gate token for the whole removal so an Elevate-triggered restart
-    // waits for this Clean to settle instead of terminating it (#92).
-    let _clean_guard = state.clean_gate.enter();
+    // waits for this Clean to settle instead of terminating it (#92). If the
+    // gate is sealed for shutdown, reject before consuming the token or
+    // deleting anything: a new Clean must never start during handoff.
+    let _clean_guard = state
+        .clean_gate
+        .enter()
+        .ok_or_else(|| ContractError::Internal {
+            reason: "Clean is unavailable while an elevation restart is in progress".into(),
+        })?;
 
     // Atomic validation + consumption of preview token under lock (prevents double execute races).
     let (min_age_hours, validated_items, preview_estimated_bytes) = {

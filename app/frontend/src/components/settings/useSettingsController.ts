@@ -336,6 +336,12 @@ const queueDrainListeners = new Set<() => void>();
 // controller's draft. The controller registers a flusher while mounted so the
 // shell can persist that draft through the same save queue before restarting
 // (#92). A stale registration is cleared on unmount.
+//
+// The shell mounts exactly one SettingsView at a time: SettingsPanel renders it
+// only while the settings view is active and returns null otherwise, which
+// unmounts the previous controller. So at most one controller ever owns this
+// slot and a newer mount cannot overwrite a live registration. No app-shell
+// state consolidation is needed.
 let draftFlusher: (() => Promise<void>) | null = null;
 
 export function registerDraftFlusher(flusher: (() => Promise<void>) | null): void {

@@ -524,7 +524,7 @@ fn relaunch_elevated_defers_launch_and_exit_until_in_flight_clean_settles() {
 
     let gate = CleanGate::default();
     // Simulate a Clean currently in progress.
-    let clean_guard = gate.enter();
+    let clean_guard = gate.enter().expect("gate starts unsealed");
 
     let provider_thread = provider.clone();
     let si_thread = Arc::clone(&si);
@@ -594,7 +594,7 @@ fn relaunch_elevated_never_exits_before_active_clean_completes() {
     };
 
     let gate = CleanGate::default();
-    let clean_guard = gate.enter();
+    let clean_guard = gate.enter().expect("gate starts unsealed");
     let finished_for_clean = clean_finished.clone();
     let clean_thread = std::thread::spawn(move || {
         // A real Clean would run its safety-checked removal here. When it is
@@ -627,4 +627,90 @@ fn relaunch_elevated_never_exits_before_active_clean_completes() {
         exit_saw_finished.load(Ordering::SeqCst),
         "exit hook must observe the Clean as finished; an in-flight Clean must never be terminated"
     );
+}
+
+/// #92: sealing must close the window where a Clean could enter after the gate
+/// was observed idle but before the old process handed off and exited.
+#[test]
+fn relaunch_elevated_seals_gate_and_rejects_new_clean_until_in_flight_clean_settles() {
+    use std::sync::atomic::Ordering;
+
+    let ctx = common::make_elevation_test_state(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    );
+    let gate = ctx.state.clean_gate.clone();
+    // A Clean is already in flight when Elevate is requested.
+    let clean_guard = gate.enter().expect("gate starts unsealed");
+
+    let provider = ctx.provider.clone();
+    let si = ctx.si.clone();
+    let gate_for_relaunch = gate.clone();
+    let exit_hook = ctx.state.app_exit.clone();
+    let relaunch = std::thread::spawn(move || {
+        sweeper_desktop::elevation::relaunch_elevated(
+            provider.as_ref(),
+            si.as_ref(),
+            &gate_for_relaunch,
+            exit_hook.as_ref(),
+        )
+    });
+
+    // While the Clean is in flight the gate must be sealed: a new Clean is
+    // rejected, and neither launch nor exit may happen. No Clean is terminated.
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    assert!(
+        gate.enter().is_none(),
+        "a new Clean must be rejected once the gate is sealed for shutdown"
+    );
+    assert_eq!(ctx.provider.relaunch_calls.load(Ordering::SeqCst), 0);
+    assert!(!ctx.exited.load(Ordering::SeqCst));
+    assert!(ctx.si.is_held());
+
+    // The in-flight Clean settles; handoff and exit may now proceed.
+    drop(clean_guard);
+    let result = relaunch
+        .join()
+        .expect("relaunch thread panicked")
+        .expect("relaunch ok");
+    assert!(result.launched);
+    assert_eq!(ctx.provider.relaunch_calls.load(Ordering::SeqCst), 1);
+    assert!(ctx.exited.load(Ordering::SeqCst));
+    assert_eq!(*ctx.exit_code.lock().expect("exit code lock"), Some(0));
+    // Success leaves the gate sealed: the old process is going away.
+    assert!(
+        gate.enter().is_none(),
+        "gate must stay sealed after a successful relaunch"
+    );
+}
+
+/// #92: an aborted or failed relaunch must unseal the gate so the still-running
+/// app can accept Cleans again.
+#[test]
+fn relaunch_elevated_abort_or_failure_unseals_gate() {
+    fn run_aborted(outcome: Result<sweeper_core::elevation::RelaunchOutcome, String>) {
+        let ctx = common::make_elevation_test_state(false, outcome);
+        let gate = ctx.state.clean_gate.clone();
+        // Gate is open before the relaunch attempt.
+        drop(gate.enter().expect("gate starts unsealed"));
+
+        let err = commands_impl::relaunch_elevated(&ctx.state).unwrap_err();
+        assert!(matches!(
+            err,
+            sweeper_contract::ContractError::InvalidInput { .. }
+                | sweeper_contract::ContractError::Internal { .. }
+        ));
+        // App stays usable: a new Clean can enter after abort/failure.
+        drop(
+            gate.enter()
+                .expect("gate must be unsealed after an aborted relaunch"),
+        );
+        assert!(!ctx.exited.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(ctx.si.is_held());
+    }
+
+    run_aborted(Ok(
+        sweeper_core::elevation::RelaunchOutcome::CancelledByUser,
+    ));
+    run_aborted(Err("ShellExecute failed".to_string()));
 }
