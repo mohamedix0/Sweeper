@@ -6838,3 +6838,42 @@ input[type="checkbox"]:indeterminate {
 [data-theme="light"] .analyzer-row.active {
   outline-color: var(--row-active-border-light);
 }
+
+/* Unsaved Settings navigation guard (issue #91). */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-overlay);
+}
+
+.confirm-dialog {
+  width: min(440px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-popover);
+}
+
+.confirm-dialog-title {
+  margin: 0 0 8px;
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+}
+
+.confirm-dialog-message {
+  margin: 0 0 20px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
