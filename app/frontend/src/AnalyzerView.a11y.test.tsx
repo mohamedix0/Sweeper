@@ -206,6 +206,35 @@ describe('Analyzer tree accessibility', () => {
     expect(scrolled).toEqual([]);
   });
 
+  it('reveals the fallback row when a query removes the active row', async () => {
+    const { user, tree, rows } = await openTree(threeFileResult());
+    expect(rows).toHaveLength(3);
+
+    // Move the active row to c (the last row) via arrow navigation.
+    tree.focus();
+    await user.keyboard('{ArrowDown}');
+    await user.keyboard('{ArrowDown}');
+    expect(tree.getAttribute('aria-activedescendant')).toBe(rows[2].id);
+
+    // Start recording only after navigation: arrow keys legitimately reveal
+    // each active row, but the reconciliation fallback must also reveal so a
+    // sighted keyboard user is not left with an active row off-screen.
+    const scrolled: Array<{ id: string; arg: unknown }> = [];
+    for (const row of within(tree).getAllByRole('treeitem') as HTMLElement[]) {
+      row.scrollIntoView = ((arg: unknown) => { scrolled.push({ id: row.id, arg }); }) as typeof row.scrollIntoView;
+    }
+
+    // Query down to only a.tmp, which removes the active row c. Reconciliation
+    // falls back to the only remaining row (a) and must reveal it.
+    const search = screen.getByRole('searchbox', { name: 'Search analyzer folders' });
+    await user.type(search, 'a.tmp');
+
+    const remaining = within(tree).getAllByRole('treeitem') as HTMLElement[];
+    expect(remaining).toHaveLength(1);
+    expect(tree.getAttribute('aria-activedescendant')).toBe(remaining[0].id);
+    expect(scrolled).toEqual([{ id: remaining[0].id, arg: { block: 'nearest' } }]);
+  });
+
   it('activates the active row with Enter and Space while DOM focus stays on the tree', async () => {
     const result = selectableFileResult();
     const explainItem = vi.fn(async (itemId: string) => ({ itemId, title: itemId, description: '', risk: 'Safe' as const }));

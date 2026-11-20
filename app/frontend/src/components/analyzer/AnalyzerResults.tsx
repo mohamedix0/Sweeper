@@ -95,11 +95,22 @@ export function AnalyzerResults(props: ResultsProps) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const pendingShowAllFocusRef = useRef<string | null>(null);
   const revealTargetRef = useRef<string | null>(null);
+  const revealOnReconcileRef = useRef<string | null>(null);
+  const suppressReconcileRevealRef = useRef(false);
   const rowIds = useMemo(() => props.rows.map((row) => row.node.id), [props.rows]);
 
   useEffect(() => {
     const next = resolveActiveId(rowIds, activeId);
-    if (next !== activeId) setActiveId(next);
+    const suppressReveal = suppressReconcileRevealRef.current;
+    suppressReconcileRevealRef.current = false;
+    if (next !== activeId) {
+      // A query / analysis change can remove the active row. Reveal the chosen
+      // fallback so a sighted keyboard user is not left with an off-screen
+      // active row. A Show more / Show fewer replacement must NOT reveal: the
+      // focused replacement control has to stay in view.
+      revealOnReconcileRef.current = suppressReveal ? null : next;
+      setActiveId(next);
+    }
   }, [rowIds, activeId]);
 
   useLayoutEffect(() => {
@@ -108,18 +119,24 @@ export function AnalyzerResults(props: ResultsProps) {
 
   // Reveal the keyboard-active row: ArrowUp/ArrowDown call preventDefault, so
   // without this the viewport never scrolls and focus can land on invisible
-  // rows. Only arrow navigation reveals: a Show more / Show fewer replacement
-  // removes the activated pseudo-row, and resolving the fallback row here would
-  // scroll the viewport away from the focused replacement control.
+  // rows. Two causes reveal: arrow navigation (recorded by onArrowNavigation)
+  // and a query / analysis change that removes the active row (recorded by the
+  // reconciliation effect above). A Show more / Show fewer replacement is
+  // explicitly excluded so the focused replacement control stays in view.
   // jsdom has no scrollIntoView, hence the function guard.
   useEffect(() => {
-    if (!activeId || revealTargetRef.current !== activeId) return;
+    if (!activeId) return;
+    if (revealTargetRef.current !== activeId && revealOnReconcileRef.current !== activeId) return;
     revealTargetRef.current = null;
+    revealOnReconcileRef.current = null;
     const element = document.getElementById(treeItemDomId(activeId));
     if (typeof element?.scrollIntoView === 'function') element.scrollIntoView({ block: 'nearest' });
   }, [activeId]);
 
   function handleShowMore(args: { parentId: string }) {
+    // A Show more / Show fewer replacement removes the activated pseudo-row;
+    // suppress the reconciliation reveal so the focused control stays in view.
+    suppressReconcileRevealRef.current = true;
     pendingShowAllFocusRef.current = args.parentId;
     props.onShowMore(args);
   }
