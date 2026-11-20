@@ -177,17 +177,28 @@ function onListenerRegistered(
   void deliverPendingRequest(deps, handler, () => !session.disposed);
 }
 
+// Related state and callbacks for the registration-failure path, bundled so the
+// helper takes a single named value instead of a long positional argument list.
+type RegistrationFailureContext = {
+  session: ListenerSession;
+  deps: CloseBridgeDeps;
+  index: number;
+  scheduleAttempt: (next: number) => void;
+  retryFromZero: () => void;
+  notifyFailure: () => void;
+};
+
 // Once registration retries are exhausted, clear the native gate, surface the
 // failure, and schedule a bounded number of later re-registrations so a
 // subsequent close reaches a live listener (#93).
-function handleRegistrationFailure(
-  session: ListenerSession,
-  deps: CloseBridgeDeps,
-  index: number,
-  scheduleAttempt: (next: number) => void,
-  retryFromZero: () => void,
-  notifyFailure: () => void,
-): void {
+function handleRegistrationFailure({
+  session,
+  deps,
+  index,
+  scheduleAttempt,
+  retryFromZero,
+  notifyFailure,
+}: RegistrationFailureContext): void {
   if (session.disposed) return;
   const next = index + 1;
   if (next < LISTEN_ATTEMPTS) {
@@ -229,14 +240,14 @@ function startHostCloseListener(
       )
       .then((unlisten) => onListenerRegistered(session, deps, handler, unlisten))
       .catch(() =>
-        handleRegistrationFailure(
+        handleRegistrationFailure({
           session,
           deps,
           index,
-          (next) => deps.schedule(() => attempt(next), retryDelay(next)),
-          () => attempt(0),
+          scheduleAttempt: (next) => deps.schedule(() => attempt(next), retryDelay(next)),
+          retryFromZero: () => attempt(0),
           notifyFailure,
-        ),
+        }),
       );
   };
   attempt(0);

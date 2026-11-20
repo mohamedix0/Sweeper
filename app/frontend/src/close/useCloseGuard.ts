@@ -74,16 +74,28 @@ function useDecisionDelivery(
   return { deliver, setRequestId };
 }
 
+// Handshake callbacks/state bundled into one named value. The effect below
+// still depends on the individual (stable) function references, so passing an
+// object here does not churn the host subscription on every render.
+type HostCloseHandshakeDeps = {
+  bridge: CloseBridge;
+  isDirty: () => boolean;
+  setRequestId: (requestId: string) => void;
+  deliver: (approved: boolean) => Promise<void>;
+  setError: (message: string | null) => void;
+  setPromptOpen: (value: boolean) => void;
+};
+
 // Subscribes to the host handshake and the listener-registration failure
 // notice. A clean draft is approved at once; a dirty one opens the prompt.
-function useHostCloseHandshake(
-  bridge: CloseBridge,
-  isDirty: () => boolean,
-  setRequestId: (requestId: string) => void,
-  deliver: (approved: boolean) => Promise<void>,
-  setError: (message: string | null) => void,
-  setPromptOpen: (value: boolean) => void,
-): void {
+function useHostCloseHandshake({
+  bridge,
+  isDirty,
+  setRequestId,
+  deliver,
+  setError,
+  setPromptOpen,
+}: HostCloseHandshakeDeps): void {
   useEffect(
     () =>
       bridge.onHostCloseRequest((requestId) => {
@@ -123,16 +135,27 @@ function useBeforeUnloadGuard(isDirty: () => boolean): void {
   }, [isDirty]);
 }
 
+// Close-action callbacks/state bundled into one named value. The useCallback
+// dependencies below keep referencing the individual stable values, preserving
+// the existing behaviour of cancel/saveAndClose.
+type CloseActionsDeps = {
+  deliver: (approved: boolean) => Promise<void>;
+  flushDraft: () => Promise<boolean>;
+  saving: boolean;
+  setSaving: (value: boolean) => void;
+  setError: (message: string | null) => void;
+};
+
 // The user actions. Cancel is inert while saving so a stale cancel cannot
 // answer a newer close request; saving flushes every outstanding draft change
 // before approving, and a failed save keeps the prompt open for a retry.
-function useCloseActions(
-  deliver: (approved: boolean) => Promise<void>,
-  flushDraft: () => Promise<boolean>,
-  saving: boolean,
-  setSaving: (value: boolean) => void,
-  setError: (message: string | null) => void,
-): Pick<CloseGuardState, 'cancel' | 'saveAndClose'> {
+function useCloseActions({
+  deliver,
+  flushDraft,
+  saving,
+  setSaving,
+  setError,
+}: CloseActionsDeps): Pick<CloseGuardState, 'cancel' | 'saveAndClose'> {
   const cancel = useCallback(() => {
     if (saving) return;
     void deliver(false);
@@ -180,16 +203,16 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
     setError,
   );
 
-  useHostCloseHandshake(bridge, isDirty, setRequestId, deliver, setError, setPromptOpen);
+  useHostCloseHandshake({ bridge, isDirty, setRequestId, deliver, setError, setPromptOpen });
   useBeforeUnloadGuard(isDirty);
 
-  const { cancel, saveAndClose } = useCloseActions(
+  const { cancel, saveAndClose } = useCloseActions({
     deliver,
     flushDraft,
     saving,
     setSaving,
     setError,
-  );
+  });
 
   return { promptOpen, saving, closePending, error, cancel, saveAndClose };
 }

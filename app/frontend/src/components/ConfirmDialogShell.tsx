@@ -50,6 +50,26 @@ function useFocusCapture(
   }, [dialogRef, orderRef, initialFocusRef]);
 }
 
+// Pure decision of which focus move a busy transition requires. Only an actual
+// idle->busy or busy->idle edge produces an action; ordinary rerenders do not.
+type BusyFocusMove = 'focus-dialog' | 'restore' | 'none';
+
+function busyFocusMove(busy: boolean, wasBusy: boolean): BusyFocusMove {
+  if (busy && !wasBusy) return 'focus-dialog';
+  if (!busy && wasBusy) return 'restore';
+  return 'none';
+}
+
+// On busy -> idle, restore focus to the first enabled action. If focus ended up
+// outside the dialog (e.g. the action was removed), fall back to the container,
+// which is focusable via tabIndex={-1}. Disabled actions are never targets.
+function restoreFocusAfterIdle(dialog: HTMLDivElement | null, order: ActionOrder): void {
+  enabledActions(order)[0]?.focus();
+  if (!dialog?.contains(document.activeElement as Node | null)) {
+    dialog?.focus();
+  }
+}
+
 // Keep focus inside the dialog across a busy transition, and restore it to an
 // enabled action only on busy -> idle — never on an ordinary rerender.
 function useBusyFocusTransition(
@@ -59,13 +79,11 @@ function useBusyFocusTransition(
 ): void {
   const wasBusy = useRef(busy);
   useEffect(() => {
-    if (busy && !wasBusy.current) {
+    const move = busyFocusMove(busy, wasBusy.current);
+    if (move === 'focus-dialog') {
       dialogRef.current?.focus();
-    } else if (!busy && wasBusy.current) {
-      enabledActions(orderRef.current)[0]?.focus();
-      if (!dialogRef.current?.contains(document.activeElement as Node | null)) {
-        dialogRef.current?.focus();
-      }
+    } else if (move === 'restore') {
+      restoreFocusAfterIdle(dialogRef.current, orderRef.current);
     }
     wasBusy.current = busy;
   }, [busy, dialogRef, orderRef]);
