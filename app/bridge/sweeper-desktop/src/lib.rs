@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod clean_gate;
 pub mod clock;
 pub mod commands_impl;
 pub mod elevation;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 pub use clock::{Clock, SystemClock};
 
+use clean_gate::CleanGate;
 use elevation::{ElevationProvider, RealElevationProvider, SingleInstanceState};
 use session::SessionStore;
 use settings_store::SettingsStore;
@@ -34,6 +36,8 @@ pub struct AppState<C: Clock = SystemClock> {
     pub single_instance: Arc<SingleInstanceState>,
     /// App exit hook (DI seam; default exits process after successful relaunch handoff).
     pub app_exit: Arc<dyn Fn(i32) + Send + Sync>,
+    /// Tracks in-flight Cleans so an Elevate restart can defer exit until they settle.
+    pub clean_gate: CleanGate,
 }
 
 fn default_settings_path() -> Option<PathBuf> {
@@ -54,6 +58,7 @@ impl AppState<SystemClock> {
             elevation_provider: Arc::new(RealElevationProvider),
             single_instance: Arc::new(SingleInstanceState::new()),
             app_exit: Arc::new(elevation::default_exit),
+            clean_gate: CleanGate::default(),
         }
     }
 
@@ -77,6 +82,7 @@ impl<C: Clock> AppState<C> {
             elevation_provider: Arc::new(RealElevationProvider),
             single_instance: Arc::new(SingleInstanceState::new()),
             app_exit: Arc::new(|_| {}),
+            clean_gate: CleanGate::default(),
         }
     }
 

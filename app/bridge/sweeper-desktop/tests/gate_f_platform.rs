@@ -112,6 +112,30 @@ fn validate_custom_path_rejects_missing_and_protected_and_accepts_valid_sandbox_
     );
 }
 
+/// Safe values for the numeric and boolean fields that were tampered with.
+fn assert_tampered_safe_defaults(dto: &sweeper_contract::SettingsDto) {
+    assert!(dto.enable_tier1, "invalid bool should fall back");
+    assert_eq!(dto.min_age_hours, 24, "out-of-bounds min_age_hours");
+    assert_eq!(
+        dto.stale_project_days, 30,
+        "out-of-bounds stale_project_days"
+    );
+}
+
+/// Unsafe fields must be dropped and the fallback surfaced as warnings.
+fn assert_tampered_fields_sanitized(dto: &sweeper_contract::SettingsDto, warnings: &[String]) {
+    assert!(!dto.allow_delete_unknown, "invalid flag should fall back");
+    assert!(
+        dto.custom_paths.is_empty(),
+        "unsafe paths must be dropped: {:?}",
+        dto.custom_paths
+    );
+    assert!(
+        !warnings.is_empty(),
+        "tampered settings should emit warnings"
+    );
+}
+
 #[test]
 fn tampered_settings_json_recovers_to_safe_defaults_with_warnings() {
     let tmp = tempfile::tempdir().unwrap();
@@ -132,22 +156,8 @@ fn tampered_settings_json_recovers_to_safe_defaults_with_warnings() {
     let store = sweeper_desktop::settings_store::SettingsStore::with_path(settings_path);
     let dto = store.get();
     let core = store.core();
-    assert!(dto.enable_tier1, "invalid bool should fall back");
-    assert_eq!(dto.min_age_hours, 24, "out-of-bounds min_age_hours");
-    assert_eq!(
-        dto.stale_project_days, 30,
-        "out-of-bounds stale_project_days"
-    );
-    assert!(!dto.allow_delete_unknown, "invalid flag should fall back");
-    assert!(
-        dto.custom_paths.is_empty(),
-        "unsafe paths must be dropped: {:?}",
-        dto.custom_paths
-    );
-    assert!(
-        !store.warnings().is_empty(),
-        "tampered settings should emit warnings"
-    );
+    assert_tampered_safe_defaults(&dto);
+    assert_tampered_fields_sanitized(&dto, store.warnings());
     assert!(core.enable_tier3, "valid tier3 opt-in should be preserved");
 }
 
@@ -395,7 +405,8 @@ struct RelaunchExpectation {
     held: bool,
 }
 
-fn assert_relaunch_state(ctx: &common::ElevationTestState, expected: RelaunchExpectation) {
+/// The launcher and exit hook must be invoked exactly as expected.
+fn assert_relaunch_attempt(ctx: &common::ElevationTestState, expected: RelaunchExpectation) {
     assert_eq!(
         ctx.provider
             .relaunch_calls
@@ -406,6 +417,10 @@ fn assert_relaunch_state(ctx: &common::ElevationTestState, expected: RelaunchExp
         ctx.exited.load(std::sync::atomic::Ordering::SeqCst),
         expected.exited
     );
+}
+
+/// The exit code and single-instance guard must be left in the expected state.
+fn assert_relaunch_aftermath(ctx: &common::ElevationTestState, expected: RelaunchExpectation) {
     assert_eq!(*ctx.exit_code.lock().unwrap(), expected.exit_code);
     assert_eq!(ctx.si.is_held(), expected.held);
 }
@@ -426,7 +441,16 @@ fn run_relaunch_case(case: RelaunchCase) {
             );
             let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
             assert!(!res.launched);
-            assert_relaunch_state(
+            assert_relaunch_attempt(
+                &ctx,
+                RelaunchExpectation {
+                    calls: 0,
+                    exited: false,
+                    exit_code: None,
+                    held: true,
+                },
+            );
+            assert_relaunch_aftermath(
                 &ctx,
                 RelaunchExpectation {
                     calls: 0,
@@ -451,7 +475,16 @@ fn run_relaunch_case(case: RelaunchCase) {
             );
             let res = commands_impl::relaunch_elevated(&ctx.state).unwrap();
             assert!(res.launched);
-            assert_relaunch_state(
+            assert_relaunch_attempt(
+                &ctx,
+                RelaunchExpectation {
+                    calls: 1,
+                    exited: true,
+                    exit_code: Some(0),
+                    held: false,
+                },
+            );
+            assert_relaunch_aftermath(
                 &ctx,
                 RelaunchExpectation {
                     calls: 1,

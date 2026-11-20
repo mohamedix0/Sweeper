@@ -28,7 +28,7 @@ export function SettingsSystemCachesCard(props: {
                   aria-label="Allow system-wide Windows caches (Admin)"
                   checked={draft.enableElevationTargets}
                   onChange={(e) => setDraft({ ...draft, enableElevationTargets: e.target.checked })}
-                  disabled={!elevationStatus.isElevated || deepDisabled}
+                  disabled={!elevationStatus.isElevated || deepDisabled || relaunching}
                 />
                 <span className="tier-switch" aria-hidden="true" />
               </label>
@@ -39,7 +39,7 @@ export function SettingsSystemCachesCard(props: {
               {draft.enableTier3 ? <CheckIcon aria-hidden="true" /> : <LockIcon aria-hidden="true" />}
               <span>{draft.enableTier3 ? 'Deep Cleanup enabled' : 'Deep Cleanup disabled'}</span>
               {!draft.enableTier3 && (
-                <button type="button" className="btn small subtle-btn settings-prereq-action" onClick={() => setDraft({ ...draft, enableTier3: true })}>Enable Deep Cleanup</button>
+                <button type="button" className="btn small subtle-btn settings-prereq-action" onClick={() => setDraft({ ...draft, enableTier3: true })} disabled={relaunching}>Enable Deep Cleanup</button>
               )}
             </span>
             <span className={`settings-prereq-chip ${elevationStatus.isElevated ? 'ok' : 'missing'}`}>

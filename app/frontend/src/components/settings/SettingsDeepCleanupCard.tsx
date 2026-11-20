@@ -8,8 +8,9 @@ export function SettingsDeepCleanupCard(props: {
   deepDisabled: boolean;
   highlightAllowUnknown: boolean;
   allowUnknownRowRef: Ref<HTMLDivElement>;
+  inputsDisabled?: boolean;
 }) {
-  const { draft, setDraft, deepDisabled, highlightAllowUnknown, allowUnknownRowRef } = props;
+  const { draft, setDraft, deepDisabled, highlightAllowUnknown, allowUnknownRowRef, inputsDisabled } = props;
   return (
     <section className="settings-group" aria-labelledby="tier3-settings-heading">
       <h2 id="tier3-settings-heading" className="settings-group-title">Deep Cleanup &amp; Inactive Projects</h2>
@@ -22,7 +23,7 @@ export function SettingsDeepCleanupCard(props: {
           </div>
           <div className="settings-row-control">
             <label className="checkbox tier-toggle">
-              <input type="checkbox" aria-label="Enable deep cleanup categories" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} />
+              <input type="checkbox" aria-label="Enable deep cleanup categories" checked={draft.enableTier3} onChange={(e) => setDraft({ ...draft, enableTier3: e.target.checked })} disabled={inputsDisabled} />
               <span className="tier-switch" aria-hidden="true" />
             </label>
           </div>
@@ -35,7 +36,7 @@ export function SettingsDeepCleanupCard(props: {
             </div>
             <div className="settings-row-control settings-row-control-cluster">
               <label className="inline-threshold" htmlFor="stale-project-days-node">
-                <input id="stale-project-days-node" className="compact-number" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={deepDisabled} aria-label="Inactive Node.js dependencies age" />
+                <input id="stale-project-days-node" className="compact-number" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={deepDisabled || inputsDisabled} aria-label="Inactive Node.js dependencies age" />
                 <span className="unit-suffix">days</span>
               </label>
             </div>
@@ -47,7 +48,7 @@ export function SettingsDeepCleanupCard(props: {
             </div>
             <div className="settings-row-control settings-row-control-cluster">
               <label className="inline-threshold" htmlFor="stale-project-days">
-                <input id="stale-project-days" className="compact-number" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={deepDisabled} aria-label="Inactive project cache age" />
+                <input id="stale-project-days" className="compact-number" type="number" min={1} value={draft.staleProjectDays} onChange={(e) => setDraft({ ...draft, staleProjectDays: Number(e.target.value || 30) })} disabled={deepDisabled || inputsDisabled} aria-label="Inactive project cache age" />
                 <span className="unit-suffix">days</span>
               </label>
             </div>
@@ -72,7 +73,7 @@ export function SettingsDeepCleanupCard(props: {
           </div>
           <div className="settings-row-control">
             <label className="checkbox tier-toggle">
-              <input type="checkbox" aria-label="Allow deleting unknown folders (advanced)" checked={draft.allowDeleteUnknown} onChange={(e) => setDraft({ ...draft, allowDeleteUnknown: e.target.checked })} />
+              <input type="checkbox" aria-label="Allow deleting unknown folders (advanced)" checked={draft.allowDeleteUnknown} onChange={(e) => setDraft({ ...draft, allowDeleteUnknown: e.target.checked })} disabled={inputsDisabled} />
               <span className="tier-switch" aria-hidden="true" />
             </label>
           </div>

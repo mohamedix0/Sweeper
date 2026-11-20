@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use sweeper_contract::{ContractError, ElevationStatusDto, RelaunchResultDto};
 use sweeper_core::elevation::{self, RelaunchOutcome, SingleInstanceGuard};
 
+use crate::clean_gate::CleanGate;
+
 /// Abstraction over elevation checks and relaunch launching (DI seam for deterministic tests).
 pub trait ElevationProvider: Send + Sync + fmt::Debug {
     /// Returns whether the current process token is elevated.
@@ -105,16 +107,32 @@ pub fn get_elevation_status(
     Ok(ElevationStatusDto { is_elevated })
 }
 
+/// Restore the single-instance guard after an aborted or failed relaunch,
+/// leaving the still-running app fully usable. The shutdown seal is lifted by
+/// dropping the `RelaunchSealGuard` owned by the calling relaunch.
+fn restore_guard(guard: SingleInstanceGuard, single_instance: &SingleInstanceState) {
+    let mut guard = guard;
+    let _ = guard.reacquire(5_000);
+    single_instance.put(guard);
+}
+
 /// Execute `relaunch_elevated` with injected providers/hooks (deterministic seam).
 ///
 /// Behavior:
 /// - If already elevated: returns `Ok { launched: false }` without invoking launcher or exit hook.
-/// - If not elevated: releases single-instance guard for handoff, invokes launcher.
-///   - Cancelled: re-acquires guard and returns sanitized error, no exit.
-///   - Launched: returns `Ok { launched: true }` and triggers exit hook after response preparation.
+/// - Otherwise claims the single relaunch slot and atomically seals the gate
+///   (blocking new Cleans) before waiting for any in-flight Clean to settle, so
+///   no Clean is terminated by the restart (#92). A concurrent relaunch is
+///   rejected before it can seal or unseal the gate.
+/// - Then releases the single-instance guard for handoff and invokes the launcher.
+///   - Cancelled: unseals the gate, re-acquires guard, returns sanitized error, no exit.
+///   - Launched: returns `Ok { launched: true }` and triggers the exit hook while
+///     the gate stays sealed (the process is going away).
+///   - Failed: unseals the gate and restores the guard so the app stays usable.
 pub fn relaunch_elevated(
     provider: &dyn ElevationProvider,
     single_instance: &SingleInstanceState,
+    clean_gate: &CleanGate,
     exit_app: &dyn Fn(i32),
 ) -> Result<RelaunchResultDto, ContractError> {
     let elevated = provider
@@ -126,16 +144,34 @@ pub fn relaunch_elevated(
         return Ok(RelaunchResultDto { launched: false });
     }
 
-    let mut guard = single_instance
-        .take()
+    // Graceful exit: claim the single relaunch slot and seal first so no new
+    // Clean can enter, then let any Clean already in flight finish before
+    // handing over the guard, launching, or exiting. The seal is owned by this
+    // call only: a second concurrent relaunch is rejected here, before it can
+    // seal or unseal the gate while this call's UAC prompt is pending (#92).
+    // Sealing and waiting stay one atomic operation under the gate lock, and a
+    // Clean is never cancelled or terminated.
+    let seal = clean_gate
+        .try_begin_relaunch()
         .ok_or_else(|| ContractError::Internal {
-            reason: "single-instance guard unavailable".to_string(),
+            reason: "relaunch already in progress".to_string(),
         })?;
 
+    let mut guard = match single_instance.take() {
+        Some(guard) => guard,
+        None => {
+            drop(seal);
+            return Err(ContractError::Internal {
+                reason: "single-instance guard unavailable".to_string(),
+            });
+        }
+    };
+
     if let Err(e) = guard.release_for_handoff() {
-        // Best-effort: try to restore ownership before returning error.
-        let _ = guard.reacquire(5_000);
-        single_instance.put(guard);
+        // Best-effort: restoring ownership and dropping the seal unseals the
+        // gate and releases the relaunch slot before returning the error.
+        drop(seal);
+        restore_guard(guard, single_instance);
         return Err(ContractError::Internal {
             reason: sanitize_relaunch_error(&e.to_string()),
         });
@@ -143,24 +179,30 @@ pub fn relaunch_elevated(
 
     match provider.relaunch() {
         Ok(RelaunchOutcome::CancelledByUser) => {
-            // UAC cancelled: re-acquire guard and keep running.
-            let _ = guard.reacquire(5_000);
-            single_instance.put(guard);
+            // UAC cancelled: dropping the seal unseals the gate and releases
+            // the slot; restore the guard and keep running.
+            drop(seal);
+            restore_guard(guard, single_instance);
             Err(ContractError::InvalidInput {
                 reason: "elevation request was cancelled".to_string(),
             })
         }
         Ok(RelaunchOutcome::Launched) => {
-            // Handoff complete for this instance; elevated instance will acquire mutex.
-            // Do not put guard back. Trigger clean exit after returning launched=true.
+            // Handoff complete for this instance; elevated instance will
+            // acquire the mutex. Do not put the guard back. Persist the seal so
+            // the process exits with the gate sealed and no further Clean may
+            // start in this instance, and so no later relaunch can unseal it.
             drop(guard);
+            let mut seal = seal;
+            seal.persist_for_exit();
             exit_app(0);
             Ok(RelaunchResultDto { launched: true })
         }
         Err(e) => {
-            // Relaunch failed: restore guard and report sanitized error.
-            let _ = guard.reacquire(5_000);
-            single_instance.put(guard);
+            // Relaunch failed: dropping the seal unseals the gate and releases
+            // the slot; restore the guard so the app stays usable.
+            drop(seal);
+            restore_guard(guard, single_instance);
             Err(ContractError::Internal {
                 reason: sanitize_relaunch_error(&e),
             })

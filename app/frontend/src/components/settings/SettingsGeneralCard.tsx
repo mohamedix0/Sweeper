@@ -6,8 +6,9 @@ export function SettingsGeneralCard(props: {
   setDraft: (s: Settings) => void;
   theme?: Theme;
   onThemeChange?: (theme: Theme) => void;
+  inputsDisabled?: boolean;
 }) {
-  const { draft, setDraft, theme, onThemeChange } = props;
+  const { draft, setDraft, theme, onThemeChange, inputsDisabled } = props;
   return (
     <section className="settings-group" aria-labelledby="general-settings-heading">
       <h2 id="general-settings-heading" className="settings-group-title">General</h2>
@@ -19,7 +20,7 @@ export function SettingsGeneralCard(props: {
           </div>
           <div className="settings-row-control">
             <label className="checkbox tier-toggle">
-              <input type="checkbox" aria-label="Enable Tier 1" checked={draft.enableTier1} onChange={(e) => setDraft({ ...draft, enableTier1: e.target.checked })} />
+              <input type="checkbox" aria-label="Enable Tier 1" checked={draft.enableTier1} onChange={(e) => setDraft({ ...draft, enableTier1: e.target.checked })} disabled={inputsDisabled} />
               <span className="tier-switch" aria-hidden="true" />
             </label>
           </div>
@@ -31,7 +32,7 @@ export function SettingsGeneralCard(props: {
           </div>
           <div className="settings-row-control">
             <label className="checkbox tier-toggle">
-              <input type="checkbox" aria-label="Enable Tier 2" checked={draft.enableTier2} onChange={(e) => setDraft({ ...draft, enableTier2: e.target.checked })} />
+              <input type="checkbox" aria-label="Enable Tier 2" checked={draft.enableTier2} onChange={(e) => setDraft({ ...draft, enableTier2: e.target.checked })} disabled={inputsDisabled} />
               <span className="tier-switch" aria-hidden="true" />
             </label>
           </div>
@@ -43,7 +44,7 @@ export function SettingsGeneralCard(props: {
             {draft.minAgeHours < 24 && <span className="inline-warn-text" role="note">Warning: below 24 hours may include very recent files.</span>}
           </div>
           <div className="settings-row-control numeric-control">
-            <input id="min-age-hours" className="compact-number" type="number" min={0} value={draft.minAgeHours} onChange={(e) => setDraft({ ...draft, minAgeHours: Number(e.target.value || 0) })} />
+            <input id="min-age-hours" className="compact-number" type="number" min={0} value={draft.minAgeHours} onChange={(e) => setDraft({ ...draft, minAgeHours: Number(e.target.value || 0) })} disabled={inputsDisabled} />
             <span className="unit-suffix">hours</span>
           </div>
         </div>
@@ -54,8 +55,8 @@ export function SettingsGeneralCard(props: {
           </div>
           <div className="settings-row-control">
             <div className="theme-toggle" role="group" aria-label="Appearance">
-              <button type="button" className={theme === 'dark' ? 'theme-segment active' : 'theme-segment'} aria-pressed={theme === 'dark'} onClick={() => onThemeChange?.('dark')} disabled={!onThemeChange}>Dark</button>
-              <button type="button" className={theme === 'light' ? 'theme-segment active' : 'theme-segment'} aria-pressed={theme === 'light'} onClick={() => onThemeChange?.('light')} disabled={!onThemeChange}>Light</button>
+              <button type="button" className={theme === 'dark' ? 'theme-segment active' : 'theme-segment'} aria-pressed={theme === 'dark'} onClick={() => onThemeChange?.('dark')} disabled={!onThemeChange || inputsDisabled}>Dark</button>
+              <button type="button" className={theme === 'light' ? 'theme-segment active' : 'theme-segment'} aria-pressed={theme === 'light'} onClick={() => onThemeChange?.('light')} disabled={!onThemeChange || inputsDisabled}>Light</button>
             </div>
           </div>
         </div>
