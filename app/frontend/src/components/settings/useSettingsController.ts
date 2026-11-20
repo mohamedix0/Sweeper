@@ -163,22 +163,27 @@ function useFocusAndPrefill(options: FocusPrefillOptions) {
   useEffect(() => focusAllowUnknownRow(options), [focusTarget, options]);
 }
 
+// One ordered save queue shared by every controller instance. Each save waits
+// for the previous one to settle, so requests and responses are processed in
+// global submission order rather than reordered by IPC. Because the queue
+// outlives any single controller, a save queued just before an unmount still
+// runs in order — a newer save from a remounted controller is therefore always
+// the last write (and its `onSaved` callback fires last).
+let sharedSaveChain: Promise<void> = Promise.resolve();
+
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
   const { setDraft, setError, setInfo, setSaving } = ui;
   // Single-flight guard: at most one `updateSettings` IPC call is in flight.
   // `toSave` is captured synchronously when the save is requested, not when the
-  // queued task runs. Each save is chained behind the previous one, so requests
-  // and responses are processed in submission order rather than reordered by
-  // IPC. Edits that land after a save was submitted stay in the draft and are
-  // preserved by `mergePreservingEdits` when that save's result is merged, so
-  // the backend and UI converge on one consistent final state.
-  const chainRef = useRef<Promise<void>>(Promise.resolve());
+  // queued task runs. Edits that land after a save was submitted stay in the
+  // draft and are preserved by `mergePreservingEdits` when that save's result
+  // is merged, so the backend and UI converge on one consistent final state.
   return useCallback((next?: Settings): Promise<void> => {
     const toSave = next ?? refs.draftRef.current;
     if (!toSave) return Promise.resolve();
     refs.draftRef.current = toSave;
     setDraft(toSave);
-    const run = chainRef.current.then(async () => {
+    const run = sharedSaveChain.then(async () => {
       setSaving(true);
       setError(null);
       setInfo(null);
@@ -196,8 +201,8 @@ function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typ
         setSaving(false);
       }
     });
-    // Keep the chain alive after a rejected task so later saves still run.
-    chainRef.current = run.catch(() => {});
+    // Keep the shared chain alive after a rejected task so later saves still run.
+    sharedSaveChain = run.catch(() => {});
     return run;
   }, [client, refs, setDraft, setError, setInfo, setSaving]);
 }

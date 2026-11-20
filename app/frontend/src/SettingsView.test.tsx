@@ -199,9 +199,69 @@ describe('Sweeper frontend', () => {
     expect(calls[1].submitted).toEqual(second);
 
     // Resolve the second save. The final UI state must match what was persisted.
+    // Require the second onSaved callback specifically: mergePreservingEdits can
+    // already produce the second submission's value from the first callback, so
+    // merely waiting for any onSaved call would not prove the queued save ran.
     calls[1].resolve(second);
-    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(2));
     const finalSaved = onSaved.mock.calls[onSaved.mock.calls.length - 1][0] as Settings;
     expect(finalSaved).toEqual(second);
+  });
+
+  it('queued saves from an unmounted controller do not overwrite a newer save from a remounted controller', async () => {
+    type SaveCall = { submitted: Settings; resolve: (value: Settings) => void };
+    const calls: SaveCall[] = [];
+    const updateSettings = vi.fn((submitted: Settings) => {
+      let resolve!: (value: Settings) => void;
+      const promise = new Promise<Settings>((r) => { resolve = r; });
+      calls.push({ submitted, resolve });
+      return promise;
+    });
+    const onSaved = vi.fn();
+    const client: SweeperClient = { ...mockController, updateSettings };
+    const initial = baseSettings();
+    const first = { ...initial, minAgeHours: 11 };
+    const second = { ...initial, minAgeHours: 12 };
+    const newest = { ...initial, minAgeHours: 13 };
+
+    function Harness({ firstSave, secondSave }: { firstSave: Settings; secondSave?: Settings }) {
+      const { save } = useSettingsController({ client, settings: initial, onSaved });
+      return (
+        <>
+          <button onClick={() => void save(firstSave)}>save-first</button>
+          {secondSave && <button onClick={() => void save(secondSave)}>save-second</button>}
+        </>
+      );
+    }
+
+    const user = userEvent.setup();
+    const firstMount = render(<Harness firstSave={first} secondSave={second} />);
+
+    // The first save is in flight and the second is queued behind it.
+    await user.click(screen.getByRole('button', { name: 'save-first' }));
+    await user.click(screen.getByRole('button', { name: 'save-second' }));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    // Unmount with a save still queued in the old controller.
+    firstMount.unmount();
+
+    // A remounted controller submits a newer save. The shared queue keeps it
+    // behind the old controller's saves, so it must still be the last write.
+    render(<Harness firstSave={newest} />);
+    await user.click(screen.getByRole('button', { name: 'save-first' }));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    calls[0].resolve(first);
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+    calls[1].resolve(second);
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(3));
+
+    // Submissions stay in global order: old controller's saves, then the new one.
+    expect(calls.map((c) => c.submitted.minAgeHours)).toEqual([11, 12, 13]);
+
+    calls[2].resolve(newest);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(3));
+    const finalSaved = onSaved.mock.calls[onSaved.mock.calls.length - 1][0] as Settings;
+    expect(finalSaved).toEqual(newest);
   });
 });
