@@ -72,6 +72,8 @@ fn register_types(type_map: &mut TypeCollection) {
     let _ = <AnalyzerNodeDto as NamedType>::definition_named_data_type(type_map);
     let _ = <StartAnalyzerResponse as NamedType>::definition_named_data_type(type_map);
     let _ = <ValidateCustomPathResponse as NamedType>::definition_named_data_type(type_map);
+    let _ = <CloseRequestDto as NamedType>::definition_named_data_type(type_map);
+    let _ = <CloseReadyResultDto as NamedType>::definition_named_data_type(type_map);
     let _ = <TierDto as NamedType>::definition_named_data_type(type_map);
     let _ = <RiskDto as NamedType>::definition_named_data_type(type_map);
     let _ = <SkipReasonDto as NamedType>::definition_named_data_type(type_map);
@@ -240,11 +242,21 @@ fn host_lifecycle_commands(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<Vec<String>, Box<dyn Error>> {
-    Ok(vec![cmd_resolve_close(cfg, type_map)?])
+    Ok(vec![
+        cmd_resolve_close(cfg, type_map)?,
+        cmd_noarg::<CloseReadyResultDto>(
+            cfg,
+            type_map,
+            "notifyCloseListenerReady",
+            "notify_close_listener_ready",
+        )?,
+        cmd_reset_pending_close(cfg, type_map)?,
+    ])
 }
 
 // The window-close handshake: the webview answers the host's deferred
 // CloseRequested event with its decision, and the host exits only on approval.
+// The request id makes a late decision for an older request a no-op.
 fn cmd_resolve_close(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
@@ -254,9 +266,31 @@ fn cmd_resolve_close(
         CmdSpec {
             name: "resolveClose",
             invoke: "resolve_close",
-            arg_obj: Some("{ approved }"),
+            arg_obj: Some("{ approved, requestId }"),
         },
-        &[("approved", "boolean".to_string())],
+        &[
+            ("approved", "boolean".to_string()),
+            ("request_id", "string".to_string()),
+        ],
+        &format!("Result<null, {err}>"),
+    ))
+}
+
+// Recovery for an unreachable host listener: clear the native pending close
+// gate so a later attempt reaches a registered listener instead of hanging in
+// `AlreadyPending`. Never approves a close.
+fn cmd_reset_pending_close(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn Error>> {
+    let err = ty::<ContractError>(cfg, type_map)?;
+    Ok(cmd_fn(
+        CmdSpec {
+            name: "resetPendingClose",
+            invoke: "reset_pending_close",
+            arg_obj: None,
+        },
+        &[],
         &format!("Result<null, {err}>"),
     ))
 }
@@ -416,8 +450,9 @@ fn render_events(
     let scan = ty::<ScanProgressEvent>(cfg, type_map)?;
     let clean = ty::<CleanProgressEvent>(cfg, type_map)?;
     let analyzer = ty::<AnalyzerProgressEvent>(cfg, type_map)?;
+    let close = ty::<CloseRequestDto>(cfg, type_map)?;
     let events_types = format!(
-        "scanProgressEvent: {scan},\ncleanProgressEvent: {clean},\nanalyzerProgressEvent: {analyzer},\ncloseRequestedByHost: null"
+        "scanProgressEvent: {scan},\ncleanProgressEvent: {clean},\nanalyzerProgressEvent: {analyzer},\ncloseRequestedByHost: {close}"
     );
     let events_map =
         "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\",\nanalyzerProgressEvent: \"AnalyzerProgressEvent\",\ncloseRequestedByHost: \"CloseRequestedByHost\""

@@ -399,6 +399,24 @@ function getSaveQueueVersion(): number {
   return saveQueueVersion;
 }
 
+// Await the shared save queue draining so a dirty check or flush observes the
+// value the backend actually acknowledged, not a snapshot from before an
+// in-flight save settled. An edit back to the acknowledged value while a
+// different value is still being persisted is not a clean draft (#93).
+function waitForPendingSaves(): Promise<void> {
+  if (pendingSaves === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let off: (() => void) | null = null;
+    const check = () => {
+      if (pendingSaves !== 0) return;
+      off?.();
+      resolve();
+    };
+    off = subscribeQueueDrain(check);
+    check();
+  });
+}
+
 function settleSave(): void {
   pendingSaves -= 1;
   if (pendingSaves === 0) {
@@ -554,15 +572,24 @@ export function useSettingsController(args: ControllerArgs) {
   // save handler). This keeps a newer edit dirty so Elevate flushes it (#92).
   const isDirty = useMemo(() => !settingsEqual(ui.draft, ui.acknowledged), [ui.draft, ui.acknowledged]);
   // Only a genuinely dirty draft is saved: Elevate with no edits must not bump
-  // the settings generation or invalidate live sessions (#92). Read both sides
-  // from refs at call time so a pending render cannot hide a newer edit.
+  // the settings generation or invalidate live sessions (#92). Settle any
+  // outstanding save first, then compare the current draft against the value
+  // that actually landed and flush a corrective change if it differs (#93).
   const flushDraft = useCallback(async (): Promise<boolean> => {
+    await waitForPendingSaves();
     if (settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current)) return true;
-    return save();
+    const persisted = await save();
+    await waitForPendingSaves();
+    return persisted;
   }, [refs, save]);
   useEffect(() => {
     registerDraftFlusher(flushDraft);
-    registerDraftDirtyReader(() => !settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current));
+    // An outstanding save is itself a reason to treat the draft as dirty: its
+    // acknowledgement has not landed yet, so a rendered equality of draft and
+    // acknowledged cannot prove the backend agrees (#93).
+    registerDraftDirtyReader(
+      () => pendingSaves > 0 || !settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current),
+    );
     return () => {
       registerDraftFlusher(null);
       registerDraftDirtyReader(null);

@@ -7,15 +7,29 @@
 //! window between observing an idle gate and the exit, so no Clean can be
 //! terminated mid-run (#92). If the relaunch is aborted or fails, the gate is
 //! unsealed and the app stays usable.
+//!
+//! The seal has an **owner** (see [`SealReason`]). A relaunch owns a reversible
+//! seal: cancelling it lifts only its own seal. An approved window close owns a
+//! terminal seal: it can never be lifted, so a relaunch cancelled *after* a
+//! close approval cannot reopen the gate before `app.exit(0)` (#93).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Shared gate state: in-flight Clean count plus the shutdown seal.
+/// Who owns the shutdown seal. `Close` outranks `Relaunch`, so a close approval
+/// can upgrade a pending relaunch seal but a relaunch can never downgrade a
+/// close seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SealReason {
+    Relaunch,
+    Close,
+}
+
+/// Shared gate state: in-flight Clean count plus the owned shutdown seal.
 #[derive(Debug, Default)]
 struct CleanGateState {
     active: usize,
-    sealed: bool,
+    seal: Option<SealReason>,
 }
 
 /// Tracks in-flight Cleans and the shutdown seal for graceful exit.
@@ -59,7 +73,7 @@ impl RelaunchSealGuard {
 impl Drop for RelaunchSealGuard {
     fn drop(&mut self) {
         if self.owns_seal {
-            self.gate.unseal();
+            self.gate.unseal_relaunch();
         }
         if self.release_flag {
             self.gate.relaunch_active.store(false, Ordering::SeqCst);
@@ -75,7 +89,7 @@ impl CleanGate {
     pub fn enter(&self) -> Option<CleanGuard> {
         let (lock, _cv) = self.inner.as_ref();
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if state.sealed {
+        if state.seal.is_some() {
             return None;
         }
         state.active += 1;
@@ -84,17 +98,25 @@ impl CleanGate {
         })
     }
 
-    /// Atomically seal the gate against new Cleans, then block until every Clean
-    /// already in flight has settled. Sealing and waiting share one lock
-    /// acquisition so no Clean can slip in after the idle check (#92). A poisoned
-    /// lock is recovered rather than propagated so shutdown can still complete.
-    pub fn seal_and_wait_for_idle(&self) {
+    /// Atomically apply a seal, then block until every Clean already in flight
+    /// has settled. Sealing and waiting share one lock acquisition so no Clean
+    /// can slip in after the idle check (#92). A `Close` seal outranks a
+    /// `Relaunch` seal and is therefore never downgraded by a concurrent
+    /// relaunch. A poisoned lock is recovered so shutdown can still complete.
+    fn seal_and_wait_for_idle(&self, reason: SealReason) {
         let (lock, cv) = self.inner.as_ref();
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-        state.sealed = true;
+        state.seal = state.seal.max(Some(reason));
         while state.active != 0 {
             state = cv.wait(state).unwrap_or_else(|e| e.into_inner());
         }
+    }
+
+    /// Seal the gate on behalf of an approved window close and wait for in-flight
+    /// Cleans. The seal is terminal: there is no public path that lifts it, so
+    /// the process can never accept a new Clean between here and `app.exit(0)`.
+    pub fn seal_for_close_and_wait(&self) {
+        self.seal_and_wait_for_idle(SealReason::Close);
     }
 
     /// Claim the single relaunch slot and seal the gate before waiting for
@@ -110,7 +132,7 @@ impl CleanGate {
         {
             return None;
         }
-        self.seal_and_wait_for_idle();
+        self.seal_and_wait_for_idle(SealReason::Relaunch);
         Some(RelaunchSealGuard {
             gate: self.clone(),
             owns_seal: true,
@@ -118,12 +140,15 @@ impl CleanGate {
         })
     }
 
-    /// Lift the shutdown seal so the app can accept Cleans again after an
-    /// aborted or failed relaunch.
-    pub fn unseal(&self) {
+    /// Lift a relaunch-owned seal so the app can accept Cleans again after an
+    /// aborted or failed relaunch. A `Close` seal is deliberately left intact:
+    /// only a relaunch may be reversed; a close approval persists until exit.
+    fn unseal_relaunch(&self) {
         let (lock, _cv) = self.inner.as_ref();
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-        state.sealed = false;
+        if state.seal == Some(SealReason::Relaunch) {
+            state.seal = None;
+        }
     }
 }
 

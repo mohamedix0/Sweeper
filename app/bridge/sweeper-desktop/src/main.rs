@@ -4,8 +4,8 @@
 //! Sweeper desktop binary (Tauri 2 shell).
 
 use sweeper_contract::{
-    AnalyzerProgressEvent, CleanProgressEvent, ContractError, ElevationStatusDto,
-    ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto, LogReadResponse,
+    AnalyzerProgressEvent, CleanProgressEvent, CloseReadyResultDto, CloseRequestDto, ContractError,
+    ElevationStatusDto, ExecuteCleanResponse, ExplainItemResponse, LogMetadataDto, LogReadResponse,
     PreviewCleanResponse, PreviewConfirmationsDto, RelaunchResultDto, ScanProgressEvent,
     ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse, TierDto,
     ValidateCustomPathResponse,
@@ -172,25 +172,64 @@ async fn relaunch_elevated(
     run_blocking(state, commands_impl::relaunch_elevated).await
 }
 
-/// Webview's answer to a deferred close request. Sealing the Clean gate and
-/// waiting for in-flight Cleans happens on a blocking worker, never on the
-/// async runtime or the window-event thread (#93).
+/// Webview's answer to a deferred close request. The request id is echoed back
+/// so a late decision for an older request cannot answer a newer one, and a
+/// retried decision is idempotent (#93). Sealing the Clean gate and waiting for
+/// in-flight Cleans happens on a blocking worker, never on the async runtime or
+/// the window-event thread.
 #[tauri::command]
 async fn resolve_close(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState<SystemClock>>,
     approved: bool,
+    request_id: String,
 ) -> Result<(), ContractError> {
     let decision = if approved {
         CloseDecision::Approved
     } else {
         CloseDecision::Cancelled
     };
-    let approval = run_blocking(state, move |s| Ok(s.close_gate.record_decision(decision))).await?;
+    let approval = run_blocking(state, move |s| {
+        Ok(s.close_gate.record_decision(decision, &request_id))
+    })
+    .await?;
     if approval == CloseApproval::Exit {
         app.exit(0);
     }
     Ok(())
+}
+
+/// Registration-time pending-state query. When the webview's close listener
+/// becomes ready it calls this; any request that arrived while no listener was
+/// registered is returned for immediate delivery (never auto-approved) (#93).
+#[tauri::command]
+async fn notify_close_listener_ready(
+    state: tauri::State<'_, AppState<SystemClock>>,
+) -> Result<CloseReadyResultDto, ContractError> {
+    run_blocking(state, move |s| {
+        Ok(CloseReadyResultDto {
+            pending_request: s
+                .close_gate
+                .pending_request()
+                .map(|request_id| CloseRequestDto { request_id }),
+        })
+    })
+    .await
+}
+
+/// Clear a pending close left by an unreachable listener. Used after bounded
+/// listener-registration retries fail, so a later close is a fresh request and
+/// cannot be swallowed as `AlreadyPending` (#93). The native close stays
+/// prevented until a decision is actually delivered.
+#[tauri::command]
+async fn reset_pending_close(
+    state: tauri::State<'_, AppState<SystemClock>>,
+) -> Result<(), ContractError> {
+    run_blocking(state, move |s| {
+        s.close_gate.reset_pending();
+        Ok(())
+    })
+    .await
 }
 
 fn main() {
@@ -226,15 +265,17 @@ fn main() {
             read_log,
             get_elevation_status,
             relaunch_elevated,
-            resolve_close
+            resolve_close,
+            notify_close_listener_ready,
+            reset_pending_close
         ])
         .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Always prevent the native close first: an unsaved draft must
                 // never be lost just because the OS asked the window to close.
                 api.prevent_close();
-                if close_gate.begin_close() == CloseRequest::DeferAndAsk {
-                    let _ = window.emit(CLOSE_REQUESTED_EVENT, ());
+                if let CloseRequest::DeferAndAsk { request_id } = close_gate.begin_close() {
+                    let _ = window.emit(CLOSE_REQUESTED_EVENT, CloseRequestDto { request_id });
                 }
             }
         })

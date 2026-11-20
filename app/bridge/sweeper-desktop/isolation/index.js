@@ -22,6 +22,8 @@ const ALLOWED_COMMANDS = new Set([
   'get_elevation_status',
   'relaunch_elevated',
   'resolve_close',
+  'notify_close_listener_ready',
+  'reset_pending_close',
 ]);
 
 // Tauri's event-plugin messages carry progress events emitted by the backend.
@@ -75,7 +77,9 @@ const ARGUMENT_SHAPES = {
   read_log: { logId: isString },
   get_elevation_status: {},
   relaunch_elevated: {},
-  resolve_close: { approved: isBoolean },
+  resolve_close: { approved: isBoolean, requestId: isString },
+  notify_close_listener_ready: {},
+  reset_pending_close: {},
 };
 
 function hasValidArguments(cmd, payload) {

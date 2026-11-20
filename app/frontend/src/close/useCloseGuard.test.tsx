@@ -11,6 +11,7 @@ function Harness({ deps }: { deps: CloseGuardDeps }) {
   return (
     <div>
       <output data-testid="prompt">{String(guard.promptOpen)}</output>
+      <output data-testid="close-pending">{String(guard.closePending)}</output>
       {guard.promptOpen && (
         <CloseDraftDialog
           saving={guard.saving}
@@ -81,9 +82,9 @@ describe('window-close handshake (#93)', () => {
     });
     const tracked: CloseBridge = {
       onHostCloseRequest: bridge.onHostCloseRequest,
-      async resolveClose(approved) {
+      async resolveClose(approved, requestId) {
         order.push(approved ? 'resolve' : 'cancel');
-        await bridge.resolveClose(approved);
+        await bridge.resolveClose(approved, requestId);
       },
     };
     render(<Harness deps={depsOf(tracked, true, flush)} />);
@@ -119,5 +120,78 @@ describe('window-close handshake (#93)', () => {
     window.dispatchEvent(dirtyEvent);
     expect(dirtyEvent.defaultPrevented).toBe(true);
     expect(bridge.decisions).toEqual([]);
+  });
+
+  it('locks controls from a clean approval through exit', async () => {
+    const bridge = fakeBridge();
+    render(<Harness deps={depsOf(bridge, false, async () => true)} />);
+    expect(screen.getByTestId('close-pending')).toHaveTextContent('false');
+
+    act(() => bridge.requestHostClose());
+
+    expect(bridge.decisions).toEqual([true]);
+    await waitFor(() => expect(screen.getByTestId('close-pending')).toHaveTextContent('true'));
+  });
+
+  it('locks controls while the approval is still in flight', async () => {
+    const bridge = fakeBridge();
+    let finishResolve!: () => void;
+    const tracked: CloseBridge = {
+      ...bridge,
+      resolveClose: (approved, requestId) =>
+        new Promise<void>((resolve) => {
+          finishResolve = () => {
+            void bridge.resolveClose(approved, requestId);
+            resolve();
+          };
+        }),
+    };
+    render(<Harness deps={depsOf(tracked, false, async () => true)} />);
+
+    act(() => bridge.requestHostClose());
+    // Rust blocks its answer until in-flight Cleans settle; controls must be
+    // locked from here, not only once the IPC promise resolves (#93).
+    await waitFor(() => expect(screen.getByTestId('close-pending')).toHaveTextContent('true'));
+    expect(bridge.decisions).toEqual([]);
+
+    finishResolve();
+    await waitFor(() => expect(bridge.decisions).toEqual([true]));
+  });
+
+  it('cancel is inert while saving so a stale cancel cannot answer a newer close', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    let finishFlush!: (value: boolean) => void;
+    const flush = vi.fn(() => new Promise<boolean>((resolve) => { finishFlush = resolve; }));
+    render(<Harness deps={depsOf(bridge, true, flush)} />);
+    act(() => bridge.requestHostClose());
+    const dialog = screen.getByRole('alertdialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Save & close' }));
+
+    // Saving is in flight: Escape and Cancel must not send a decision that
+    // could later answer a newer close request (#93).
+    await user.keyboard('{Escape}');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(bridge.decisions).toEqual([]);
+
+    finishFlush(true);
+    await waitFor(() => expect(bridge.decisions).toEqual([true]));
+  });
+
+  it('a failed decision delivery surfaces an error and keeps the prompt open', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    const failing: CloseBridge = {
+      ...bridge,
+      resolveClose: vi.fn(async () => { throw new Error('ipc down'); }),
+    };
+    render(<Harness deps={depsOf(failing, true, async () => true)} />);
+    act(() => bridge.requestHostClose());
+    const dialog = screen.getByRole('alertdialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Save & close' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.getByTestId('close-pending')).toHaveTextContent('false');
   });
 });

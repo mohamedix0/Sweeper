@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { ConfirmDialogShell } from './ConfirmDialogShell';
 
 // Shown only when the host has asked to close and the mounted Settings draft is
@@ -12,6 +12,9 @@ export function CloseDraftDialog(props: {
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const saveRef = useRef<HTMLButtonElement>(null);
+  // Stable order so the shell's busy-transition effect does not rerun on every
+  // saving/error rerender and steal focus back (#93).
+  const trapOrder = useMemo(() => [cancelRef, saveRef], []);
 
   return (
     <ConfirmDialogShell
@@ -21,8 +24,9 @@ export function CloseDraftDialog(props: {
       message="You have unsaved changes in Settings. Save them before closing, or cancel to keep Sweeper open."
       onEscape={props.onCancel}
       initialFocusRef={cancelRef}
-      trapOrder={[cancelRef, saveRef]}
+      trapOrder={trapOrder}
       error={props.error}
+      busy={props.saving}
     >
       <button ref={cancelRef} className="btn" onClick={props.onCancel} disabled={props.saving}>Cancel</button>
       <button ref={saveRef} className="btn primary" onClick={props.onSaveAndClose} disabled={props.saving}>

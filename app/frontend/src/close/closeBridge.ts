@@ -7,35 +7,50 @@ import { commands, events } from '../contract/bindings';
 // This is deliberately a dedicated host-lifecycle bridge rather than part of
 // the SweeperClient facade in api/client.ts. The facade (and its mock) model the
 // domain API used by every view; this handshake is a narrow window-lifecycle
-// concern (one command + one event) that must work before a client exists and
-// must be replaceable in close tests. Routing it through the facade would force
-// the mock controller to grow a second, unrelated protocol with no safety gain.
+// concern that must work before a client exists and must be replaceable in close
+// tests. Routing it through the facade would force the mock controller to grow a
+// second, unrelated protocol with no safety gain.
+//
+// Protocol (#93):
+// - every host request carries a generation id that decisions echo back;
+// - a newly registered listener queries for a pending request and delivers it;
+// - an unreachable listener clears the native pending gate and re-arms;
+// - decision delivery is retried with a bound and surfaces exhaustion.
+
+export type CloseRequestPayload = { requestId: string };
+export type CloseReadyPayload = { pendingRequest: CloseRequestPayload | null };
+
 export type CloseBridge = {
   /** Subscribe to the host's deferred-close request; returns an unsubscribe. */
-  onHostCloseRequest: (handler: () => void) => () => void;
+  onHostCloseRequest: (handler: (requestId: string) => void) => () => void;
   /** Answer the pending host request. Only an approval lets the process exit. */
-  resolveClose: (approved: boolean) => Promise<void>;
+  resolveClose: (approved: boolean, requestId: string) => Promise<void>;
   /** Notified when the host listener cannot be registered after all retries. */
   onRegistrationFailure?: (handler: (message: string) => void) => () => void;
 };
 
-// User-facing message for a permanently unavailable close listener. The app is
-// deliberately left open with the draft intact; nothing is auto-approved.
+// User-facing messages. The app is deliberately left open with the draft
+// intact; nothing is auto-approved.
 export const CLOSE_REGISTRATION_ERROR =
   'The close handler could not be registered, so Sweeper was kept open and your changes were not discarded. Save your work and try closing again.';
+export const CLOSE_DELIVERY_ERROR =
+  'The close decision could not be delivered, so Sweeper was kept open and your changes were not discarded. Please try closing again.';
 
 // Browser-preview fallback: the mock backend already runs the whole app in a
-// plain browser, so mirror the two host events as DOM CustomEvents there. In a
-// real Tauri window the typed IPC events are the only channel.
+// plain browser, so mirror the host event as a DOM CustomEvent there. In a real
+// Tauri window the typed IPC events are the only channel.
 const BROWSER_CLOSE_REQUEST = 'sweeper:close-requested';
+const BROWSER_REQUEST_ID = 'browser';
 
 function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
 export type CloseBridgeDeps = {
-  listenForHostClose: (handler: () => void) => Promise<() => void>;
-  resolve: (approved: boolean) => Promise<void>;
+  listenForHostClose: (handler: (payload: CloseRequestPayload) => void) => Promise<() => void>;
+  resolve: (approved: boolean, requestId: string) => Promise<void>;
+  notifyListenerReady: () => Promise<CloseReadyPayload>;
+  resetPendingClose: () => Promise<void>;
   schedule: (fn: () => void, delayMs: number) => void;
 };
 
@@ -44,23 +59,37 @@ export type CloseBridgeDeps = {
 // waiting for a webview decision, a missing listener would hang the app.
 const LISTEN_ATTEMPTS = 4;
 const LISTEN_BACKOFF_MS = [0, 100, 400, 1000];
+const MAX_RECOVERIES = 2;
+const RECOVERY_RETRY_MS = 2000;
+const RESOLVE_ATTEMPTS = 3;
 
 function defaultDeps(): CloseBridgeDeps {
   return {
-    listenForHostClose: (handler) => events.closeRequestedByHost.listen(() => handler()),
-    resolve: async (approved) => {
-      const result = await commands.resolveClose(approved);
+    listenForHostClose: (handler) =>
+      events.closeRequestedByHost.listen((event) => handler(event.payload)),
+    resolve: async (approved, requestId) => {
+      const result = await commands.resolveClose(approved, requestId);
       if (result.status === 'error') throw result.error;
     },
-    schedule: (fn, delayMs) => { window.setTimeout(fn, delayMs); },
+    notifyListenerReady: async () => {
+      const result = await commands.notifyCloseListenerReady();
+      if (result.status === 'error') throw result.error;
+      return result.data;
+    },
+    resetPendingClose: async () => {
+      const result = await commands.resetPendingClose();
+      if (result.status === 'error') throw result.error;
+    },
+    schedule: (fn, delayMs) => {
+      window.setTimeout(fn, delayMs);
+    },
   };
 }
 
-// Browser-preview path: mirror the two host events as DOM CustomEvents. The
-// Tauri runtime never takes this branch; the typed IPC events are its only
-// channel.
-function registerBrowserCloseListener(handler: () => void): () => void {
-  const listener = () => handler();
+// Browser-preview path: mirror the host event as a DOM CustomEvent. The Tauri
+// runtime never takes this branch; the typed IPC events are its only channel.
+function registerBrowserCloseListener(handler: (requestId: string) => void): () => void {
+  const listener = () => handler(BROWSER_REQUEST_ID);
   window.addEventListener(BROWSER_CLOSE_REQUEST, listener);
   return () => window.removeEventListener(BROWSER_CLOSE_REQUEST, listener);
 }
@@ -71,36 +100,80 @@ function retryDelay(attemptIndex: number): number {
   return LISTEN_BACKOFF_MS[attemptIndex] ?? LISTEN_BACKOFF_MS[LISTEN_BACKOFF_MS.length - 1];
 }
 
-// Failure path after bounded retries are exhausted: answer the deferred host
-// close with a cancel (never an approval) so Rust records a Cancelled decision
-// instead of hanging in `awaiting`, then surface an actionable error. The draft
-// stays intact — a dirty close is never auto-approved.
-function cancelAndReportFailure(
-  resolve: CloseBridgeDeps['resolve'],
-  notifyFailure: () => void,
-): void {
-  void resolve(false).catch(() => {});
-  notifyFailure();
+// Clear the native pending gate after an unreachable listener. `resolve(false)`
+// cannot be relied on to cancel a pending request we never received, so use the
+// explicit recovery command. A failure here is best-effort: the user-visible
+// error still tells them Sweeper stayed open (#93).
+async function recoverPendingGate(deps: CloseBridgeDeps): Promise<void> {
+  try {
+    await deps.resetPendingClose();
+  } catch {
+    /* best effort; the error notice is authoritative */
+  }
+}
+
+// Deliver a decision idempotently with bounded retry. Rust ignores a replayed
+// decision for the same generation, so retrying is safe. Exhaustion rejects so
+// the hook can surface the failure and reopen the prompt for re-delivery (#93).
+async function deliverWithRetry(
+  deps: CloseBridgeDeps,
+  approved: boolean,
+  requestId: string,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < RESOLVE_ATTEMPTS; attempt += 1) {
+    try {
+      await deps.resolve(approved, requestId);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 // Register the Tauri host listener, retrying transient "IPC not ready"
-// rejections with bounded backoff. Returns a disposer that detaches the
-// listener and stops any pending retries.
+// rejections with bounded backoff. On success, a registration-time pending
+// query delivers any close request that arrived before the listener existed.
+// On exhaustion, the native pending gate is cleared and a bounded number of
+// later re-registration attempts are scheduled so a subsequent close reaches a
+// live listener (#93).
 function startHostCloseListener(
-  handler: () => void,
+  handler: (requestId: string) => void,
   deps: CloseBridgeDeps,
   notifyFailure: () => void,
 ): () => void {
   let disposed = false;
   let unlisten: (() => void) | null = null;
+  let recoveryTimer: number | null = null;
+  let recoveries = 0;
 
   const attempt = (index: number) => {
     if (disposed) return;
     void Promise.resolve()
-      .then(() => deps.listenForHostClose(() => { if (!disposed) handler(); }))
+      .then(() =>
+        deps.listenForHostClose((payload) => {
+          if (!disposed) handler(payload.requestId);
+        }),
+      )
       .then((fn) => {
-        if (disposed) fn();
-        else unlisten = fn;
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+        return deps
+          .notifyListenerReady()
+          .then((ready) => {
+            if (!disposed && ready.pendingRequest) {
+              handler(ready.pendingRequest.requestId);
+            }
+          })
+          .catch(() => {
+            // Listener is already live; a failed pending query must never
+            // create a duplicate subscription. Clear the native gate instead.
+            void recoverPendingGate(deps);
+          });
       })
       .catch(() => {
         if (disposed) return;
@@ -109,7 +182,14 @@ function startHostCloseListener(
           deps.schedule(() => attempt(next), retryDelay(next));
           return;
         }
-        cancelAndReportFailure(deps.resolve, notifyFailure);
+        void recoverPendingGate(deps).then(() => {
+          if (disposed) return;
+          notifyFailure();
+          if (recoveries < MAX_RECOVERIES) {
+            recoveries += 1;
+            recoveryTimer = window.setTimeout(() => attempt(0), RECOVERY_RETRY_MS);
+          }
+        });
       });
   };
   attempt(0);
@@ -117,6 +197,7 @@ function startHostCloseListener(
   return () => {
     disposed = true;
     unlisten?.();
+    if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
   };
 }
 
@@ -134,17 +215,19 @@ export function createCloseBridge(overrides: Partial<CloseBridgeDeps> = {}): Clo
         ? startHostCloseListener(handler, deps, notifyFailure)
         : registerBrowserCloseListener(handler);
     },
-    async resolveClose(approved) {
+    async resolveClose(approved, requestId) {
       if (!isTauriRuntime()) {
         // Exposed for browser-preview diagnostics of the handshake.
         (window as unknown as { sweeperCloseDecision?: boolean }).sweeperCloseDecision = approved;
         return;
       }
-      await deps.resolve(approved);
+      await deliverWithRetry(deps, approved, requestId);
     },
     onRegistrationFailure(handler) {
       failureHandlers.add(handler);
-      return () => { failureHandlers.delete(handler); };
+      return () => {
+        failureHandlers.delete(handler);
+      };
     },
   };
 }

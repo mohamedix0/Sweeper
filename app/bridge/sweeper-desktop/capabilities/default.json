@@ -22,7 +22,9 @@
       "read_log",
       "get_elevation_status",
       "relaunch_elevated",
-      "resolve_close"
+      "resolve_close",
+      "notify_close_listener_ready",
+      "reset_pending_close"
     ],
     "deny": []
   }

@@ -116,9 +116,25 @@ async relaunchElevated() : Promise<Result<{ launched: boolean }, { code: "sessio
     else return { status: "error", error: e  as any };
 }
 },
-async resolveClose(approved: boolean) : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+async resolveClose(approved: boolean, requestId: string) : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("resolve_close", { approved }) };
+    return { status: "ok", data: await TAURI_INVOKE("resolve_close", { approved, requestId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async notifyCloseListenerReady() : Promise<Result<{ pendingRequest: CloseRequestDto | null }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("notify_close_listener_ready") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resetPendingClose() : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reset_pending_close") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -132,7 +148,7 @@ export const events = __makeEvents__<{
 scanProgressEvent: { kind: "started"; session_id: string } | { kind: "progress"; session_id: string; completed_targets: number; total_targets: number; current_target_id: string | null; current_target_name: string | null; scanned_items: string; scanned_bytes: string } | { kind: "cancelled"; session_id: string } | { kind: "completed"; session_id: string } | { kind: "failed"; session_id: string; error: ContractError },
 cleanProgressEvent: { previewToken: string; targetId: string; completedItems: string; totalItems: string; bytesFreedSoFar: string; status: string },
 analyzerProgressEvent: { sessionId: string; scannedDirs: string; scannedFiles: string; scannedBytes: string; currentPath: string | null },
-closeRequestedByHost: null
+closeRequestedByHost: { requestId: string }
 }>({
 scanProgressEvent: "ScanProgressEvent",
 cleanProgressEvent: "CleanProgressEvent",
@@ -214,6 +230,16 @@ selectable: boolean;
  * Child nodes.
  */
 children: AnalyzerNodeDto[] }
+
+/**
+ * A deferred close request issued by the host. The id is echoed on the
+ * decision so a late answer for an older request cannot close a newer one.
+ */
+export type CloseRequestDto = { 
+/**
+ * Monotonic generation id for this close handshake (decimal string).
+ */
+requestId: string }
 
 /**
  * Structured contract error variants (no internal paths or stack traces).
