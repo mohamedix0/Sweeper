@@ -33,7 +33,12 @@ pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, Contra
 
 /// `update_settings` implementation.
 ///
-/// Bumps settings generation on scan/analyzer/clean-affecting changes and invalidates active sessions.
+/// Overlapping saves are serialized by the `settings` mutex, which is held for
+/// the whole persist-first update and the subsequent invalidation. The
+/// generation only advances on scan-affecting changes, so a no-op or a
+/// non-scan-affecting update leaves in-flight `ScanSession`s valid while a real
+/// scan-affecting change invalidates them immediately. The persist-first,
+/// error-propagating behaviour of `SettingsStore::update` is reused unchanged.
 pub fn update_settings<C: Clock>(
     state: &AppState<C>,
     settings: SettingsDto,

@@ -10,7 +10,13 @@ use sweeper_core::settings::{self, SweeperSettings};
 pub struct SettingsStore {
     path: Option<PathBuf>,
     settings: SweeperSettings,
-    /// Monotonic generation incremented on scan/analyzer/clean-affecting changes to invalidate sessions.
+    /// Monotonic generation incremented ONLY on scan-affecting settings changes.
+    ///
+    /// Sessions capture this generation at creation and are rejected when it
+    /// changes. Keeping it scoped to settings that actually change what a Scan
+    /// discovers means a no-op or a non-scan-affecting update (for example
+    /// toggling `allow_delete_unknown`, which only gates Clean/Analyzer
+    /// selection) leaves an in-flight ScanSession valid.
     generation: u64,
     /// Last non-fatal sanitization warnings from load/parse (best-effort diagnostics).
     warnings: Vec<String>,
@@ -125,13 +131,20 @@ fn to_dto(settings: &SweeperSettings) -> SettingsDto {
     }
 }
 
+/// Whether the change alters what a `Scan` discovers, and therefore must
+/// invalidate an in-flight `ScanSession` immediately.
+///
+/// Every field the scanner consumes is included: enabled Tiers, elevation
+/// targets, minimum age, custom paths and the Tier 3 staleness window.
+/// `allow_delete_unknown` is deliberately excluded: it gates Clean/Analyzer
+/// selection, not Scan discovery, so changing it must not invalidate a running
+/// Scan. It is still persisted and published to the UI like any other field.
 fn scan_affecting_changed(old: &SweeperSettings, new: &SweeperSettings) -> bool {
     old.enable_tier1 != new.enable_tier1
         || old.enable_tier2 != new.enable_tier2
         || old.enable_tier3 != new.enable_tier3
         || old.enable_elevation_targets != new.enable_elevation_targets
         || old.min_age_hours != new.min_age_hours
-        || old.allow_delete_unknown != new.allow_delete_unknown
         || old.custom_paths != new.custom_paths
         || old.stale_project_days != new.stale_project_days
 }
@@ -184,6 +197,29 @@ mod tests {
             store.warnings(),
             initial_warnings.as_slice(),
             "warnings must not change on a failed write"
+        );
+    }
+
+    /// `allow_delete_unknown` gates Clean/Analyzer selection, not Scan
+    /// discovery. Persisting a change to it must update state without bumping
+    /// the generation, so an in-flight ScanSession stays valid.
+    #[test]
+    fn non_scan_affecting_change_updates_state_without_bumping_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = SettingsStore::with_path(dir.path().join("settings.json"));
+        let initial = store.get();
+        let initial_gen = store.generation();
+        let mut requested = initial.clone();
+        requested.allow_delete_unknown = !requested.allow_delete_unknown;
+
+        let updated = store.update(requested.clone()).expect("write succeeds");
+
+        assert_eq!(updated, requested);
+        assert_eq!(store.get(), requested);
+        assert_eq!(
+            store.generation(),
+            initial_gen,
+            "a non-scan-affecting change must not bump generation"
         );
     }
 

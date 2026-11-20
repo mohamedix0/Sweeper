@@ -149,6 +149,103 @@ fn update_settings_increments_generation_and_invalidates_active_sessions() {
 }
 
 #[test]
+fn no_op_settings_update_keeps_scan_session_valid() {
+    let state = common::make_state();
+    let sandbox = Sandbox::new();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    common::seed_session(&state, &root, &f, 1_700_000_000);
+
+    // Re-submit the exact current settings. A no-op must not bump the
+    // generation, so the in-flight ScanSession stays valid.
+    let current = commands_impl::get_settings(&state).unwrap();
+    let gen_before = state.settings.lock().unwrap().generation();
+    let updated = commands_impl::update_settings(&state, current.clone()).unwrap();
+    assert_eq!(updated, current);
+    assert_eq!(state.settings.lock().unwrap().generation(), gen_before);
+    let results = commands_impl::get_scan_results(&state, "scan-test".to_string())
+        .expect("a no-op settings update must not invalidate the scan session");
+    assert_eq!(results.session_id, "scan-test");
+}
+
+#[test]
+fn non_scan_affecting_change_keeps_scan_session_valid() {
+    let state = common::make_state();
+    let sandbox = Sandbox::new();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    common::seed_session(&state, &root, &f, 1_700_000_000);
+
+    // `allow_delete_unknown` gates Clean/Analyzer selection; it does not affect
+    // what a Scan discovers, so changing it must leave the ScanSession valid.
+    let mut requested = commands_impl::get_settings(&state).unwrap();
+    requested.allow_delete_unknown = !requested.allow_delete_unknown;
+    commands_impl::update_settings(&state, requested).unwrap();
+
+    let results = commands_impl::get_scan_results(&state, "scan-test".to_string())
+        .expect("a non-scan-affecting change must not invalidate the scan session");
+    assert_eq!(results.session_id, "scan-test");
+}
+
+#[test]
+fn scan_affecting_change_invalidates_scan_session_immediately() {
+    let state = common::make_state();
+    let sandbox = Sandbox::new();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    common::seed_session(&state, &root, &f, 1_700_000_000);
+
+    // `min_age_hours` changes which items a Scan reports, so the in-flight
+    // session must be rejected as soon as the change is persisted.
+    let mut requested = commands_impl::get_settings(&state).unwrap();
+    requested.min_age_hours = if requested.min_age_hours == 10 {
+        11
+    } else {
+        10
+    };
+    commands_impl::update_settings(&state, requested).unwrap();
+
+    let err = commands_impl::get_scan_results(&state, "scan-test".to_string()).unwrap_err();
+    common::assert_session_invalid_err(err);
+}
+
+#[test]
+fn overlapping_settings_saves_converge_to_one_consistent_state() {
+    let state = common::make_state();
+    let base = commands_impl::get_settings(&state).unwrap();
+
+    // Drive overlapping saves from multiple threads. Each save holds the
+    // settings mutex across its persist + generation bump + invalidation, so
+    // they converge on exactly one of the submitted values and bump the
+    // generation once per scan-affecting save.
+    let mut handles = Vec::new();
+    for i in 0..8u32 {
+        let state = state.clone();
+        let mut requested = base.clone();
+        requested.min_age_hours = 10 + i;
+        let submitted_age = requested.min_age_hours;
+        handles.push(std::thread::spawn(move || {
+            commands_impl::update_settings(&state, requested).expect("concurrent save succeeds");
+            submitted_age
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("save thread did not panic");
+    }
+
+    let final_settings = commands_impl::get_settings(&state).unwrap();
+    assert!(
+        (10..18).contains(&final_settings.min_age_hours),
+        "final state must be one of the submitted values: {final_settings:?}"
+    );
+    assert_eq!(
+        state.settings.lock().unwrap().generation(),
+        8,
+        "each scan-affecting save bumps generation exactly once"
+    );
+}
+
+#[test]
 fn failed_settings_write_is_reported_and_generation_unchanged() {
     let mut state = common::make_state();
     // A regular file where the settings directory should be makes persistence

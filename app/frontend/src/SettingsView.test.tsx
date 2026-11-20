@@ -4,6 +4,7 @@ import { createRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { SettingsView } from './components/SettingsView';
+import { useSettingsController } from './components/settings/useSettingsController';
 import { mockController } from './api/mock';
 import type { Settings, SweeperClient } from './api/client';
 
@@ -142,5 +143,65 @@ describe('Sweeper frontend', () => {
     pending.resolve({ ...baseSettings(), minAgeHours: 12 });
     await waitFor(() => expect(screen.getByText(/Settings saved/i)).toBeInTheDocument());
     expect((screen.getByLabelText('Allow deleting unknown folders (advanced)') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('single-flight saves converge on one consistent final state across overlapping saves', async () => {
+    type SaveCall = { submitted: Settings; resolve: (value: Settings) => void };
+    const calls: SaveCall[] = [];
+    const updateSettings = vi.fn((submitted: Settings) => {
+      let resolve!: (value: Settings) => void;
+      const promise = new Promise<Settings>((r) => { resolve = r; });
+      calls.push({ submitted, resolve });
+      return promise;
+    });
+    const onSaved = vi.fn();
+    const client: SweeperClient = { ...mockController, updateSettings };
+
+    // A harness that exposes save() directly: overlapping saves can originate
+    // from any caller (Save button, custom-path actions, auto-save), not just
+    // the button which is disabled while `saving` is true.
+    const initialSettings = baseSettings();
+    const first = { ...initialSettings, minAgeHours: 12 };
+    const second = { ...initialSettings, minAgeHours: 12, allowDeleteUnknown: true };
+    function SaveHarness() {
+      const { save } = useSettingsController({
+        client,
+        settings: initialSettings,
+        onSaved,
+      });
+      return (
+        <>
+          <button onClick={() => void save(first)}>save-first</button>
+          <button onClick={() => void save(second)}>save-second</button>
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(<SaveHarness />);
+
+    // First save stays in flight.
+    await user.click(screen.getByRole('button', { name: 'save-first' }));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(calls[0].submitted).toEqual(first);
+
+    // A second save is requested while the first is still in flight.
+    await user.click(screen.getByRole('button', { name: 'save-second' }));
+
+    // Single-flight: the second save is queued behind the first, not started.
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+
+    // Resolve the first save; the queued save must now start.
+    calls[0].resolve(first);
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+
+    // The queued save carries the latest user intent, so the backend converges
+    // on one consistent final state.
+    expect(calls[1].submitted).toEqual(second);
+
+    // Resolve the second save. The final UI state must match what was persisted.
+    calls[1].resolve(second);
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    const finalSaved = onSaved.mock.calls[onSaved.mock.calls.length - 1][0] as Settings;
+    expect(finalSaved).toEqual(second);
   });
 });

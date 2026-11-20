@@ -165,27 +165,40 @@ function useFocusAndPrefill(options: FocusPrefillOptions) {
 
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
   const { setDraft, setError, setInfo, setSaving } = ui;
-  return useCallback(async (next?: Settings) => {
+  // Single-flight guard: at most one `updateSettings` IPC call is in flight.
+  // Each save captures the current draft when requested; a save requested while
+  // another is pending is queued behind it, so requests and responses are
+  // processed in order instead of being reordered by IPC. A queued save runs
+  // against the draft as it stands after the previous save merged its result,
+  // keeping the backend and the UI on one consistent final state even when
+  // edits land during an in-flight save.
+  const chainRef = useRef<Promise<void>>(Promise.resolve());
+  return useCallback((next?: Settings): Promise<void> => {
     const toSave = next ?? refs.draftRef.current;
-    if (!toSave) return;
-    setSaving(true);
-    setError(null);
-    setInfo(null);
+    if (!toSave) return Promise.resolve();
     refs.draftRef.current = toSave;
     setDraft(toSave);
-    try {
-      const saved = await client.updateSettings(toSave);
-      const after = refs.draftRef.current ?? saved;
-      const merged = mergePreservingEdits({ saved, submitted: toSave, after });
-      refs.draftRef.current = merged;
-      setDraft(merged);
-      refs.onSavedRef.current(merged);
-      setInfo('Settings saved. Active sessions may be invalidated when scan-affecting settings change.');
-    } catch (e) {
-      setError(formatContractError(e));
-    } finally {
-      setSaving(false);
-    }
+    const run = chainRef.current.then(async () => {
+      setSaving(true);
+      setError(null);
+      setInfo(null);
+      try {
+        const saved = await client.updateSettings(toSave);
+        const after = refs.draftRef.current ?? saved;
+        const merged = mergePreservingEdits({ saved, submitted: toSave, after });
+        refs.draftRef.current = merged;
+        setDraft(merged);
+        refs.onSavedRef.current(merged);
+        setInfo('Settings saved. Active sessions may be invalidated when scan-affecting settings change.');
+      } catch (e) {
+        setError(formatContractError(e));
+      } finally {
+        setSaving(false);
+      }
+    });
+    // Keep the chain alive after a rejected task so later saves still run.
+    chainRef.current = run.catch(() => {});
+    return run;
   }, [client, refs, setDraft, setError, setInfo, setSaving]);
 }
 
