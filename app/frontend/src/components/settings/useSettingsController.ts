@@ -425,6 +425,39 @@ function settleSave(): void {
   }
 }
 
+// Add Folder validates asynchronously and only queues its save once validation
+// resolves. A close approval must not race ahead of that save, so in-flight
+// validations are tracked alongside the save queue and drained before the close
+// handshake treats the draft as settled (#93).
+let pendingValidations = 0;
+const validationDrainListeners = new Set<() => void>();
+
+function settleValidation(): void {
+  pendingValidations -= 1;
+  if (pendingValidations === 0) {
+    for (const listener of validationDrainListeners) listener();
+  }
+}
+
+function subscribeValidationDrain(listener: () => void): () => void {
+  validationDrainListeners.add(listener);
+  return () => { validationDrainListeners.delete(listener); };
+}
+
+function waitForPendingValidations(): Promise<void> {
+  if (pendingValidations === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let off: (() => void) | null = null;
+    const check = () => {
+      if (pendingValidations !== 0) return;
+      off?.();
+      resolve();
+    };
+    off = subscribeValidationDrain(check);
+    check();
+  });
+}
+
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
   const { setDraft, setAcknowledged, setError, setInfo, setSaving } = ui;
   // Single-flight guard: at most one `updateSettings` IPC call is in flight.
@@ -493,6 +526,9 @@ function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs:
     if (!base) return;
     const raw = customPathInput.trim();
     if (!raw) return;
+    // Count the whole validation -> save sequence so a close approval waits for
+    // it instead of letting the path save land after the decision (#93).
+    pendingValidations += 1;
     setValidatingPath(true);
     setError(null);
     setInfo(null);
@@ -507,6 +543,9 @@ function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs:
     } catch (e) {
       setError(formatContractError(e));
     } finally {
+      // Settled only after the validation's own save has been queued, so the
+      // subsequent waitForPendingSaves() observes it (#93).
+      settleValidation();
       setValidatingPath(false);
     }
   }, [client, customPathInput, refs, save, setError, setInfo]);
@@ -576,11 +615,18 @@ export function useSettingsController(args: ControllerArgs) {
   // outstanding save first, then compare the current draft against the value
   // that actually landed and flush a corrective change if it differs (#93).
   const flushDraft = useCallback(async (): Promise<boolean> => {
+    // A validation started before the close request can still be settling and
+    // queue its save after ours; wait for it before deciding anything (#93).
+    await waitForPendingValidations();
     await waitForPendingSaves();
     if (settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current)) return true;
-    const persisted = await save();
+    await save();
+    // A save queued behind ours (e.g. an Add Folder save whose validation
+    // resolved mid-flush) can land after ours. Wait for the WHOLE queue to
+    // drain, then report success only if what the backend acknowledged equals
+    // the current draft; otherwise the close prompt must stay open (#93).
     await waitForPendingSaves();
-    return persisted;
+    return settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current);
   }, [refs, save]);
   useEffect(() => {
     registerDraftFlusher(flushDraft);
@@ -588,7 +634,7 @@ export function useSettingsController(args: ControllerArgs) {
     // acknowledgement has not landed yet, so a rendered equality of draft and
     // acknowledged cannot prove the backend agrees (#93).
     registerDraftDirtyReader(
-      () => pendingSaves > 0 || !settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current),
+      () => pendingValidations > 0 || pendingSaves > 0 || !settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current),
     );
     return () => {
       registerDraftFlusher(null);

@@ -20,6 +20,29 @@ export type CloseGuardState = {
 const SAVE_FAILED_MESSAGE =
   'Settings could not be saved. The window was kept open and your changes are kept.';
 
+// A decision's IPC may settle after a newer close request superseded it. Apply
+// the completion (success AND failure effects) only when the captured generation
+// is still current, so a stale answer cannot clear a newer request's id or hide
+// its prompt while Rust still holds it pending (#93).
+type DecisionCompletionContext = {
+  requestId: string;
+  requestIdRef: { current: string | null };
+  succeeded: boolean;
+  approved: boolean;
+  onDelivered: () => void;
+  onDeliveryFailed: (approved: boolean) => void;
+};
+
+function applyDecisionCompletion(ctx: DecisionCompletionContext): void {
+  if (ctx.requestIdRef.current !== ctx.requestId) return;
+  if (ctx.succeeded) {
+    ctx.requestIdRef.current = null;
+    ctx.onDelivered();
+  } else {
+    ctx.onDeliveryFailed(ctx.approved);
+  }
+}
+
 // Owns the generation id and decision delivery. The id lives in a ref so a late
 // answer always targets the request the user actually saw (#93). All callbacks
 // are stable for the hook's lifetime, so `deliver` does not re-subscribe the
@@ -56,12 +79,18 @@ function useDecisionDelivery(
       // Rust blocks that call until in-flight Cleans settle, and no edit may land
       // during that wait (#93).
       if (approved) lockClose();
+      const completion = {
+        requestId,
+        requestIdRef,
+        approved,
+        onDelivered,
+        onDeliveryFailed,
+      };
       try {
         await bridge.resolveClose(approved, requestId);
-        requestIdRef.current = null;
-        onDelivered();
+        applyDecisionCompletion({ ...completion, succeeded: true });
       } catch {
-        onDeliveryFailed(approved);
+        applyDecisionCompletion({ ...completion, succeeded: false });
       }
     },
     [bridge, lockClose, onDelivered, onDeliveryFailed],

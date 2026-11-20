@@ -62,6 +62,9 @@ const LISTEN_BACKOFF_MS = [0, 100, 400, 1000];
 const MAX_RECOVERIES = 2;
 const RECOVERY_RETRY_MS = 2000;
 const RESOLVE_ATTEMPTS = 3;
+// Bounded retries for the registration-time readiness query. A transient IPC
+// rejection here must never clear the native pending gate (see below).
+const READY_ATTEMPTS = 4;
 
 function defaultDeps(): CloseBridgeDeps {
   return {
@@ -141,24 +144,42 @@ type ListenerSession = {
   recoveries: number;
 };
 
+// The id of a still-pending request, but only while this listener is live.
+function livePendingRequestId(isLive: () => boolean, ready: CloseReadyPayload): string | null {
+  return isLive() ? (ready.pendingRequest?.requestId ?? null) : null;
+}
+
+// A readiness query is retried only while the listener is live and the bounded
+// attempt budget remains (#93).
+function shouldRetryReadyQuery(isLive: () => boolean, attempt: number): boolean {
+  return isLive() && attempt + 1 < READY_ATTEMPTS;
+}
+
 // A newly live listener answers a request that arrived before registration.
-// A failed pending query must never create a duplicate subscription, so the
-// native gate is cleared instead (#93).
+// A transient rejection of the readiness query must NEVER clear the native
+// gate: the listener may already own a request pushed by the host event, and a
+// reset would strand it (Rust would ignore the dialog's decision while the
+// close stayed pending). Retry the query on this SAME live listener instead,
+// preserving already-delivered requests (#93).
 function deliverPendingRequest(
   deps: CloseBridgeDeps,
   handler: (requestId: string) => void,
   isLive: () => boolean,
-): Promise<void> {
-  return deps
-    .notifyListenerReady()
-    .then((ready) => {
-      if (isLive() && ready.pendingRequest) {
-        handler(ready.pendingRequest.requestId);
-      }
-    })
-    .catch(() => {
-      void recoverPendingGate(deps);
-    });
+): void {
+  const query = (attempt: number): void => {
+    void deps.notifyListenerReady().then(
+      (ready) => {
+        const requestId = livePendingRequestId(isLive, ready);
+        if (requestId) handler(requestId);
+      },
+      () => {
+        if (shouldRetryReadyQuery(isLive, attempt)) {
+          deps.schedule(() => query(attempt + 1), retryDelay(attempt + 1));
+        }
+      },
+    );
+  };
+  query(0);
 }
 
 // Store a registered listener (or tear it down if disposal raced the
@@ -174,7 +195,7 @@ function onListenerRegistered(
     return;
   }
   session.unlisten = unlisten;
-  void deliverPendingRequest(deps, handler, () => !session.disposed);
+  deliverPendingRequest(deps, handler, () => !session.disposed);
 }
 
 // Related state and callbacks for the registration-failure path, bundled so the

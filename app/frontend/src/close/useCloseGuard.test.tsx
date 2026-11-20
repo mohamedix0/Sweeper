@@ -178,6 +178,38 @@ describe('window-close handshake (#93)', () => {
     await waitFor(() => expect(bridge.decisions).toEqual([true]));
   });
 
+  it('a stale cancel completion cannot clear or hide a newer close request', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    let finishR1!: () => void;
+    const resolveR1 = vi.fn((_approved: boolean, _requestId: string) =>
+      new Promise<void>((resolve) => { finishR1 = resolve; }),
+    );
+    const tracked: CloseBridge = {
+      ...bridge,
+      resolveClose: (approved, requestId) =>
+        requestId === 'R1' ? resolveR1(approved, requestId) : bridge.resolveClose(approved, requestId),
+    };
+    render(<Harness deps={depsOf(tracked, true, async () => true)} />);
+    act(() => bridge.requestHostClose('R1'));
+    const dialog = screen.getByRole('alertdialog');
+
+    // Cancel R1, but keep its IPC answer in flight.
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(resolveR1).toHaveBeenCalledTimes(1);
+
+    // A newer close R2 supersedes R1 before R1's decision settles.
+    act(() => bridge.requestHostClose('R2'));
+
+    // R1's stale completion must leave R2's id and prompt intact.
+    finishR1();
+    await waitFor(() => expect(screen.getByTestId('prompt')).toHaveTextContent('true'));
+
+    // The still-open prompt answers R2, not the superseded R1.
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }));
+    expect(bridge.decisionIds).toEqual(['R2']);
+  });
+
   it('a failed decision delivery surfaces an error and keeps the prompt open', async () => {
     const user = userEvent.setup();
     const bridge = fakeBridge();

@@ -130,6 +130,40 @@ describe('close listener registration (#93)', () => {
     off();
   });
 
+  it('retries a rejected readiness query after delivery without clearing the native gate', async () => {
+    vi.useFakeTimers();
+    setTauriRuntime(true);
+    const state: { wired: ((payload: { requestId: string }) => void) | null } = { wired: null };
+    const observed: { resets: number; readyCalls: number } = { resets: 0, readyCalls: 0 };
+    const listen = vi.fn((handler: (payload: { requestId: string }) => void): Promise<() => void> => {
+      state.wired = handler;
+      return Promise.resolve(() => {});
+    });
+    const notifyListenerReady = vi.fn(async (): Promise<CloseReadyPayload> => {
+      observed.readyCalls += 1;
+      if (observed.readyCalls === 1) throw new Error('ipc not ready');
+      return { pendingRequest: { requestId: 'R1' } };
+    });
+    const bridge = createCloseBridge(
+      depsWith({ listenForHostClose: listen, notifyListenerReady }, observed),
+    );
+    const received = vi.fn();
+    const off = bridge.onHostCloseRequest(received);
+    await vi.advanceTimersByTimeAsync(0);
+    // The live listener already delivered R1 through the host event.
+    state.wired?.({ requestId: 'R1' });
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // Rejection must not wipe a request the listener owns: Rust still holds R1,
+    // so a later Save & close decision is honoured instead of being ignored.
+    expect(observed.resets).toBe(0);
+    expect(notifyListenerReady.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(listen).toHaveBeenCalledTimes(1);
+    expect(received).toHaveBeenCalledWith('R1');
+    off();
+  });
+
   it('re-arms after exhausted retries and delivers the pending close on re-registration', async () => {
     vi.useFakeTimers();
     setTauriRuntime(true);

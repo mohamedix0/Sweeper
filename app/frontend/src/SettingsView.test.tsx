@@ -589,6 +589,54 @@ describe('Sweeper frontend', () => {
     await waitFor(() => expect(flushResult).toBe(true));
   });
 
+  it('flushDraft stays false when a save queued behind the flush fails (#93)', async () => {
+    type SaveCall = { submitted: Settings; resolve: (v: Settings) => void; reject: (e?: unknown) => void };
+    const calls: SaveCall[] = [];
+    const updateSettings = vi.fn((submitted: Settings) => {
+      let resolve!: (v: Settings) => void;
+      let reject!: (e?: unknown) => void;
+      const promise = new Promise<Settings>((res, rej) => { resolve = res; reject = rej; });
+      calls.push({ submitted, resolve, reject });
+      return promise;
+    });
+    const client: SweeperClient = { ...mockController, updateSettings };
+    const initial = baseSettings();
+    let flushResult: boolean | null = null;
+
+    function Harness() {
+      const c = useSettingsController({ client, settings: initial, onSaved: () => {} });
+      return (
+        <>
+          <button onClick={() => c.setDraft((d) => (d ? { ...d, minAgeHours: 12 } : d))}>edit-12</button>
+          <button onClick={() => void c.save({ ...initial, minAgeHours: 24 })}>save-24</button>
+          <button onClick={() => { void c.flushDraft().then((ok) => { flushResult = ok; }); }}>flush</button>
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    // Make the draft dirty, then start a flush so our own save is in flight.
+    await user.click(screen.getByRole('button', { name: 'edit-12' }));
+    await user.click(screen.getByRole('button', { name: 'flush' }));
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+    expect(calls[0].submitted.minAgeHours).toBe(12);
+
+    // A save requested while the flush's save is in flight queues behind it.
+    await user.click(screen.getByRole('button', { name: 'save-24' }));
+    expect(updateSettings).toHaveBeenCalledTimes(1); // still queued
+
+    // The flush's own save succeeds; the save queued behind it then fails.
+    calls[0].resolve(calls[0].submitted);
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+    calls[1].reject(new Error('disk write failed'));
+
+    await waitFor(() => expect(flushResult).not.toBeNull());
+    // The draft holds 24 but the backend only acknowledged 12, so the close
+    // prompt must stay open: flush reports false, not just its own result.
+    expect(flushResult).toBe(false);
+  });
+
   it('aborts Elevate when the draft cannot be persisted', async () => {
     const relaunchElevated = vi.fn(async () => ({ launched: true }));
     const updateSettings = vi.fn(async (_s: Settings): Promise<Settings> => {
