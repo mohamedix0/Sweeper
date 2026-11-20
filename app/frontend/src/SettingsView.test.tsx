@@ -395,4 +395,42 @@ describe('Sweeper frontend', () => {
     await waitFor(() => expect(screen.getByTestId('draft-min-age')).toHaveTextContent('11'));
     expect(fixture.onSaved).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps a rejected local submission when the parent value never changed during the pending save', async () => {
+    // Same controller, parent holds 24 the whole time. The user submits 12 and
+    // the save rejects, so no onSaved fires and there is no deferred parent
+    // feedback. The queue-drain replay must not reconcile the rejected 12 back
+    // to the unchanged parent value of 24.
+    const pending = deferred<Settings>();
+    const updateSettings = vi.fn(() => pending.promise);
+    const onSaved = vi.fn();
+    const client: SweeperClient = { ...mockController, updateSettings };
+    const initial = baseSettings();
+
+    function Controller() {
+      const { draft, error, save } = useSettingsController({ client, settings: initial, onSaved });
+      return (
+        <>
+          <output data-testid="draft-min-age">{draft?.minAgeHours ?? 'none'}</output>
+          <output data-testid="error">{error ?? 'none'}</output>
+          <button onClick={() => void save({ ...initial, minAgeHours: 12 })}>save-rejected</button>
+        </>
+      );
+    }
+
+    const user = userEvent.setup();
+    render(<Controller />);
+    expect(screen.getByTestId('draft-min-age')).toHaveTextContent('24');
+
+    await user.click(screen.getByRole('button', { name: 'save-rejected' }));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('draft-min-age')).toHaveTextContent('12');
+
+    pending.reject(new Error('updateSettings failed'));
+    // The error stays visible and the rejected input stays in the draft: there
+    // was no changed parent value to replay when the queue drained.
+    await waitFor(() => expect(screen.getByTestId('error')).not.toHaveTextContent('none'));
+    expect(screen.getByTestId('draft-min-age')).toHaveTextContent('12');
+    expect(onSaved).not.toHaveBeenCalled();
+  });
 });

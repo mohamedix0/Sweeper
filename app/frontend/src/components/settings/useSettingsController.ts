@@ -112,21 +112,42 @@ function useControllerRefs(args: ControllerArgs) {
   // Tracks the queue-drain version already observed by the sync effect so it
   // can tell a drain-triggered rerun from an ordinary parent settings update.
   const seenQueueVersionRef = useRef<number>(getSaveQueueVersion());
+  // Parent value last adopted into the draft. Comparing an incoming `settings`
+  // against it tells whether feedback skipped while saves were pending is real
+  // (a changed parent value) rather than an incidental effect rerun.
+  const lastAppliedParentRef = useRef<Settings | null>(args.settings);
+  // Set when a changed parent value is skipped because saves are still pending;
+  // cleared once that feedback is replayed or applied directly. A queue drain
+  // with no such feedback must leave a rejected local submission untouched.
+  const deferredFeedbackRef = useRef<boolean>(false);
   onSavedRef.current = args.onSaved;
   onFocusConsumedRef.current = args.onFocusConsumed;
   // Keep the bundle stable across renders: all members are ref objects, so the
   // sync effect can safely depend on `refs` without rerunning on every draft
   // edit and overwriting unsaved user changes with parent feedback.
   return useMemo(
-    () => ({ draftRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef }),
-    [draftRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef],
+    () => ({ draftRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef, lastAppliedParentRef, deferredFeedbackRef }),
+    [draftRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef, lastAppliedParentRef, deferredFeedbackRef],
   );
 }
 
 // A queue-drain rerun replays deferred parent feedback through an edit-preserving
-// merge; an ordinary parent update overwrites the draft directly.
-function shouldReplayDeferredFeedback(input: { drained: boolean }): boolean {
-  return input.drained;
+// merge only when a changed parent value was actually skipped while saves were
+// pending. With no real feedback to apply the draft is left alone, so a rejected
+// submission is not silently replaced by the unchanged parent value.
+function shouldReplayDeferredFeedback(input: { drained: boolean; hasDeferredFeedback: boolean }): boolean {
+  return input.drained && input.hasDeferredFeedback;
+}
+
+// Record that a changed parent value arrived while saves were pending, so the
+// eventual queue drain knows there is real feedback to replay. An unchanged
+// parent value carries no deferred feedback and must not trigger a replay.
+function recordDeferredFeedback(options: {
+  settings: Settings;
+  refs: ReturnType<typeof useControllerRefs>;
+}): void {
+  if (settingsEqual(options.refs.lastAppliedParentRef.current, options.settings)) return;
+  options.refs.deferredFeedbackRef.current = true;
 }
 
 // Replay parent feedback that was skipped while saves were pending. The merge
@@ -141,6 +162,8 @@ function applyDeferredFeedback(options: {
     lastSubmitted: options.refs.lastSubmittedRef.current,
     draft: options.refs.draftRef.current,
   }));
+  options.refs.lastAppliedParentRef.current = options.settings;
+  options.refs.deferredFeedbackRef.current = false;
 }
 
 // Effect body: mirror the draft into the ref bundle so save handlers and the
@@ -150,6 +173,21 @@ function mirrorDraftIntoRef(options: {
   draft: Settings | null;
 }): void {
   options.refs.draftRef.current = options.draft;
+}
+
+// Adopt an ordinary parent update outright. A queue drain with no real deferred
+// feedback (e.g. a rejected save whose parent value never changed) leaves the
+// local draft untouched so the rejected submission is not silently replaced.
+function adoptParentFeedback(options: {
+  settings: Settings;
+  refs: ReturnType<typeof useControllerRefs>;
+  setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  drained: boolean;
+}): void {
+  if (options.drained) return;
+  options.refs.lastAppliedParentRef.current = options.settings;
+  options.refs.deferredFeedbackRef.current = false;
+  options.setDraft(options.settings);
 }
 
 // Effect body: adopt parent feedback when no save is outstanding. A queue drain
@@ -172,13 +210,17 @@ function syncParentFeedback(options: {
   setLoading(false);
   // While a save is still outstanding, parent feedback is from an earlier
   // queued save and must not overwrite the draft holding the latest submitted
-  // value. It is applied by the save handler's own merge instead.
-  if (pendingSaves > 0) return;
-  if (shouldReplayDeferredFeedback({ drained })) {
+  // value. It is applied by the save handler's own merge instead. Record real
+  // (changed) feedback so a later drain can replay it.
+  if (pendingSaves > 0) {
+    recordDeferredFeedback({ settings, refs });
+    return;
+  }
+  if (shouldReplayDeferredFeedback({ drained, hasDeferredFeedback: refs.deferredFeedbackRef.current })) {
     applyDeferredFeedback({ settings, refs, setDraft });
     return;
   }
-  setDraft(settings);
+  adoptParentFeedback({ settings, refs, setDraft, drained });
 }
 
 // Effect body: load settings from the client on mount when the parent has not
