@@ -431,14 +431,11 @@ mod tests {
 
     /// A failed write must propagate out of `persist_settings_json` rather than
     /// being silently discarded. The failure is injected with a path whose parent
-    /// is a regular file (so directory creation fails deterministically), using
-    /// only a runtime temp directory — no real user or system paths.
+    /// is a regular file (so directory creation fails deterministically), via the
+    /// shared `sweeper_testkit` fixture — runtime temp dir only, no real paths.
     #[test]
     fn persist_settings_json_propagates_write_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let blocker = dir.path().join("occupied-by-a-file");
-        std::fs::write(&blocker, b"not a directory").expect("blocker file");
-        let settings_path = blocker.join("settings.json");
+        let (_dir, settings_path) = sweeper_testkit::blocked_settings_path();
 
         let err = persist_settings_json(&settings_path, &SweeperSettings::default())
             .expect_err("write failure must propagate");

@@ -48,6 +48,19 @@ pub enum TestkitError {
 /// Result type for testkit operations.
 pub type Result<T> = std::result::Result<T, TestkitError>;
 
+/// Build a settings file path whose parent is a regular file, so any attempt to
+/// create the settings directory fails deterministically.
+///
+/// Returns the owning temp directory (keep it alive for as long as the path is
+/// used) and the settings file path. Uses only a runtime temp directory — never
+/// a real user or system path.
+pub fn blocked_settings_path() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let blocker = dir.path().join("occupied-by-a-file");
+    std::fs::write(&blocker, b"not a directory").expect("blocker file");
+    (dir, blocker.join("settings.json"))
+}
+
 pub use canary::CanaryTree;
 pub use cleanup::{
     cleanup_stale_canaries, cleanup_stale_sandboxes, CANARY_DIR_PREFIX, SANDBOX_DIR_PREFIX,

@@ -151,14 +151,11 @@ fn update_settings_increments_generation_and_invalidates_active_sessions() {
 #[test]
 fn failed_settings_write_is_reported_and_generation_unchanged() {
     let mut state = common::make_state();
-    let dir = tempfile::tempdir().unwrap();
     // A regular file where the settings directory should be makes persistence
     // fail deterministically, using only a runtime temp directory.
-    let blocker = dir.path().join("occupied-by-a-file");
-    std::fs::write(&blocker, b"not a directory").unwrap();
-    let settings_path = blocker.join("settings.json");
+    let (_dir, settings_path) = sweeper_testkit::blocked_settings_path();
     state.settings = std::sync::Arc::new(std::sync::Mutex::new(
-        sweeper_desktop::settings_store::SettingsStore::with_path(settings_path),
+        sweeper_desktop::settings_store::SettingsStore::with_path(settings_path.clone()),
     ));
 
     let gen_before = state.settings.lock().unwrap().generation();
@@ -166,10 +163,21 @@ fn failed_settings_write_is_reported_and_generation_unchanged() {
     requested.enable_tier3 = true;
 
     let err = commands_impl::update_settings(&state, requested).unwrap_err();
+    let reason = match &err {
+        sweeper_contract::ContractError::Internal { reason } => reason.clone(),
+        other => panic!("failed write must surface as Internal, got {other:?}"),
+    };
+
+    // The IPC error is sanitized: a fixed, human-safe category with no raw OS
+    // error text and no absolute path (the persistence error embeds the settings
+    // path). Exact text proves nothing extra leaked across the boundary.
+    assert_eq!(reason, "failed to persist settings");
+    let serialized = serde_json::to_string(&err).expect("serialize contract error");
     assert!(
-        matches!(err, sweeper_contract::ContractError::Internal { .. }),
-        "failed write must surface as an error, got {err:?}"
+        !serialized.contains(settings_path.to_string_lossy().as_ref()),
+        "serialized IPC error leaked the absolute settings path: {serialized}"
     );
+
     assert_eq!(
         state.settings.lock().unwrap().generation(),
         gen_before,
