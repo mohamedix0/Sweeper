@@ -1,15 +1,99 @@
-import { useEffect, useRef, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type KeyboardEvent,
+  type MutableRefObject,
+  type ReactNode,
+  type RefObject,
+} from 'react';
 import { trapTab } from './dialogFocus';
+
+type ActionOrder = RefObject<HTMLButtonElement>[];
+
+// Disabled actions are never focus targets. These are pure reads of the live
+// refs so every focus path below shares exactly the same notion of "focusable".
+function enabledActions(order: ActionOrder): HTMLButtonElement[] {
+  return order
+    .map((ref) => ref.current)
+    .filter((el): el is HTMLButtonElement => el !== null && !el.disabled);
+}
+
+// While busy both actions are disabled, so the dialog container itself is the
+// in-dialog fallback; Tab then cannot escape to the page behind the modal.
+function focusables(order: ActionOrder, dialogRef: RefObject<HTMLDivElement>): HTMLElement[] {
+  const actions = enabledActions(order);
+  return actions.length > 0
+    ? actions
+    : [dialogRef.current].filter((el): el is HTMLDivElement => el !== null);
+}
+
+// Capture focus on mount and restore it on unmount. Refs are stable for the
+// dialog's lifetime, so re-running on every render would steal focus back while
+// the user is interacting with the actions.
+function useFocusCapture(
+  dialogRef: RefObject<HTMLDivElement>,
+  orderRef: MutableRefObject<ActionOrder>,
+  initialFocusRef: RefObject<HTMLButtonElement>,
+): void {
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const initial = initialFocusRef.current;
+    const target =
+      initial && !initial.disabled
+        ? initial
+        : (enabledActions(orderRef.current)[0] ?? dialogRef.current);
+    target?.focus();
+    return () => {
+      previouslyFocused?.focus();
+    };
+  }, [dialogRef, orderRef, initialFocusRef]);
+}
+
+// Keep focus inside the dialog across a busy transition, and restore it to an
+// enabled action only on busy -> idle — never on an ordinary rerender.
+function useBusyFocusTransition(
+  dialogRef: RefObject<HTMLDivElement>,
+  orderRef: MutableRefObject<ActionOrder>,
+  busy: boolean,
+): void {
+  const wasBusy = useRef(busy);
+  useEffect(() => {
+    if (busy && !wasBusy.current) {
+      dialogRef.current?.focus();
+    } else if (!busy && wasBusy.current) {
+      enabledActions(orderRef.current)[0]?.focus();
+      if (!dialogRef.current?.contains(document.activeElement as Node | null)) {
+        dialogRef.current?.focus();
+      }
+    }
+    wasBusy.current = busy;
+  }, [busy, dialogRef, orderRef]);
+}
+
+// Escape is the safe action; Tab is trapped inside the dialog's focusables.
+function useDialogKeyTrap(
+  dialogRef: RefObject<HTMLDivElement>,
+  orderRef: MutableRefObject<ActionOrder>,
+  onEscape: () => void,
+): (event: KeyboardEvent<HTMLDivElement>) => void {
+  return useCallback(
+    (event) => {
+      if (event.key === 'Escape') {
+        onEscape();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      trapTab(event, focusables(orderRef.current, dialogRef));
+    },
+    [onEscape, dialogRef, orderRef],
+  );
+}
 
 // Shared shell for the app's confirmation alerts. It owns the behaviour that
 // must be identical in every dialog — capturing/restoring focus, trapping Tab,
 // treating Escape as the safe action, and the backdrop/markup — so individual
 // dialogs only supply their copy, action buttons and initial focus.
-//
-// Disabled actions are never focus targets. While `busy` (e.g. saving) the
-// dialog container itself is the in-dialog focus fallback, so Tab cannot escape
-// to the page behind the modal, and focus is restored to an enabled action only
-// on the busy -> idle transition, not on ordinary rerenders (#93).
 export function ConfirmDialogShell(props: {
   titleId: string;
   messageId: string;
@@ -17,65 +101,19 @@ export function ConfirmDialogShell(props: {
   message: ReactNode;
   onEscape: () => void;
   initialFocusRef: RefObject<HTMLButtonElement>;
-  trapOrder: RefObject<HTMLButtonElement>[];
+  trapOrder: ActionOrder;
   error?: string | null;
   busy?: boolean;
   children: ReactNode;
 }) {
-  const previouslyFocused = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const trapOrderRef = useRef(props.trapOrder);
   trapOrderRef.current = props.trapOrder;
-  const wasBusy = useRef(props.busy ?? false);
+  const busy = props.busy ?? false;
 
-  const enabledActions = () =>
-    trapOrderRef.current
-      .map((ref) => ref.current)
-      .filter((el): el is HTMLButtonElement => el !== null && !el.disabled);
-
-  const focusables = (): HTMLElement[] => {
-    const actions = enabledActions();
-    return actions.length > 0
-      ? actions
-      : [dialogRef.current].filter((el): el is HTMLDivElement => el !== null);
-  };
-
-  useEffect(() => {
-    previouslyFocused.current = document.activeElement as HTMLElement | null;
-    const initial = props.initialFocusRef.current;
-    const target =
-      initial && !initial.disabled ? initial : (enabledActions()[0] ?? dialogRef.current);
-    target?.focus();
-    return () => {
-      previouslyFocused.current?.focus();
-    };
-    // Refs are stable for the dialog's lifetime; re-running on every render
-    // would steal focus back while the user is interacting with the actions.
-  }, [props.initialFocusRef]);
-
-  useEffect(() => {
-    const busy = props.busy ?? false;
-    if (busy && !wasBusy.current) {
-      // Both actions are disabled while busy; keep focus inside the dialog so
-      // the Tab trap (which lives on the dialog) keeps receiving key events.
-      dialogRef.current?.focus();
-    } else if (!busy && wasBusy.current) {
-      enabledActions()[0]?.focus();
-      if (!dialogRef.current?.contains(document.activeElement as Node | null)) {
-        dialogRef.current?.focus();
-      }
-    }
-    wasBusy.current = busy;
-  }, [props.busy]);
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'Escape') {
-      props.onEscape();
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    trapTab(event, focusables());
-  };
+  useFocusCapture(dialogRef, trapOrderRef, props.initialFocusRef);
+  useBusyFocusTransition(dialogRef, trapOrderRef, busy);
+  const handleKeyDown = useDialogKeyTrap(dialogRef, trapOrderRef, props.onEscape);
 
   return (
     <div className="dialog-backdrop">

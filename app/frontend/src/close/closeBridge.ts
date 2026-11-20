@@ -132,72 +132,119 @@ async function deliverWithRetry(
   throw lastError;
 }
 
-// Register the Tauri host listener, retrying transient "IPC not ready"
-// rejections with bounded backoff. On success, a registration-time pending
-// query delivers any close request that arrived before the listener existed.
-// On exhaustion, the native pending gate is cleared and a bounded number of
-// later re-registration attempts are scheduled so a subsequent close reaches a
-// live listener (#93).
+// Mutable state shared by the registration helpers. Kept in one object so the
+// disposal guard and the retry counters stay consistent across async callbacks.
+type ListenerSession = {
+  disposed: boolean;
+  unlisten: (() => void) | null;
+  recoveryTimer: number | null;
+  recoveries: number;
+};
+
+// A newly live listener answers a request that arrived before registration.
+// A failed pending query must never create a duplicate subscription, so the
+// native gate is cleared instead (#93).
+function deliverPendingRequest(
+  deps: CloseBridgeDeps,
+  handler: (requestId: string) => void,
+  isLive: () => boolean,
+): Promise<void> {
+  return deps
+    .notifyListenerReady()
+    .then((ready) => {
+      if (isLive() && ready.pendingRequest) {
+        handler(ready.pendingRequest.requestId);
+      }
+    })
+    .catch(() => {
+      void recoverPendingGate(deps);
+    });
+}
+
+// Store a registered listener (or tear it down if disposal raced the
+// registration) and drain any pending host request through the live listener.
+function onListenerRegistered(
+  session: ListenerSession,
+  deps: CloseBridgeDeps,
+  handler: (requestId: string) => void,
+  unlisten: () => void,
+): void {
+  if (session.disposed) {
+    unlisten();
+    return;
+  }
+  session.unlisten = unlisten;
+  void deliverPendingRequest(deps, handler, () => !session.disposed);
+}
+
+// Once registration retries are exhausted, clear the native gate, surface the
+// failure, and schedule a bounded number of later re-registrations so a
+// subsequent close reaches a live listener (#93).
+function handleRegistrationFailure(
+  session: ListenerSession,
+  deps: CloseBridgeDeps,
+  index: number,
+  scheduleAttempt: (next: number) => void,
+  retryFromZero: () => void,
+  notifyFailure: () => void,
+): void {
+  if (session.disposed) return;
+  const next = index + 1;
+  if (next < LISTEN_ATTEMPTS) {
+    scheduleAttempt(next);
+    return;
+  }
+  void recoverPendingGate(deps).then(() => {
+    if (session.disposed) return;
+    notifyFailure();
+    if (session.recoveries < MAX_RECOVERIES) {
+      session.recoveries += 1;
+      session.recoveryTimer = window.setTimeout(retryFromZero, RECOVERY_RETRY_MS);
+    }
+  });
+}
+
+// Register the Tauri host listener with bounded backoff for transient
+// "IPC not ready" rejections; the helpers above own the success, pending-query,
+// and failure/recovery paths (#93).
 function startHostCloseListener(
   handler: (requestId: string) => void,
   deps: CloseBridgeDeps,
   notifyFailure: () => void,
 ): () => void {
-  let disposed = false;
-  let unlisten: (() => void) | null = null;
-  let recoveryTimer: number | null = null;
-  let recoveries = 0;
+  const session: ListenerSession = {
+    disposed: false,
+    unlisten: null,
+    recoveryTimer: null,
+    recoveries: 0,
+  };
 
   const attempt = (index: number) => {
-    if (disposed) return;
+    if (session.disposed) return;
     void Promise.resolve()
       .then(() =>
         deps.listenForHostClose((payload) => {
-          if (!disposed) handler(payload.requestId);
+          if (!session.disposed) handler(payload.requestId);
         }),
       )
-      .then((fn) => {
-        if (disposed) {
-          fn();
-          return;
-        }
-        unlisten = fn;
-        return deps
-          .notifyListenerReady()
-          .then((ready) => {
-            if (!disposed && ready.pendingRequest) {
-              handler(ready.pendingRequest.requestId);
-            }
-          })
-          .catch(() => {
-            // Listener is already live; a failed pending query must never
-            // create a duplicate subscription. Clear the native gate instead.
-            void recoverPendingGate(deps);
-          });
-      })
-      .catch(() => {
-        if (disposed) return;
-        const next = index + 1;
-        if (next < LISTEN_ATTEMPTS) {
-          deps.schedule(() => attempt(next), retryDelay(next));
-          return;
-        }
-        void recoverPendingGate(deps).then(() => {
-          if (disposed) return;
-          notifyFailure();
-          if (recoveries < MAX_RECOVERIES) {
-            recoveries += 1;
-            recoveryTimer = window.setTimeout(() => attempt(0), RECOVERY_RETRY_MS);
-          }
-        });
-      });
+      .then((unlisten) => onListenerRegistered(session, deps, handler, unlisten))
+      .catch(() =>
+        handleRegistrationFailure(
+          session,
+          deps,
+          index,
+          (next) => deps.schedule(() => attempt(next), retryDelay(next)),
+          () => attempt(0),
+          notifyFailure,
+        ),
+      );
   };
   attempt(0);
 
   return () => {
-    disposed = true;
-    unlisten?.();
-    if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
+    session.disposed = true;
+    session.unlisten?.();
+    if (session.recoveryTimer !== null) window.clearTimeout(session.recoveryTimer);
   };
 }
 

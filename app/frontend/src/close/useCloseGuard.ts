@@ -20,17 +20,33 @@ export type CloseGuardState = {
 const SAVE_FAILED_MESSAGE =
   'Settings could not be saved. The window was kept open and your changes are kept.';
 
-// App-shell side of the window-close handshake. The Rust handler always defers
-// the native close and asks here; a clean draft is approved immediately with no
-// prompt, while a dirty draft is persisted or the close is cancelled.
-export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): CloseGuardState {
-  const [promptOpen, setPromptOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [closePending, setClosePending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // The generation of the request currently awaiting a decision. Kept in a ref
-  // so a late answer always targets the request the user actually saw (#93).
+// Owns the generation id and decision delivery. The id lives in a ref so a late
+// answer always targets the request the user actually saw (#93). All callbacks
+// are stable for the hook's lifetime, so `deliver` does not re-subscribe the
+// host listener on every render.
+function useDecisionDelivery(
+  bridge: CloseBridge,
+  setClosePending: (value: boolean) => void,
+  setPromptOpen: (value: boolean) => void,
+  setError: (message: string | null) => void,
+) {
   const requestIdRef = useRef<string | null>(null);
+
+  const lockClose = useCallback(() => setClosePending(true), [setClosePending]);
+  const onDelivered = useCallback(() => {
+    setPromptOpen(false);
+    setError(null);
+  }, [setPromptOpen, setError]);
+  const onDeliveryFailed = useCallback(
+    (approved: boolean) => {
+      // Keep the id so the user can re-deliver; never leave Rust silently
+      // pending. Surface the failure, reopen the prompt and unlock controls.
+      if (approved) setClosePending(false);
+      setError(CLOSE_DELIVERY_ERROR);
+      setPromptOpen(true);
+    },
+    [setClosePending, setError, setPromptOpen],
+  );
 
   const deliver = useCallback(
     async (approved: boolean) => {
@@ -39,27 +55,39 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
       // Lock draft controls at approval *intent*, before awaiting the IPC call:
       // Rust blocks that call until in-flight Cleans settle, and no edit may land
       // during that wait (#93).
-      if (approved) setClosePending(true);
+      if (approved) lockClose();
       try {
         await bridge.resolveClose(approved, requestId);
         requestIdRef.current = null;
-        setPromptOpen(false);
-        setError(null);
+        onDelivered();
       } catch {
-        // Keep the id so the user can re-deliver, surface the failure, reopen
-        // the prompt and unlock controls. Never leave Rust silently pending.
-        if (approved) setClosePending(false);
-        setError(CLOSE_DELIVERY_ERROR);
-        setPromptOpen(true);
+        onDeliveryFailed(approved);
       }
     },
-    [bridge],
+    [bridge, lockClose, onDelivered, onDeliveryFailed],
   );
 
+  const setRequestId = useCallback((requestId: string) => {
+    requestIdRef.current = requestId;
+  }, []);
+
+  return { deliver, setRequestId };
+}
+
+// Subscribes to the host handshake and the listener-registration failure
+// notice. A clean draft is approved at once; a dirty one opens the prompt.
+function useHostCloseHandshake(
+  bridge: CloseBridge,
+  isDirty: () => boolean,
+  setRequestId: (requestId: string) => void,
+  deliver: (approved: boolean) => Promise<void>,
+  setError: (message: string | null) => void,
+  setPromptOpen: (value: boolean) => void,
+): void {
   useEffect(
     () =>
       bridge.onHostCloseRequest((requestId) => {
-        requestIdRef.current = requestId;
+        setRequestId(requestId);
         setError(null);
         if (!isDirty()) {
           // Clean close: no dialog, no save round trip beyond the handshake.
@@ -68,20 +96,22 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
         }
         setPromptOpen(true);
       }),
-    [bridge, deliver, isDirty],
+    [bridge, deliver, isDirty, setError, setPromptOpen, setRequestId],
   );
 
-  // A permanently unavailable host listener is reported by the bridge after
-  // its bounded retries. Surface it as a user-visible error; the bridge has
-  // already cleared the native pending gate, so the draft is kept intact.
+  // A permanently unavailable host listener is reported after its bounded
+  // retries. The bridge has already cleared the native pending gate, so the
+  // draft stays intact; only a user-visible error is needed here.
   useEffect(() => {
     const off = bridge.onRegistrationFailure?.((message) => setError(message));
     return () => off?.();
-  }, [bridge]);
+  }, [bridge, setError]);
+}
 
-  // Complementary only. A browser or a close path that bypasses the Rust
-  // handler still gets the standard "leave site?" protection when dirty; the
-  // authoritative decision is always made by the Rust handshake above.
+// Complementary only. A browser or a close path that bypasses the Rust handler
+// still gets the standard "leave site?" protection when dirty; the authoritative
+// decision is always made by the Rust handshake.
+function useBeforeUnloadGuard(isDirty: () => boolean): void {
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!isDirty()) return;
@@ -91,10 +121,19 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [isDirty]);
+}
 
+// The user actions. Cancel is inert while saving so a stale cancel cannot
+// answer a newer close request; saving flushes every outstanding draft change
+// before approving, and a failed save keeps the prompt open for a retry.
+function useCloseActions(
+  deliver: (approved: boolean) => Promise<void>,
+  flushDraft: () => Promise<boolean>,
+  saving: boolean,
+  setSaving: (value: boolean) => void,
+  setError: (message: string | null) => void,
+): Pick<CloseGuardState, 'cancel' | 'saveAndClose'> {
   const cancel = useCallback(() => {
-    // Escape and the Cancel button must be inert while a save is in flight;
-    // otherwise the later approval could answer a newer request (#93).
     if (saving) return;
     void deliver(false);
   }, [deliver, saving]);
@@ -120,7 +159,37 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
     } finally {
       setSaving(false);
     }
-  }, [deliver, flushDraft, saving]);
+  }, [deliver, flushDraft, saving, setError, setSaving]);
+
+  return { cancel, saveAndClose };
+}
+
+// App-shell side of the window-close handshake. The Rust handler always defers
+// the native close and asks here; a clean draft is approved immediately with no
+// prompt, while a dirty draft is persisted or the close is cancelled.
+export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): CloseGuardState {
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [closePending, setClosePending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const { deliver, setRequestId } = useDecisionDelivery(
+    bridge,
+    setClosePending,
+    setPromptOpen,
+    setError,
+  );
+
+  useHostCloseHandshake(bridge, isDirty, setRequestId, deliver, setError, setPromptOpen);
+  useBeforeUnloadGuard(isDirty);
+
+  const { cancel, saveAndClose } = useCloseActions(
+    deliver,
+    flushDraft,
+    saving,
+    setSaving,
+    setError,
+  );
 
   return { promptOpen, saving, closePending, error, cancel, saveAndClose };
 }

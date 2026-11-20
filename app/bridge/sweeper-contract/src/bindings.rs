@@ -261,8 +261,9 @@ fn cmd_resolve_close(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
+    cmd_null_result(
+        cfg,
+        type_map,
         CmdSpec {
             name: "resolveClose",
             invoke: "resolve_close",
@@ -272,8 +273,7 @@ fn cmd_resolve_close(
             ("approved", "boolean".to_string()),
             ("request_id", "string".to_string()),
         ],
-        &format!("Result<null, {err}>"),
-    ))
+    )
 }
 
 // Recovery for an unreachable host listener: clear the native pending close
@@ -283,16 +283,16 @@ fn cmd_reset_pending_close(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
+    cmd_null_result(
+        cfg,
+        type_map,
         CmdSpec {
             name: "resetPendingClose",
             invoke: "reset_pending_close",
             arg_obj: None,
         },
         &[],
-        &format!("Result<null, {err}>"),
-    ))
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -359,6 +359,19 @@ fn arg_type<A: Type + 'static>(
         Some(ArgTy::Str) => "string".to_string(),
         None => ty::<A>(cfg, type_map)?,
     })
+}
+
+// Shared shape for commands that answer with no data: resolve the structured
+// error type once, then emit a `Result<null, ContractError>` command. Keeping
+// the spec and arguments at each call site preserves the wire format exactly.
+fn cmd_null_result(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+    spec: CmdSpec<'_>,
+    args: &[(&str, String)],
+) -> Result<String, Box<dyn Error>> {
+    let err = ty::<ContractError>(cfg, type_map)?;
+    Ok(cmd_fn(spec, args, &format!("Result<null, {err}>")))
 }
 
 fn cmd_noarg<R: Type + 'static>(
@@ -431,16 +444,16 @@ fn cmd_cancel_analyzer(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
+    cmd_null_result(
+        cfg,
+        type_map,
         CmdSpec {
             name: "cancelAnalyzer",
             invoke: "cancel_analyzer",
             arg_obj: Some("{ sessionId }"),
         },
         &[("session_id", "string".to_string())],
-        &format!("Result<null, {err}>"),
-    ))
+    )
 }
 
 fn render_events(
