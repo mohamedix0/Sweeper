@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+﻿import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import './styles/tokens.css';
 import './App.css';
 import { createClient, formatContractError, type ElevationStatus, type Settings } from './api/client';
@@ -220,56 +220,82 @@ function useRelaunch(client: ReturnType<typeof createClient>) {
   return { relaunching, relaunchError, runAsAdministrator };
 }
 
-function useAppNavigation(scanRef: React.RefObject<ScanAndPreviewViewHandle>) {
+type PendingNavigation = {
+  target: View;
+  apply: () => void;
+};
+
+// Every view transition funnels through this hook. A single app-shell dirty
+// flag (published by the mounted Settings view) is enough because leaving
+// Settings unmounts its controller and with it the unsaved draft. Holding a
+// transition until the user stays or explicitly discards now covers *every*
+// leave-Settings path, not only the sidebar buttons.
+export function useAppNavigation(scanRef: React.RefObject<ScanAndPreviewViewHandle>) {
   const [view, setView] = useState<View>('scan');
   const [focusLogId, setFocusLogId] = useState<string | null>(null);
   const [deepLink, setDeepLink] = useState<SettingsDeepLink>({ focus: null, prefillCustomPath: null });
-  const clearDeepLink = () => setDeepLink({ focus: null, prefillCustomPath: null });
-  const switchView = (next: View) => {
-    if (next !== 'settings') clearDeepLink();
-    setView(next);
-  };
-  const openSettings = (focus: SettingsFocusTarget = null, prefillCustomPath: string | null = null) => {
-    setDeepLink({ focus, prefillCustomPath });
-    setView('settings');
-  };
-  const openLog = (logId: string) => { setFocusLogId(logId); setView('logs'); };
-  const scanAgainFromLogs = () => {
-    setView('scan');
-    window.setTimeout(() => { void scanRef.current?.runScan(); }, 0);
-  };
-  return { view, focusLogId, deepLink, switchView, openSettings, openLog, scanAgainFromLogs, clearDeepLink, clearFocusLog: () => setFocusLogId(null) };
-}
-
-// A single app-shell dirty flag, published by the mounted Settings view, is
-// enough to guard navigation because leaving Settings unmounts its controller
-// (and with it the unsaved draft). The prompt holds the navigation until the
-// user either stays or explicitly chooses to discard.
-function useSettingsNavigationGuard(nav: ReturnType<typeof useAppNavigation>) {
   const [settingsDirty, setSettingsDirty] = useState(false);
-  const [pendingView, setPendingView] = useState<View | null>(null);
+  const [pending, setPending] = useState<PendingNavigation | null>(null);
 
-  const reportDirty = useCallback((dirty: boolean) => setSettingsDirty(dirty), []);
+  const clearDeepLink = () => setDeepLink({ focus: null, prefillCustomPath: null });
 
-  const requestViewChange = (next: View) => {
-    if (next === nav.view) return;
-    if (nav.view === 'settings' && settingsDirty) {
-      setPendingView(next);
+  // The one choke point for all transitions. Only transitions that leave a
+  // dirty Settings draft are held; the full side effect is captured so a
+  // discard completes exactly the transition the user asked for. Transitions
+  // into Settings (deep links) are never blocked or deferred.
+  const transitionTo = (target: View, apply: () => void) => {
+    if (view === 'settings' && settingsDirty && target !== 'settings') {
+      setPending({ target, apply });
       return;
     }
-    nav.switchView(next);
+    apply();
   };
 
-  const keepEditing = () => setPendingView(null);
+  const switchView = (next: View) => {
+    transitionTo(next, () => {
+      if (next !== 'settings') clearDeepLink();
+      setView(next);
+    });
+  };
+
+  const openSettings = (focus: SettingsFocusTarget = null, prefillCustomPath: string | null = null) => {
+    transitionTo('settings', () => {
+      setDeepLink({ focus, prefillCustomPath });
+      setView('settings');
+    });
+  };
+
+  const openLog = (logId: string) => {
+    transitionTo('logs', () => {
+      setFocusLogId(logId);
+      setView('logs');
+    });
+  };
+
+  const scanAgainFromLogs = () => {
+    transitionTo('scan', () => {
+      setView('scan');
+      window.setTimeout(() => { void scanRef.current?.runScan(); }, 0);
+    });
+  };
+
+  const keepEditing = () => setPending(null);
 
   const discardAndLeave = () => {
-    const next = pendingView;
-    setPendingView(null);
+    const next = pending;
+    setPending(null);
     setSettingsDirty(false);
-    if (next) nav.switchView(next);
+    if (next) next.apply();
   };
 
-  return { reportDirty, requestViewChange, pendingView, keepEditing, discardAndLeave };
+  return {
+    view, focusLogId, deepLink,
+    switchView, openSettings, openLog, scanAgainFromLogs,
+    clearDeepLink, clearFocusLog: () => setFocusLogId(null),
+    reportDirty: setSettingsDirty,
+    pendingView: pending?.target ?? null,
+    keepEditing, discardAndLeave,
+  };
 }
 
 function AppMain(props: { client: ReturnType<typeof createClient>; settings: Settings | null; settingsVersion: number; elevation: ElevationStatus; elevationError: string | null; relaunchError: string | null; scanRef: React.RefObject<ScanAndPreviewViewHandle>; nav: ReturnType<typeof useAppNavigation>; theme: Theme; setTheme: (t: Theme) => void; onSaved: (s: Settings) => void; onSettingsDirtyChange: (dirty: boolean) => void }) {
@@ -305,7 +331,6 @@ export function App() {
   const client = useMemo(() => createClient(), []);
   const scanRef = useRef<ScanAndPreviewViewHandle>(null);
   const nav = useAppNavigation(scanRef);
-  const guard = useSettingsNavigationGuard(nav);
   const relaunch = useRelaunch(client);
   const { theme, setTheme } = usePersistentTheme();
   const { elevation, elevationError } = useElevationState(client);
@@ -314,15 +339,15 @@ export function App() {
     <div className="app-shell">
       <AppSidebar
         view={nav.view}
-        onSwitchView={guard.requestViewChange}
+        onSwitchView={nav.switchView}
         elevationAria={elevationAria({ elevated: elevation.isElevated })}
         isElevated={elevation.isElevated}
         relaunching={relaunch.relaunching}
         onRunAsAdministrator={() => void relaunch.runAsAdministrator()}
       />
-      <AppMain client={client} settings={settings} settingsVersion={settingsVersion} elevation={elevation} elevationError={elevationError} relaunchError={relaunch.relaunchError} scanRef={scanRef} nav={nav} theme={theme} setTheme={setTheme} onSaved={handleSaved} onSettingsDirtyChange={guard.reportDirty} />
-      {guard.pendingView && (
-        <UnsavedSettingsDialog onKeepEditing={guard.keepEditing} onDiscard={guard.discardAndLeave} />
+      <AppMain client={client} settings={settings} settingsVersion={settingsVersion} elevation={elevation} elevationError={elevationError} relaunchError={relaunch.relaunchError} scanRef={scanRef} nav={nav} theme={theme} setTheme={setTheme} onSaved={handleSaved} onSettingsDirtyChange={nav.reportDirty} />
+      {nav.pendingView && (
+        <UnsavedSettingsDialog onKeepEditing={nav.keepEditing} onDiscard={nav.discardAndLeave} />
       )}
     </div>
   );

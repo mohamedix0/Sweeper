@@ -1,4 +1,21 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type KeyboardEvent } from 'react';
+
+// Cycle focus within the dialog on Tab / Shift+Tab. We handle every Tab press
+// (not only the wrap-around) so focus can never escape the alertdialog, and so
+// the trap behaves identically in real browsers and in jsdom-based tests.
+function trapTab(event: KeyboardEvent<HTMLDivElement>, focusables: HTMLElement[]) {
+  if (focusables.length === 0) return;
+  event.preventDefault();
+  const active = document.activeElement as HTMLElement | null;
+  const index = focusables.indexOf(active as HTMLElement);
+  if (index === -1) {
+    focusables[event.shiftKey ? focusables.length - 1 : 0].focus();
+    return;
+  }
+  const step = event.shiftKey ? -1 : 1;
+  const next = (index + step + focusables.length) % focusables.length;
+  focusables[next].focus();
+}
 
 // Confirmation shown when the user tries to leave Settings with an unsaved
 // draft. The safe action ("Keep editing") is focused by default so a stray
@@ -8,9 +25,31 @@ export function UnsavedSettingsDialog(props: {
   onDiscard: () => void;
 }) {
   const keepRef = useRef<HTMLButtonElement>(null);
+  const discardRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
+    // Capture where focus came from, then move it into the dialog. Restoring on
+    // unmount covers both close paths (Keep editing and Discard changes).
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
     keepRef.current?.focus();
+    return () => {
+      previouslyFocused.current?.focus();
+    };
   }, []);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      props.onKeepEditing();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusables = [keepRef.current, discardRef.current].filter(
+      (el): el is HTMLButtonElement => el !== null,
+    );
+    trapTab(event, focusables);
+  };
+
   return (
     <div className="dialog-backdrop">
       <div
@@ -19,9 +58,7 @@ export function UnsavedSettingsDialog(props: {
         aria-modal="true"
         aria-labelledby="unsaved-settings-title"
         aria-describedby="unsaved-settings-message"
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') props.onKeepEditing();
-        }}
+        onKeyDown={handleKeyDown}
       >
         <h2 id="unsaved-settings-title" className="confirm-dialog-title">Unsaved settings changes</h2>
         <p id="unsaved-settings-message" className="confirm-dialog-message">
@@ -29,7 +66,7 @@ export function UnsavedSettingsDialog(props: {
         </p>
         <div className="confirm-dialog-actions">
           <button ref={keepRef} className="btn" onClick={props.onKeepEditing}>Keep editing</button>
-          <button className="btn danger" onClick={props.onDiscard}>Discard changes</button>
+          <button ref={discardRef} className="btn danger" onClick={props.onDiscard}>Discard changes</button>
         </div>
       </div>
     </div>
