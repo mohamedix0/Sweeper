@@ -149,6 +149,43 @@ fn update_settings_increments_generation_and_invalidates_active_sessions() {
 }
 
 #[test]
+fn failed_settings_write_is_reported_and_generation_unchanged() {
+    let mut state = common::make_state();
+    // A regular file where the settings directory should be makes persistence
+    // fail deterministically, using only a runtime temp directory.
+    let (_dir, settings_path) = sweeper_testkit::blocked_settings_path();
+    state.settings = std::sync::Arc::new(std::sync::Mutex::new(
+        sweeper_desktop::settings_store::SettingsStore::with_path(settings_path.clone()),
+    ));
+
+    let gen_before = state.settings.lock().unwrap().generation();
+    let mut requested = commands_impl::get_settings(&state).unwrap();
+    requested.enable_tier3 = true;
+
+    let err = commands_impl::update_settings(&state, requested).unwrap_err();
+    let reason = match &err {
+        sweeper_contract::ContractError::Internal { reason } => reason.clone(),
+        other => panic!("failed write must surface as Internal, got {other:?}"),
+    };
+
+    // The IPC error is sanitized: a fixed, human-safe category with no raw OS
+    // error text and no absolute path (the persistence error embeds the settings
+    // path). Exact text proves nothing extra leaked across the boundary.
+    assert_eq!(reason, "failed to persist settings");
+    let serialized = serde_json::to_string(&err).expect("serialize contract error");
+    assert!(
+        !serialized.contains(settings_path.to_string_lossy().as_ref()),
+        "serialized IPC error leaked the absolute settings path: {serialized}"
+    );
+
+    assert_eq!(
+        state.settings.lock().unwrap().generation(),
+        gen_before,
+        "generation must not bump when persistence fails"
+    );
+}
+
+#[test]
 fn tier3_default_off_and_opt_in_reflected_in_settings() {
     let state = common::make_state();
     let got = commands_impl::get_settings(&state).unwrap();

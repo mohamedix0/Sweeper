@@ -40,7 +40,16 @@ pub fn update_settings<C: Clock>(
 ) -> Result<SettingsDto, ContractError> {
     let mut store = state.settings.lock().map_err(|_| lock_state_error())?;
     let prev_gen = store.generation();
-    let updated = store.update(settings);
+    let updated = store.update(settings).map_err(|_| {
+        // The persistence error can embed the absolute settings path and raw OS
+        // error text. `Internal` is a sanitized, human-safe contract variant, so
+        // only a fixed, path-free category crosses the IPC boundary. The failure
+        // still propagates (and `update_with` leaves generation/in-memory state
+        // untouched on a failed write); only the reason text is replaced.
+        ContractError::Internal {
+            reason: "failed to persist settings".into(),
+        }
+    })?;
     let new_gen = store.generation();
 
     if new_gen != prev_gen {
