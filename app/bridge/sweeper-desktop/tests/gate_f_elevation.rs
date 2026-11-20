@@ -63,6 +63,29 @@ fn assert_clean_rejected(gate: &CleanGate, message: &str) {
     assert!(gate.enter().is_none(), "{message}");
 }
 
+/// Wait until the Elevate worker has actually sealed the gate, instead of
+/// sleeping for a fixed duration that may end before the worker gets there.
+///
+/// `CleanGate` exposes no `is_sealed` accessor, so the observable seal signal is
+/// `enter()` returning `None`. Each probe guard is dropped immediately: leaving
+/// one alive would keep the worker blocked in `seal_and_wait_for_idle`, so the
+/// caller's original Clean guard stays the only in-flight Clean throughout.
+/// A hard deadline turns a stalled worker into a test failure rather than a hang.
+fn wait_for_gate_sealed(gate: &CleanGate) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match gate.enter() {
+            None => return,
+            Some(probe) => drop(probe),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the Elevate worker to seal the Clean gate"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 #[test]
 fn relaunch_elevated_defers_launch_and_exit_until_in_flight_clean_settles() {
     let provider = Arc::new(FakeElevationProvider::new(
@@ -96,9 +119,10 @@ fn relaunch_elevated_defers_launch_and_exit_until_in_flight_clean_settles() {
         )
     });
 
-    // While the Clean holds the gate, neither the elevated launch nor the exit
-    // may happen, and the single-instance guard must remain with this instance.
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    // Keep the Clean guard held until the worker has sealed the gate, then
+    // verify neither the elevated launch nor the exit happened in that window,
+    // and that the single-instance guard still belongs to this instance.
+    wait_for_gate_sealed(&gate);
     assert_shutdown_deferred(&provider.relaunch_calls, &exited, &si);
 
     // The Clean settles; the graceful path may now proceed.
@@ -190,7 +214,9 @@ fn relaunch_elevated_seals_gate_and_rejects_new_clean_until_in_flight_clean_sett
 
     // While the Clean is in flight the gate must be sealed: a new Clean is
     // rejected, and neither launch nor exit may happen. No Clean is terminated.
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    // The original Clean guard is still held here, so observing the seal proves
+    // the worker reached seal_and_wait_for_idle rather than simply not starting.
+    wait_for_gate_sealed(&gate);
     assert_clean_rejected(
         &gate,
         "a new Clean must be rejected once the gate is sealed for shutdown",
