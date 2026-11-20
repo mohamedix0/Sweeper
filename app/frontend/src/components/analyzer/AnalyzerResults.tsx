@@ -10,6 +10,8 @@ import type { AnalyzerStatusFilter, FlatAnalyzerRow } from './analyzerHelpers';
 import type { ExplainState, PreviewResult } from '../cleanShared';
 import type { PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 import { activeDescendantFor, consumePendingShowAllFocus, handleTreeKeyDown, resolveActiveId } from './analyzerTreeKeyboard';
+import { activationCallbacks } from './analyzerTreeActivation';
+import { ANALYZER_TREE_DOM_ID, treeItemDomId } from './analyzerTreeA11y';
 
 type ResultsProps = {
   rows: FlatAnalyzerRow[];
@@ -103,13 +105,31 @@ export function AnalyzerResults(props: ResultsProps) {
     focusDomElement(consumePendingShowAllFocus(pendingShowAllFocusRef));
   }, [props.rows]);
 
+  // Reveal the keyboard-active row: ArrowUp/ArrowDown call preventDefault, so
+  // without this the viewport never scrolls and focus can land on invisible
+  // rows. jsdom has no scrollIntoView, hence the function guard.
+  useEffect(() => {
+    if (!activeId) return;
+    const element = document.getElementById(treeItemDomId(activeId));
+    if (typeof element?.scrollIntoView === 'function') element.scrollIntoView({ block: 'nearest' });
+  }, [activeId]);
+
   function handleShowMore(args: { parentId: string }) {
     pendingShowAllFocusRef.current = args.parentId;
     props.onShowMore(args);
   }
 
   function onTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    handleTreeKeyDown(e, rowIds, activeId, setActiveId);
+    const activations = activationCallbacks({
+      rows: props.rows,
+      allowDeleteUnknown: props.allowDeleteUnknown,
+      cleaning: props.cleaning,
+      onInspect: props.onInspect,
+      onToggleSelect: props.onToggleSelect,
+      onToggleExpand: props.onToggleExpand,
+      onShowMore: handleShowMore,
+    });
+    handleTreeKeyDown(e, { rowIds, activeId, setActiveId, ...activations });
   }
 
   const activeDescendant = activeDescendantFor(rowIds, activeId);
@@ -133,7 +153,7 @@ export function AnalyzerResults(props: ResultsProps) {
             <span className="analyzer-col-h-share" aria-hidden="true">Share</span><span className="analyzer-col-h-items" aria-hidden="true">Files</span><span className="analyzer-col-h-size" aria-hidden="true">Size</span><span className="analyzer-col-h-status" aria-hidden="true">Status</span>
           </div>
           <div className="pane-body flush">
-            <div className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" aria-activedescendant={activeDescendant} tabIndex={0} onKeyDown={onTreeKeyDown}>
+            <div id={ANALYZER_TREE_DOM_ID} className="analyzer-viewport" role="tree" aria-label="Analyzer results tree" aria-activedescendant={activeDescendant} tabIndex={0} onKeyDown={onTreeKeyDown}>
               {props.rows.map((row) => <AnalyzerTreeRow key={row.node.id} row={row} rootTotalBytes={props.rootTotalBytes} expanded={props.expanded} selectedIds={props.selectedIds} inspectedId={props.inspectedId} allowDeleteUnknown={props.allowDeleteUnknown} cleaning={props.cleaning} onToggleExpand={props.onToggleExpand} onToggleSelect={props.onToggleSelect} onInspect={props.onInspect} onShowMore={handleShowMore} onDrill={props.onDrill} />)}
               {emptyTreeState(props.rows.length)}
             </div>

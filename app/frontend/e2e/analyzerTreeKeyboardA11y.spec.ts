@@ -33,10 +33,6 @@ async function readTreeState(page: Page): Promise<TreeState> {
   });
 }
 
-async function activeElementText(page: Page): Promise<string> {
-  return page.evaluate(() => document.activeElement?.textContent?.trim() ?? '');
-}
-
 async function openAnalyzerTree(page: Page) {
   await page.goto('/');
   await page.getByRole('button', { name: 'Analyzer' }).click();
@@ -104,10 +100,38 @@ test.describe('Analyzer tree keyboard accessibility (mock sandbox, system Edge)'
     const showFewer = page.getByRole('button', { name: 'Show fewer files' });
     await expect(showFewer).toBeVisible();
     await expect(showMore).toHaveCount(0);
-    await expect.poll(() => activeElementText(page)).toContain('Show fewer files');
+    // Assert the actual element is focused, not just that its label appears in
+    // document.body.textContent (which would let body focus pass falsely).
+    await expect(showFewer).toBeFocused();
 
     await showFewer.click();
     await expect(showMore).toBeVisible();
-    await expect.poll(() => activeElementText(page)).toContain('Show more');
+    await expect(showMore).toBeFocused();
+  });
+
+  test('row controls stay out of the tab order and are reachable via ArrowRight / Escape', async ({ page }) => {
+    const tree = await openAnalyzerTree(page);
+    // The size-sorted first row is a read-only .vhdx with no controls; target
+    // the first row that actually owns interactive controls (Temp).
+    const rowWithControls = page.getByRole('treeitem').filter({ has: page.locator('[data-tree-control]') }).first();
+    const controls = rowWithControls.locator('[data-tree-control]');
+    expect(await controls.count()).toBeGreaterThan(0);
+    expect(await controls.evaluateAll((els) => els.every((el) => el.getAttribute('tabindex') === '-1'))).toBe(true);
+
+    await tree.focus();
+    // Move the active treeitem onto that row, then enter interaction mode.
+    for (let i = 0; i < 8; i += 1) {
+      const activeId = (await readTreeState(page)).activeDescendantId;
+      const rowId = await rowWithControls.getAttribute('id');
+      if (activeId === rowId) break;
+      await page.keyboard.press('ArrowDown');
+    }
+    await expect.poll(async () => (await readTreeState(page)).activeDescendantId).toBe(await rowWithControls.getAttribute('id'));
+
+    await page.keyboard.press('ArrowRight');
+    await expect(controls.first()).toBeFocused();
+
+    await page.keyboard.press('Escape');
+    await expect(tree).toBeFocused();
   });
 });

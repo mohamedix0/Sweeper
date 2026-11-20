@@ -43,3 +43,16 @@ export function treeItemDomId(nodeId: string): string {
 export function showAllButtonDomId(parentId: string): string {
   return `analyzer-show-all-${parentId}`;
 }
+
+/** DOM id of the single role=tree tab stop that owns DOM focus. */
+export const ANALYZER_TREE_DOM_ID = 'analyzer-results-tree';
+
+/** Marks every interactive descendant control of a tree row. */
+export const TREE_CONTROL_ATTR = 'data-tree-control';
+
+export type TreeControlKind = 'expand' | 'select' | 'drill' | 'showmore';
+
+/** Stable id for a row control, used for programmatic focus. */
+export function treeControlDomId(nodeId: string, kind: TreeControlKind): string {
+  return `${treeItemDomId(nodeId)}--control-${kind}`;
+}
