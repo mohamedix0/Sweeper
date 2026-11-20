@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use sweeper_contract::{ContractError, ElevationStatusDto, RelaunchResultDto};
 use sweeper_core::elevation::{self, RelaunchOutcome, SingleInstanceGuard};
 
+use crate::clean_gate::CleanGate;
+
 /// Abstraction over elevation checks and relaunch launching (DI seam for deterministic tests).
 pub trait ElevationProvider: Send + Sync + fmt::Debug {
     /// Returns whether the current process token is elevated.
@@ -109,12 +111,15 @@ pub fn get_elevation_status(
 ///
 /// Behavior:
 /// - If already elevated: returns `Ok { launched: false }` without invoking launcher or exit hook.
-/// - If not elevated: releases single-instance guard for handoff, invokes launcher.
+/// - Otherwise waits for any in-flight `Clean` to settle before any handoff or exit,
+///   so no Clean is terminated by the restart (#92).
+/// - Then releases the single-instance guard for handoff and invokes the launcher.
 ///   - Cancelled: re-acquires guard and returns sanitized error, no exit.
-///   - Launched: returns `Ok { launched: true }` and triggers exit hook after response preparation.
+///   - Launched: returns `Ok { launched: true }` and triggers the exit hook.
 pub fn relaunch_elevated(
     provider: &dyn ElevationProvider,
     single_instance: &SingleInstanceState,
+    clean_gate: &CleanGate,
     exit_app: &dyn Fn(i32),
 ) -> Result<RelaunchResultDto, ContractError> {
     let elevated = provider
@@ -125,6 +130,11 @@ pub fn relaunch_elevated(
     if elevated {
         return Ok(RelaunchResultDto { launched: false });
     }
+
+    // Graceful exit: let an in-flight Clean finish before handing over the
+    // single-instance guard, launching the elevated process, or exiting. The
+    // Clean is never cancelled or terminated.
+    clean_gate.wait_for_idle();
 
     let mut guard = single_instance
         .take()

@@ -332,6 +332,21 @@ let pendingSaves = 0;
 let saveQueueVersion = 0;
 const queueDrainListeners = new Set<() => void>();
 
+// The app shell's Elevate control has no access to the mounted Settings
+// controller's draft. The controller registers a flusher while mounted so the
+// shell can persist that draft through the same save queue before restarting
+// (#92). A stale registration is cleared on unmount.
+let draftFlusher: (() => Promise<void>) | null = null;
+
+export function registerDraftFlusher(flusher: (() => Promise<void>) | null): void {
+  draftFlusher = flusher;
+}
+
+export async function flushPendingDraft(): Promise<void> {
+  const flusher = draftFlusher;
+  if (flusher) await flusher();
+}
+
 function subscribeQueueDrain(listener: () => void): () => void {
   queueDrainListeners.add(listener);
   return () => { queueDrainListeners.delete(listener); };
@@ -436,7 +451,7 @@ function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs:
   return { customPathInput, setCustomPathInput, validatingPath, addCustomPath, removeCustomPath, applyCustomPathPreset };
 }
 
-function useRelaunchAction(client: SweeperClient) {
+function useRelaunchAction(client: SweeperClient, flushDraft: () => Promise<void>) {
   const [relaunching, setRelaunching] = useState(false);
   const [relaunchInfo, setRelaunchInfo] = useState<string | null>(null);
   const [relaunchError, setRelaunchError] = useState<string | null>(null);
@@ -445,6 +460,9 @@ function useRelaunchAction(client: SweeperClient) {
     setRelaunchInfo(null);
     setRelaunchError(null);
     try {
+      // Persist the pending draft through the shared save queue before the
+      // restart is requested, so no edit is lost (#92).
+      await flushDraft();
       const res = await client.relaunchElevated();
       if (res.launched) setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
       else setRelaunchError('Administrator launch was not started.');
@@ -453,7 +471,7 @@ function useRelaunchAction(client: SweeperClient) {
     } finally {
       setRelaunching(false);
     }
-  }, [client]);
+  }, [client, flushDraft]);
   return { relaunching, relaunchInfo, relaunchError, runAsAdministrator };
 }
 
@@ -473,8 +491,15 @@ export function useSettingsController(args: ControllerArgs) {
     allowUnknownRowRef,
     setHighlight: setHighlightAllowUnknown,
   });
-  const relaunch = useRelaunchAction(args.client);
   const isDirty = useMemo(() => !settingsEqual(ui.draft, args.settings), [ui.draft, args.settings]);
+  // Only a genuinely dirty draft is saved: Elevate with no edits must not bump
+  // the settings generation or invalidate live sessions (#92).
+  const flushDraft = useCallback(async () => { if (isDirty) await save(); }, [isDirty, save]);
+  useEffect(() => {
+    registerDraftFlusher(flushDraft);
+    return () => registerDraftFlusher(null);
+  }, [flushDraft]);
+  const relaunch = useRelaunchAction(args.client, flushDraft);
   const deepDisabled = !!ui.draft && !ui.draft.enableTier3;
   const { setDraft } = ui;
   const resetDraft = useCallback(() => { if (args.settings) setDraft(args.settings); }, [args.settings, setDraft]);
@@ -483,6 +508,6 @@ export function useSettingsController(args: ControllerArgs) {
     customPathInput: paths.customPathInput, setCustomPathInput: paths.setCustomPathInput, validatingPath: paths.validatingPath,
     relaunching: relaunch.relaunching, relaunchInfo: relaunch.relaunchInfo, relaunchError: relaunch.relaunchError,
     highlightAllowUnknown, allowUnknownRowRef, isDirty, deepDisabled,
-    save, addCustomPath: paths.addCustomPath, removeCustomPath: paths.removeCustomPath, runAsAdministrator: relaunch.runAsAdministrator, applyCustomPathPreset: paths.applyCustomPathPreset, resetDraft,
+    save, flushDraft, addCustomPath: paths.addCustomPath, removeCustomPath: paths.removeCustomPath, runAsAdministrator: relaunch.runAsAdministrator, applyCustomPathPreset: paths.applyCustomPathPreset, resetDraft,
   };
 }

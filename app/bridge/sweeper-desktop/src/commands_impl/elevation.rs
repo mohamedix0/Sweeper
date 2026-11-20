@@ -17,6 +17,7 @@ pub fn relaunch_elevated<C: Clock>(
     crate::elevation::relaunch_elevated(
         state.elevation_provider.as_ref(),
         state.single_instance.as_ref(),
+        &state.clean_gate,
         state.app_exit.as_ref(),
     )
 }

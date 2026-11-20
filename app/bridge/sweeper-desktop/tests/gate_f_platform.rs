@@ -492,3 +492,139 @@ fn single_instance_guard_cross_thread_handoff_via_app_state() {
     handle.join().expect("join");
     assert!(si.is_held());
 }
+
+// --- Elevate graceful exit (#92) -------------------------------------------------
+//
+// These drive the pure relaunch seam directly so the ordering between an
+// in-flight Clean settling, the elevated launch, and the old process exiting is
+// deterministic. No real UAC prompt, process exit, or deletion is performed.
+
+#[test]
+fn relaunch_elevated_defers_launch_and_exit_until_in_flight_clean_settles() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use sweeper_desktop::clean_gate::CleanGate;
+    use sweeper_desktop::elevation::relaunch_elevated as relaunch_pure;
+
+    let provider = Arc::new(common::FakeElevationProvider::new(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    ));
+    let si = common::make_single_instance_state_with_unique_mutex("SweeperGateF-deferred-exit");
+    let exited = Arc::new(AtomicBool::new(false));
+    let exit_code = Arc::new(std::sync::Mutex::new(None));
+
+    let exited_hook = exited.clone();
+    let exit_code_hook = exit_code.clone();
+    let exit_hook = move |code: i32| {
+        exited_hook.store(true, Ordering::SeqCst);
+        *exit_code_hook.lock().expect("exit code lock") = Some(code);
+    };
+
+    let gate = CleanGate::default();
+    // Simulate a Clean currently in progress.
+    let clean_guard = gate.enter();
+
+    let provider_thread = provider.clone();
+    let si_thread = Arc::clone(&si);
+    let gate_thread = gate.clone();
+    let relaunch = std::thread::spawn(move || {
+        relaunch_pure(
+            provider_thread.as_ref(),
+            si_thread.as_ref(),
+            &gate_thread,
+            &exit_hook,
+        )
+    });
+
+    // While the Clean holds the gate, neither the elevated launch nor the exit
+    // may happen, and the single-instance guard must remain with this instance.
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    assert!(
+        !exited.load(Ordering::SeqCst),
+        "process must not exit while a Clean is in flight"
+    );
+    assert_eq!(
+        provider.relaunch_calls.load(Ordering::SeqCst),
+        0,
+        "elevated launch must be deferred until the Clean settles"
+    );
+    assert!(
+        si.is_held(),
+        "single-instance guard must be held while waiting"
+    );
+
+    // The Clean settles; the graceful path may now proceed.
+    drop(clean_guard);
+    let result = relaunch
+        .join()
+        .expect("relaunch thread panicked")
+        .expect("relaunch ok");
+    assert!(result.launched);
+    assert!(
+        exited.load(Ordering::SeqCst),
+        "exit must follow Clean completion"
+    );
+    assert_eq!(*exit_code.lock().expect("exit code lock"), Some(0));
+    assert_eq!(provider.relaunch_calls.load(Ordering::SeqCst), 1);
+    assert!(!si.is_held());
+}
+
+#[test]
+fn relaunch_elevated_never_exits_before_active_clean_completes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use sweeper_desktop::clean_gate::CleanGate;
+    use sweeper_desktop::elevation::relaunch_elevated as relaunch_pure;
+
+    let provider = Arc::new(common::FakeElevationProvider::new(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    ));
+    let si = common::make_single_instance_state_with_unique_mutex("SweeperGateF-clean-ordering");
+    let clean_finished = Arc::new(AtomicBool::new(false));
+    let exit_saw_finished = Arc::new(AtomicBool::new(false));
+
+    let finished_for_exit = clean_finished.clone();
+    let saw_for_assert = exit_saw_finished.clone();
+    let exit_hook = move |_code: i32| {
+        saw_for_assert.store(finished_for_exit.load(Ordering::SeqCst), Ordering::SeqCst);
+    };
+
+    let gate = CleanGate::default();
+    let clean_guard = gate.enter();
+    let finished_for_clean = clean_finished.clone();
+    let clean_thread = std::thread::spawn(move || {
+        // A real Clean would run its safety-checked removal here. When it is
+        // done it drops its guard, which is the only signal the exit waits on.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        finished_for_clean.store(true, Ordering::SeqCst);
+        drop(clean_guard);
+    });
+
+    let provider_thread = provider.clone();
+    let si_thread = Arc::clone(&si);
+    let gate_thread = gate.clone();
+    let relaunch = std::thread::spawn(move || {
+        relaunch_pure(
+            provider_thread.as_ref(),
+            si_thread.as_ref(),
+            &gate_thread,
+            &exit_hook,
+        )
+    });
+
+    clean_thread.join().expect("clean thread panicked");
+    relaunch
+        .join()
+        .expect("relaunch thread panicked")
+        .expect("relaunch ok");
+
+    assert!(clean_finished.load(Ordering::SeqCst));
+    assert!(
+        exit_saw_finished.load(Ordering::SeqCst),
+        "exit hook must observe the Clean as finished; an in-flight Clean must never be terminated"
+    );
+}

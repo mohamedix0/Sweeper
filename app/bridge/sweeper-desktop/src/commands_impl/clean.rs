@@ -27,6 +27,10 @@ where
         });
     }
 
+    // Hold a gate token for the whole removal so an Elevate-triggered restart
+    // waits for this Clean to settle instead of terminating it (#92).
+    let _clean_guard = state.clean_gate.enter();
+
     // Atomic validation + consumption of preview token under lock (prevents double execute races).
     let (min_age_hours, validated_items, preview_estimated_bytes) = {
         let settings = state.settings.lock().map_err(|_| lock_state_error())?;

@@ -433,4 +433,59 @@ describe('Sweeper frontend', () => {
     expect(screen.getByTestId('draft-min-age')).toHaveTextContent('12');
     expect(onSaved).not.toHaveBeenCalled();
   });
+
+  // --- Elevate persists the pending draft before restart (#92) ------------------
+
+  it('persists the pending draft before the Settings Elevate restarts', async () => {
+    const user = userEvent.setup();
+    const events: string[] = [];
+    const stored = { ...baseSettings() };
+    const client: SweeperClient = {
+      ...mockController,
+      updateSettings: vi.fn(async (s: Settings) => {
+        events.push('updateSettings');
+        Object.assign(stored, s);
+        return s;
+      }),
+      relaunchElevated: vi.fn(async () => {
+        events.push('relaunchElevated');
+        return { launched: true };
+      }),
+      getSettings: vi.fn(async () => ({ ...stored })),
+    };
+    render(
+      <SettingsView
+        client={client}
+        settings={baseSettings()}
+        elevationStatus={{ isElevated: false }}
+        elevationError={null}
+        onSaved={() => {}}
+      />,
+    );
+
+    const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
+    await user.clear(minAge);
+    await user.type(minAge, '12');
+    await user.click(screen.getByLabelText('Run as administrator'));
+
+    await waitFor(() => expect(events).toContain('relaunchElevated'));
+    expect(events[0], 'the draft must be saved before the restart request').toBe('updateSettings');
+    expect(stored.minAgeHours).toBe(12);
+  });
+
+  it('persists the pending draft before the sidebar Elevate restarts', async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await screen.findByRole('heading', { name: 'Settings' });
+
+    const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
+    await user.clear(minAge);
+    await user.type(minAge, '12');
+    await user.click(screen.getByLabelText('Standard Mode · Elevate'));
+
+    await waitFor(async () => {
+      const persisted = await mockController.getSettings();
+      expect(persisted.minAgeHours).toBe(12);
+    });
+  });
 });

@@ -7,6 +7,7 @@ import { AppSidebar, type View } from './components/AppSidebar';
 import { LogsView } from './components/LogsView';
 import { ScanAndPreviewView, type ScanAndPreviewViewHandle } from './components/ScanAndPreviewView';
 import { SettingsView } from './components/SettingsView';
+import { flushPendingDraft } from './components/settings/useSettingsController';
 import { UnsavedSettingsDialog } from './components/UnsavedSettingsDialog';
 
 type Theme = 'dark' | 'light';
@@ -209,6 +210,9 @@ function useRelaunch(client: ReturnType<typeof createClient>) {
     setRelaunching(true);
     setRelaunchError(null);
     try {
+      // Flush the mounted Settings draft through its save queue before asking
+      // the bridge to restart, so no pending edit is lost (#92).
+      await flushPendingDraft();
       const res = await client.relaunchElevated();
       onRelaunchSuccess(res.launched);
     } catch (e) {
