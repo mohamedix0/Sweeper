@@ -1,4 +1,5 @@
-﻿import type { Settings, SweeperClient } from '../api/client';
+﻿import { useEffect } from 'react';
+import type { Settings, SweeperClient } from '../api/client';
 import { SettingsFooterBar } from './settings/SettingsFooterBar';
 import { SettingsGeneralCard } from './settings/SettingsGeneralCard';
 import { SettingsCustomPathsCard } from './settings/SettingsCustomPathsCard';
@@ -17,6 +18,7 @@ export function SettingsView({
   focusTarget,
   onFocusConsumed,
   prefillCustomPath,
+  onDirtyChange,
 }: {
   client: SweeperClient;
   settings: Settings | null;
@@ -28,8 +30,15 @@ export function SettingsView({
   focusTarget?: SettingsFocusTarget;
   onFocusConsumed?: () => void;
   prefillCustomPath?: string | null;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const c = useSettingsController({ client, settings, onSaved, focusTarget, onFocusConsumed, prefillCustomPath });
+  // Publish the controller's dirty state to the app shell so it can guard
+  // navigation away from this view. The effect is deliberately unconditional
+  // (it runs before the loading early return) and the callback is stable.
+  useEffect(() => {
+    onDirtyChange?.(c.isDirty);
+  }, [c.isDirty, onDirtyChange]);
   if (c.loading || !c.draft) {
     return (
       <div className="view-stack">

@@ -7,6 +7,7 @@ import { AppSidebar, type View } from './components/AppSidebar';
 import { LogsView } from './components/LogsView';
 import { ScanAndPreviewView, type ScanAndPreviewViewHandle } from './components/ScanAndPreviewView';
 import { SettingsView } from './components/SettingsView';
+import { UnsavedSettingsDialog } from './components/UnsavedSettingsDialog';
 
 type Theme = 'dark' | 'light';
 export type SettingsFocusTarget = 'allowDeleteUnknown' | 'enableTier3' | null;
@@ -75,6 +76,7 @@ interface ViewPanelsProps {
   deepLink: SettingsDeepLink;
   onDeepLinkConsumed: () => void;
   onSaved: (s: Settings) => void;
+  onSettingsDirtyChange: (dirty: boolean) => void;
 }
 
 function isHidden(view: View, name: View): boolean {
@@ -90,7 +92,7 @@ function HiddenPanel(props: { name: View; view: View; children: ReactNode }) {
   );
 }
 
-function SettingsPanel(props: { view: View; client: ReturnType<typeof createClient>; settings: Settings | null; elevation: ElevationStatus; theme: Theme; setTheme: (t: Theme) => void; deepLink: SettingsDeepLink; onDeepLinkConsumed: () => void; onSaved: (s: Settings) => void }) {
+function SettingsPanel(props: { view: View; client: ReturnType<typeof createClient>; settings: Settings | null; elevation: ElevationStatus; theme: Theme; setTheme: (t: Theme) => void; deepLink: SettingsDeepLink; onDeepLinkConsumed: () => void; onSaved: (s: Settings) => void; onDirtyChange: (dirty: boolean) => void }) {
   if (props.view !== 'settings') return null;
   return (
     <SettingsView
@@ -104,6 +106,7 @@ function SettingsPanel(props: { view: View; client: ReturnType<typeof createClie
       focusTarget={props.deepLink.focus}
       prefillCustomPath={props.deepLink.prefillCustomPath}
       onFocusConsumed={props.onDeepLinkConsumed}
+      onDirtyChange={props.onDirtyChange}
     />
   );
 }
@@ -148,7 +151,7 @@ function ViewPanels(props: ViewPanelsProps) {
       <HiddenPanel name="analyzer" view={props.view}>
         <AnalyzerPanel client={props.client} settings={props.settings} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
       </HiddenPanel>
-      <SettingsPanel view={props.view} client={props.client} settings={props.settings} elevation={props.elevation} theme={props.theme} setTheme={props.setTheme} deepLink={props.deepLink} onDeepLinkConsumed={props.onDeepLinkConsumed} onSaved={props.onSaved} />
+      <SettingsPanel view={props.view} client={props.client} settings={props.settings} elevation={props.elevation} theme={props.theme} setTheme={props.setTheme} deepLink={props.deepLink} onDeepLinkConsumed={props.onDeepLinkConsumed} onSaved={props.onSaved} onDirtyChange={props.onSettingsDirtyChange} />
       <LogsPanel view={props.view} client={props.client} focusLogId={props.focusLogId} onFocusConsumed={props.onFocusConsumed} onScanAgain={props.onScanAgain} />
     </>
   );
@@ -217,28 +220,95 @@ function useRelaunch(client: ReturnType<typeof createClient>) {
   return { relaunching, relaunchError, runAsAdministrator };
 }
 
-function useAppNavigation(scanRef: React.RefObject<ScanAndPreviewViewHandle>) {
+type PendingNavigation = {
+  target: View;
+  apply: () => void;
+};
+
+// A transition is held only when it leaves a dirty Settings draft. Entering
+// Settings (including deep links) is never held, and a clean draft leaves at
+// once. Kept as a small named predicate so the transition choke point stays a
+// single, uncomplicated decision.
+function leavesDirtySettings(from: View, to: View, dirty: boolean): boolean {
+  if (from !== 'settings') return false;
+  if (to === 'settings') return false;
+  return dirty;
+}
+
+// Every view transition funnels through this hook. A single app-shell dirty
+// flag (published by the mounted Settings view) is enough because leaving
+// Settings unmounts its controller and with it the unsaved draft. Holding a
+// transition until the user stays or explicitly discards now covers *every*
+// leave-Settings path, not only the sidebar buttons.
+export function useAppNavigation(scanRef: React.RefObject<ScanAndPreviewViewHandle>) {
   const [view, setView] = useState<View>('scan');
   const [focusLogId, setFocusLogId] = useState<string | null>(null);
   const [deepLink, setDeepLink] = useState<SettingsDeepLink>({ focus: null, prefillCustomPath: null });
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [pending, setPending] = useState<PendingNavigation | null>(null);
+
   const clearDeepLink = () => setDeepLink({ focus: null, prefillCustomPath: null });
+
+  // The one choke point for all transitions. Only transitions that leave a
+  // dirty Settings draft are held; the full side effect is captured so a
+  // discard completes exactly the transition the user asked for. Transitions
+  // into Settings (deep links) are never blocked or deferred.
+  const transitionTo = (target: View, apply: () => void) => {
+    if (leavesDirtySettings(view, target, settingsDirty)) {
+      setPending({ target, apply });
+      return;
+    }
+    apply();
+  };
+
   const switchView = (next: View) => {
-    if (next !== 'settings') clearDeepLink();
-    setView(next);
+    transitionTo(next, () => {
+      if (next !== 'settings') clearDeepLink();
+      setView(next);
+    });
   };
+
   const openSettings = (focus: SettingsFocusTarget = null, prefillCustomPath: string | null = null) => {
-    setDeepLink({ focus, prefillCustomPath });
-    setView('settings');
+    transitionTo('settings', () => {
+      setDeepLink({ focus, prefillCustomPath });
+      setView('settings');
+    });
   };
-  const openLog = (logId: string) => { setFocusLogId(logId); setView('logs'); };
+
+  const openLog = (logId: string) => {
+    transitionTo('logs', () => {
+      setFocusLogId(logId);
+      setView('logs');
+    });
+  };
+
   const scanAgainFromLogs = () => {
-    setView('scan');
-    window.setTimeout(() => { void scanRef.current?.runScan(); }, 0);
+    transitionTo('scan', () => {
+      setView('scan');
+      window.setTimeout(() => { void scanRef.current?.runScan(); }, 0);
+    });
   };
-  return { view, focusLogId, deepLink, switchView, openSettings, openLog, scanAgainFromLogs, clearDeepLink, clearFocusLog: () => setFocusLogId(null) };
+
+  const keepEditing = () => setPending(null);
+
+  const discardAndLeave = () => {
+    const next = pending;
+    setPending(null);
+    setSettingsDirty(false);
+    if (next) next.apply();
+  };
+
+  return {
+    view, focusLogId, deepLink,
+    switchView, openSettings, openLog, scanAgainFromLogs,
+    clearDeepLink, clearFocusLog: () => setFocusLogId(null),
+    reportDirty: setSettingsDirty,
+    pendingView: pending?.target ?? null,
+    keepEditing, discardAndLeave,
+  };
 }
 
-function AppMain(props: { client: ReturnType<typeof createClient>; settings: Settings | null; settingsVersion: number; elevation: ElevationStatus; elevationError: string | null; relaunchError: string | null; scanRef: React.RefObject<ScanAndPreviewViewHandle>; nav: ReturnType<typeof useAppNavigation>; theme: Theme; setTheme: (t: Theme) => void; onSaved: (s: Settings) => void }) {
+function AppMain(props: { client: ReturnType<typeof createClient>; settings: Settings | null; settingsVersion: number; elevation: ElevationStatus; elevationError: string | null; relaunchError: string | null; scanRef: React.RefObject<ScanAndPreviewViewHandle>; nav: ReturnType<typeof useAppNavigation>; theme: Theme; setTheme: (t: Theme) => void; onSaved: (s: Settings) => void; onSettingsDirtyChange: (dirty: boolean) => void }) {
   return (
     <div className="app-main">
       <main className="main-content">
@@ -260,6 +330,7 @@ function AppMain(props: { client: ReturnType<typeof createClient>; settings: Set
           deepLink={props.nav.deepLink}
           onDeepLinkConsumed={props.nav.clearDeepLink}
           onSaved={props.onSaved}
+          onSettingsDirtyChange={props.onSettingsDirtyChange}
         />
       </main>
     </div>
@@ -284,7 +355,10 @@ export function App() {
         relaunching={relaunch.relaunching}
         onRunAsAdministrator={() => void relaunch.runAsAdministrator()}
       />
-      <AppMain client={client} settings={settings} settingsVersion={settingsVersion} elevation={elevation} elevationError={elevationError} relaunchError={relaunch.relaunchError} scanRef={scanRef} nav={nav} theme={theme} setTheme={setTheme} onSaved={handleSaved} />
+      <AppMain client={client} settings={settings} settingsVersion={settingsVersion} elevation={elevation} elevationError={elevationError} relaunchError={relaunch.relaunchError} scanRef={scanRef} nav={nav} theme={theme} setTheme={setTheme} onSaved={handleSaved} onSettingsDirtyChange={nav.reportDirty} />
+      {nav.pendingView && (
+        <UnsavedSettingsDialog onKeepEditing={nav.keepEditing} onDiscard={nav.discardAndLeave} />
+      )}
     </div>
   );
 }
