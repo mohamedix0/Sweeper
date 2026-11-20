@@ -7,8 +7,12 @@
  * controls carry tabIndex={-1}: they are reached through an explicit
  * interaction mode entered with ArrowRight from the active row and exited with
  * Escape, which keeps every action keyboard-reachable without extra tab stops.
- * Keeping the decision logic here makes that model easy to review and keeps
- * the AnalyzerResults component simple (CodeScene complexity gate).
+ *
+ * Key handling is a data-driven dispatch: each mode has a small key -> action
+ * table, and every action is a named, single-purpose function that reports
+ * whether it handled the key. The two entry points therefore only resolve the
+ * context, look up the action and apply preventDefault once, which keeps the
+ * decision logic reviewable (CodeScene complexity gate).
  */
 
 import type { KeyboardEvent } from 'react';
@@ -50,6 +54,112 @@ function controlsForActiveRow(rowIds: readonly string[], activeId: string | null
   return id ? controlsForRow(document.getElementById(treeItemDomId(id))) : [];
 }
 
+/** True when the bubbled event came from the control that actually has focus. */
+function isFocusedTreeControl(value: EventTarget | null): value is HTMLElement {
+  if (!(value instanceof HTMLElement)) return false;
+  if (!value.hasAttribute(TREE_CONTROL_ATTR)) return false;
+  return document.activeElement === value;
+}
+
+/** Actions report whether they handled a key, so prevention is applied once. */
+type TreeModeAction = (event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext, currentId: string) => boolean;
+type ControlModeAction = (event: KeyboardEvent<HTMLDivElement>, target: HTMLElement, context: TreeKeyContext) => boolean;
+
+/** ArrowUp/Down move the active row; navigation is clamped by rowIdForArrowKey. */
+function moveActiveRow(event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext, currentId: string): boolean {
+  const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(currentId), event.key);
+  if (!nextId) return false;
+  context.setActiveId(nextId);
+  return true;
+}
+
+/** Enter / Space activate the active row while DOM focus stays on the tree. */
+function activateActiveRow(_event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext, currentId: string): boolean {
+  context.activateRow(currentId);
+  return true;
+}
+
+/** ArrowRight enters interaction mode on the active row's first control. */
+function enterInteractionMode(_event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext, currentId: string): boolean {
+  const controls = controlsForActiveRow(context.rowIds, currentId);
+  if (controls.length === 0) return false;
+  controls[0].focus();
+  return true;
+}
+
+/** ArrowLeft follows the APG tree pattern: collapse an expanded active row. */
+function collapseActiveRow(_event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext, currentId: string): boolean {
+  const rowElement = document.getElementById(treeItemDomId(currentId));
+  if (rowElement?.getAttribute('aria-expanded') !== 'true') return false;
+  context.collapseRow(currentId);
+  return true;
+}
+
+/** Returning focus from a control with Escape is always handled. */
+function returnFocusToTree(
+  _event: KeyboardEvent<HTMLDivElement>,
+  _target: HTMLElement,
+  _context: TreeKeyContext,
+): boolean {
+  focusTree();
+  return true;
+}
+
+/** Direction of a horizontal control-cycle arrow. */
+function controlStep(key: string): number {
+  return key === 'ArrowRight' ? 1 : -1;
+}
+
+/** ArrowLeft/ArrowRight cycle the focused row's controls. */
+function cycleRowControl(event: KeyboardEvent<HTMLDivElement>, target: HTMLElement, _context: TreeKeyContext): boolean {
+  const controls = controlsForRow(target.closest('[role="treeitem"]'));
+  const index = controls.indexOf(target);
+  if (index < 0) return false;
+  const next = Math.min(Math.max(index + controlStep(event.key), 0), controls.length - 1);
+  controls[next]?.focus();
+  return true;
+}
+
+/** Up / Down while interacting exit to tree navigation on the adjacent row. */
+function navigateFromControl(event: KeyboardEvent<HTMLDivElement>, _target: HTMLElement, context: TreeKeyContext): boolean {
+  const currentId = resolveActiveId(context.rowIds, context.activeId);
+  if (!currentId) return false;
+  const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(currentId), event.key);
+  if (!nextId) return false;
+  context.setActiveId(nextId);
+  focusTree();
+  return true;
+}
+
+/** Buttons activate natively; Enter on a focused, enabled checkbox is the gap. */
+function clickEnabledCheckbox(_event: KeyboardEvent<HTMLDivElement>, target: HTMLElement, _context: TreeKeyContext): boolean {
+  if (!(target instanceof HTMLInputElement)) return false;
+  if (target.type !== 'checkbox') return false;
+  if (target.disabled) return false;
+  target.click();
+  return true;
+}
+
+// Map lookup (not a plain object) so inherited names such as "toString" can
+// never be mistaken for an action for an otherwise unhandled key.
+const TREE_MODE_ACTIONS: ReadonlyMap<string, TreeModeAction> = new Map<string, TreeModeAction>([
+  ['ArrowDown', moveActiveRow],
+  ['ArrowUp', moveActiveRow],
+  ['Enter', activateActiveRow],
+  [' ', activateActiveRow],
+  ['ArrowRight', enterInteractionMode],
+  ['ArrowLeft', collapseActiveRow],
+]);
+
+const CONTROL_MODE_ACTIONS: ReadonlyMap<string, ControlModeAction> = new Map<string, ControlModeAction>([
+  ['Escape', returnFocusToTree],
+  ['ArrowRight', cycleRowControl],
+  ['ArrowLeft', cycleRowControl],
+  ['ArrowDown', navigateFromControl],
+  ['ArrowUp', navigateFromControl],
+  ['Enter', clickEnabledCheckbox],
+]);
+
 /**
  * Apply a keydown on the tree. Keys originating on the tree container navigate
  * rows / activate the active row / enter interaction mode; keys originating on
@@ -67,83 +177,17 @@ export function handleTreeKeyDown(event: KeyboardEvent<HTMLDivElement>, context:
 function handleTreeModeKeyDown(event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext): void {
   const currentId = resolveActiveId(context.rowIds, context.activeId);
   if (!currentId) return;
-
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(currentId), event.key);
-    if (!nextId) return;
-    event.preventDefault();
-    context.setActiveId(nextId);
-    return;
-  }
-
-  // Enter / Space activate the active row even though DOM focus stays on the
-  // tree, so the per-row onRowKeyDown handler never sees these keys.
-  if (event.key === 'Enter' || event.key === ' ') {
-    event.preventDefault();
-    context.activateRow(currentId);
-    return;
-  }
-
-  // ArrowRight enters the interaction mode on the active row's first control.
-  if (event.key === 'ArrowRight') {
-    const controls = controlsForActiveRow(context.rowIds, context.activeId);
-    if (controls.length === 0) return;
-    event.preventDefault();
-    controls[0].focus();
-    return;
-  }
-
-  // ArrowLeft follows the APG tree pattern: collapse an expanded active row.
-  if (event.key === 'ArrowLeft') {
-    const rowElement = document.getElementById(treeItemDomId(currentId));
-    if (rowElement?.getAttribute('aria-expanded') !== 'true') return;
-    event.preventDefault();
-    context.collapseRow(currentId);
-  }
+  const action = TREE_MODE_ACTIONS.get(event.key);
+  if (!action) return;
+  if (action(event, context, currentId)) event.preventDefault();
 }
 
 function handleControlModeKeyDown(event: KeyboardEvent<HTMLDivElement>, context: TreeKeyContext): void {
-  const target = event.target as HTMLElement | null;
-  if (!target || typeof target.hasAttribute !== 'function' || !target.hasAttribute(TREE_CONTROL_ATTR)) return;
-  // Ignore bubbled synthetic keydowns where the control is not actually focused.
-  if (document.activeElement !== target) return;
-
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    focusTree();
-    return;
-  }
-
-  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-    const controls = controlsForRow(target.closest('[role="treeitem"]'));
-    const index = controls.indexOf(target);
-    if (index < 0) return;
-    const next = event.key === 'ArrowRight'
-      ? Math.min(index + 1, controls.length - 1)
-      : Math.max(index - 1, 0);
-    event.preventDefault();
-    controls[next]?.focus();
-    return;
-  }
-
-  // Up / Down while interacting exit to tree navigation on the adjacent row.
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    const currentId = resolveActiveId(context.rowIds, context.activeId);
-    if (!currentId) return;
-    const nextId = rowIdForArrowKey(context.rowIds, context.rowIds.indexOf(currentId), event.key);
-    if (!nextId) return;
-    event.preventDefault();
-    context.setActiveId(nextId);
-    focusTree();
-    return;
-  }
-
-  // Buttons natively activate on both Enter and Space, and checkboxes on
-  // Space. Enter on a focused checkbox is the one gap to fill explicitly.
-  if (event.key === 'Enter' && target instanceof HTMLInputElement && target.type === 'checkbox' && !target.disabled) {
-    event.preventDefault();
-    target.click();
-  }
+  const target = event.target;
+  if (!isFocusedTreeControl(target)) return;
+  const action = CONTROL_MODE_ACTIONS.get(event.key);
+  if (!action) return;
+  if (action(event, target, context)) event.preventDefault();
 }
 
 /** aria-activedescendant value for the active row, or undefined when invalid. */

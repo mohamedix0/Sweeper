@@ -24,47 +24,49 @@ function clientFor(result: StartAnalyzerResult): SweeperClient {
   };
 }
 
-function threeFileResult(): StartAnalyzerResult {
+type TempFileFixture = { id: string; sizeBytes: string; selectable?: boolean };
+
+/** One factory for every "C:\ root with Temp file children" fixture. */
+function tempFileTreeResult(sessionId: string, files: readonly TempFileFixture[]): StartAnalyzerResult {
   return makeAnalyzerResult({
-    sessionId: 'a11y-three',
+    sessionId,
     root: makeAnalyzerNode({
       id: 'root',
       name: 'C:\\',
       path: 'C:\\',
       isDir: true,
-      children: [
-        makeAnalyzerNode({ id: 'a', name: 'a.tmp', path: 'C:\\Temp\\a.tmp', sizeBytes: '300' }),
-        makeAnalyzerNode({ id: 'b', name: 'b.tmp', path: 'C:\\Temp\\b.tmp', sizeBytes: '200' }),
-        makeAnalyzerNode({ id: 'c', name: 'c.tmp', path: 'C:\\Temp\\c.tmp', sizeBytes: '100' }),
-      ],
+      children: files.map((file) => makeAnalyzerNode({
+        id: file.id,
+        name: `${file.id}.tmp`,
+        path: `C:\\Temp\\${file.id}.tmp`,
+        sizeBytes: file.sizeBytes,
+        selectable: file.selectable,
+        targetId: file.selectable ? 't1' : null,
+      })),
     }),
   });
+}
+
+function threeFileResult(): StartAnalyzerResult {
+  return tempFileTreeResult('a11y-three', [
+    { id: 'a', sizeBytes: '300' },
+    { id: 'b', sizeBytes: '200' },
+    { id: 'c', sizeBytes: '100' },
+  ]);
 }
 
 function manyChildrenResult(count: number): StartAnalyzerResult {
-  const children = Array.from({ length: count }, (_, i) =>
-    makeAnalyzerNode({ id: `f-${i}`, name: `f-${i}.tmp`, path: `C:\\Temp\\f-${i}.tmp`, sizeBytes: String(count - i) }),
-  );
-  return makeAnalyzerResult({
-    sessionId: 'a11y-many',
-    root: makeAnalyzerNode({ id: 'root', name: 'C:\\', path: 'C:\\', isDir: true, children }),
-  });
+  return tempFileTreeResult('a11y-many', Array.from({ length: count }, (_, i) => ({
+    id: `f-${i}`,
+    sizeBytes: String(count - i),
+  })));
 }
 
 function selectableFileResult(): StartAnalyzerResult {
-  return makeAnalyzerResult({
-    sessionId: 'a11y-activate',
-    root: makeAnalyzerNode({
-      id: 'root',
-      name: 'C:\\',
-      path: 'C:\\',
-      isDir: true,
-      children: [
-        makeAnalyzerNode({ id: 'a', name: 'a.tmp', path: 'C:\\Temp\\a.tmp', sizeBytes: '300', selectable: true, targetId: 't1' }),
-        makeAnalyzerNode({ id: 'b', name: 'b.tmp', path: 'C:\\Temp\\b.tmp', sizeBytes: '200', selectable: true, targetId: 't1' }),
-      ],
-    }),
-  });
+  return tempFileTreeResult('a11y-activate', [
+    { id: 'a', sizeBytes: '300', selectable: true },
+    { id: 'b', sizeBytes: '200', selectable: true },
+  ]);
 }
 
 function interactionResult(): StartAnalyzerResult {
