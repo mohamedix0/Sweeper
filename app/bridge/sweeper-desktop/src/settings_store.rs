@@ -29,10 +29,14 @@ pub struct SettingsStore {
 }
 
 impl SettingsStore {
-    /// Create with safe defaults and no backing file.
-    pub fn new_default() -> Self {
+    /// Shared constructor: safe defaults with an optional backing file path.
+    ///
+    /// Both public constructors funnel through here so the initial state is
+    /// defined in exactly one place; the difference is only whether a path is
+    /// supplied and whether that path is loaded immediately.
+    fn with_optional_path(path: Option<PathBuf>) -> Self {
         Self {
-            path: None,
+            path,
             settings: SweeperSettings::default(),
             generation: 0,
             analyzer_generation: 0,
@@ -40,15 +44,14 @@ impl SettingsStore {
         }
     }
 
+    /// Create with safe defaults and no backing file.
+    pub fn new_default() -> Self {
+        Self::with_optional_path(None)
+    }
+
     /// Create with a backing file path; loads and sanitizes or falls back to defaults.
     pub fn with_path(path: PathBuf) -> Self {
-        let mut s = Self {
-            path: Some(path),
-            settings: SweeperSettings::default(),
-            generation: 0,
-            analyzer_generation: 0,
-            warnings: Vec::new(),
-        };
+        let mut s = Self::with_optional_path(Some(path));
         s.reload();
         s
     }

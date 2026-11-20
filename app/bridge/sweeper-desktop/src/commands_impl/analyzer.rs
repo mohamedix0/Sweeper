@@ -7,7 +7,9 @@ use crate::clock::Clock;
 use crate::session::AnalyzerFinishInput;
 use crate::AppState;
 
-use super::shared::{commit_async_outcome, lock_state_error, AsyncOutcomeCommit};
+use super::shared::{
+    commit_async_outcome, lock_state_error, AsyncOutcomeCommit, CommitStartGenerations,
+};
 
 /// `cancel_analyzer` implementation.
 pub fn cancel_analyzer<C: Clock>(
@@ -97,8 +99,10 @@ fn commit_analyzer_outcome<C: Clock>(
         state,
         AsyncOutcomeCommit::new(
             prepared.session_id.clone(),
-            prepared.settings_generation,
-            prepared.analyzer_generation,
+            CommitStartGenerations {
+                scan: prepared.settings_generation,
+                analyzer: prepared.analyzer_generation,
+            },
             (min_age_hours, result),
             |clock: &C,
              sessions: &mut crate::session::SessionStore,

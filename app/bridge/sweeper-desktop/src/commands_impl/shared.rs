@@ -61,10 +61,17 @@ pub(super) struct CommitGenerations {
     pub analyzer_current: u64,
 }
 
+/// Generation snapshots captured when an async operation started. Neither is
+/// derivable at commit time, so both travel together as one value object.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CommitStartGenerations {
+    pub scan: u64,
+    pub analyzer: u64,
+}
+
 pub(super) struct AsyncOutcomeCommit<P, R, F> {
     pub session_id: String,
-    pub settings_generation_at_start: u64,
-    pub analyzer_generation_at_start: u64,
+    pub start_generations: CommitStartGenerations,
     pub payload: P,
     pub finish: F,
     _marker: std::marker::PhantomData<fn() -> R>,
@@ -73,15 +80,13 @@ pub(super) struct AsyncOutcomeCommit<P, R, F> {
 impl<P, R, F> AsyncOutcomeCommit<P, R, F> {
     pub fn new(
         session_id: String,
-        settings_generation_at_start: u64,
-        analyzer_generation_at_start: u64,
+        start_generations: CommitStartGenerations,
         payload: P,
         finish: F,
     ) -> Self {
         Self {
             session_id,
-            settings_generation_at_start,
-            analyzer_generation_at_start,
+            start_generations,
             payload,
             finish,
             _marker: std::marker::PhantomData,
@@ -99,9 +104,9 @@ where
 {
     let settings = state.settings.lock().map_err(|_| lock_state_error())?;
     let generations = CommitGenerations {
-        scan_at_start: req.settings_generation_at_start,
+        scan_at_start: req.start_generations.scan,
         scan_current: settings.generation(),
-        analyzer_at_start: req.analyzer_generation_at_start,
+        analyzer_at_start: req.start_generations.analyzer,
         analyzer_current: settings.analyzer_generation(),
     };
     let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
