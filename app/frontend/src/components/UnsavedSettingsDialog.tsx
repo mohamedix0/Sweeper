@@ -1,21 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent } from 'react';
-
-// Cycle focus within the dialog on Tab / Shift+Tab. We handle every Tab press
-// (not only the wrap-around) so focus can never escape the alertdialog, and so
-// the trap behaves identically in real browsers and in jsdom-based tests.
-function trapTab(event: KeyboardEvent<HTMLDivElement>, focusables: HTMLElement[]) {
-  if (focusables.length === 0) return;
-  event.preventDefault();
-  const active = document.activeElement as HTMLElement | null;
-  const index = focusables.indexOf(active as HTMLElement);
-  if (index === -1) {
-    focusables[event.shiftKey ? focusables.length - 1 : 0].focus();
-    return;
-  }
-  const step = event.shiftKey ? -1 : 1;
-  const next = (index + step + focusables.length) % focusables.length;
-  focusables[next].focus();
-}
+import { trapTab } from './dialogFocus';
 
 // Confirmation shown when the user tries to leave Settings with an unsaved
 // draft. The safe action ("Keep editing") is focused by default so a stray

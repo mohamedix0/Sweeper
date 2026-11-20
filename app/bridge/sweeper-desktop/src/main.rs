@@ -10,8 +10,12 @@ use sweeper_contract::{
     ScanResultsDto, SettingsDto, StartAnalyzerResponse, StartScanResponse, TierDto,
     ValidateCustomPathResponse,
 };
+use sweeper_desktop::close_gate::{CloseApproval, CloseDecision, CloseRequest};
 use sweeper_desktop::{commands_impl, AppState, SystemClock};
 use tauri::Emitter;
+
+/// Host-to-webview event asking the app shell to flush/save its draft and decide.
+const CLOSE_REQUESTED_EVENT: &str = "CloseRequestedByHost";
 
 fn emit_event<T: serde::Serialize + Clone + Send + 'static>(
     app: &tauri::AppHandle,
@@ -168,6 +172,27 @@ async fn relaunch_elevated(
     run_blocking(state, commands_impl::relaunch_elevated).await
 }
 
+/// Webview's answer to a deferred close request. Sealing the Clean gate and
+/// waiting for in-flight Cleans happens on a blocking worker, never on the
+/// async runtime or the window-event thread (#93).
+#[tauri::command]
+async fn resolve_close(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState<SystemClock>>,
+    approved: bool,
+) -> Result<(), ContractError> {
+    let decision = if approved {
+        CloseDecision::Approved
+    } else {
+        CloseDecision::Cancelled
+    };
+    let approval = run_blocking(state, move |s| Ok(s.close_gate.record_decision(decision))).await?;
+    if approval == CloseApproval::Exit {
+        app.exit(0);
+    }
+    Ok(())
+}
+
 fn main() {
     let single_instance_guard = match sweeper_desktop::elevation::acquire_startup_single_instance()
     {
@@ -178,6 +203,7 @@ fn main() {
         }
     };
     let app_state = AppState::new_default().with_single_instance_guard(single_instance_guard);
+    let close_gate = app_state.close_gate.clone();
     #[cfg(has_frontend_dist)]
     let context = tauri::generate_context!();
     #[cfg(not(has_frontend_dist))]
@@ -199,8 +225,19 @@ fn main() {
             list_logs,
             read_log,
             get_elevation_status,
-            relaunch_elevated
+            relaunch_elevated,
+            resolve_close
         ])
+        .on_window_event(move |window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Always prevent the native close first: an unsaved draft must
+                // never be lost just because the OS asked the window to close.
+                api.prevent_close();
+                if close_gate.begin_close() == CloseRequest::DeferAndAsk {
+                    let _ = window.emit(CLOSE_REQUESTED_EVENT, ());
+                }
+            }
+        })
         .run(context)
         .expect("error while running tauri application");
 }

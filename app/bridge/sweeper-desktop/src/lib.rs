@@ -6,6 +6,7 @@
 
 pub mod clean_gate;
 pub mod clock;
+pub mod close_gate;
 pub mod commands_impl;
 pub mod elevation;
 pub mod session;
@@ -17,6 +18,7 @@ use std::sync::{Arc, Mutex};
 pub use clock::{Clock, SystemClock};
 
 use clean_gate::CleanGate;
+use close_gate::CloseGate;
 use elevation::{ElevationProvider, RealElevationProvider, SingleInstanceState};
 use session::SessionStore;
 use settings_store::SettingsStore;
@@ -38,6 +40,8 @@ pub struct AppState<C: Clock = SystemClock> {
     pub app_exit: Arc<dyn Fn(i32) + Send + Sync>,
     /// Tracks in-flight Cleans so an Elevate restart can defer exit until they settle.
     pub clean_gate: CleanGate,
+    /// Coordinates window-close requests with the webview draft handshake.
+    pub close_gate: CloseGate,
 }
 
 fn default_settings_path() -> Option<PathBuf> {
@@ -51,6 +55,7 @@ impl AppState<SystemClock> {
             Some(path) => SettingsStore::with_path(path),
             None => SettingsStore::new_default(),
         };
+        let clean_gate = CleanGate::default();
         Self {
             sessions: Arc::new(Mutex::new(SessionStore::new())),
             settings: Arc::new(Mutex::new(settings)),
@@ -58,7 +63,8 @@ impl AppState<SystemClock> {
             elevation_provider: Arc::new(RealElevationProvider),
             single_instance: Arc::new(SingleInstanceState::new()),
             app_exit: Arc::new(elevation::default_exit),
-            clean_gate: CleanGate::default(),
+            close_gate: CloseGate::new(clean_gate.clone()),
+            clean_gate,
         }
     }
 
@@ -75,6 +81,7 @@ impl AppState<SystemClock> {
 impl<C: Clock> AppState<C> {
     /// Create state with a custom clock (for tests).
     pub fn with_clock(clock: C) -> Self {
+        let clean_gate = CleanGate::default();
         Self {
             sessions: Arc::new(Mutex::new(SessionStore::new())),
             settings: Arc::new(Mutex::new(SettingsStore::new_default())),
@@ -82,7 +89,8 @@ impl<C: Clock> AppState<C> {
             elevation_provider: Arc::new(RealElevationProvider),
             single_instance: Arc::new(SingleInstanceState::new()),
             app_exit: Arc::new(|_| {}),
-            clean_gate: CleanGate::default(),
+            close_gate: CloseGate::new(clean_gate.clone()),
+            clean_gate,
         }
     }
 

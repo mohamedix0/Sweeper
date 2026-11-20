@@ -79,6 +79,7 @@ fn tauri_capability_command_surface_snapshot() {
             "preview_clean".to_string(),
             "read_log".to_string(),
             "relaunch_elevated".to_string(),
+            "resolve_close".to_string(),
             "start_analyzer".to_string(),
             "start_scan".to_string(),
             "update_settings".to_string(),

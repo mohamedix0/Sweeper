@@ -115,6 +115,14 @@ async relaunchElevated() : Promise<Result<{ launched: boolean }, { code: "sessio
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async resolveClose(approved: boolean) : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } }>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_close", { approved }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -123,11 +131,13 @@ async relaunchElevated() : Promise<Result<{ launched: boolean }, { code: "sessio
 export const events = __makeEvents__<{
 scanProgressEvent: { kind: "started"; session_id: string } | { kind: "progress"; session_id: string; completed_targets: number; total_targets: number; current_target_id: string | null; current_target_name: string | null; scanned_items: string; scanned_bytes: string } | { kind: "cancelled"; session_id: string } | { kind: "completed"; session_id: string } | { kind: "failed"; session_id: string; error: ContractError },
 cleanProgressEvent: { previewToken: string; targetId: string; completedItems: string; totalItems: string; bytesFreedSoFar: string; status: string },
-analyzerProgressEvent: { sessionId: string; scannedDirs: string; scannedFiles: string; scannedBytes: string; currentPath: string | null }
+analyzerProgressEvent: { sessionId: string; scannedDirs: string; scannedFiles: string; scannedBytes: string; currentPath: string | null },
+closeRequestedByHost: null
 }>({
 scanProgressEvent: "ScanProgressEvent",
 cleanProgressEvent: "CleanProgressEvent",
-analyzerProgressEvent: "AnalyzerProgressEvent"
+analyzerProgressEvent: "AnalyzerProgressEvent",
+closeRequestedByHost: "CloseRequestedByHost"
 })
 
 /** user-defined constants **/

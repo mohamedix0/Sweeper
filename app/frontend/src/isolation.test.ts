@@ -47,6 +47,7 @@ const VALID_ARGUMENTS: Record<string, unknown> = {
   read_log: { logId: 'clean-1' },
   get_elevation_status: {},
   relaunch_elevated: {},
+  resolve_close: { approved: true },
 };
 
 /** Command names generated into bindings.ts (the contract's IPC surface). */

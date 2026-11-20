@@ -229,7 +229,26 @@ fn logs_and_elevation_commands(
             "get_elevation_status",
         )?,
         cmd_noarg::<RelaunchResultDto>(cfg, type_map, "relaunchElevated", "relaunch_elevated")?,
+        cmd_resolve_close(cfg, type_map)?,
     ])
+}
+
+// The window-close handshake: the webview answers the host's deferred
+// CloseRequested event with its decision, and the host exits only on approval.
+fn cmd_resolve_close(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn Error>> {
+    let err = ty::<ContractError>(cfg, type_map)?;
+    Ok(cmd_fn(
+        CmdSpec {
+            name: "resolveClose",
+            invoke: "resolve_close",
+            arg_obj: Some("{ approved }"),
+        },
+        &[("approved", "boolean".to_string())],
+        &format!("Result<null, {err}>"),
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -388,10 +407,10 @@ fn render_events(
     let clean = ty::<CleanProgressEvent>(cfg, type_map)?;
     let analyzer = ty::<AnalyzerProgressEvent>(cfg, type_map)?;
     let events_types = format!(
-        "scanProgressEvent: {scan},\ncleanProgressEvent: {clean},\nanalyzerProgressEvent: {analyzer}"
+        "scanProgressEvent: {scan},\ncleanProgressEvent: {clean},\nanalyzerProgressEvent: {analyzer},\ncloseRequestedByHost: null"
     );
     let events_map =
-        "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\",\nanalyzerProgressEvent: \"AnalyzerProgressEvent\""
+        "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\",\nanalyzerProgressEvent: \"AnalyzerProgressEvent\",\ncloseRequestedByHost: \"CloseRequestedByHost\""
             .to_string();
     Ok(format!(
         "export const events = __makeEvents__<{{\n{events_types}\n}}>({{\n{events_map}\n}})"

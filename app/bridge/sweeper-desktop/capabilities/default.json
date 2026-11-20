@@ -21,7 +21,8 @@
       "list_logs",
       "read_log",
       "get_elevation_status",
-      "relaunch_elevated"
+      "relaunch_elevated",
+      "resolve_close"
     ],
     "deny": []
   }

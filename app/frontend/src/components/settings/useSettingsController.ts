@@ -357,8 +357,17 @@ const queueDrainListeners = new Set<() => void>();
 // state consolidation is needed.
 let draftFlusher: (() => Promise<boolean>) | null = null;
 
+// The same mounted controller publishes whether its draft differs from what
+// the backend acknowledged. The window-close handshake reads this at request
+// time to decide between an instant clean exit and a save/cancel prompt (#93).
+let draftDirtyReader: (() => boolean) | null = null;
+
 export function registerDraftFlusher(flusher: (() => Promise<boolean>) | null): void {
   draftFlusher = flusher;
+}
+
+export function registerDraftDirtyReader(reader: (() => boolean) | null): void {
+  draftDirtyReader = reader;
 }
 
 // Returns whether it is safe to relaunch: true when the draft was persisted
@@ -367,6 +376,13 @@ export function registerDraftFlusher(flusher: (() => Promise<boolean>) | null): 
 export async function flushPendingDraft(): Promise<boolean> {
   const flusher = draftFlusher;
   return flusher ? flusher() : true;
+}
+
+// True only while a mounted Settings controller holds a draft that the backend
+// has not acknowledged. Reads the controller's refs at call time so the close
+// handshake sees the latest edit rather than a stale render (#93).
+export function isPendingDraftDirty(): boolean {
+  return draftDirtyReader ? draftDirtyReader() : false;
 }
 
 function subscribeQueueDrain(listener: () => void): () => void {
@@ -541,8 +557,12 @@ export function useSettingsController(args: ControllerArgs) {
   }, [refs, save]);
   useEffect(() => {
     registerDraftFlusher(flushDraft);
-    return () => registerDraftFlusher(null);
-  }, [flushDraft]);
+    registerDraftDirtyReader(() => !settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current));
+    return () => {
+      registerDraftFlusher(null);
+      registerDraftDirtyReader(null);
+    };
+  }, [flushDraft, refs]);
   const relaunch = useRelaunchAction(args.client, flushDraft);
   const deepDisabled = !!ui.draft && !ui.draft.enableTier3;
   const { setDraft } = ui;

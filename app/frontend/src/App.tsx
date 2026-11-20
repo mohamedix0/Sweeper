@@ -2,12 +2,15 @@
 import './styles/tokens.css';
 import './App.css';
 import { createClient, formatContractError, type ElevationStatus, type Settings } from './api/client';
+import { createCloseBridge, type CloseBridge } from './close/closeBridge';
+import { useCloseGuard } from './close/useCloseGuard';
 import { AnalyzerView } from './components/AnalyzerView';
+import { CloseDraftDialog } from './components/CloseDraftDialog';
 import { AppSidebar, type View } from './components/AppSidebar';
 import { LogsView } from './components/LogsView';
 import { ScanAndPreviewView, type ScanAndPreviewViewHandle } from './components/ScanAndPreviewView';
 import { SettingsView } from './components/SettingsView';
-import { flushPendingDraft } from './components/settings/useSettingsController';
+import { flushPendingDraft, isPendingDraftDirty } from './components/settings/useSettingsController';
 import { UnsavedSettingsDialog } from './components/UnsavedSettingsDialog';
 
 type Theme = 'dark' | 'light';
@@ -349,11 +352,17 @@ function AppMain(props: { client: ReturnType<typeof createClient>; settings: Set
   );
 }
 
-export function App() {
+export function App({ closeBridge }: { closeBridge?: CloseBridge } = {}) {
   const client = useMemo(() => createClient(), []);
+  const bridge = useMemo(() => closeBridge ?? createCloseBridge(), [closeBridge]);
   const scanRef = useRef<ScanAndPreviewViewHandle>(null);
   const nav = useAppNavigation(scanRef);
   const relaunch = useRelaunch(client);
+  const close = useCloseGuard({
+    bridge,
+    isDirty: isPendingDraftDirty,
+    flushDraft: flushPendingDraft,
+  });
   const { theme, setTheme } = usePersistentTheme();
   const { elevation, elevationError } = useElevationState(client);
   const { settings, settingsVersion, handleSaved } = useSettingsState(client);
@@ -370,6 +379,14 @@ export function App() {
       <AppMain client={client} settings={settings} settingsVersion={settingsVersion} elevation={elevation} elevationError={elevationError} relaunchError={relaunch.relaunchError} relaunching={relaunch.relaunching} scanRef={scanRef} nav={nav} theme={theme} setTheme={setTheme} onSaved={handleSaved} onSettingsDirtyChange={nav.reportDirty} />
       {nav.pendingView && (
         <UnsavedSettingsDialog onKeepEditing={nav.keepEditing} onDiscard={nav.discardAndLeave} />
+      )}
+      {close.promptOpen && (
+        <CloseDraftDialog
+          saving={close.saving}
+          error={close.error}
+          onCancel={close.cancel}
+          onSaveAndClose={() => void close.saveAndClose()}
+        />
       )}
     </div>
   );
