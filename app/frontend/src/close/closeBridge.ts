@@ -56,6 +56,70 @@ function defaultDeps(): CloseBridgeDeps {
   };
 }
 
+// Browser-preview path: mirror the two host events as DOM CustomEvents. The
+// Tauri runtime never takes this branch; the typed IPC events are its only
+// channel.
+function registerBrowserCloseListener(handler: () => void): () => void {
+  const listener = () => handler();
+  window.addEventListener(BROWSER_CLOSE_REQUEST, listener);
+  return () => window.removeEventListener(BROWSER_CLOSE_REQUEST, listener);
+}
+
+// Delay before the retry at `attemptIndex`. Clamped to the last configured
+// delay so a growing index can never produce an undefined/NaN timer.
+function retryDelay(attemptIndex: number): number {
+  return LISTEN_BACKOFF_MS[attemptIndex] ?? LISTEN_BACKOFF_MS[LISTEN_BACKOFF_MS.length - 1];
+}
+
+// Failure path after bounded retries are exhausted: answer the deferred host
+// close with a cancel (never an approval) so Rust records a Cancelled decision
+// instead of hanging in `awaiting`, then surface an actionable error. The draft
+// stays intact — a dirty close is never auto-approved.
+function cancelAndReportFailure(
+  resolve: CloseBridgeDeps['resolve'],
+  notifyFailure: () => void,
+): void {
+  void resolve(false).catch(() => {});
+  notifyFailure();
+}
+
+// Register the Tauri host listener, retrying transient "IPC not ready"
+// rejections with bounded backoff. Returns a disposer that detaches the
+// listener and stops any pending retries.
+function startHostCloseListener(
+  handler: () => void,
+  deps: CloseBridgeDeps,
+  notifyFailure: () => void,
+): () => void {
+  let disposed = false;
+  let unlisten: (() => void) | null = null;
+
+  const attempt = (index: number) => {
+    if (disposed) return;
+    void Promise.resolve()
+      .then(() => deps.listenForHostClose(() => { if (!disposed) handler(); }))
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        if (disposed) return;
+        const next = index + 1;
+        if (next < LISTEN_ATTEMPTS) {
+          deps.schedule(() => attempt(next), retryDelay(next));
+          return;
+        }
+        cancelAndReportFailure(deps.resolve, notifyFailure);
+      });
+  };
+  attempt(0);
+
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
+}
+
 export function createCloseBridge(overrides: Partial<CloseBridgeDeps> = {}): CloseBridge {
   const deps: CloseBridgeDeps = { ...defaultDeps(), ...overrides };
   const failureHandlers = new Set<(message: string) => void>();
@@ -66,45 +130,9 @@ export function createCloseBridge(overrides: Partial<CloseBridgeDeps> = {}): Clo
 
   return {
     onHostCloseRequest(handler) {
-      if (!isTauriRuntime()) {
-        const listener = () => handler();
-        window.addEventListener(BROWSER_CLOSE_REQUEST, listener);
-        return () => window.removeEventListener(BROWSER_CLOSE_REQUEST, listener);
-      }
-      let disposed = false;
-      let unlisten: (() => void) | null = null;
-
-      const attempt = (index: number) => {
-        if (disposed) return;
-        void Promise.resolve()
-          .then(() => deps.listenForHostClose(() => { if (!disposed) handler(); }))
-          .then((fn) => {
-            if (disposed) fn();
-            else unlisten = fn;
-          })
-          .catch(() => {
-            if (disposed) return;
-            const next = index + 1;
-            if (next < LISTEN_ATTEMPTS) {
-              const delay = LISTEN_BACKOFF_MS[next] ?? LISTEN_BACKOFF_MS[LISTEN_BACKOFF_MS.length - 1];
-              deps.schedule(() => attempt(next), delay);
-              return;
-            }
-            // Deterministic fallback after bounded retries: answer the deferred
-            // close with a cancel so Rust records a Cancelled decision instead
-            // of waiting forever in `awaiting` (no uncloseable/hung state). The
-            // draft stays intact — a dirty close is never auto-approved — and
-            // the UI surfaces an actionable error via onRegistrationFailure.
-            void deps.resolve(false).catch(() => {});
-            notifyFailure();
-          });
-      };
-      attempt(0);
-
-      return () => {
-        disposed = true;
-        unlisten?.();
-      };
+      return isTauriRuntime()
+        ? startHostCloseListener(handler, deps, notifyFailure)
+        : registerBrowserCloseListener(handler);
     },
     async resolveClose(approved) {
       if (!isTauriRuntime()) {
