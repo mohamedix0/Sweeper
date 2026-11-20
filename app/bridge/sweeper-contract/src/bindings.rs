@@ -72,6 +72,8 @@ fn register_types(type_map: &mut TypeCollection) {
     let _ = <AnalyzerNodeDto as NamedType>::definition_named_data_type(type_map);
     let _ = <StartAnalyzerResponse as NamedType>::definition_named_data_type(type_map);
     let _ = <ValidateCustomPathResponse as NamedType>::definition_named_data_type(type_map);
+    let _ = <CloseRequestDto as NamedType>::definition_named_data_type(type_map);
+    let _ = <CloseReadyResultDto as NamedType>::definition_named_data_type(type_map);
     let _ = <TierDto as NamedType>::definition_named_data_type(type_map);
     let _ = <RiskDto as NamedType>::definition_named_data_type(type_map);
     let _ = <SkipReasonDto as NamedType>::definition_named_data_type(type_map);
@@ -111,6 +113,7 @@ fn render_commands(
     let mut commands = scan_and_clean_commands(cfg, type_map)?;
     commands.extend(analyzer_and_settings_commands(cfg, type_map)?);
     commands.extend(logs_and_elevation_commands(cfg, type_map)?);
+    commands.extend(host_lifecycle_commands(cfg, type_map)?);
     Ok(format!(
         "export const commands = {{\n{}\n}}",
         commands.join(",\n")
@@ -232,6 +235,66 @@ fn logs_and_elevation_commands(
     ])
 }
 
+// Host-lifecycle commands: the webview answers the host's deferred close
+// request. Kept separate from the domain/log commands so this generator's name
+// describes what it actually emits.
+fn host_lifecycle_commands(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(vec![
+        cmd_resolve_close(cfg, type_map)?,
+        cmd_noarg::<CloseReadyResultDto>(
+            cfg,
+            type_map,
+            "notifyCloseListenerReady",
+            "notify_close_listener_ready",
+        )?,
+        cmd_reset_pending_close(cfg, type_map)?,
+    ])
+}
+
+// The window-close handshake: the webview answers the host's deferred
+// CloseRequested event with its decision, and the host exits only on approval.
+// The request id makes a late decision for an older request a no-op.
+fn cmd_resolve_close(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn Error>> {
+    cmd_null_result(
+        cfg,
+        type_map,
+        CmdSpec {
+            name: "resolveClose",
+            invoke: "resolve_close",
+            arg_obj: Some("{ approved, requestId }"),
+        },
+        &[
+            ("approved", "boolean".to_string()),
+            ("request_id", "string".to_string()),
+        ],
+    )
+}
+
+// Recovery for an unreachable host listener: clear the native pending close
+// gate so a later attempt reaches a registered listener instead of hanging in
+// `AlreadyPending`. Never approves a close.
+fn cmd_reset_pending_close(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn Error>> {
+    cmd_null_result(
+        cfg,
+        type_map,
+        CmdSpec {
+            name: "resetPendingClose",
+            invoke: "reset_pending_close",
+            arg_obj: None,
+        },
+        &[],
+    )
+}
+
 #[derive(Clone, Copy)]
 struct CmdSpec<'a> {
     name: &'a str,
@@ -296,6 +359,19 @@ fn arg_type<A: Type + 'static>(
         Some(ArgTy::Str) => "string".to_string(),
         None => ty::<A>(cfg, type_map)?,
     })
+}
+
+// Shared shape for commands that answer with no data: resolve the structured
+// error type once, then emit a `Result<null, ContractError>` command. Keeping
+// the spec and arguments at each call site preserves the wire format exactly.
+fn cmd_null_result(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+    spec: CmdSpec<'_>,
+    args: &[(&str, String)],
+) -> Result<String, Box<dyn Error>> {
+    let err = ty::<ContractError>(cfg, type_map)?;
+    Ok(cmd_fn(spec, args, &format!("Result<null, {err}>")))
 }
 
 fn cmd_noarg<R: Type + 'static>(
@@ -368,16 +444,16 @@ fn cmd_cancel_analyzer(
     cfg: &specta_typescript::Typescript,
     type_map: &mut TypeCollection,
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
-    Ok(cmd_fn(
+    cmd_null_result(
+        cfg,
+        type_map,
         CmdSpec {
             name: "cancelAnalyzer",
             invoke: "cancel_analyzer",
             arg_obj: Some("{ sessionId }"),
         },
         &[("session_id", "string".to_string())],
-        &format!("Result<null, {err}>"),
-    ))
+    )
 }
 
 fn render_events(
@@ -387,11 +463,12 @@ fn render_events(
     let scan = ty::<ScanProgressEvent>(cfg, type_map)?;
     let clean = ty::<CleanProgressEvent>(cfg, type_map)?;
     let analyzer = ty::<AnalyzerProgressEvent>(cfg, type_map)?;
+    let close = ty::<CloseRequestDto>(cfg, type_map)?;
     let events_types = format!(
-        "scanProgressEvent: {scan},\ncleanProgressEvent: {clean},\nanalyzerProgressEvent: {analyzer}"
+        "scanProgressEvent: {scan},\ncleanProgressEvent: {clean},\nanalyzerProgressEvent: {analyzer},\ncloseRequestedByHost: {close}"
     );
     let events_map =
-        "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\",\nanalyzerProgressEvent: \"AnalyzerProgressEvent\""
+        "scanProgressEvent: \"ScanProgressEvent\",\ncleanProgressEvent: \"CleanProgressEvent\",\nanalyzerProgressEvent: \"AnalyzerProgressEvent\",\ncloseRequestedByHost: \"CloseRequestedByHost\""
             .to_string();
     Ok(format!(
         "export const events = __makeEvents__<{{\n{events_types}\n}}>({{\n{events_map}\n}})"

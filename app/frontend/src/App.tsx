@@ -2,12 +2,15 @@
 import './styles/tokens.css';
 import './App.css';
 import { createClient, formatContractError, type ElevationStatus, type Settings } from './api/client';
+import { createCloseBridge, type CloseBridge } from './close/closeBridge';
+import { useCloseGuard } from './close/useCloseGuard';
 import { AnalyzerView } from './components/AnalyzerView';
+import { CloseDraftDialog } from './components/CloseDraftDialog';
 import { AppSidebar, type View } from './components/AppSidebar';
 import { LogsView } from './components/LogsView';
 import { ScanAndPreviewView, type ScanAndPreviewViewHandle } from './components/ScanAndPreviewView';
 import { SettingsView } from './components/SettingsView';
-import { flushPendingDraft } from './components/settings/useSettingsController';
+import { flushPendingDraft, isPendingDraftDirty } from './components/settings/useSettingsController';
 import { UnsavedSettingsDialog } from './components/UnsavedSettingsDialog';
 
 type Theme = 'dark' | 'light';
@@ -79,6 +82,7 @@ interface ViewPanelsProps {
   onSaved: (s: Settings) => void;
   onSettingsDirtyChange: (dirty: boolean) => void;
   relaunching: boolean;
+  closePending: boolean;
 }
 
 function isHidden(view: View, name: View): boolean {
@@ -94,7 +98,7 @@ function HiddenPanel(props: { name: View; view: View; children: ReactNode }) {
   );
 }
 
-function SettingsPanel(props: { view: View; client: ReturnType<typeof createClient>; settings: Settings | null; elevation: ElevationStatus; theme: Theme; setTheme: (t: Theme) => void; deepLink: SettingsDeepLink; onDeepLinkConsumed: () => void; onSaved: (s: Settings) => void; onDirtyChange: (dirty: boolean) => void; relaunching: boolean }) {
+function SettingsPanel(props: { view: View; client: ReturnType<typeof createClient>; settings: Settings | null; elevation: ElevationStatus; theme: Theme; setTheme: (t: Theme) => void; deepLink: SettingsDeepLink; onDeepLinkConsumed: () => void; onSaved: (s: Settings) => void; onDirtyChange: (dirty: boolean) => void; relaunching: boolean; closePending: boolean }) {
   if (props.view !== 'settings') return null;
   return (
     <SettingsView
@@ -110,6 +114,7 @@ function SettingsPanel(props: { view: View; client: ReturnType<typeof createClie
       onFocusConsumed={props.onDeepLinkConsumed}
       onDirtyChange={props.onDirtyChange}
       relaunching={props.relaunching}
+      closePending={props.closePending}
     />
   );
 }
@@ -154,7 +159,7 @@ function ViewPanels(props: ViewPanelsProps) {
       <HiddenPanel name="analyzer" view={props.view}>
         <AnalyzerPanel client={props.client} settings={props.settings} onOpenLog={props.onOpenLog} onOpenSettings={props.onOpenSettings} />
       </HiddenPanel>
-      <SettingsPanel view={props.view} client={props.client} settings={props.settings} elevation={props.elevation} theme={props.theme} setTheme={props.setTheme} deepLink={props.deepLink} onDeepLinkConsumed={props.onDeepLinkConsumed} onSaved={props.onSaved} onDirtyChange={props.onSettingsDirtyChange} relaunching={props.relaunching} />
+      <SettingsPanel view={props.view} client={props.client} settings={props.settings} elevation={props.elevation} theme={props.theme} setTheme={props.setTheme} deepLink={props.deepLink} onDeepLinkConsumed={props.onDeepLinkConsumed} onSaved={props.onSaved} onDirtyChange={props.onSettingsDirtyChange} relaunching={props.relaunching} closePending={props.closePending} />
       <LogsPanel view={props.view} client={props.client} focusLogId={props.focusLogId} onFocusConsumed={props.onFocusConsumed} onScanAgain={props.onScanAgain} />
     </>
   );
@@ -319,7 +324,7 @@ export function useAppNavigation(scanRef: React.RefObject<ScanAndPreviewViewHand
   };
 }
 
-function AppMain(props: { client: ReturnType<typeof createClient>; settings: Settings | null; settingsVersion: number; elevation: ElevationStatus; elevationError: string | null; relaunchError: string | null; relaunching: boolean; scanRef: React.RefObject<ScanAndPreviewViewHandle>; nav: ReturnType<typeof useAppNavigation>; theme: Theme; setTheme: (t: Theme) => void; onSaved: (s: Settings) => void; onSettingsDirtyChange: (dirty: boolean) => void }) {
+function AppMain(props: { client: ReturnType<typeof createClient>; settings: Settings | null; settingsVersion: number; elevation: ElevationStatus; elevationError: string | null; relaunchError: string | null; relaunching: boolean; closePending: boolean; scanRef: React.RefObject<ScanAndPreviewViewHandle>; nav: ReturnType<typeof useAppNavigation>; theme: Theme; setTheme: (t: Theme) => void; onSaved: (s: Settings) => void; onSettingsDirtyChange: (dirty: boolean) => void }) {
   return (
     <div className="app-main">
       <main className="main-content">
@@ -343,33 +348,51 @@ function AppMain(props: { client: ReturnType<typeof createClient>; settings: Set
           onSaved={props.onSaved}
           onSettingsDirtyChange={props.onSettingsDirtyChange}
           relaunching={props.relaunching}
+          closePending={props.closePending}
         />
       </main>
     </div>
   );
 }
 
-export function App() {
+export function App({ closeBridge }: { closeBridge?: CloseBridge } = {}) {
   const client = useMemo(() => createClient(), []);
+  const bridge = useMemo(() => closeBridge ?? createCloseBridge(), [closeBridge]);
   const scanRef = useRef<ScanAndPreviewViewHandle>(null);
   const nav = useAppNavigation(scanRef);
   const relaunch = useRelaunch(client);
+  const close = useCloseGuard({
+    bridge,
+    isDirty: isPendingDraftDirty,
+    flushDraft: flushPendingDraft,
+  });
   const { theme, setTheme } = usePersistentTheme();
   const { elevation, elevationError } = useElevationState(client);
   const { settings, settingsVersion, handleSaved } = useSettingsState(client);
   return (
     <div className="app-shell">
+      {close.error && !close.promptOpen && (
+        <p className="notice error" role="alert">{close.error}</p>
+      )}
       <AppSidebar
         view={nav.view}
         onSwitchView={nav.switchView}
         elevationAria={elevationAria({ elevated: elevation.isElevated })}
         isElevated={elevation.isElevated}
-        relaunching={relaunch.relaunching}
+        relaunching={relaunch.relaunching || close.closePending}
         onRunAsAdministrator={() => void relaunch.runAsAdministrator()}
       />
-      <AppMain client={client} settings={settings} settingsVersion={settingsVersion} elevation={elevation} elevationError={elevationError} relaunchError={relaunch.relaunchError} relaunching={relaunch.relaunching} scanRef={scanRef} nav={nav} theme={theme} setTheme={setTheme} onSaved={handleSaved} onSettingsDirtyChange={nav.reportDirty} />
+      <AppMain client={client} settings={settings} settingsVersion={settingsVersion} elevation={elevation} elevationError={elevationError} relaunchError={relaunch.relaunchError} relaunching={relaunch.relaunching} closePending={close.closePending} scanRef={scanRef} nav={nav} theme={theme} setTheme={setTheme} onSaved={handleSaved} onSettingsDirtyChange={nav.reportDirty} />
       {nav.pendingView && (
         <UnsavedSettingsDialog onKeepEditing={nav.keepEditing} onDiscard={nav.discardAndLeave} />
+      )}
+      {close.promptOpen && (
+        <CloseDraftDialog
+          saving={close.saving}
+          error={close.error}
+          onCancel={close.cancel}
+          onSaveAndClose={() => void close.saveAndClose()}
+        />
       )}
     </div>
   );

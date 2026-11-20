@@ -496,6 +496,24 @@ pub enum ScanProgressEvent {
     },
 }
 
+/// A deferred close request issued by the host. The id is echoed on the
+/// decision so a late answer for an older request cannot close a newer one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseRequestDto {
+    /// Monotonic generation id for this close handshake (decimal string).
+    pub request_id: String,
+}
+
+/// Answer to the listener-ready handshake: the close request, if any, that the
+/// host is still waiting on and that the newly registered listener must deliver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseReadyResultDto {
+    /// Pending close request to deliver immediately, if one is outstanding.
+    pub pending_request: Option<CloseRequestDto>,
+}
+
 /// Structured contract error variants (no internal paths or stack traces).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, thiserror::Error)]
 #[serde(tag = "code", content = "details", rename_all = "camelCase")]

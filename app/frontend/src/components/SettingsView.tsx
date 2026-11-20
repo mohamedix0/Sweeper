@@ -20,6 +20,7 @@ export function SettingsView({
   prefillCustomPath,
   onDirtyChange,
   relaunching,
+  closePending,
 }: {
   client: SweeperClient;
   settings: Settings | null;
@@ -33,12 +34,15 @@ export function SettingsView({
   prefillCustomPath?: string | null;
   onDirtyChange?: (dirty: boolean) => void;
   relaunching?: boolean;
+  closePending?: boolean;
 }) {
   const c = useSettingsController({ client, settings, onSaved, focusTarget, onFocusConsumed, prefillCustomPath });
   // Lock every draft-bound control while either Elevate path is restarting so
-  // no edit can land after the draft flush and before the process exits. The
-  // lock clears on success or failure, keeping the view usable (#92).
-  const inputsDisabled = c.relaunching || !!relaunching;
+  // no edit can land after the draft flush and before the process exits (#92),
+  // and from a close approval until exit so no edit is silently lost while the
+  // host waits for in-flight Cleans (#93). The Elevate lock clears on success
+  // or failure; the close lock is terminal.
+  const inputsDisabled = c.relaunching || !!relaunching || !!closePending;
   // Publish the controller's dirty state to the app shell so it can guard
   // navigation away from this view. The effect is deliberately unconditional
   // (it runs before the loading early return) and the callback is stable.

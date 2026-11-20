@@ -4,7 +4,10 @@ import { createRef, useCallback, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { SettingsView } from './components/SettingsView';
-import { useSettingsController } from './components/settings/useSettingsController';
+import {
+  isPendingDraftDirty,
+  useSettingsController,
+} from './components/settings/useSettingsController';
 import { mockController } from './api/mock';
 import type { Settings, SweeperClient } from './api/client';
 
@@ -536,6 +539,102 @@ describe('Sweeper frontend', () => {
     await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
     expect(calls[1].submitted.minAgeHours).toBe(6);
     calls[1].resolve(calls[1].submitted);
+  });
+
+  it('never declares a draft clean while a save of a different value is outstanding', async () => {
+    type SaveCall = { submitted: Settings; resolve: (value: Settings) => void };
+    const calls: SaveCall[] = [];
+    const updateSettings = vi.fn((submitted: Settings) => {
+      let resolve!: (value: Settings) => void;
+      const promise = new Promise<Settings>((r) => { resolve = r; });
+      calls.push({ submitted, resolve });
+      return promise;
+    });
+    const client: SweeperClient = { ...mockController, updateSettings };
+    const initial = baseSettings();
+    let flushResult: boolean | null = null;
+
+    function Harness() {
+      const controller = useSettingsController({ client, settings: initial, onSaved: () => {} });
+      return (
+        <>
+          <output data-testid="draft">{controller.draft?.minAgeHours ?? 'none'}</output>
+          <button onClick={() => void controller.save({ ...initial, minAgeHours: 12 })}>save-12</button>
+          <button onClick={() => controller.setDraft((d) => (d ? { ...d, minAgeHours: 24 } : d))}>edit-24</button>
+          <button onClick={() => { void controller.flushDraft().then((ok) => { flushResult = ok; }); }}>flush</button>
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    // Save 12 is outstanding, then the draft is edited back to the currently
+    // acknowledged value 24. Ref-only equality would call this clean even
+    // though the backend is about to persist 12 (#93).
+    await user.click(screen.getByRole('button', { name: 'save-12' }));
+    await user.click(screen.getByRole('button', { name: 'edit-24' }));
+    expect(screen.getByTestId('draft')).toHaveTextContent('24');
+    expect(isPendingDraftDirty()).toBe(true);
+
+    // The in-flight save lands as 12 while the draft keeps the newer edit 24.
+    calls[0].resolve(calls[0].submitted);
+    await waitFor(() => expect(isPendingDraftDirty()).toBe(true));
+
+    // Flushing must not skip the corrective save just because the draft
+    // momentarily matched the pre-save acknowledgement.
+    await user.click(screen.getByRole('button', { name: 'flush' }));
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+    expect(calls[1].submitted.minAgeHours).toBe(24);
+    calls[1].resolve(calls[1].submitted);
+    await waitFor(() => expect(flushResult).toBe(true));
+  });
+
+  it('flushDraft stays false when a save queued behind the flush fails (#93)', async () => {
+    type SaveCall = { submitted: Settings; resolve: (v: Settings) => void; reject: (e?: unknown) => void };
+    const calls: SaveCall[] = [];
+    const updateSettings = vi.fn((submitted: Settings) => {
+      let resolve!: (v: Settings) => void;
+      let reject!: (e?: unknown) => void;
+      const promise = new Promise<Settings>((res, rej) => { resolve = res; reject = rej; });
+      calls.push({ submitted, resolve, reject });
+      return promise;
+    });
+    const client: SweeperClient = { ...mockController, updateSettings };
+    const initial = baseSettings();
+    let flushResult: boolean | null = null;
+
+    function Harness() {
+      const c = useSettingsController({ client, settings: initial, onSaved: () => {} });
+      return (
+        <>
+          <button onClick={() => c.setDraft((d) => (d ? { ...d, minAgeHours: 12 } : d))}>edit-12</button>
+          <button onClick={() => void c.save({ ...initial, minAgeHours: 24 })}>save-24</button>
+          <button onClick={() => { void c.flushDraft().then((ok) => { flushResult = ok; }); }}>flush</button>
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    // Make the draft dirty, then start a flush so our own save is in flight.
+    await user.click(screen.getByRole('button', { name: 'edit-12' }));
+    await user.click(screen.getByRole('button', { name: 'flush' }));
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+    expect(calls[0].submitted.minAgeHours).toBe(12);
+
+    // A save requested while the flush's save is in flight queues behind it.
+    await user.click(screen.getByRole('button', { name: 'save-24' }));
+    expect(updateSettings).toHaveBeenCalledTimes(1); // still queued
+
+    // The flush's own save succeeds; the save queued behind it then fails.
+    calls[0].resolve(calls[0].submitted);
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+    calls[1].reject(new Error('disk write failed'));
+
+    await waitFor(() => expect(flushResult).not.toBeNull());
+    // The draft holds 24 but the backend only acknowledged 12, so the close
+    // prompt must stay open: flush reports false, not just its own result.
+    expect(flushResult).toBe(false);
   });
 
   it('aborts Elevate when the draft cannot be persisted', async () => {

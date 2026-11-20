@@ -357,8 +357,22 @@ const queueDrainListeners = new Set<() => void>();
 // state consolidation is needed.
 let draftFlusher: (() => Promise<boolean>) | null = null;
 
+// The same mounted controller publishes whether its draft differs from what
+// the backend acknowledged. The window-close handshake reads this at request
+// time to decide between an instant clean exit and a save/cancel prompt (#93).
+// This is deliberately a reader rather than a reuse of the #91 `settingsDirty`
+// navigation flag: that flag is render-time state published on every edit and
+// would be stale inside the long-lived close subscription, while this reader
+// consults draftRef/acknowledgedRef (the same source of truth) at call time.
+// Both flags therefore describe one state and cannot diverge.
+let draftDirtyReader: (() => boolean) | null = null;
+
 export function registerDraftFlusher(flusher: (() => Promise<boolean>) | null): void {
   draftFlusher = flusher;
+}
+
+export function registerDraftDirtyReader(reader: (() => boolean) | null): void {
+  draftDirtyReader = reader;
 }
 
 // Returns whether it is safe to relaunch: true when the draft was persisted
@@ -367,6 +381,13 @@ export function registerDraftFlusher(flusher: (() => Promise<boolean>) | null): 
 export async function flushPendingDraft(): Promise<boolean> {
   const flusher = draftFlusher;
   return flusher ? flusher() : true;
+}
+
+// True only while a mounted Settings controller holds a draft that the backend
+// has not acknowledged. Reads the controller's refs at call time so the close
+// handshake sees the latest edit rather than a stale render (#93).
+export function isPendingDraftDirty(): boolean {
+  return draftDirtyReader ? draftDirtyReader() : false;
 }
 
 function subscribeQueueDrain(listener: () => void): () => void {
@@ -378,12 +399,63 @@ function getSaveQueueVersion(): number {
   return saveQueueVersion;
 }
 
+// Await the shared save queue draining so a dirty check or flush observes the
+// value the backend actually acknowledged, not a snapshot from before an
+// in-flight save settled. An edit back to the acknowledged value while a
+// different value is still being persisted is not a clean draft (#93).
+function waitForPendingSaves(): Promise<void> {
+  if (pendingSaves === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let off: (() => void) | null = null;
+    const check = () => {
+      if (pendingSaves !== 0) return;
+      off?.();
+      resolve();
+    };
+    off = subscribeQueueDrain(check);
+    check();
+  });
+}
+
 function settleSave(): void {
   pendingSaves -= 1;
   if (pendingSaves === 0) {
     saveQueueVersion += 1;
     for (const listener of queueDrainListeners) listener();
   }
+}
+
+// Add Folder validates asynchronously and only queues its save once validation
+// resolves. A close approval must not race ahead of that save, so in-flight
+// validations are tracked alongside the save queue and drained before the close
+// handshake treats the draft as settled (#93).
+let pendingValidations = 0;
+const validationDrainListeners = new Set<() => void>();
+
+function settleValidation(): void {
+  pendingValidations -= 1;
+  if (pendingValidations === 0) {
+    for (const listener of validationDrainListeners) listener();
+  }
+}
+
+function subscribeValidationDrain(listener: () => void): () => void {
+  validationDrainListeners.add(listener);
+  return () => { validationDrainListeners.delete(listener); };
+}
+
+function waitForPendingValidations(): Promise<void> {
+  if (pendingValidations === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let off: (() => void) | null = null;
+    const check = () => {
+      if (pendingValidations !== 0) return;
+      off?.();
+      resolve();
+    };
+    off = subscribeValidationDrain(check);
+    check();
+  });
 }
 
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
@@ -454,6 +526,9 @@ function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs:
     if (!base) return;
     const raw = customPathInput.trim();
     if (!raw) return;
+    // Count the whole validation -> save sequence so a close approval waits for
+    // it instead of letting the path save land after the decision (#93).
+    pendingValidations += 1;
     setValidatingPath(true);
     setError(null);
     setInfo(null);
@@ -468,6 +543,9 @@ function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs:
     } catch (e) {
       setError(formatContractError(e));
     } finally {
+      // Settled only after the validation's own save has been queued, so the
+      // subsequent waitForPendingSaves() observes it (#93).
+      settleValidation();
       setValidatingPath(false);
     }
   }, [client, customPathInput, refs, save, setError, setInfo]);
@@ -533,16 +611,36 @@ export function useSettingsController(args: ControllerArgs) {
   // save handler). This keeps a newer edit dirty so Elevate flushes it (#92).
   const isDirty = useMemo(() => !settingsEqual(ui.draft, ui.acknowledged), [ui.draft, ui.acknowledged]);
   // Only a genuinely dirty draft is saved: Elevate with no edits must not bump
-  // the settings generation or invalidate live sessions (#92). Read both sides
-  // from refs at call time so a pending render cannot hide a newer edit.
+  // the settings generation or invalidate live sessions (#92). Settle any
+  // outstanding save first, then compare the current draft against the value
+  // that actually landed and flush a corrective change if it differs (#93).
   const flushDraft = useCallback(async (): Promise<boolean> => {
+    // A validation started before the close request can still be settling and
+    // queue its save after ours; wait for it before deciding anything (#93).
+    await waitForPendingValidations();
+    await waitForPendingSaves();
     if (settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current)) return true;
-    return save();
+    await save();
+    // A save queued behind ours (e.g. an Add Folder save whose validation
+    // resolved mid-flush) can land after ours. Wait for the WHOLE queue to
+    // drain, then report success only if what the backend acknowledged equals
+    // the current draft; otherwise the close prompt must stay open (#93).
+    await waitForPendingSaves();
+    return settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current);
   }, [refs, save]);
   useEffect(() => {
     registerDraftFlusher(flushDraft);
-    return () => registerDraftFlusher(null);
-  }, [flushDraft]);
+    // An outstanding save is itself a reason to treat the draft as dirty: its
+    // acknowledgement has not landed yet, so a rendered equality of draft and
+    // acknowledged cannot prove the backend agrees (#93).
+    registerDraftDirtyReader(
+      () => pendingValidations > 0 || pendingSaves > 0 || !settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current),
+    );
+    return () => {
+      registerDraftFlusher(null);
+      registerDraftDirtyReader(null);
+    };
+  }, [flushDraft, refs]);
   const relaunch = useRelaunchAction(args.client, flushDraft);
   const deepDisabled = !!ui.draft && !ui.draft.enableTier3;
   const { setDraft } = ui;
