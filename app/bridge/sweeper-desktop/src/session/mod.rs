@@ -147,8 +147,10 @@ pub struct PreparedScan {
 pub struct PreparedAnalyzer {
     /// Pre-allocated session id.
     pub session_id: String,
-    /// Settings generation snapshot at analyzer start.
+    /// Scan-affecting settings generation snapshot at analyzer start.
     pub settings_generation: u64,
+    /// Analyzer-affecting settings generation snapshot at analyzer start.
+    pub analyzer_generation: u64,
     /// Cooperative cancellation token.
     pub cancel: Arc<AtomicBool>,
 }
@@ -173,10 +175,14 @@ pub struct ScanFinishInput {
 pub struct AnalyzerFinishInput {
     /// Session id.
     pub session_id: String,
-    /// Settings generation snapshot at analyzer start.
+    /// Scan-affecting settings generation snapshot at analyzer start.
     pub settings_generation_at_start: u64,
-    /// Current settings generation at commit time.
+    /// Current scan-affecting settings generation at commit time.
     pub current_settings_generation: u64,
+    /// Analyzer-affecting settings generation snapshot at analyzer start.
+    pub analyzer_generation_at_start: u64,
+    /// Current analyzer-affecting settings generation at commit time.
+    pub current_analyzer_generation: u64,
     /// Minimum age hours at analysis time.
     pub min_age_hours: u32,
     /// Completed analyzer result.
@@ -282,19 +288,47 @@ impl SessionStore {
         self.sessions.insert(session.id.clone(), session);
     }
 
+    /// Cancel active operations, drop the sessions of one kind, and discard
+    /// preview tokens issued from them. Shared by both invalidation surfaces;
+    /// the caller selects the kind by passing its active/session maps.
+    fn invalidate_session_kind<S>(
+        active: &mut HashMap<String, Arc<AtomicBool>>,
+        sessions: &mut HashMap<String, S>,
+        preview_tokens: &mut HashMap<String, PreviewTokenState>,
+    ) {
+        for c in active.values() {
+            c.store(true, Ordering::Relaxed);
+        }
+        active.clear();
+        let removed: HashSet<String> = sessions.keys().cloned().collect();
+        sessions.clear();
+        preview_tokens.retain(|_, t| !removed.contains(&t.session_id));
+    }
+
+    /// Invalidate only Scan sessions (and tokens issued from them), leaving
+    /// analyzer sessions untouched. Used when scan-affecting settings change.
+    pub fn invalidate_scan_sessions(&mut self) {
+        Self::invalidate_session_kind(
+            &mut self.active_scans,
+            &mut self.sessions,
+            &mut self.preview_tokens,
+        );
+    }
+
+    /// Invalidate only Analyzer sessions (and tokens issued from them), leaving
+    /// scan sessions untouched. Used when analyzer-affecting settings change.
+    pub fn invalidate_analyzer_sessions(&mut self) {
+        Self::invalidate_session_kind(
+            &mut self.active_analyzers,
+            &mut self.analyzer_sessions,
+            &mut self.preview_tokens,
+        );
+    }
+
     /// Explicitly invalidate all active scan/analyzer sessions and preview tokens.
     pub fn invalidate_all_sessions(&mut self) {
-        for c in self.active_scans.values() {
-            c.store(true, Ordering::Relaxed);
-        }
-        for c in self.active_analyzers.values() {
-            c.store(true, Ordering::Relaxed);
-        }
-        self.active_scans.clear();
-        self.active_analyzers.clear();
-        self.sessions.clear();
-        self.analyzer_sessions.clear();
-        self.preview_tokens.clear();
+        self.invalidate_scan_sessions();
+        self.invalidate_analyzer_sessions();
     }
 
     /// Direct access helper for tests: create a basic session with provided items/results.

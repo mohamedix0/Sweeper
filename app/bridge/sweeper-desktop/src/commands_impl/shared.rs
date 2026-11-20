@@ -50,9 +50,28 @@ where
     }) as scanner::ScanProgressCallback)
 }
 
+/// Generation snapshots captured at session start and read again at commit.
+/// Both surfaces are carried so each session kind can validate against the
+/// generation its validity actually depends on.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CommitGenerations {
+    pub scan_at_start: u64,
+    pub scan_current: u64,
+    pub analyzer_at_start: u64,
+    pub analyzer_current: u64,
+}
+
+/// Generation snapshots captured when an async operation started. Neither is
+/// derivable at commit time, so both travel together as one value object.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CommitStartGenerations {
+    pub scan: u64,
+    pub analyzer: u64,
+}
+
 pub(super) struct AsyncOutcomeCommit<P, R, F> {
     pub session_id: String,
-    pub settings_generation_at_start: u64,
+    pub start_generations: CommitStartGenerations,
     pub payload: P,
     pub finish: F,
     _marker: std::marker::PhantomData<fn() -> R>,
@@ -61,13 +80,13 @@ pub(super) struct AsyncOutcomeCommit<P, R, F> {
 impl<P, R, F> AsyncOutcomeCommit<P, R, F> {
     pub fn new(
         session_id: String,
-        settings_generation_at_start: u64,
+        start_generations: CommitStartGenerations,
         payload: P,
         finish: F,
     ) -> Self {
         Self {
             session_id,
-            settings_generation_at_start,
+            start_generations,
             payload,
             finish,
             _marker: std::marker::PhantomData,
@@ -81,17 +100,21 @@ pub(super) fn commit_async_outcome<C, P, R, F>(
 ) -> Result<R, ContractError>
 where
     C: Clock,
-    F: FnOnce(&C, &mut SessionStore, String, u64, u64, P) -> Result<R, ContractError>,
+    F: FnOnce(&C, &mut SessionStore, String, CommitGenerations, P) -> Result<R, ContractError>,
 {
     let settings = state.settings.lock().map_err(|_| lock_state_error())?;
-    let current_settings_gen = settings.generation();
+    let generations = CommitGenerations {
+        scan_at_start: req.start_generations.scan,
+        scan_current: settings.generation(),
+        analyzer_at_start: req.start_generations.analyzer,
+        analyzer_current: settings.analyzer_generation(),
+    };
     let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
     (req.finish)(
         &state.clock,
         &mut sessions,
         req.session_id,
-        req.settings_generation_at_start,
-        current_settings_gen,
+        generations,
         req.payload,
     )
 }

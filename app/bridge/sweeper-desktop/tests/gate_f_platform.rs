@@ -1,7 +1,43 @@
 mod common;
 
+use std::path::PathBuf;
+
+use sweeper_desktop::clock::FixedClock;
 use sweeper_desktop::commands_impl;
+use sweeper_desktop::AppState;
 use sweeper_testkit::Sandbox;
+
+/// Fixed mtime for the seeded scan item; only its presence in the session
+/// matters to these tests, not the exact timestamp.
+const SEED_MTIME: u64 = 1_700_000_000;
+/// Number of overlapping saves in the convergence test. The expected final
+/// state and generation count are derived from this constant.
+const OVERLAPPING_SAVES: u32 = 8;
+/// Lowest `min_age_hours` submitted by the convergence test.
+const BASE_MIN_AGE_HOURS: u32 = 10;
+
+/// Local fixture for the settings-invalidation tests: a fresh state, a sandbox
+/// kept alive for the whole test, and the seeded sandbox target root.
+struct SeededSettingsTest {
+    state: AppState<FixedClock>,
+    _sandbox: Sandbox,
+    root: PathBuf,
+}
+
+/// Common setup for the ScanSession-based invalidation tests: one state, one
+/// sandbox with a temp root and file, and one seeded ScanSession.
+fn seed_scan_session() -> SeededSettingsTest {
+    let state = common::make_state();
+    let sandbox = Sandbox::new();
+    let root = sandbox.create_dir("Temp").unwrap();
+    let file = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
+    common::seed_session(&state, &root, &file, SEED_MTIME);
+    SeededSettingsTest {
+        state,
+        _sandbox: sandbox,
+        root,
+    }
+}
 
 #[test]
 fn tauri_config_security_and_bundle_snapshot() {
@@ -117,35 +153,157 @@ fn tampered_settings_json_recovers_to_safe_defaults_with_warnings() {
 
 #[test]
 fn update_settings_increments_generation_and_invalidates_active_sessions() {
-    let state = common::make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").unwrap();
-    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
-    common::seed_session(&state, &root, &f, 1_700_000_000);
+    let fixture = seed_scan_session();
     common::insert_analyzer_session(
-        &state,
+        &fixture.state,
         "analyzer-test-session",
         common::base_analyzer_node(common::AnalyzerNodeSeed {
             id: "an-root",
-            path: &root.to_string_lossy(),
+            path: &fixture.root.to_string_lossy(),
             name: "Temp",
             is_dir: true,
         }),
         24,
     );
-    let mut s = commands_impl::get_settings(&state).unwrap();
+    let mut s = commands_impl::get_settings(&fixture.state).unwrap();
     s.stale_project_days = 45;
-    let updated = commands_impl::update_settings(&state, s).unwrap();
+    let updated = commands_impl::update_settings(&fixture.state, s).unwrap();
     assert_eq!(updated.stale_project_days, 45);
-    let scan_err = commands_impl::get_scan_results(&state, "scan-test".to_string()).unwrap_err();
+    let scan_err =
+        commands_impl::get_scan_results(&fixture.state, "scan-test".to_string()).unwrap_err();
     common::assert_session_invalid_err(scan_err);
     let preview_err = common::preview_with_delete_confirmation(
-        &state,
+        &fixture.state,
         "analyzer-test-session",
         "an-root".to_string(),
     )
     .unwrap_err();
     common::assert_session_invalid_err(preview_err);
+}
+
+#[test]
+fn no_op_settings_update_keeps_scan_session_valid() {
+    let fixture = seed_scan_session();
+
+    // Re-submit the exact current settings. A no-op must not bump the
+    // generation, so the in-flight ScanSession stays valid.
+    let current = commands_impl::get_settings(&fixture.state).unwrap();
+    let gen_before = fixture.state.settings.lock().unwrap().generation();
+    let updated = commands_impl::update_settings(&fixture.state, current.clone()).unwrap();
+    assert_eq!(updated, current);
+    assert_eq!(
+        fixture.state.settings.lock().unwrap().generation(),
+        gen_before
+    );
+    let results = commands_impl::get_scan_results(&fixture.state, "scan-test".to_string())
+        .expect("a no-op settings update must not invalidate the scan session");
+    assert_eq!(results.session_id, "scan-test");
+}
+
+#[test]
+fn non_scan_affecting_change_keeps_scan_session_valid() {
+    let fixture = seed_scan_session();
+
+    // `allow_delete_unknown` gates Clean/Analyzer selection; it does not affect
+    // what a Scan discovers, so changing it must leave the ScanSession valid.
+    let mut requested = commands_impl::get_settings(&fixture.state).unwrap();
+    requested.allow_delete_unknown = !requested.allow_delete_unknown;
+    commands_impl::update_settings(&fixture.state, requested).unwrap();
+
+    let results = commands_impl::get_scan_results(&fixture.state, "scan-test".to_string())
+        .expect("a non-scan-affecting change must not invalidate the scan session");
+    assert_eq!(results.session_id, "scan-test");
+}
+
+/// An analyzer-affecting change must invalidate in-flight Analyzer sessions
+/// without disturbing Scan sessions. `allow_delete_unknown` feeds the
+/// Analyzer's `allow_unknown` option, so a session that started before the
+/// toggle would otherwise stay valid with a stale selection policy.
+#[test]
+fn analyzer_affecting_change_invalidates_analyzer_session_but_keeps_scan_session() {
+    let fixture = seed_scan_session();
+    common::insert_analyzer_session(
+        &fixture.state,
+        "analyzer-test-session",
+        common::base_analyzer_node(common::AnalyzerNodeSeed {
+            id: "an-root",
+            path: &fixture.root.to_string_lossy(),
+            name: "Temp",
+            is_dir: true,
+        }),
+        24,
+    );
+
+    let mut requested = commands_impl::get_settings(&fixture.state).unwrap();
+    requested.allow_delete_unknown = !requested.allow_delete_unknown;
+    commands_impl::update_settings(&fixture.state, requested).unwrap();
+
+    let err = common::preview_with_delete_confirmation(
+        &fixture.state,
+        "analyzer-test-session",
+        "an-root".to_string(),
+    )
+    .unwrap_err();
+    common::assert_session_invalid_err(err);
+
+    let results = commands_impl::get_scan_results(&fixture.state, "scan-test".to_string())
+        .expect("an analyzer-affecting change must not invalidate the scan session");
+    assert_eq!(results.session_id, "scan-test");
+}
+
+#[test]
+fn scan_affecting_change_invalidates_scan_session_immediately() {
+    let fixture = seed_scan_session();
+
+    // `min_age_hours` changes which items a Scan reports, so the in-flight
+    // session must be rejected as soon as the change is persisted.
+    let mut requested = commands_impl::get_settings(&fixture.state).unwrap();
+    requested.min_age_hours = if requested.min_age_hours == BASE_MIN_AGE_HOURS {
+        BASE_MIN_AGE_HOURS + 1
+    } else {
+        BASE_MIN_AGE_HOURS
+    };
+    commands_impl::update_settings(&fixture.state, requested).unwrap();
+
+    let err = commands_impl::get_scan_results(&fixture.state, "scan-test".to_string()).unwrap_err();
+    common::assert_session_invalid_err(err);
+}
+
+#[test]
+fn overlapping_settings_saves_converge_to_one_consistent_state() {
+    let state = common::make_state();
+    let base = commands_impl::get_settings(&state).unwrap();
+
+    // Drive overlapping saves from multiple threads. Each save holds the
+    // settings mutex across its persist + generation bump + invalidation, so
+    // they converge on exactly one of the submitted values and bump the
+    // generation once per scan-affecting save.
+    let mut handles = Vec::new();
+    for i in 0..OVERLAPPING_SAVES {
+        let state = state.clone();
+        let mut requested = base.clone();
+        requested.min_age_hours = BASE_MIN_AGE_HOURS + i;
+        let submitted_age = requested.min_age_hours;
+        handles.push(std::thread::spawn(move || {
+            commands_impl::update_settings(&state, requested).expect("concurrent save succeeds");
+            submitted_age
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("save thread did not panic");
+    }
+
+    let final_settings = commands_impl::get_settings(&state).unwrap();
+    assert!(
+        (BASE_MIN_AGE_HOURS..BASE_MIN_AGE_HOURS + OVERLAPPING_SAVES)
+            .contains(&final_settings.min_age_hours),
+        "final state must be one of the submitted values: {final_settings:?}"
+    );
+    assert_eq!(
+        state.settings.lock().unwrap().generation(),
+        u64::from(OVERLAPPING_SAVES),
+        "each scan-affecting save bumps generation exactly once"
+    );
 }
 
 #[test]

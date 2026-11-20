@@ -7,7 +7,9 @@ use crate::clock::Clock;
 use crate::session::AnalyzerFinishInput;
 use crate::AppState;
 
-use super::shared::{commit_async_outcome, lock_state_error, AsyncOutcomeCommit};
+use super::shared::{
+    commit_async_outcome, lock_state_error, AsyncOutcomeCommit, CommitStartGenerations,
+};
 
 /// `cancel_analyzer` implementation.
 pub fn cancel_analyzer<C: Clock>(
@@ -56,8 +58,9 @@ where
         let settings_store = state.settings.lock().map_err(|_| lock_state_error())?;
         let settings = settings_store.core();
         let settings_gen = settings_store.generation();
+        let analyzer_gen = settings_store.analyzer_generation();
         let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
-        let prepared = sessions.begin_analyzer(&state.clock, settings_gen)?;
+        let prepared = sessions.begin_analyzer(&state.clock, settings_gen, analyzer_gen)?;
         (prepared, settings)
     };
     let progress = build_analyzer_progress_cb(&prepared.session_id, on_progress);
@@ -96,20 +99,24 @@ fn commit_analyzer_outcome<C: Clock>(
         state,
         AsyncOutcomeCommit::new(
             prepared.session_id.clone(),
-            prepared.settings_generation,
+            CommitStartGenerations {
+                scan: prepared.settings_generation,
+                analyzer: prepared.analyzer_generation,
+            },
             (min_age_hours, result),
             |clock: &C,
              sessions: &mut crate::session::SessionStore,
              sid: String,
-             start_gen: u64,
-             current_gen: u64,
+             gens: super::shared::CommitGenerations,
              payload: (u32, analyzer::AnalyzerResult)| {
                 sessions.finish_analyzer(
                     clock,
                     AnalyzerFinishInput {
                         session_id: sid,
-                        settings_generation_at_start: start_gen,
-                        current_settings_generation: current_gen,
+                        settings_generation_at_start: gens.scan_at_start,
+                        current_settings_generation: gens.scan_current,
+                        analyzer_generation_at_start: gens.analyzer_at_start,
+                        current_analyzer_generation: gens.analyzer_current,
                         min_age_hours: payload.0,
                         result: payload.1,
                     },

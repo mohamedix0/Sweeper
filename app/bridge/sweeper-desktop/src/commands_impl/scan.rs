@@ -13,7 +13,7 @@ use crate::AppState;
 
 use super::shared::{
     build_scan_progress_cb, commit_async_outcome, emit_scan_event, lock_state_error,
-    AsyncOutcomeCommit, SharedScanCb,
+    AsyncOutcomeCommit, CommitStartGenerations, SharedScanCb,
 };
 
 #[derive(Clone, Copy)]
@@ -36,20 +36,24 @@ fn commit_scan_outcome<C: Clock>(
         state,
         AsyncOutcomeCommit::new(
             session_id.to_string(),
-            prepared.settings_generation,
+            CommitStartGenerations {
+                scan: prepared.settings_generation,
+                // Scan commits validate only the scan generation; the analyzer
+                // generation is unused here but carried by the shared commit seam.
+                analyzer: 0,
+            },
             (prepared.effective_settings.min_age_hours, report),
             |clock: &C,
              sessions: &mut crate::session::SessionStore,
              sid: String,
-             start_gen: u64,
-             current_gen: u64,
+             gens: super::shared::CommitGenerations,
              payload: (u32, scanner::ScanReport)| {
                 sessions.finish_scan(
                     clock,
                     ScanFinishInput {
                         session_id: sid,
-                        settings_generation_at_start: start_gen,
-                        current_settings_generation: current_gen,
+                        settings_generation_at_start: gens.scan_at_start,
+                        current_settings_generation: gens.scan_current,
                         effective_min_age_hours: payload.0,
                         report: payload.1,
                     },
