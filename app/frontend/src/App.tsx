@@ -225,6 +225,16 @@ type PendingNavigation = {
   apply: () => void;
 };
 
+// A transition is held only when it leaves a dirty Settings draft. Entering
+// Settings (including deep links) is never held, and a clean draft leaves at
+// once. Kept as a small named predicate so the transition choke point stays a
+// single, uncomplicated decision.
+function leavesDirtySettings(from: View, to: View, dirty: boolean): boolean {
+  if (from !== 'settings') return false;
+  if (to === 'settings') return false;
+  return dirty;
+}
+
 // Every view transition funnels through this hook. A single app-shell dirty
 // flag (published by the mounted Settings view) is enough because leaving
 // Settings unmounts its controller and with it the unsaved draft. Holding a
@@ -244,7 +254,7 @@ export function useAppNavigation(scanRef: React.RefObject<ScanAndPreviewViewHand
   // discard completes exactly the transition the user asked for. Transitions
   // into Settings (deep links) are never blocked or deferred.
   const transitionTo = (target: View, apply: () => void) => {
-    if (view === 'settings' && settingsDirty && target !== 'settings') {
+    if (leavesDirtySettings(view, target, settingsDirty)) {
       setPending({ target, apply });
       return;
     }
