@@ -40,6 +40,14 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
     [bridge, isDirty],
   );
 
+  // A permanently unavailable host listener is reported by the bridge after
+  // its bounded retries. Surface it as a user-visible error; the bridge has
+  // already cancelled the deferred close, so the draft is kept intact.
+  useEffect(() => {
+    const off = bridge.onRegistrationFailure?.((message) => setError(message));
+    return () => off?.();
+  }, [bridge]);
+
   // Complementary only. A browser or a close path that bypasses the Rust
   // handler still gets the standard "leave site?" protection when dirty; the
   // authoritative decision is always made by the Rust handshake above.

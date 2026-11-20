@@ -368,6 +368,9 @@ export function App({ closeBridge }: { closeBridge?: CloseBridge } = {}) {
   const { settings, settingsVersion, handleSaved } = useSettingsState(client);
   return (
     <div className="app-shell">
+      {close.error && !close.promptOpen && (
+        <p className="notice error" role="alert">{close.error}</p>
+      )}
       <AppSidebar
         view={nav.view}
         onSwitchView={nav.switchView}

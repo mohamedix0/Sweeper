@@ -3,33 +3,8 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CloseDraftDialog } from '../components/CloseDraftDialog';
 import type { CloseBridge } from './closeBridge';
+import { fakeCloseBridge as fakeBridge } from './fakeCloseBridge';
 import { useCloseGuard, type CloseGuardDeps } from './useCloseGuard';
-
-type FakeBridge = CloseBridge & {
-  decisions: boolean[];
-  requestHostClose: () => void;
-};
-
-function fakeBridge(): FakeBridge {
-  const listeners: Array<() => void> = [];
-  const decisions: boolean[] = [];
-  return {
-    decisions,
-    onHostCloseRequest(handler) {
-      listeners.push(handler);
-      return () => {
-        const index = listeners.indexOf(handler);
-        if (index >= 0) listeners.splice(index, 1);
-      };
-    },
-    async resolveClose(approved) {
-      decisions.push(approved);
-    },
-    requestHostClose() {
-      for (const listener of [...listeners]) listener();
-    },
-  };
-}
 
 function Harness({ deps }: { deps: CloseGuardDeps }) {
   const guard = useCloseGuard(deps);

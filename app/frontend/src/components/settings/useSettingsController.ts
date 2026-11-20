@@ -360,6 +360,11 @@ let draftFlusher: (() => Promise<boolean>) | null = null;
 // The same mounted controller publishes whether its draft differs from what
 // the backend acknowledged. The window-close handshake reads this at request
 // time to decide between an instant clean exit and a save/cancel prompt (#93).
+// This is deliberately a reader rather than a reuse of the #91 `settingsDirty`
+// navigation flag: that flag is render-time state published on every edit and
+// would be stale inside the long-lived close subscription, while this reader
+// consults draftRef/acknowledgedRef (the same source of truth) at call time.
+// Both flags therefore describe one state and cannot diverge.
 let draftDirtyReader: (() => boolean) | null = null;
 
 export function registerDraftFlusher(flusher: (() => Promise<boolean>) | null): void {

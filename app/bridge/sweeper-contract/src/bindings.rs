@@ -111,6 +111,7 @@ fn render_commands(
     let mut commands = scan_and_clean_commands(cfg, type_map)?;
     commands.extend(analyzer_and_settings_commands(cfg, type_map)?);
     commands.extend(logs_and_elevation_commands(cfg, type_map)?);
+    commands.extend(host_lifecycle_commands(cfg, type_map)?);
     Ok(format!(
         "export const commands = {{\n{}\n}}",
         commands.join(",\n")
@@ -229,8 +230,17 @@ fn logs_and_elevation_commands(
             "get_elevation_status",
         )?,
         cmd_noarg::<RelaunchResultDto>(cfg, type_map, "relaunchElevated", "relaunch_elevated")?,
-        cmd_resolve_close(cfg, type_map)?,
     ])
+}
+
+// Host-lifecycle commands: the webview answers the host's deferred close
+// request. Kept separate from the domain/log commands so this generator's name
+// describes what it actually emits.
+fn host_lifecycle_commands(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(vec![cmd_resolve_close(cfg, type_map)?])
 }
 
 // The window-close handshake: the webview answers the host's deferred

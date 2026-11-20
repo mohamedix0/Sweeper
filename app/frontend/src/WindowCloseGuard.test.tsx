@@ -3,35 +3,9 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { App } from './App';
 import { mockController } from './api/mock';
-import type { CloseBridge } from './close/closeBridge';
+import { fakeCloseBridge as fakeBridge } from './close/fakeCloseBridge';
 
 type User = ReturnType<typeof userEvent.setup>;
-
-type FakeBridge = CloseBridge & {
-  decisions: boolean[];
-  requestHostClose: () => void;
-};
-
-function fakeBridge(): FakeBridge {
-  const listeners: Array<() => void> = [];
-  const decisions: boolean[] = [];
-  return {
-    decisions,
-    onHostCloseRequest(handler) {
-      listeners.push(handler);
-      return () => {
-        const index = listeners.indexOf(handler);
-        if (index >= 0) listeners.splice(index, 1);
-      };
-    },
-    async resolveClose(approved) {
-      decisions.push(approved);
-    },
-    requestHostClose() {
-      for (const listener of [...listeners]) listener();
-    },
-  };
-}
 
 async function openSettings(user: User) {
   await user.click(screen.getByRole('button', { name: 'Settings' }));
