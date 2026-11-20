@@ -100,8 +100,12 @@ function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typ
   useEffect(() => { refs.draftRef.current = draft; }, [refs, draft]);
   useEffect(() => {
     if (!settings) return;
-    setDraft(settings);
     setLoading(false);
+    // While a save is still outstanding, parent feedback is from an earlier
+    // queued save and must not overwrite the draft holding the latest submitted
+    // value. It is applied by the save handler's own merge instead.
+    if (pendingSaves > 0) return;
+    setDraft(settings);
   }, [setDraft, setLoading, settings]);
   useEffect(() => {
     if (settings) return;
@@ -171,6 +175,16 @@ function useFocusAndPrefill(options: FocusPrefillOptions) {
 // the last write (and its `onSaved` callback fires last).
 let sharedSaveChain: Promise<void> = Promise.resolve();
 
+// Number of saves submitted but not yet settled, shared across remounts just
+// like `sharedSaveChain`. While any save is pending, feedback delivered through
+// the parent's `settings` prop reflects an *earlier* save (e.g. save 11's
+// `onSaved` arriving while save 13 is still queued). Letting that stale value
+// replace the local draft would make `mergePreservingEdits` mistake it for a
+// post-submit user edit and leave the UI showing an older value than the one
+// persisted. Parent feedback is still honoured once nothing is pending, so
+// single-save flows (including the initial load) keep working.
+let pendingSaves = 0;
+
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
   const { setDraft, setError, setInfo, setSaving } = ui;
   // Single-flight guard: at most one `updateSettings` IPC call is in flight.
@@ -183,6 +197,7 @@ function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typ
     if (!toSave) return Promise.resolve();
     refs.draftRef.current = toSave;
     setDraft(toSave);
+    pendingSaves += 1;
     const run = sharedSaveChain.then(async () => {
       setSaving(true);
       setError(null);
@@ -198,6 +213,10 @@ function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typ
       } catch (e) {
         setError(formatContractError(e));
       } finally {
+        // Decrement only after onSaved has delivered this save's feedback, so
+        // any parent feedback still observed while a later save is queued is
+        // correctly treated as stale by the sync effect.
+        pendingSaves -= 1;
         setSaving(false);
       }
     });
