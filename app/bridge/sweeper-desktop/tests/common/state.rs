@@ -14,6 +14,11 @@ where
     let state = make_state();
     let mut settings = state.settings.lock().unwrap().get();
     mutate(&mut settings);
-    state.settings.lock().unwrap().update(settings);
+    state
+        .settings
+        .lock()
+        .unwrap()
+        .update(settings)
+        .expect("update settings in test helper");
     state
 }

@@ -149,6 +149,35 @@ fn update_settings_increments_generation_and_invalidates_active_sessions() {
 }
 
 #[test]
+fn failed_settings_write_is_reported_and_generation_unchanged() {
+    let mut state = common::make_state();
+    let dir = tempfile::tempdir().unwrap();
+    // A regular file where the settings directory should be makes persistence
+    // fail deterministically, using only a runtime temp directory.
+    let blocker = dir.path().join("occupied-by-a-file");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let settings_path = blocker.join("settings.json");
+    state.settings = std::sync::Arc::new(std::sync::Mutex::new(
+        sweeper_desktop::settings_store::SettingsStore::with_path(settings_path),
+    ));
+
+    let gen_before = state.settings.lock().unwrap().generation();
+    let mut requested = commands_impl::get_settings(&state).unwrap();
+    requested.enable_tier3 = true;
+
+    let err = commands_impl::update_settings(&state, requested).unwrap_err();
+    assert!(
+        matches!(err, sweeper_contract::ContractError::Internal { .. }),
+        "failed write must surface as an error, got {err:?}"
+    );
+    assert_eq!(
+        state.settings.lock().unwrap().generation(),
+        gen_before,
+        "generation must not bump when persistence fails"
+    );
+}
+
+#[test]
 fn tier3_default_off_and_opt_in_reflected_in_settings() {
     let state = common::make_state();
     let got = commands_impl::get_settings(&state).unwrap();

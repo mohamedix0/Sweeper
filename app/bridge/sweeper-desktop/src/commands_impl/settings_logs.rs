@@ -40,7 +40,11 @@ pub fn update_settings<C: Clock>(
 ) -> Result<SettingsDto, ContractError> {
     let mut store = state.settings.lock().map_err(|_| lock_state_error())?;
     let prev_gen = store.generation();
-    let updated = store.update(settings);
+    let updated = store
+        .update(settings)
+        .map_err(|reason| ContractError::Internal {
+            reason: format!("failed to persist settings: {reason}"),
+        })?;
     let new_gen = store.generation();
 
     if new_gen != prev_gen {
