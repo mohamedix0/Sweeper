@@ -488,4 +488,121 @@ describe('Sweeper frontend', () => {
       expect(persisted.minAgeHours).toBe(12);
     });
   });
+
+  it('flushes a draft edit made while an earlier save is still in flight', async () => {
+    type SaveCall = { submitted: Settings; resolve: (value: Settings) => void };
+    const calls: SaveCall[] = [];
+    const updateSettings = vi.fn((submitted: Settings) => {
+      let resolve!: (value: Settings) => void;
+      const promise = new Promise<Settings>((r) => { resolve = r; });
+      calls.push({ submitted, resolve });
+      return promise;
+    });
+    const client: SweeperClient = { ...mockController, updateSettings };
+    const initial = baseSettings();
+
+    function Harness() {
+      const { draft, setDraft, isDirty, save, flushDraft } = useSettingsController({
+        client, settings: initial, onSaved: () => {},
+      });
+      return (
+        <>
+          <output data-testid="draft-min-age">{draft?.minAgeHours ?? 'none'}</output>
+          <output data-testid="dirty">{String(isDirty)}</output>
+          <button onClick={() => void save({ ...initial, minAgeHours: 12 })}>save-12</button>
+          <button onClick={() => setDraft((d) => (d ? { ...d, minAgeHours: 6 } : d))}>edit-6</button>
+          <button onClick={() => void flushDraft()}>flush</button>
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    // Save 12 starts; while it is in flight the user edits the draft to 6.
+    await user.click(screen.getByRole('button', { name: 'save-12' }));
+    await user.click(screen.getByRole('button', { name: 'edit-6' }));
+    expect(updateSettings).toHaveBeenCalledTimes(1);
+    expect(calls[0].submitted.minAgeHours).toBe(12);
+
+    // The backend acknowledged 12, but the merged draft keeps the newer edit.
+    // The draft must stay dirty against the ACKNOWLEDGED value (12), not the
+    // parent feedback that carries the merged edit.
+    calls[0].resolve(calls[0].submitted);
+    await waitFor(() => expect(screen.getByTestId('draft-min-age')).toHaveTextContent('6'));
+    await waitFor(() => expect(screen.getByTestId('dirty')).toHaveTextContent('true'));
+
+    // Flush persists the newer edit instead of skipping it as already saved.
+    await user.click(screen.getByRole('button', { name: 'flush' }));
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+    expect(calls[1].submitted.minAgeHours).toBe(6);
+    calls[1].resolve(calls[1].submitted);
+  });
+
+  it('aborts Elevate when the draft cannot be persisted', async () => {
+    const relaunchElevated = vi.fn(async () => ({ launched: true }));
+    const updateSettings = vi.fn(async (_s: Settings): Promise<Settings> => {
+      throw new Error('disk write failed');
+    });
+    const client: SweeperClient = { ...mockController, updateSettings, relaunchElevated };
+    render(
+      <SettingsView
+        client={client}
+        settings={baseSettings()}
+        elevationStatus={{ isElevated: false }}
+        elevationError={null}
+        onSaved={() => {}}
+      />,
+    );
+
+    const user = userEvent.setup();
+    const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
+    fireEvent.change(minAge, { target: { value: '12' } });
+    expect((screen.getByLabelText('Minimum file age') as HTMLInputElement).value).toBe('12');
+    await user.click(screen.getByLabelText('Run as administrator'));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+    expect(relaunchElevated).not.toHaveBeenCalled();
+    expect(await screen.findByText(/could not be saved/i)).toBeInTheDocument();
+    expect((screen.getByLabelText('Minimum file age') as HTMLInputElement).value).toBe('12');
+  });
+
+  it('locks every draft-bound control until the Elevate request settles', async () => {
+    type Relaunch = Awaited<ReturnType<SweeperClient['relaunchElevated']>>;
+    const pending = deferred<Relaunch>();
+    const relaunchElevated = vi.fn(() => pending.promise);
+    const client: SweeperClient = {
+      ...mockController,
+      updateSettings: vi.fn(async (s: Settings) => s),
+      relaunchElevated,
+    };
+    render(
+      <SettingsView
+        client={client}
+        settings={baseSettings()}
+        elevationStatus={{ isElevated: false }}
+        elevationError={null}
+        onSaved={() => {}}
+      />,
+    );
+
+    const user = userEvent.setup();
+    const minAge = screen.getByLabelText('Minimum file age') as HTMLInputElement;
+    await user.clear(minAge);
+    await user.type(minAge, '12');
+    await user.click(screen.getByLabelText('Run as administrator'));
+
+    await waitFor(() => expect(relaunchElevated).toHaveBeenCalledTimes(1));
+    expect(minAge).toBeDisabled();
+    expect(screen.getByLabelText('Enable Tier 1')).toBeDisabled();
+    expect(screen.getByLabelText('Enable Tier 2')).toBeDisabled();
+    expect(screen.getByLabelText('Enable deep cleanup categories')).toBeDisabled();
+    expect(screen.getByLabelText('Allow deleting unknown folders (advanced)')).toBeDisabled();
+    expect(screen.getByLabelText('Add Custom Path')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Enable Deep Cleanup' })).toBeDisabled();
+    expect(screen.getByLabelText('Run as administrator')).toBeDisabled();
+
+    pending.resolve({ launched: true });
+    await waitFor(() => expect(minAge).toBeEnabled());
+    expect(screen.getByLabelText('Enable Tier 1')).toBeEnabled();
+  });
 });

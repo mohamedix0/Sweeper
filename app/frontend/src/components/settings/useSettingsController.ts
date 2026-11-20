@@ -81,6 +81,12 @@ type ControllerArgs = {
 type UiState = {
   draft: Settings | null;
   setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  // The exact value the backend last acknowledged, kept separate from the
+  // editable draft. A save that lands while a newer edit is in the draft only
+  // acknowledges what it actually persisted, so Elevate still flushes the
+  // newer draft instead of mistaking it for saved (#92).
+  acknowledged: Settings | null;
+  setAcknowledged: React.Dispatch<React.SetStateAction<Settings | null>>;
   loading: boolean;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   saving: boolean;
@@ -93,15 +99,19 @@ type UiState = {
 
 function useUiState(settings: Settings | null): UiState {
   const [draft, setDraft] = useState<Settings | null>(settings);
+  const [acknowledged, setAcknowledged] = useState<Settings | null>(settings);
   const [loading, setLoading] = useState(!settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-  return { draft, setDraft, loading, setLoading, saving, setSaving, error, setError, info, setInfo };
+  return { draft, setDraft, acknowledged, setAcknowledged, loading, setLoading, saving, setSaving, error, setError, info, setInfo };
 }
 
 function useControllerRefs(args: ControllerArgs) {
   const draftRef = useRef<Settings | null>(args.settings);
+  // Backend-acknowledged value, read at flush time so a stale render cannot
+  // decide that a draft matching an in-flight save is already persisted.
+  const acknowledgedRef = useRef<Settings | null>(args.settings);
   const onSavedRef = useRef(args.onSaved);
   const onFocusConsumedRef = useRef(args.onFocusConsumed);
   // Baseline for detecting genuine user edits when reconciling deferred parent
@@ -126,8 +136,8 @@ function useControllerRefs(args: ControllerArgs) {
   // sync effect can safely depend on `refs` without rerunning on every draft
   // edit and overwriting unsaved user changes with parent feedback.
   return useMemo(
-    () => ({ draftRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef, lastAppliedParentRef, deferredFeedbackRef }),
-    [draftRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef, lastAppliedParentRef, deferredFeedbackRef],
+    () => ({ draftRef, acknowledgedRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef, lastAppliedParentRef, deferredFeedbackRef }),
+    [draftRef, acknowledgedRef, onSavedRef, onFocusConsumedRef, lastSubmittedRef, seenQueueVersionRef, lastAppliedParentRef, deferredFeedbackRef],
   );
 }
 
@@ -229,6 +239,7 @@ function loadSettingsWhenMissing(options: {
   client: SweeperClient;
   refs: ReturnType<typeof useControllerRefs>;
   setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  setAcknowledged: React.Dispatch<React.SetStateAction<Settings | null>>;
   setError: React.Dispatch<React.SetStateAction<string | null>>;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
 }): () => void {
@@ -238,6 +249,8 @@ function loadSettingsWhenMissing(options: {
       const s = await options.client.getSettings();
       if (cancelled) return;
       options.setDraft(s);
+      options.refs.acknowledgedRef.current = s;
+      options.setAcknowledged(s);
       options.refs.onSavedRef.current(s);
     } catch (e) {
       if (!cancelled) options.setError(formatContractError(e));
@@ -250,7 +263,7 @@ function loadSettingsWhenMissing(options: {
 
 function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typeof useControllerRefs>, queueVersion: number) {
   const { settings, client } = args;
-  const { draft, setDraft, setLoading, setError } = ui;
+  const { draft, setDraft, setAcknowledged, setLoading, setError } = ui;
   useEffect(() => mirrorDraftIntoRef({ refs, draft }), [refs, draft]);
   useEffect(
     () => syncParentFeedback({ settings, refs, queueVersion, setDraft, setLoading }),
@@ -258,8 +271,8 @@ function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typ
   );
   useEffect(() => {
     if (settings) return;
-    return loadSettingsWhenMissing({ client, refs, setDraft, setError, setLoading });
-  }, [client, refs, setDraft, setError, setLoading, settings]);
+    return loadSettingsWhenMissing({ client, refs, setDraft, setAcknowledged, setError, setLoading });
+  }, [client, refs, setDraft, setAcknowledged, setError, setLoading, settings]);
 }
 
 type FocusPrefillOptions = {
@@ -342,15 +355,18 @@ const queueDrainListeners = new Set<() => void>();
 // unmounts the previous controller. So at most one controller ever owns this
 // slot and a newer mount cannot overwrite a live registration. No app-shell
 // state consolidation is needed.
-let draftFlusher: (() => Promise<void>) | null = null;
+let draftFlusher: (() => Promise<boolean>) | null = null;
 
-export function registerDraftFlusher(flusher: (() => Promise<void>) | null): void {
+export function registerDraftFlusher(flusher: (() => Promise<boolean>) | null): void {
   draftFlusher = flusher;
 }
 
-export async function flushPendingDraft(): Promise<void> {
+// Returns whether it is safe to relaunch: true when the draft was persisted
+// (or there was nothing to persist), false when persistence failed and the
+// caller must keep the draft and abort the restart (#92).
+export async function flushPendingDraft(): Promise<boolean> {
   const flusher = draftFlusher;
-  if (flusher) await flusher();
+  return flusher ? flusher() : true;
 }
 
 function subscribeQueueDrain(listener: () => void): () => void {
@@ -371,33 +387,42 @@ function settleSave(): void {
 }
 
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
-  const { setDraft, setError, setInfo, setSaving } = ui;
+  const { setDraft, setAcknowledged, setError, setInfo, setSaving } = ui;
   // Single-flight guard: at most one `updateSettings` IPC call is in flight.
   // `toSave` is captured synchronously when the save is requested, not when the
   // queued task runs. Edits that land after a save was submitted stay in the
   // draft and are preserved by `mergePreservingEdits` when that save's result
   // is merged, so the backend and UI converge on one consistent final state.
-  return useCallback((next?: Settings): Promise<void> => {
+  // Resolves to whether the backend actually persisted the value: the Elevate
+  // path uses that to abort before restarting on a failure (#92).
+  return useCallback((next?: Settings): Promise<boolean> => {
     const toSave = next ?? refs.draftRef.current;
-    if (!toSave) return Promise.resolve();
+    if (!toSave) return Promise.resolve(true);
     refs.draftRef.current = toSave;
     // Remember exactly what was submitted so reconciliation after a drain can
     // tell a genuine post-submit edit from deferred parent feedback.
     refs.lastSubmittedRef.current = toSave;
     setDraft(toSave);
     pendingSaves += 1;
-    const run = sharedSaveChain.then(async () => {
+    const run = sharedSaveChain.then(async (): Promise<boolean> => {
       setSaving(true);
       setError(null);
       setInfo(null);
+      let persisted = false;
       try {
         const saved = await client.updateSettings(toSave);
+        // The backend acknowledged exactly `saved`. That may differ from the
+        // merged draft when a newer edit landed while this save was in flight,
+        // so tracking it separately keeps a later flush honest (#92).
+        refs.acknowledgedRef.current = saved;
+        setAcknowledged(saved);
         const after = refs.draftRef.current ?? saved;
         const merged = mergePreservingEdits({ saved, submitted: toSave, after });
         refs.draftRef.current = merged;
         setDraft(merged);
         refs.onSavedRef.current(merged);
         setInfo('Settings saved. Active sessions may be invalidated when scan-affecting settings change.');
+        persisted = true;
       } catch (e) {
         setError(formatContractError(e));
       } finally {
@@ -410,14 +435,15 @@ function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typ
         settleSave();
         setSaving(false);
       }
+      return persisted;
     });
     // Keep the shared chain alive after a rejected task so later saves still run.
-    sharedSaveChain = run.catch(() => {});
+    sharedSaveChain = run.then(() => {}, () => {});
     return run;
-  }, [client, refs, setDraft, setError, setInfo, setSaving]);
+  }, [client, refs, setAcknowledged, setDraft, setError, setInfo, setSaving]);
 }
 
-function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs: ReturnType<typeof useControllerRefs>; save: (next?: Settings) => Promise<void> }) {
+function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs: ReturnType<typeof useControllerRefs>; save: (next?: Settings) => Promise<boolean> }) {
   const [customPathInput, setCustomPathInput] = useState('');
   const [validatingPath, setValidatingPath] = useState(false);
   const [browseIndex, setBrowseIndex] = useState(0);
@@ -457,7 +483,7 @@ function useCustomPathActions(input: { client: SweeperClient; ui: UiState; refs:
   return { customPathInput, setCustomPathInput, validatingPath, addCustomPath, removeCustomPath, applyCustomPathPreset };
 }
 
-function useRelaunchAction(client: SweeperClient, flushDraft: () => Promise<void>) {
+function useRelaunchAction(client: SweeperClient, flushDraft: () => Promise<boolean>) {
   const [relaunching, setRelaunching] = useState(false);
   const [relaunchInfo, setRelaunchInfo] = useState<string | null>(null);
   const [relaunchError, setRelaunchError] = useState<string | null>(null);
@@ -467,8 +493,13 @@ function useRelaunchAction(client: SweeperClient, flushDraft: () => Promise<void
     setRelaunchError(null);
     try {
       // Persist the pending draft through the shared save queue before the
-      // restart is requested, so no edit is lost (#92).
-      await flushDraft();
+      // restart is requested, so no edit is lost (#92). A failed save must
+      // abort the restart and keep the draft intact.
+      const persisted = await flushDraft();
+      if (!persisted) {
+        setRelaunchError('Settings could not be saved. Elevate was cancelled; your changes are kept.');
+        return;
+      }
       const res = await client.relaunchElevated();
       if (res.launched) setRelaunchInfo('Administrator launch requested. Approve the Windows elevation prompt to continue in the elevated session.');
       else setRelaunchError('Administrator launch was not started.');
@@ -497,10 +528,17 @@ export function useSettingsController(args: ControllerArgs) {
     allowUnknownRowRef,
     setHighlight: setHighlightAllowUnknown,
   });
-  const isDirty = useMemo(() => !settingsEqual(ui.draft, args.settings), [ui.draft, args.settings]);
+  // Compare the editable draft with what the backend actually acknowledged,
+  // not with parent feedback (which may carry a post-submit edit merged by the
+  // save handler). This keeps a newer edit dirty so Elevate flushes it (#92).
+  const isDirty = useMemo(() => !settingsEqual(ui.draft, ui.acknowledged), [ui.draft, ui.acknowledged]);
   // Only a genuinely dirty draft is saved: Elevate with no edits must not bump
-  // the settings generation or invalidate live sessions (#92).
-  const flushDraft = useCallback(async () => { if (isDirty) await save(); }, [isDirty, save]);
+  // the settings generation or invalidate live sessions (#92). Read both sides
+  // from refs at call time so a pending render cannot hide a newer edit.
+  const flushDraft = useCallback(async (): Promise<boolean> => {
+    if (settingsEqual(refs.draftRef.current, refs.acknowledgedRef.current)) return true;
+    return save();
+  }, [refs, save]);
   useEffect(() => {
     registerDraftFlusher(flushDraft);
     return () => registerDraftFlusher(null);

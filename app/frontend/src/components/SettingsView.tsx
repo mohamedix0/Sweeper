@@ -19,6 +19,7 @@ export function SettingsView({
   onFocusConsumed,
   prefillCustomPath,
   onDirtyChange,
+  relaunching,
 }: {
   client: SweeperClient;
   settings: Settings | null;
@@ -31,8 +32,13 @@ export function SettingsView({
   onFocusConsumed?: () => void;
   prefillCustomPath?: string | null;
   onDirtyChange?: (dirty: boolean) => void;
+  relaunching?: boolean;
 }) {
   const c = useSettingsController({ client, settings, onSaved, focusTarget, onFocusConsumed, prefillCustomPath });
+  // Lock every draft-bound control while either Elevate path is restarting so
+  // no edit can land after the draft flush and before the process exits. The
+  // lock clears on success or failure, keeping the view usable (#92).
+  const inputsDisabled = c.relaunching || !!relaunching;
   // Publish the controller's dirty state to the app shell so it can guard
   // navigation away from this view. The effect is deliberately unconditional
   // (it runs before the loading early return) and the callback is stable.
@@ -66,15 +72,15 @@ export function SettingsView({
         <div className="settings-form-wrap settings-v13">
           <div className="settings-columns">
             <div className="settings-col">
-              <SettingsGeneralCard draft={c.draft} setDraft={c.setDraft} theme={theme} onThemeChange={onThemeChange} />
-              <SettingsCustomPathsCard draft={c.draft} setDraft={c.setDraft} saving={c.saving} validatingPath={c.validatingPath} customPathInput={c.customPathInput} setCustomPathInput={c.setCustomPathInput} onApplyPreset={c.applyCustomPathPreset} onAdd={c.addCustomPath} onRemove={c.removeCustomPath} />
+              <SettingsGeneralCard draft={c.draft} setDraft={c.setDraft} theme={theme} onThemeChange={onThemeChange} inputsDisabled={inputsDisabled} />
+              <SettingsCustomPathsCard draft={c.draft} setDraft={c.setDraft} saving={c.saving} validatingPath={c.validatingPath} inputsDisabled={inputsDisabled} customPathInput={c.customPathInput} setCustomPathInput={c.setCustomPathInput} onApplyPreset={c.applyCustomPathPreset} onAdd={c.addCustomPath} onRemove={c.removeCustomPath} />
             </div>
             <div className="settings-col">
-              <SettingsDeepCleanupCard draft={c.draft} setDraft={c.setDraft} deepDisabled={c.deepDisabled} highlightAllowUnknown={c.highlightAllowUnknown} allowUnknownRowRef={c.allowUnknownRowRef} />
-              <SettingsSystemCachesCard draft={c.draft} setDraft={c.setDraft} deepDisabled={c.deepDisabled} elevationStatus={elevationStatus} relaunching={c.relaunching} onRunAsAdmin={c.runAsAdministrator} />
+              <SettingsDeepCleanupCard draft={c.draft} setDraft={c.setDraft} deepDisabled={c.deepDisabled} highlightAllowUnknown={c.highlightAllowUnknown} allowUnknownRowRef={c.allowUnknownRowRef} inputsDisabled={inputsDisabled} />
+              <SettingsSystemCachesCard draft={c.draft} setDraft={c.setDraft} deepDisabled={c.deepDisabled} elevationStatus={elevationStatus} relaunching={inputsDisabled} onRunAsAdmin={c.runAsAdministrator} />
             </div>
           </div>
-          <SettingsFooterBar isDirty={c.isDirty} saving={c.saving} onReset={c.resetDraft} onSave={() => c.save()} />
+          <SettingsFooterBar isDirty={c.isDirty} saving={c.saving} inputsDisabled={inputsDisabled} onReset={c.resetDraft} onSave={() => c.save()} />
         </div>
       </div>
     </div>

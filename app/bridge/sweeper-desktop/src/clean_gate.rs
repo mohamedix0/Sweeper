@@ -8,6 +8,7 @@
 //! terminated mid-run (#92). If the relaunch is aborted or fails, the gate is
 //! unsealed and the app stays usable.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// Shared gate state: in-flight Clean count plus the shutdown seal.
@@ -21,12 +22,49 @@ struct CleanGateState {
 #[derive(Debug, Clone, Default)]
 pub struct CleanGate {
     inner: Arc<(Mutex<CleanGateState>, Condvar)>,
+    /// Set while a relaunch owns the seal. A concurrent relaunch is rejected
+    /// before it can seal or unseal the gate (#92).
+    relaunch_active: Arc<AtomicBool>,
 }
 
 /// RAII token held by one in-flight `Clean`. Dropping it marks the Clean settled.
 #[derive(Debug)]
 pub struct CleanGuard {
     inner: Arc<(Mutex<CleanGateState>, Condvar)>,
+}
+
+/// RAII owner of a graceful-exit relaunch seal. Only the owning call may lift
+/// the seal, so a second concurrent relaunch cannot open the gate while the
+/// first call's UAC prompt is pending (#92).
+#[derive(Debug)]
+pub struct RelaunchSealGuard {
+    gate: CleanGate,
+    /// Whether dropping this guard lifts the seal. Cleared on a successful
+    /// handoff, where this instance exits with the gate still sealed.
+    owns_seal: bool,
+    /// Whether dropping this guard permits a later relaunch. Kept on
+    /// abort/failure so the app stays usable; cleared on a successful handoff.
+    release_flag: bool,
+}
+
+impl RelaunchSealGuard {
+    /// Keep the gate sealed for process exit. A successful handoff neither
+    /// unseals nor allows another relaunch in this instance.
+    pub fn persist_for_exit(&mut self) {
+        self.owns_seal = false;
+        self.release_flag = false;
+    }
+}
+
+impl Drop for RelaunchSealGuard {
+    fn drop(&mut self) {
+        if self.owns_seal {
+            self.gate.unseal();
+        }
+        if self.release_flag {
+            self.gate.relaunch_active.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 impl CleanGate {
@@ -57,6 +95,27 @@ impl CleanGate {
         while state.active != 0 {
             state = cv.wait(state).unwrap_or_else(|e| e.into_inner());
         }
+    }
+
+    /// Claim the single relaunch slot and seal the gate before waiting for
+    /// in-flight Cleans. Returns `None` when another relaunch is already in
+    /// progress, so that caller aborts *before* sealing or touching the guard.
+    /// The returned guard owns the seal: only it can lift the seal, preventing
+    /// a concurrent caller from opening the gate during a pending UAC prompt.
+    pub fn try_begin_relaunch(&self) -> Option<RelaunchSealGuard> {
+        if self
+            .relaunch_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return None;
+        }
+        self.seal_and_wait_for_idle();
+        Some(RelaunchSealGuard {
+            gate: self.clone(),
+            owns_seal: true,
+            release_flag: true,
+        })
     }
 
     /// Lift the shutdown seal so the app can accept Cleans again after an

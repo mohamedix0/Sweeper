@@ -1,11 +1,13 @@
 mod common;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use sweeper_desktop::clean_gate::CleanGate;
 use sweeper_desktop::commands_impl;
-use sweeper_desktop::elevation::{relaunch_elevated as relaunch_pure, SingleInstanceState};
+use sweeper_desktop::elevation::{
+    relaunch_elevated as relaunch_pure, ElevationProvider, SingleInstanceState,
+};
 
 use common::FakeElevationProvider;
 
@@ -84,6 +86,77 @@ fn wait_for_gate_sealed(gate: &CleanGate) {
         );
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
+}
+
+/// Elevation provider that parks inside `relaunch` until released, so a test
+/// can hold one relaunch at the UAC-prompt stage while issuing a second call.
+#[derive(Debug)]
+struct BlockingProvider {
+    outcome: Result<sweeper_core::elevation::RelaunchOutcome, String>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+    entered: Arc<AtomicBool>,
+}
+
+impl BlockingProvider {
+    fn new(outcome: Result<sweeper_core::elevation::RelaunchOutcome, String>) -> Self {
+        Self {
+            outcome,
+            release: Arc::new((Mutex::new(false), Condvar::new())),
+            entered: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn wait_until_blocked(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !self.entered.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the first relaunch to reach the UAC prompt"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn release(&self) {
+        let (lock, cv) = self.release.as_ref();
+        let mut done = lock.lock().expect("release lock");
+        *done = true;
+        cv.notify_all();
+    }
+}
+
+impl ElevationProvider for BlockingProvider {
+    fn is_elevated(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn relaunch(&self) -> Result<sweeper_core::elevation::RelaunchOutcome, String> {
+        self.entered.store(true, Ordering::SeqCst);
+        let (lock, cv) = self.release.as_ref();
+        let mut done = lock.lock().expect("release lock");
+        while !*done {
+            done = cv.wait(done).expect("release condvar");
+        }
+        self.outcome.clone()
+    }
+}
+
+/// A concurrent relaunch is rejected with an internal error, never invokes its
+/// launcher, and never unseals the gate owned by the first call.
+fn assert_concurrent_rejected(
+    err: &sweeper_contract::ContractError,
+    contender: &FakeElevationProvider,
+    gate: &CleanGate,
+) {
+    assert!(
+        matches!(err, sweeper_contract::ContractError::Internal { .. }),
+        "{err:?}"
+    );
+    assert_eq!(contender.relaunch_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        gate.enter().is_none(),
+        "a rejected concurrent relaunch must not unseal the gate"
+    );
 }
 
 #[test]
@@ -263,4 +336,60 @@ fn relaunch_elevated_abort_or_failure_unseals_gate() {
         sweeper_core::elevation::RelaunchOutcome::CancelledByUser,
     ));
     run_aborted(Err("ShellExecute failed".to_string()));
+}
+
+/// #92: a second concurrent relaunch must be rejected before it can seal or
+/// unseal the gate. Without ownership tracking the second call would fail to
+/// take the shared single-instance guard and unseal the gate while the first
+/// call's UAC prompt is pending, letting a Clean start and later be killed at
+/// exit — exactly the hazard this gate exists to prevent.
+#[test]
+fn relaunch_elevated_rejects_concurrent_relaunch_without_unsealing_gate() {
+    let blocking = Arc::new(BlockingProvider::new(Ok(
+        sweeper_core::elevation::RelaunchOutcome::Launched,
+    )));
+    let si = common::make_single_instance_state_with_unique_mutex("SweeperGateF-concurrent");
+    let gate = CleanGate::default();
+    let exited = Arc::new(AtomicBool::new(false));
+
+    let exited_hook = exited.clone();
+    let exit_hook = move |_code: i32| {
+        exited_hook.store(true, Ordering::SeqCst);
+    };
+    let provider = blocking.clone();
+    let si_thread = si.clone();
+    let gate_thread = gate.clone();
+    let first = std::thread::spawn(move || {
+        relaunch_pure(
+            provider.as_ref(),
+            si_thread.as_ref(),
+            &gate_thread,
+            &exit_hook,
+        )
+    });
+
+    // The first call now holds the guard with its UAC prompt pending and the
+    // gate sealed.
+    blocking.wait_until_blocked();
+    assert_clean_rejected(&gate, "the gate must be sealed while UAC is pending");
+
+    // The contender shares the gate and single-instance state: without the
+    // ownership slot it would reach `take()`, fail, and unseal the gate.
+    let contender = FakeElevationProvider::new(
+        false,
+        Ok(sweeper_core::elevation::RelaunchOutcome::Launched),
+    );
+    let no_exit = |_code: i32| {};
+    let err = relaunch_pure(&contender, si.as_ref(), &gate, &no_exit)
+        .expect_err("a concurrent relaunch must be rejected");
+    assert_concurrent_rejected(&err, &contender, &gate);
+
+    blocking.release();
+    let result = first
+        .join()
+        .expect("first relaunch thread panicked")
+        .expect("first relaunch ok");
+    assert!(result.launched);
+    assert!(exited.load(Ordering::SeqCst));
+    assert_clean_rejected(&gate, "the gate stays sealed after a successful handoff");
 }
