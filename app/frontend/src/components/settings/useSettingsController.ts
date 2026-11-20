@@ -123,52 +123,100 @@ function useControllerRefs(args: ControllerArgs) {
   );
 }
 
+// A queue-drain rerun replays deferred parent feedback through an edit-preserving
+// merge; an ordinary parent update overwrites the draft directly.
+function shouldReplayDeferredFeedback(input: { drained: boolean }): boolean {
+  return input.drained;
+}
+
+// Replay parent feedback that was skipped while saves were pending. The merge
+// keeps genuine user edits and newer submissions (see reconcileDeferredFeedback).
+function applyDeferredFeedback(options: {
+  settings: Settings;
+  refs: ReturnType<typeof useControllerRefs>;
+  setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+}): void {
+  options.setDraft(reconcileDeferredFeedback({
+    settings: options.settings,
+    lastSubmitted: options.refs.lastSubmittedRef.current,
+    draft: options.refs.draftRef.current,
+  }));
+}
+
+// Effect body: mirror the draft into the ref bundle so save handlers and the
+// reconciliation merge always read the latest local value.
+function mirrorDraftIntoRef(options: {
+  refs: ReturnType<typeof useControllerRefs>;
+  draft: Settings | null;
+}): void {
+  options.refs.draftRef.current = options.draft;
+}
+
+// Effect body: adopt parent feedback when no save is outstanding. A queue drain
+// (success OR failure) replays skipped feedback via a merge; an ordinary parent
+// update replaces the draft outright.
+function syncParentFeedback(options: {
+  settings: Settings | null;
+  refs: ReturnType<typeof useControllerRefs>;
+  queueVersion: number;
+  setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  setLoading: React.Dispatch<React.SetStateAction<boolean>>;
+}): void {
+  const { settings, refs, queueVersion, setDraft, setLoading } = options;
+  // A changed queue version means the save queue just became empty (on success
+  // OR failure). Record it before the early returns so a drain that coincides
+  // with a null `settings` is not mistaken for a later drain.
+  const drained = refs.seenQueueVersionRef.current !== queueVersion;
+  refs.seenQueueVersionRef.current = queueVersion;
+  if (!settings) return;
+  setLoading(false);
+  // While a save is still outstanding, parent feedback is from an earlier
+  // queued save and must not overwrite the draft holding the latest submitted
+  // value. It is applied by the save handler's own merge instead.
+  if (pendingSaves > 0) return;
+  if (shouldReplayDeferredFeedback({ drained })) {
+    applyDeferredFeedback({ settings, refs, setDraft });
+    return;
+  }
+  setDraft(settings);
+}
+
+// Effect body: load settings from the client on mount when the parent has not
+// supplied them yet. Returns the cancellation cleanup for the effect.
+function loadSettingsWhenMissing(options: {
+  client: SweeperClient;
+  refs: ReturnType<typeof useControllerRefs>;
+  setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  setError: React.Dispatch<React.SetStateAction<string | null>>;
+  setLoading: React.Dispatch<React.SetStateAction<boolean>>;
+}): () => void {
+  let cancelled = false;
+  void (async () => {
+    try {
+      const s = await options.client.getSettings();
+      if (cancelled) return;
+      options.setDraft(s);
+      options.refs.onSavedRef.current(s);
+    } catch (e) {
+      if (!cancelled) options.setError(formatContractError(e));
+    } finally {
+      if (!cancelled) options.setLoading(false);
+    }
+  })();
+  return () => { cancelled = true; };
+}
+
 function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typeof useControllerRefs>, queueVersion: number) {
   const { settings, client } = args;
   const { draft, setDraft, setLoading, setError } = ui;
-  useEffect(() => { refs.draftRef.current = draft; }, [refs, draft]);
-  useEffect(() => {
-    // A changed queue version means the save queue just became empty (on success
-    // OR failure). Record it before the early returns so a drain that coincides
-    // with a null `settings` is not mistaken for a later drain.
-    const drained = refs.seenQueueVersionRef.current !== queueVersion;
-    refs.seenQueueVersionRef.current = queueVersion;
-    if (!settings) return;
-    setLoading(false);
-    // While a save is still outstanding, parent feedback is from an earlier
-    // queued save and must not overwrite the draft holding the latest submitted
-    // value. It is applied by the save handler's own merge instead.
-    if (pendingSaves > 0) return;
-    if (drained) {
-      // The final queued save may have rejected, so no `onSaved` delivered the
-      // earlier successful save's feedback that this controller skipped while
-      // saves were pending. Replay the parent's value via a merge that keeps
-      // genuine edits and newer submissions (see reconcileDeferredFeedback).
-      setDraft(reconcileDeferredFeedback({
-        settings,
-        lastSubmitted: refs.lastSubmittedRef.current,
-        draft: refs.draftRef.current,
-      }));
-      return;
-    }
-    setDraft(settings);
-  }, [setDraft, setLoading, settings, queueVersion, refs]);
+  useEffect(() => mirrorDraftIntoRef({ refs, draft }), [refs, draft]);
+  useEffect(
+    () => syncParentFeedback({ settings, refs, queueVersion, setDraft, setLoading }),
+    [setDraft, setLoading, settings, queueVersion, refs],
+  );
   useEffect(() => {
     if (settings) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const s = await client.getSettings();
-        if (cancelled) return;
-        setDraft(s);
-        refs.onSavedRef.current(s);
-      } catch (e) {
-        if (!cancelled) setError(formatContractError(e));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
+    return loadSettingsWhenMissing({ client, refs, setDraft, setError, setLoading });
   }, [client, refs, setDraft, setError, setLoading, settings]);
 }
 
