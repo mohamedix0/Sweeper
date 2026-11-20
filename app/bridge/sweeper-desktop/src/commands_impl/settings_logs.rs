@@ -34,17 +34,19 @@ pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, Contra
 /// `update_settings` implementation.
 ///
 /// Overlapping saves are serialized by the `settings` mutex, which is held for
-/// the whole persist-first update and the subsequent invalidation. The
-/// generation only advances on scan-affecting changes, so a no-op or a
-/// non-scan-affecting update leaves in-flight `ScanSession`s valid while a real
-/// scan-affecting change invalidates them immediately. The persist-first,
-/// error-propagating behaviour of `SettingsStore::update` is reused unchanged.
+/// the whole persist-first update and the subsequent invalidation. Invalidation
+/// is scoped to the surface that actually changed: a scan-affecting change
+/// invalidates Scan sessions, an analyzer-affecting change (for example
+/// `allow_delete_unknown`) invalidates Analyzer sessions, and a no-op
+/// invalidates neither. The persist-first, error-propagating behaviour of
+/// `SettingsStore::update` is reused unchanged.
 pub fn update_settings<C: Clock>(
     state: &AppState<C>,
     settings: SettingsDto,
 ) -> Result<SettingsDto, ContractError> {
     let mut store = state.settings.lock().map_err(|_| lock_state_error())?;
-    let prev_gen = store.generation();
+    let prev_scan_gen = store.generation();
+    let prev_analyzer_gen = store.analyzer_generation();
     let updated = store.update(settings).map_err(|_| {
         // The persistence error can embed the absolute settings path and raw OS
         // error text. `Internal` is a sanitized, human-safe contract variant, so
@@ -55,12 +57,21 @@ pub fn update_settings<C: Clock>(
             reason: "failed to persist settings".into(),
         }
     })?;
-    let new_gen = store.generation();
+    let scan_changed = store.generation() != prev_scan_gen;
+    let analyzer_changed = store.analyzer_generation() != prev_analyzer_gen;
 
-    if new_gen != prev_gen {
-        // Explicitly invalidate active scan/analyzer sessions and preview tokens.
+    if scan_changed || analyzer_changed {
+        // Invalidate only the sessions whose settings surface changed. Holding
+        // the settings lock across this step keeps the generation comparison
+        // and the invalidation atomic with respect to overlapping saves and
+        // in-flight scan/analyzer commits.
         let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
-        sessions.invalidate_all_sessions();
+        if scan_changed {
+            sessions.invalidate_scan_sessions();
+        }
+        if analyzer_changed {
+            sessions.invalidate_analyzer_sessions();
+        }
     }
     Ok(updated)
 }

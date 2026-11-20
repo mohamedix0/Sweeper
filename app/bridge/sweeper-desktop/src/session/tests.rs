@@ -307,7 +307,7 @@ fn preview_rejects_non_descendant_contents_only_target() {
 fn cancel_analyzer_sets_cancellation_flag_for_active_session() {
     let clock = FixedClock::new(1_800_000_000);
     let mut store = SessionStore::new();
-    let prepared = store.begin_analyzer(&clock, 1).unwrap();
+    let prepared = store.begin_analyzer(&clock, 1, 1).unwrap();
     assert!(!prepared.cancel.load(Ordering::Relaxed));
 
     let cancelled = store.cancel_analyzer(&prepared.session_id);

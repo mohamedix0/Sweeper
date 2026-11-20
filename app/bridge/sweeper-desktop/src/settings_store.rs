@@ -12,12 +12,18 @@ pub struct SettingsStore {
     settings: SweeperSettings,
     /// Monotonic generation incremented ONLY on scan-affecting settings changes.
     ///
-    /// Sessions capture this generation at creation and are rejected when it
-    /// changes. Keeping it scoped to settings that actually change what a Scan
-    /// discovers means a no-op or a non-scan-affecting update (for example
-    /// toggling `allow_delete_unknown`, which only gates Clean/Analyzer
-    /// selection) leaves an in-flight ScanSession valid.
+    /// Every session (Scan and Analyzer) captures this generation for
+    /// lookup-time validity, so a scan-affecting change still invalidates both
+    /// kinds of session. Keeping it scoped to settings that actually change what
+    /// a Scan discovers means a no-op or an analyzer-only update (for example
+    /// toggling `allow_delete_unknown`) leaves an in-flight ScanSession valid.
     generation: u64,
+    /// Monotonic generation incremented ONLY on analyzer-affecting settings changes.
+    ///
+    /// Checked at Analyzer commit time in addition to `generation`, so a run
+    /// that started before an analyzer-only setting toggled is rejected instead
+    /// of being stored with a stale `allow_unknown`.
+    analyzer_generation: u64,
     /// Last non-fatal sanitization warnings from load/parse (best-effort diagnostics).
     warnings: Vec<String>,
 }
@@ -29,6 +35,7 @@ impl SettingsStore {
             path: None,
             settings: SweeperSettings::default(),
             generation: 0,
+            analyzer_generation: 0,
             warnings: Vec::new(),
         }
     }
@@ -39,6 +46,7 @@ impl SettingsStore {
             path: Some(path),
             settings: SweeperSettings::default(),
             generation: 0,
+            analyzer_generation: 0,
             warnings: Vec::new(),
         };
         s.reload();
@@ -102,19 +110,30 @@ impl SettingsStore {
             write(path.as_path(), &sanitized.settings)?;
         }
 
-        // Publish the new state and bump the generation (which invalidates active
-        // scan/analyzer sessions) only AFTER a successful write.
+        // Publish the new state and bump only the generations whose affected
+        // surface actually changed, AFTER a successful write. The scan
+        // generation gates lookup-time validity for every session; the analyzer
+        // generation additionally gates Analyzer commit so a run started under
+        // a stale `allow_unknown` cannot be stored.
         if scan_affecting_changed(&self.settings, &sanitized.settings) {
             self.generation = self.generation.saturating_add(1);
+        }
+        if analyzer_affecting_changed(&self.settings, &sanitized.settings) {
+            self.analyzer_generation = self.analyzer_generation.saturating_add(1);
         }
         self.settings = sanitized.settings;
         self.warnings = sanitized.warnings;
         Ok(to_dto(&self.settings))
     }
 
-    /// Current settings generation.
+    /// Current scan-affecting settings generation.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Current analyzer-affecting settings generation.
+    pub fn analyzer_generation(&self) -> u64 {
+        self.analyzer_generation
     }
 }
 
@@ -149,6 +168,18 @@ fn scan_affecting_changed(old: &SweeperSettings, new: &SweeperSettings) -> bool 
         || old.stale_project_days != new.stale_project_days
 }
 
+/// Whether the change alters what an `Analyzer` run produces, and therefore
+/// must invalidate an in-flight `AnalyzerSession` immediately.
+///
+/// `allow_delete_unknown` feeds `AnalyzerOptions::allow_unknown` when a run
+/// starts. Without its own generation bump, toggling it mid-run would leave the
+/// Analyzer run (and any session it commits) valid with a stale `allow_unknown`.
+/// Scan-affecting settings need no entry here: analyzer sessions capture the
+/// scan generation too and are already rejected when that generation changes.
+fn analyzer_affecting_changed(old: &SweeperSettings, new: &SweeperSettings) -> bool {
+    old.allow_delete_unknown != new.allow_delete_unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +200,7 @@ mod tests {
         let initial = store.get();
         let initial_core = store.core();
         let initial_gen = store.generation();
+        let initial_analyzer_gen = store.analyzer_generation();
         let initial_warnings = store.warnings().to_vec();
 
         let err = store
@@ -182,6 +214,11 @@ mod tests {
             store.generation(),
             initial_gen,
             "generation must not bump on a failed write"
+        );
+        assert_eq!(
+            store.analyzer_generation(),
+            initial_analyzer_gen,
+            "analyzer generation must not bump on a failed write"
         );
         assert_eq!(
             store.get(),
@@ -209,6 +246,7 @@ mod tests {
         let mut store = SettingsStore::with_path(dir.path().join("settings.json"));
         let initial = store.get();
         let initial_gen = store.generation();
+        let initial_analyzer_gen = store.analyzer_generation();
         let mut requested = initial.clone();
         requested.allow_delete_unknown = !requested.allow_delete_unknown;
 
@@ -219,8 +257,30 @@ mod tests {
         assert_eq!(
             store.generation(),
             initial_gen,
-            "a non-scan-affecting change must not bump generation"
+            "a non-scan-affecting change must not bump the scan generation"
         );
+        assert_eq!(
+            store.analyzer_generation(),
+            initial_analyzer_gen + 1,
+            "an analyzer-affecting change must bump the analyzer generation"
+        );
+    }
+
+    /// A scan-affecting change advances only the scan generation; analyzer
+    /// sessions are already invalidated by that generation at lookup/commit
+    /// time, so no separate analyzer bump is needed.
+    #[test]
+    fn scan_affecting_change_leaves_analyzer_generation_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = SettingsStore::with_path(dir.path().join("settings.json"));
+        let initial = store.get();
+        let initial_analyzer_gen = store.analyzer_generation();
+
+        store
+            .update(changed_request(&initial))
+            .expect("write succeeds");
+
+        assert_eq!(store.analyzer_generation(), initial_analyzer_gen);
     }
 
     /// A successful write persists first, bumps the generation once, and leaves

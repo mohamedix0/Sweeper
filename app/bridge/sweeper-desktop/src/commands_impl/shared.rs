@@ -50,9 +50,21 @@ where
     }) as scanner::ScanProgressCallback)
 }
 
+/// Generation snapshots captured at session start and read again at commit.
+/// Both surfaces are carried so each session kind can validate against the
+/// generation its validity actually depends on.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CommitGenerations {
+    pub scan_at_start: u64,
+    pub scan_current: u64,
+    pub analyzer_at_start: u64,
+    pub analyzer_current: u64,
+}
+
 pub(super) struct AsyncOutcomeCommit<P, R, F> {
     pub session_id: String,
     pub settings_generation_at_start: u64,
+    pub analyzer_generation_at_start: u64,
     pub payload: P,
     pub finish: F,
     _marker: std::marker::PhantomData<fn() -> R>,
@@ -62,12 +74,14 @@ impl<P, R, F> AsyncOutcomeCommit<P, R, F> {
     pub fn new(
         session_id: String,
         settings_generation_at_start: u64,
+        analyzer_generation_at_start: u64,
         payload: P,
         finish: F,
     ) -> Self {
         Self {
             session_id,
             settings_generation_at_start,
+            analyzer_generation_at_start,
             payload,
             finish,
             _marker: std::marker::PhantomData,
@@ -81,17 +95,21 @@ pub(super) fn commit_async_outcome<C, P, R, F>(
 ) -> Result<R, ContractError>
 where
     C: Clock,
-    F: FnOnce(&C, &mut SessionStore, String, u64, u64, P) -> Result<R, ContractError>,
+    F: FnOnce(&C, &mut SessionStore, String, CommitGenerations, P) -> Result<R, ContractError>,
 {
     let settings = state.settings.lock().map_err(|_| lock_state_error())?;
-    let current_settings_gen = settings.generation();
+    let generations = CommitGenerations {
+        scan_at_start: req.settings_generation_at_start,
+        scan_current: settings.generation(),
+        analyzer_at_start: req.analyzer_generation_at_start,
+        analyzer_current: settings.analyzer_generation(),
+    };
     let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
     (req.finish)(
         &state.clock,
         &mut sessions,
         req.session_id,
-        req.settings_generation_at_start,
-        current_settings_gen,
+        generations,
         req.payload,
     )
 }

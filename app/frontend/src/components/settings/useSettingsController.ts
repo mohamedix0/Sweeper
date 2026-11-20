@@ -166,12 +166,12 @@ function useFocusAndPrefill(options: FocusPrefillOptions) {
 function useSaveHandler(client: SweeperClient, ui: UiState, refs: ReturnType<typeof useControllerRefs>) {
   const { setDraft, setError, setInfo, setSaving } = ui;
   // Single-flight guard: at most one `updateSettings` IPC call is in flight.
-  // Each save captures the current draft when requested; a save requested while
-  // another is pending is queued behind it, so requests and responses are
-  // processed in order instead of being reordered by IPC. A queued save runs
-  // against the draft as it stands after the previous save merged its result,
-  // keeping the backend and the UI on one consistent final state even when
-  // edits land during an in-flight save.
+  // `toSave` is captured synchronously when the save is requested, not when the
+  // queued task runs. Each save is chained behind the previous one, so requests
+  // and responses are processed in submission order rather than reordered by
+  // IPC. Edits that land after a save was submitted stay in the draft and are
+  // preserved by `mergePreservingEdits` when that save's result is merged, so
+  // the backend and UI converge on one consistent final state.
   const chainRef = useRef<Promise<void>>(Promise.resolve());
   return useCallback((next?: Settings): Promise<void> => {
     const toSave = next ?? refs.draftRef.current;

@@ -16,8 +16,10 @@ pub struct StoreAnalyzerRun {
     pub root: Option<String>,
     /// Settings snapshot.
     pub settings: SweeperSettings,
-    /// Settings generation for this run.
+    /// Scan-affecting settings generation for this run.
     pub settings_generation: u64,
+    /// Analyzer-affecting settings generation for this run.
+    pub analyzer_generation: u64,
 }
 
 impl SessionStore {
@@ -26,6 +28,7 @@ impl SessionStore {
         &mut self,
         clock: &C,
         settings_generation: u64,
+        analyzer_generation: u64,
     ) -> Result<PreparedAnalyzer, ContractError> {
         self.cleanup(clock);
         self.cancel_all_active_analyzers();
@@ -37,6 +40,7 @@ impl SessionStore {
         Ok(PreparedAnalyzer {
             session_id,
             settings_generation,
+            analyzer_generation,
             cancel,
         })
     }
@@ -64,7 +68,9 @@ impl SessionStore {
         input: AnalyzerFinishInput,
     ) -> Result<StartAnalyzerResponse, ContractError> {
         self.active_analyzers.remove(&input.session_id);
-        if input.settings_generation_at_start != input.current_settings_generation {
+        if input.settings_generation_at_start != input.current_settings_generation
+            || input.analyzer_generation_at_start != input.current_analyzer_generation
+        {
             return Err(ContractError::SessionInvalid {
                 reason: "session invalidated by settings change".to_string(),
             });
@@ -97,7 +103,8 @@ impl SessionStore {
         C: Clock,
         P: Fn(AnalyzerProgressEvent) + Send + Sync + 'static,
     {
-        let prepared = self.begin_analyzer(clock, run.settings_generation)?;
+        let prepared =
+            self.begin_analyzer(clock, run.settings_generation, run.analyzer_generation)?;
         let progress = Self::analyzer_progress_cb(&prepared.session_id, progress_cb);
         let options = AnalyzerOptions {
             allow_unknown: run.settings.allow_delete_unknown,
@@ -121,6 +128,8 @@ impl SessionStore {
                 session_id: prepared.session_id,
                 settings_generation_at_start: prepared.settings_generation,
                 current_settings_generation: run.settings_generation,
+                analyzer_generation_at_start: prepared.analyzer_generation,
+                current_analyzer_generation: run.analyzer_generation,
                 min_age_hours: run.settings.min_age_hours,
                 result,
             },
