@@ -10,7 +10,7 @@ use sweeper_core::settings::SweeperSettings;
 
 use super::mapping::map_report_to_session;
 use super::support::{build_store_scan_cb, emit_scan_progress, sanitize_reason, SessionIdRef};
-use super::{PreparedScan, ScanFinishInput, ScanSession, SessionStore};
+use super::{ActiveScan, PreparedScan, ScanFinishInput, ScanSession, SessionStore};
 use crate::clock::Clock;
 
 type SharedScanCb<F> = Arc<Mutex<F>>;
@@ -30,6 +30,26 @@ struct StoreScanFinalizeInput {
 struct StoreScanCompleteInput {
     ctx: StoreScanCtx,
     report: ScanReport,
+}
+
+/// The operation rejected by the in-flight-Scan preflight (#95).
+///
+/// Maps each call site to its exact user-visible reason text so the wording
+/// lives in one place and cannot drift between the `Scan` and `Clean` entry
+/// points. These strings appear in a structured IPC error and stay stable.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ScanConflict {
+    SecondScan,
+    Clean,
+}
+
+impl ScanConflict {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::SecondScan => "a second Scan rejected: a Scan is already running",
+            Self::Clean => "Clean rejected: a Scan is already running",
+        }
+    }
 }
 
 /// Cohesive request for running a blocking scan with progress in store helpers.
@@ -68,13 +88,52 @@ impl SessionStore {
         let effective = Self::effective_scan_settings(req.tiers, &req.settings);
         let session_id = self.next_id("scan", now);
         let cancel = Arc::new(AtomicBool::new(false));
-        self.active_scans.insert(session_id.clone(), cancel.clone());
+        self.active_scans.insert(
+            session_id.clone(),
+            ActiveScan {
+                cancel: cancel.clone(),
+            },
+        );
         Ok(PreparedScan {
             session_id,
             effective_settings: effective,
             settings_generation: req.settings_generation,
             cancel,
         })
+    }
+
+    /// Reject a new operation while a Scan is Running (#95).
+    ///
+    /// `active_scans` holds one entry per in-flight `ScanSession`, registered by
+    /// `begin_scan` and removed on every terminal outcome: `finish_scan` on
+    /// success and `abort_scan` on cancel/error. A settings change flags the
+    /// registration for cooperative cancellation but deliberately keeps it
+    /// until the worker unwinds, so the preflight cannot admit a second Scan or
+    /// a Clean while the first worker may still be touching the filesystem.
+    /// Elapsed time never reclaims an in-flight registration; only the worker's
+    /// terminal path does (#95). Callers check and register while holding the
+    /// same `&mut self`, so there is no window between preflight and registration.
+    pub(crate) fn reject_while_scan_running(
+        &self,
+        conflict: ScanConflict,
+    ) -> Result<(), ContractError> {
+        if self.active_scans.is_empty() {
+            Ok(())
+        } else {
+            Err(ContractError::Internal {
+                reason: conflict.reason().to_string(),
+            })
+        }
+    }
+
+    /// Register a scan only when no Scan is already running (#95).
+    pub fn begin_scan_checked<C: Clock>(
+        &mut self,
+        clock: &C,
+        req: ScanBeginRequest,
+    ) -> Result<PreparedScan, ContractError> {
+        self.reject_while_scan_running(ScanConflict::SecondScan)?;
+        self.begin_scan(clock, req)
     }
 
     fn effective_scan_settings(
@@ -132,8 +191,8 @@ impl SessionStore {
     /// unrelated scan is removed or changed here (#94). There is deliberately
     /// no result to inspect: callers need only know the request was accepted.
     pub fn cancel_scan(&mut self, session_id: &str) {
-        if let Some(flag) = self.active_scans.get(session_id) {
-            flag.store(true, Ordering::Relaxed);
+        if let Some(registration) = self.active_scans.get(session_id) {
+            registration.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -141,8 +200,8 @@ impl SessionStore {
     /// their own registrations as they unwind; finished sessions, preview
     /// tokens, and analyzer work are deliberately left alone (#94).
     pub fn cancel_all_active_scans(&mut self) {
-        for flag in self.active_scans.values() {
-            flag.store(true, Ordering::Relaxed);
+        for registration in self.active_scans.values() {
+            registration.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -171,7 +230,7 @@ impl SessionStore {
         C: Clock,
         F: FnMut(ScanProgressEvent) + Send + 'static,
     {
-        let prepared = self.begin_scan(
+        let prepared = self.begin_scan_checked(
             clock,
             ScanBeginRequest {
                 tiers: req.tiers,

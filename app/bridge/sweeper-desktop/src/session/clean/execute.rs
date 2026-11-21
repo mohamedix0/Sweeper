@@ -24,6 +24,7 @@ impl SessionStore {
         current_settings_generation: u64,
     ) -> Result<(u32, Vec<ValidatedItem>, u64), ContractError> {
         self.cleanup(clock);
+        self.reject_clean_while_scan_running()?;
         let now = clock.now_unix_secs();
         let snapshot = self.snapshot_preview_token(preview_token)?;
         Self::validate_preview_snapshot(now, &snapshot)?;

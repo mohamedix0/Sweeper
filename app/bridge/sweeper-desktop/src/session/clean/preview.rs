@@ -50,6 +50,7 @@ impl SessionStore {
         req: PreviewCleanRequest,
     ) -> Result<PreviewCleanResponse, ContractError> {
         self.cleanup(clock);
+        self.reject_clean_while_scan_running()?;
         let req = PreviewRequest {
             session_id: req.session_id,
             item_ids: req.item_ids,

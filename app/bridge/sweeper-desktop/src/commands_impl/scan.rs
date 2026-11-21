@@ -241,7 +241,7 @@ where
         let settings = settings_store.core();
         let settings_gen = settings_store.generation();
         let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
-        sessions.begin_scan(
+        sessions.begin_scan_checked(
             &state.clock,
             crate::session::scan::ScanBeginRequest {
                 tiers,

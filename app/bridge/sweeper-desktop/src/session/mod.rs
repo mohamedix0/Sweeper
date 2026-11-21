@@ -121,13 +121,25 @@ pub struct PreviewTokenState {
     pub used: bool,
 }
 
+/// An in-flight Scan registration.
+///
+/// The registration lives exactly as long as the worker: `begin_scan` adds it
+/// and only the worker's terminal paths (`finish_scan` / `abort_scan`) remove
+/// it. Elapsed time never drops an in-flight registration, so a Scan that runs
+/// past the 15-minute session TTL cannot let a second Scan or a Clean through
+/// the overlap guards while it may still be touching the filesystem (#95).
+#[derive(Debug, Clone)]
+pub(super) struct ActiveScan {
+    pub(super) cancel: Arc<AtomicBool>,
+}
+
 /// In-memory session store.
 #[derive(Debug, Default)]
 pub struct SessionStore {
     pub(super) sessions: HashMap<String, ScanSession>,
     pub(super) analyzer_sessions: HashMap<String, AnalyzerSession>,
     pub(super) preview_tokens: HashMap<String, PreviewTokenState>,
-    pub(super) active_scans: HashMap<String, Arc<AtomicBool>>,
+    pub(super) active_scans: HashMap<String, ActiveScan>,
     pub(super) active_analyzers: HashMap<String, Arc<AtomicBool>>,
     pub(super) counter: u64,
 }
@@ -256,6 +268,11 @@ impl SessionStore {
             .retain(|_, s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS);
         self.analyzer_sessions
             .retain(|_, s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS);
+        // In-flight Scan registrations are deliberately NOT expired here. Only
+        // the worker's terminal paths (finish_scan/abort_scan) remove them, so
+        // elapsed time can never free the preflight slot while a Scan may still
+        // be walking the filesystem (#95). The TTL bounds stored results, not
+        // an in-flight registration.
         let valid_sessions: HashSet<String> = self
             .sessions
             .keys()
@@ -291,18 +308,12 @@ impl SessionStore {
         self.sessions.insert(session.id.clone(), session);
     }
 
-    /// Cancel active operations, drop the sessions of one kind, and discard
-    /// preview tokens issued from them. Shared by both invalidation surfaces;
-    /// the caller selects the kind by passing its active/session maps.
-    fn invalidate_session_kind<S>(
-        active: &mut HashMap<String, Arc<AtomicBool>>,
+    /// Drop stored sessions of one kind and the preview tokens issued from
+    /// them. Shared by both invalidation surfaces.
+    fn drop_sessions_and_tokens<S>(
         sessions: &mut HashMap<String, S>,
         preview_tokens: &mut HashMap<String, PreviewTokenState>,
     ) {
-        for c in active.values() {
-            c.store(true, Ordering::Relaxed);
-        }
-        active.clear();
         let removed: HashSet<String> = sessions.keys().cloned().collect();
         sessions.clear();
         preview_tokens.retain(|_, t| !removed.contains(&t.session_id));
@@ -310,22 +321,30 @@ impl SessionStore {
 
     /// Invalidate only Scan sessions (and tokens issued from them), leaving
     /// analyzer sessions untouched. Used when scan-affecting settings change.
+    ///
+    /// Cancellation is cooperative: every in-flight Scan is flagged, but its
+    /// registration is deliberately kept. Clearing it here would let the
+    /// preflight admit a second Scan or a Clean while the cancelled worker may
+    /// still be touching the filesystem. The worker clears its own registration
+    /// on `finish_scan`/`abort_scan`; elapsed time never expires an in-flight
+    /// registration (#95).
     pub fn invalidate_scan_sessions(&mut self) {
-        Self::invalidate_session_kind(
-            &mut self.active_scans,
-            &mut self.sessions,
-            &mut self.preview_tokens,
-        );
+        for registration in self.active_scans.values() {
+            registration.cancel.store(true, Ordering::Relaxed);
+        }
+        Self::drop_sessions_and_tokens(&mut self.sessions, &mut self.preview_tokens);
     }
 
     /// Invalidate only Analyzer sessions (and tokens issued from them), leaving
     /// scan sessions untouched. Used when analyzer-affecting settings change.
+    /// Analyzer registrations are still cleared eagerly; only the Scan path
+    /// retains registrations until its worker terminates (#95).
     pub fn invalidate_analyzer_sessions(&mut self) {
-        Self::invalidate_session_kind(
-            &mut self.active_analyzers,
-            &mut self.analyzer_sessions,
-            &mut self.preview_tokens,
-        );
+        for flag in self.active_analyzers.values() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.active_analyzers.clear();
+        Self::drop_sessions_and_tokens(&mut self.analyzer_sessions, &mut self.preview_tokens);
     }
 
     /// Explicitly invalidate all active scan/analyzer sessions and preview tokens.
