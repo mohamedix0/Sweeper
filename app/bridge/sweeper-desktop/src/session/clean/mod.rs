@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use sweeper_contract::{PreviewConfirmationsDto, PreviewTargetBreakdownDto};
 use sweeper_core::remover::ValidatedItem;
 
+use super::scan::ScanConflict;
 use super::SessionStore;
 use crate::clock::Clock;
 use sweeper_contract::ContractError;
@@ -91,6 +92,14 @@ pub(super) enum SessionKind {
 }
 
 impl SessionStore {
+    /// A Clean must never start while a Scan is Running (#95). Shared by the
+    /// Preview (token issuance) and Execute (token consumption) entry points
+    /// so the guard and its rationale live once: a rejection issues no token,
+    /// consumes none, and deletes nothing.
+    pub(super) fn reject_clean_while_scan_running(&self) -> Result<(), ContractError> {
+        self.reject_while_scan_running(ScanConflict::Clean)
+    }
+
     pub(super) fn scan_sessions(&self) -> &std::collections::HashMap<String, super::ScanSession> {
         &self.sessions
     }

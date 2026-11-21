@@ -84,18 +84,12 @@ fn overlapping_start_scan_is_rejected() {
 
 #[test]
 fn preview_clean_during_scan_is_rejected() {
-    let state = common::make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").expect("sandbox root");
-    let file = sandbox
-        .write_file("Temp\\a.tmp", b"abc")
-        .expect("sandbox file");
-    common::seed_session(&state, &root, &file, 1_700_000_000);
+    let s = common::seeded_scan();
 
-    register_inflight_scan(&state);
+    register_inflight_scan(&s.state);
 
     let err = commands_impl::preview_clean(
-        &state,
+        &s.state,
         "scan-test".to_string(),
         vec!["t1::1".to_string()],
         None,
@@ -106,20 +100,14 @@ fn preview_clean_during_scan_is_rejected() {
 
 #[test]
 fn execute_clean_during_scan_is_rejected_without_consuming_token_or_deleting() {
-    let state = common::make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").expect("sandbox root");
-    let file = sandbox
-        .write_file("Temp\\deleteme.tmp", b"abc")
-        .expect("sandbox file");
-    common::seed_session(&state, &root, &file, 1_700_000_000);
+    let s = common::seeded_scan();
     // Issue the token while idle, then start a Scan before executing.
-    let token = common::preview_scan_token(&state);
-    let (scan_id, _flag) = register_inflight_scan(&state);
+    let token = common::preview_scan_token(&s.state);
+    let (scan_id, _flag) = register_inflight_scan(&s.state);
 
     let logs_base = tempfile::tempdir().expect("logs base");
     let err = commands_impl::execute_clean(
-        &state,
+        &s.state,
         token.clone(),
         Some(logs_base.path().to_path_buf()),
         |_| {},
@@ -127,23 +115,27 @@ fn execute_clean_during_scan_is_rejected_without_consuming_token_or_deleting() {
     .unwrap_err();
     assert_scan_in_progress(err);
     assert!(
-        file.exists(),
+        s.file.exists(),
         "no deletion may happen while a Scan is Running"
     );
 
     // The rejected attempt must not consume the single-use token. Once the
     // Scan settles, the very same token still executes the Clean.
-    state
+    s.state
         .sessions
         .lock()
         .expect("sessions lock")
         .abort_scan(&scan_id);
-    let resp =
-        commands_impl::execute_clean(&state, token, Some(logs_base.path().to_path_buf()), |_| {})
-            .expect("rejected attempt must not consume the preview token");
+    let resp = commands_impl::execute_clean(
+        &s.state,
+        token,
+        Some(logs_base.path().to_path_buf()),
+        |_| {},
+    )
+    .expect("rejected attempt must not consume the preview token");
     assert_eq!(resp.deleted_count, U64String(1));
     assert!(
-        !file.exists(),
+        !s.file.exists(),
         "eligible file should be deleted after the Scan"
     );
 }
@@ -165,13 +157,9 @@ fn clean_succeeds_after_scan_completes() {
     let (state, sandbox) = sandbox_scan_state();
     commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>).expect("scan");
 
-    let root = sandbox.create_dir("Temp").expect("sandbox root");
-    let file = sandbox
-        .write_file("Temp\\clean.tmp", b"abc")
-        .expect("sandbox file");
-    common::seed_session(&state, &root, &file, 1_700_000_000);
+    let s = common::seeded_scan_in(state, sandbox, "clean.tmp");
     let preview = commands_impl::preview_clean(
-        &state,
+        &s.state,
         "scan-test".to_string(),
         vec!["t1::1".to_string()],
         None,
@@ -179,7 +167,7 @@ fn clean_succeeds_after_scan_completes() {
     .expect("preview after a completed Scan");
     let logs_base = tempfile::tempdir().expect("logs base");
     let resp = commands_impl::execute_clean(
-        &state,
+        &s.state,
         preview.preview_token,
         Some(logs_base.path().to_path_buf()),
         |_| {},
@@ -191,13 +179,9 @@ fn clean_succeeds_after_scan_completes() {
 #[test]
 fn scan_succeeds_after_clean() {
     let (state, sandbox) = sandbox_scan_state();
-    let root = sandbox.create_dir("Temp").expect("sandbox root");
-    let file = sandbox
-        .write_file("Temp\\clean.tmp", b"abc")
-        .expect("sandbox file");
-    common::seed_session(&state, &root, &file, 1_700_000_000);
+    let s = common::seeded_scan_in(state, sandbox, "clean.tmp");
     let preview = commands_impl::preview_clean(
-        &state,
+        &s.state,
         "scan-test".to_string(),
         vec!["t1::1".to_string()],
         None,
@@ -205,14 +189,14 @@ fn scan_succeeds_after_clean() {
     .expect("preview");
     let logs_base = tempfile::tempdir().expect("logs base");
     commands_impl::execute_clean(
-        &state,
+        &s.state,
         preview.preview_token,
         Some(logs_base.path().to_path_buf()),
         |_| {},
     )
     .expect("clean");
 
-    let resp = commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>)
+    let resp = commands_impl::start_scan(&s.state, None, None::<fn(ScanProgressEvent)>)
         .expect("Scan after a Clean must not be rejected");
     assert!(!resp.session_id.is_empty());
 }

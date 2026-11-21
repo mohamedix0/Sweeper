@@ -32,6 +32,26 @@ struct StoreScanCompleteInput {
     report: ScanReport,
 }
 
+/// The operation rejected by the in-flight-Scan preflight (#95).
+///
+/// Maps each call site to its exact user-visible reason text so the wording
+/// lives in one place and cannot drift between the `Scan` and `Clean` entry
+/// points. These strings appear in a structured IPC error and stay stable.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ScanConflict {
+    SecondScan,
+    Clean,
+}
+
+impl ScanConflict {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::SecondScan => "a second Scan rejected: a Scan is already running",
+            Self::Clean => "Clean rejected: a Scan is already running",
+        }
+    }
+}
+
 /// Cohesive request for running a blocking scan with progress in store helpers.
 #[derive(Debug, Clone)]
 pub struct ScanRunRequest {
@@ -86,12 +106,15 @@ impl SessionStore {
     /// sessions therefore leave no stale entry, so sequential runs never see a
     /// false positive. Callers check and register while holding the same
     /// `&mut self`, so there is no window between preflight and registration.
-    pub fn reject_while_scan_running(&self, operation: &str) -> Result<(), ContractError> {
+    pub(crate) fn reject_while_scan_running(
+        &self,
+        conflict: ScanConflict,
+    ) -> Result<(), ContractError> {
         if self.active_scans.is_empty() {
             Ok(())
         } else {
             Err(ContractError::Internal {
-                reason: format!("{operation} rejected: a Scan is already running"),
+                reason: conflict.reason().to_string(),
             })
         }
     }
@@ -102,7 +125,7 @@ impl SessionStore {
         clock: &C,
         req: ScanBeginRequest,
     ) -> Result<PreparedScan, ContractError> {
-        self.reject_while_scan_running("a second Scan")?;
+        self.reject_while_scan_running(ScanConflict::SecondScan)?;
         self.begin_scan(clock, req)
     }
 

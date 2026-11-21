@@ -135,21 +135,36 @@ pub fn risk_to_core(risk: RiskDto) -> sweeper_core::Risk {
     }
 }
 
+/// A one-item seeded scan fixture. The sentinel sandbox and the seeded file
+/// are exposed so tests can assert on deletion while the sandbox stays alive.
 pub struct SeededScan {
     pub state: AppState<FixedClock>,
-    pub _sandbox: Sandbox,
+    pub sandbox: Sandbox,
+    pub file: PathBuf,
+}
+
+/// Seed one scan item into a caller-supplied state and sandbox (for example a
+/// state whose settings confine a real `start_scan` to the sentinel sandbox).
+/// Returns the resolved seeded file path for deletion assertions.
+pub fn seeded_scan_in(
+    state: AppState<FixedClock>,
+    sandbox: Sandbox,
+    file_name: &str,
+) -> SeededScan {
+    let root = sandbox.create_dir("Temp").unwrap();
+    let file = sandbox
+        .write_file(format!("Temp\\{file_name}"), b"abc")
+        .unwrap();
+    seed_session(&state, &root, &file, 1_700_000_000);
+    SeededScan {
+        state,
+        sandbox,
+        file,
+    }
 }
 
 pub fn seeded_scan() -> SeededScan {
-    let state = crate::common::state::make_state();
-    let sandbox = Sandbox::new();
-    let root = sandbox.create_dir("Temp").unwrap();
-    let f = sandbox.write_file("Temp\\a.tmp", b"abc").unwrap();
-    seed_session(&state, &root, &f, 1_700_000_000);
-    SeededScan {
-        state,
-        _sandbox: sandbox,
-    }
+    seeded_scan_in(crate::common::state::make_state(), Sandbox::new(), "a.tmp")
 }
 
 pub fn preview_scan_token(state: &AppState<FixedClock>) -> String {
