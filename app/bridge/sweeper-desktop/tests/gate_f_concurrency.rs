@@ -205,29 +205,123 @@ fn scan_succeeds_after_clean() {
 fn in_flight_state_is_cleared_on_cancel_and_error() {
     let (state, _sandbox) = sandbox_scan_state();
 
-    let (cancelled_id, flag) = register_inflight_scan(&state);
-    commands_impl::cancel_scan(&state, cancelled_id.clone()).expect("cancel scan");
-    assert!(flag.load(Ordering::Relaxed), "cancel flag must be set");
-    // The scanner removes its own registration as it unwinds (#94).
-    state
-        .sessions
-        .lock()
-        .expect("sessions lock")
-        .abort_scan(&cancelled_id);
+    // Both terminal outcomes are driven through the real `start_scan` entry
+    // point so the production terminal handler (`handle_scan_terminal`) clears
+    // the in-flight registration ΓÇö the test must not clean up after itself.
+
+    // Cancel: flag the freshly started Scan from its own progress callback. The
+    // callback runs after `begin_scan_checked` released the session lock, so
+    // `cancel_scan` can acquire it without deadlocking.
+    let cancel_state = state.clone();
+    let cancelled_once = Arc::new(AtomicBool::new(false));
+    let cancel_seen = cancelled_once.clone();
+    let cancel_err = commands_impl::start_scan(
+        &state,
+        None,
+        Some(move |event| {
+            if let ScanProgressEvent::Started { session_id } = event {
+                if !cancel_seen.swap(true, Ordering::Relaxed) {
+                    commands_impl::cancel_scan(&cancel_state, session_id)
+                        .expect("cancel from progress callback");
+                }
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(cancel_err, ContractError::ScanCancelled { .. }),
+        "cancelled Scan must surface the typed cancellation error, got {cancel_err:?}"
+    );
+    assert!(
+        cancelled_once.load(Ordering::Relaxed),
+        "progress callback must have cancelled the Scan"
+    );
     let after_cancel = commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>)
-        .expect("scan after cancel");
+        .expect("scan after cancel must be admitted without manual cleanup");
     assert!(!after_cancel.session_id.is_empty());
 
-    // A failed Scan removes its registration the same way a cancelled one does.
-    let (failed_id, _flag) = register_inflight_scan(&state);
+    // Error: bump the scan-affecting generation mid-run so the commit fails and
+    // takes the `Failed` terminal path instead of the cancellation path.
+    let error_state = state.clone();
+    let failed_once = Arc::new(AtomicBool::new(false));
+    let failure_seen = failed_once.clone();
+    let error_err = commands_impl::start_scan(
+        &state,
+        None,
+        Some(move |event| {
+            if let ScanProgressEvent::Started { .. } = event {
+                if !failure_seen.swap(true, Ordering::Relaxed) {
+                    let mut settings = error_state.settings.lock().expect("settings lock");
+                    let mut dto = settings.get();
+                    dto.min_age_hours = dto.min_age_hours.saturating_add(1);
+                    settings.update(dto).expect("settings update in callback");
+                }
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error_err, ContractError::SessionInvalid { .. }),
+        "failed Scan commit must surface a session-invalid error, got {error_err:?}"
+    );
+    assert!(
+        failed_once.load(Ordering::Relaxed),
+        "progress callback must have changed settings"
+    );
+    let after_error = commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>)
+        .expect("scan after error must be admitted without manual cleanup");
+    assert!(!after_error.session_id.is_empty());
+}
+
+#[test]
+fn invalidation_keeps_scan_registration_until_worker_terminates() {
+    let (state, _sandbox) = sandbox_scan_state();
+    let (scan_id, flag) = register_inflight_scan(&state);
+
+    // A scan-affecting settings change flags the in-flight Scan for cancellation
+    // but must not free the preflight slot while the worker may still be
+    // touching the filesystem (#95).
     state
         .sessions
         .lock()
         .expect("sessions lock")
-        .abort_scan(&failed_id);
-    let after_error = commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>)
-        .expect("scan after error");
-    assert!(!after_error.session_id.is_empty());
+        .invalidate_scan_sessions();
+    assert!(
+        flag.load(Ordering::Relaxed),
+        "invalidation must flag the Scan"
+    );
+    assert_scan_in_progress(
+        commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>).unwrap_err(),
+    );
+
+    // The worker's terminal path clears the registration; only then is a new
+    // Scan admitted.
+    state
+        .sessions
+        .lock()
+        .expect("sessions lock")
+        .abort_scan(&scan_id);
+    let resp = commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>)
+        .expect("Scan admitted after the worker terminated");
+    assert!(!resp.session_id.is_empty());
+}
+
+#[test]
+fn invalidated_registration_expires_after_scan_ttl() {
+    let (state, _sandbox) = sandbox_scan_state();
+    register_inflight_scan(&state);
+    state
+        .sessions
+        .lock()
+        .expect("sessions lock")
+        .invalidate_scan_sessions();
+
+    // A worker that never reaches a terminal path must not block new runs
+    // forever: cleanup reclaims the registration at the 15-minute session TTL.
+    state.clock.advance_secs(15 * 60 + 1);
+    let resp = commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>)
+        .expect("stale registration must be reclaimed by the 15-minute TTL");
+    assert!(!resp.session_id.is_empty());
 }
 
 #[test]

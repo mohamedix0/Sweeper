@@ -10,7 +10,7 @@ use sweeper_core::settings::SweeperSettings;
 
 use super::mapping::map_report_to_session;
 use super::support::{build_store_scan_cb, emit_scan_progress, sanitize_reason, SessionIdRef};
-use super::{PreparedScan, ScanFinishInput, ScanSession, SessionStore};
+use super::{ActiveScan, PreparedScan, ScanFinishInput, ScanSession, SessionStore};
 use crate::clock::Clock;
 
 type SharedScanCb<F> = Arc<Mutex<F>>;
@@ -88,7 +88,13 @@ impl SessionStore {
         let effective = Self::effective_scan_settings(req.tiers, &req.settings);
         let session_id = self.next_id("scan", now);
         let cancel = Arc::new(AtomicBool::new(false));
-        self.active_scans.insert(session_id.clone(), cancel.clone());
+        self.active_scans.insert(
+            session_id.clone(),
+            ActiveScan {
+                cancel: cancel.clone(),
+                registered_at: now,
+            },
+        );
         Ok(PreparedScan {
             session_id,
             effective_settings: effective,
@@ -101,11 +107,13 @@ impl SessionStore {
     ///
     /// `active_scans` holds one entry per in-flight `ScanSession`, registered by
     /// `begin_scan` and removed on every terminal outcome: `finish_scan` on
-    /// success, `abort_scan` on cancel/error, and the cancel-and-clear path on
-    /// settings changes or a close request. Finished, expired, and cancelled
-    /// sessions therefore leave no stale entry, so sequential runs never see a
-    /// false positive. Callers check and register while holding the same
-    /// `&mut self`, so there is no window between preflight and registration.
+    /// success and `abort_scan` on cancel/error. A settings change flags the
+    /// registration for cooperative cancellation but deliberately keeps it
+    /// until the worker unwinds, so the preflight cannot admit a second Scan or
+    /// a Clean while the first worker may still be touching the filesystem.
+    /// Registrations stuck for longer than the 15-minute TTL are reclaimed by
+    /// `cleanup`. Callers check and register while holding the same `&mut self`,
+    /// so there is no window between preflight and registration.
     pub(crate) fn reject_while_scan_running(
         &self,
         conflict: ScanConflict,
@@ -125,6 +133,9 @@ impl SessionStore {
         clock: &C,
         req: ScanBeginRequest,
     ) -> Result<PreparedScan, ContractError> {
+        // Reclaim a registration left by a worker that never reached a terminal
+        // path before deciding whether a Scan is already running.
+        self.cleanup(clock);
         self.reject_while_scan_running(ScanConflict::SecondScan)?;
         self.begin_scan(clock, req)
     }
@@ -184,8 +195,8 @@ impl SessionStore {
     /// unrelated scan is removed or changed here (#94). There is deliberately
     /// no result to inspect: callers need only know the request was accepted.
     pub fn cancel_scan(&mut self, session_id: &str) {
-        if let Some(flag) = self.active_scans.get(session_id) {
-            flag.store(true, Ordering::Relaxed);
+        if let Some(registration) = self.active_scans.get(session_id) {
+            registration.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -193,8 +204,8 @@ impl SessionStore {
     /// their own registrations as they unwind; finished sessions, preview
     /// tokens, and analyzer work are deliberately left alone (#94).
     pub fn cancel_all_active_scans(&mut self) {
-        for flag in self.active_scans.values() {
-            flag.store(true, Ordering::Relaxed);
+        for registration in self.active_scans.values() {
+            registration.cancel.store(true, Ordering::Relaxed);
         }
     }
 
