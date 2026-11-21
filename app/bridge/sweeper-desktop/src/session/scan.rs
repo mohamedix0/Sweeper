@@ -92,7 +92,6 @@ impl SessionStore {
             session_id.clone(),
             ActiveScan {
                 cancel: cancel.clone(),
-                registered_at: now,
             },
         );
         Ok(PreparedScan {
@@ -111,9 +110,9 @@ impl SessionStore {
     /// registration for cooperative cancellation but deliberately keeps it
     /// until the worker unwinds, so the preflight cannot admit a second Scan or
     /// a Clean while the first worker may still be touching the filesystem.
-    /// Registrations stuck for longer than the 15-minute TTL are reclaimed by
-    /// `cleanup`. Callers check and register while holding the same `&mut self`,
-    /// so there is no window between preflight and registration.
+    /// Elapsed time never reclaims an in-flight registration; only the worker's
+    /// terminal path does (#95). Callers check and register while holding the
+    /// same `&mut self`, so there is no window between preflight and registration.
     pub(crate) fn reject_while_scan_running(
         &self,
         conflict: ScanConflict,
@@ -133,9 +132,6 @@ impl SessionStore {
         clock: &C,
         req: ScanBeginRequest,
     ) -> Result<PreparedScan, ContractError> {
-        // Reclaim a registration left by a worker that never reached a terminal
-        // path before deciding whether a Scan is already running.
-        self.cleanup(clock);
         self.reject_while_scan_running(ScanConflict::SecondScan)?;
         self.begin_scan(clock, req)
     }

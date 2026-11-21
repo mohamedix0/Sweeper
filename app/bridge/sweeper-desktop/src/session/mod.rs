@@ -123,13 +123,14 @@ pub struct PreviewTokenState {
 
 /// An in-flight Scan registration.
 ///
-/// Alongside the cooperative cancel flag this carries the registration time,
-/// so a cancelled Scan whose worker never reaches a terminal path can still be
-/// reclaimed by the same 15-minute TTL that bounds stored sessions (#95).
+/// The registration lives exactly as long as the worker: `begin_scan` adds it
+/// and only the worker's terminal paths (`finish_scan` / `abort_scan`) remove
+/// it. Elapsed time never drops an in-flight registration, so a Scan that runs
+/// past the 15-minute session TTL cannot let a second Scan or a Clean through
+/// the overlap guards while it may still be touching the filesystem (#95).
 #[derive(Debug, Clone)]
 pub(super) struct ActiveScan {
     pub(super) cancel: Arc<AtomicBool>,
-    pub(super) registered_at: u64,
 }
 
 /// In-memory session store.
@@ -267,11 +268,11 @@ impl SessionStore {
             .retain(|_, s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS);
         self.analyzer_sessions
             .retain(|_, s| now.saturating_sub(s.created_at) <= SCAN_SESSION_TTL_SECS);
-        // A cancelled Scan keeps its registration until its worker unwinds.
-        // Bound a worker that never reaches a terminal path by the same
-        // 15-minute TTL so a leaked registration cannot block new runs forever.
-        self.active_scans
-            .retain(|_, r| now.saturating_sub(r.registered_at) <= SCAN_SESSION_TTL_SECS);
+        // In-flight Scan registrations are deliberately NOT expired here. Only
+        // the worker's terminal paths (finish_scan/abort_scan) remove them, so
+        // elapsed time can never free the preflight slot while a Scan may still
+        // be walking the filesystem (#95). The TTL bounds stored results, not
+        // an in-flight registration.
         let valid_sessions: HashSet<String> = self
             .sessions
             .keys()
@@ -325,8 +326,8 @@ impl SessionStore {
     /// registration is deliberately kept. Clearing it here would let the
     /// preflight admit a second Scan or a Clean while the cancelled worker may
     /// still be touching the filesystem. The worker clears its own registration
-    /// on `finish_scan`/`abort_scan`; `cleanup` bounds a worker that never
-    /// reaches a terminal path with the 15-minute session TTL (#95).
+    /// on `finish_scan`/`abort_scan`; elapsed time never expires an in-flight
+    /// registration (#95).
     pub fn invalidate_scan_sessions(&mut self) {
         for registration in self.active_scans.values() {
             registration.cancel.store(true, Ordering::Relaxed);

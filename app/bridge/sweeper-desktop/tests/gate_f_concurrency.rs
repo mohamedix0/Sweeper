@@ -307,20 +307,49 @@ fn invalidation_keeps_scan_registration_until_worker_terminates() {
 }
 
 #[test]
-fn invalidated_registration_expires_after_scan_ttl() {
-    let (state, _sandbox) = sandbox_scan_state();
-    register_inflight_scan(&state);
-    state
+fn long_running_scan_registration_survives_ttl_until_worker_terminates() {
+    let (state, sandbox) = sandbox_scan_state();
+    let s = common::seeded_scan_in(state, sandbox, "clean.tmp");
+    let (scan_id, flag) = register_inflight_scan(&s.state);
+
+    // Simulate a worker still walking the filesystem well past the 15-minute
+    // session TTL. Elapsed time must never drop an in-flight registration:
+    // doing so would let a second Scan or a Clean pass the overlap guards
+    // while the first worker may still be touching the filesystem (#95).
+    s.state.clock.advance_secs(15 * 60 + 1);
+    assert_scan_in_progress(
+        commands_impl::start_scan(&s.state, None, None::<fn(ScanProgressEvent)>).unwrap_err(),
+    );
+    assert_scan_in_progress(
+        commands_impl::preview_clean(
+            &s.state,
+            "scan-test".to_string(),
+            vec!["t1::1".to_string()],
+            None,
+        )
+        .unwrap_err(),
+    );
+
+    // A cooperative cancel request flags the worker but does not free the slot
+    // while the worker unwinds.
+    s.state
         .sessions
         .lock()
         .expect("sessions lock")
-        .invalidate_scan_sessions();
+        .cancel_scan(&scan_id);
+    assert!(flag.load(Ordering::Relaxed));
+    assert_scan_in_progress(
+        commands_impl::start_scan(&s.state, None, None::<fn(ScanProgressEvent)>).unwrap_err(),
+    );
 
-    // A worker that never reaches a terminal path must not block new runs
-    // forever: cleanup reclaims the registration at the 15-minute session TTL.
-    state.clock.advance_secs(15 * 60 + 1);
-    let resp = commands_impl::start_scan(&state, None, None::<fn(ScanProgressEvent)>)
-        .expect("stale registration must be reclaimed by the 15-minute TTL");
+    // Only the worker's terminal path frees the preflight slot.
+    s.state
+        .sessions
+        .lock()
+        .expect("sessions lock")
+        .abort_scan(&scan_id);
+    let resp = commands_impl::start_scan(&s.state, None, None::<fn(ScanProgressEvent)>)
+        .expect("Scan admitted after the worker terminated");
     assert!(!resp.session_id.is_empty());
 }
 
