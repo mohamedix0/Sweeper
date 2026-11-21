@@ -323,6 +323,20 @@ fn ty<T: Type + 'static>(
     datatype_str(cfg, <T as Type>::inline(type_map, Generics::NONE), type_map)
 }
 
+/// Render a *reference* to the single exported `ContractError` alias instead of
+/// inlining the whole discriminated union into every command signature. The
+/// alias itself is emitted exactly once in the user-defined types section from
+/// the `NamedType` registration in `register_types`; using it here keeps the
+/// wire format identical and makes adding an error variant a one-line change
+/// rather than rewriting the same ~47 lines in every command signature.
+fn contract_error_ty(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, specta_typescript::ExportError> {
+    let reference = <ContractError as Type>::reference(type_map, &[]);
+    datatype_str(cfg, reference.inner, type_map)
+}
+
 #[derive(Clone, Copy)]
 enum ArgTy {
     Str,
@@ -371,7 +385,7 @@ fn cmd_null_result(
     spec: CmdSpec<'_>,
     args: &[(&str, String)],
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     Ok(cmd_fn(spec, args, &format!("Result<null, {err}>")))
 }
 
@@ -381,7 +395,7 @@ fn cmd_noarg<R: Type + 'static>(
     name: &'static str,
     invoke: &'static str,
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     let ok = ty::<R>(cfg, type_map)?;
     Ok(cmd_fn(
         CmdSpec {
@@ -403,7 +417,7 @@ where
     R: Type + 'static,
     A: Type + 'static,
 {
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     let ok = ty::<R>(cfg, type_map)?;
     let (arg_name, kind) = spec.arg;
     let args = vec![(arg_name, arg_type::<A>(cfg, type_map, kind)?)];
@@ -425,7 +439,7 @@ fn cmd_preview_clean(
     let ids = ty::<Vec<String>>(cfg, type_map)?;
     let conf = ty::<Option<PreviewConfirmationsDto>>(cfg, type_map)?;
     let ok = ty::<PreviewCleanResponse>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     Ok(cmd_fn(
         CmdSpec {
             name: "previewClean",

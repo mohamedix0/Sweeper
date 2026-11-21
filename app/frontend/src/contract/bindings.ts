@@ -4,7 +4,7 @@
 /** user-defined commands **/
 
 export const commands = {
-async startScan(tiers: ("Tier1" | "Tier2" | "Tier3")[] | null) : Promise<Result<{ sessionId: string }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async startScan(tiers: ("Tier1" | "Tier2" | "Tier3")[] | null) : Promise<Result<{ sessionId: string }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_scan", { tiers }) };
 } catch (e) {
@@ -12,7 +12,7 @@ async startScan(tiers: ("Tier1" | "Tier2" | "Tier3")[] | null) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
-async getScanResults(sessionId: string) : Promise<Result<{ sessionId: string; startedUnixSecs: string; minAgeHours: number; targets: TargetScanResultDto[] }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async getScanResults(sessionId: string) : Promise<Result<{ sessionId: string; startedUnixSecs: string; minAgeHours: number; targets: TargetScanResultDto[] }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_scan_results", { sessionId }) };
 } catch (e) {
@@ -20,7 +20,7 @@ async getScanResults(sessionId: string) : Promise<Result<{ sessionId: string; st
     else return { status: "error", error: e  as any };
 }
 },
-async cancelScan(sessionId: string) : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async cancelScan(sessionId: string) : Promise<Result<null, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_scan", { sessionId }) };
 } catch (e) {
@@ -28,7 +28,7 @@ async cancelScan(sessionId: string) : Promise<Result<null, { code: "sessionInval
     else return { status: "error", error: e  as any };
 }
 },
-async previewClean(sessionId: string, itemIds: string[], confirmations: { typedConfirmation: string | null } | null) : Promise<Result<{ previewToken: string; breakdown: PreviewTargetBreakdownDto[]; totalSelectedCount: string; totalSelectedBytes: string; skippedCount?: string; skippedReasons?: string[] }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async previewClean(sessionId: string, itemIds: string[], confirmations: { typedConfirmation: string | null } | null) : Promise<Result<{ previewToken: string; breakdown: PreviewTargetBreakdownDto[]; totalSelectedCount: string; totalSelectedBytes: string; skippedCount?: string; skippedReasons?: string[] }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("preview_clean", { sessionId, itemIds, confirmations }) };
 } catch (e) {
@@ -36,7 +36,7 @@ async previewClean(sessionId: string, itemIds: string[], confirmations: { typedC
     else return { status: "error", error: e  as any };
 }
 },
-async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; deletedCount: string; skippedCount: string; skippedReasons: SkippedReasonDto[]; aborted: boolean; abortReason: string | null; logId: string | null; journalErrors?: string[] }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; deletedCount: string; skippedCount: string; skippedReasons: SkippedReasonDto[]; aborted: boolean; abortReason: string | null; logId: string | null; journalErrors?: string[] }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("execute_clean", { previewToken }) };
 } catch (e) {
@@ -44,7 +44,7 @@ async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; 
     else return { status: "error", error: e  as any };
 }
 },
-async startAnalyzer(root: string | null) : Promise<Result<{ sessionId: string; rootPath: string; totalBytes: string; totalItems: string; scannedDirs: string; scannedFiles: string; cancelled: boolean; warnings: string[]; root: AnalyzerNodeDto }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async startAnalyzer(root: string | null) : Promise<Result<{ sessionId: string; rootPath: string; totalBytes: string; totalItems: string; scannedDirs: string; scannedFiles: string; cancelled: boolean; warnings: string[]; root: AnalyzerNodeDto }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_analyzer", { root }) };
 } catch (e) {
@@ -52,7 +52,7 @@ async startAnalyzer(root: string | null) : Promise<Result<{ sessionId: string; r
     else return { status: "error", error: e  as any };
 }
 },
-async cancelAnalyzer(sessionId: string) : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async cancelAnalyzer(sessionId: string) : Promise<Result<null, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_analyzer", { sessionId }) };
 } catch (e) {
@@ -60,7 +60,7 @@ async cancelAnalyzer(sessionId: string) : Promise<Result<null, { code: "sessionI
     else return { status: "error", error: e  as any };
 }
 },
-async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: string; description: string; risk: RiskDto }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: string; description: string; risk: RiskDto }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("explain_item", { itemId }) };
 } catch (e) {
@@ -68,7 +68,7 @@ async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: stri
     else return { status: "error", error: e  as any };
 }
 },
-async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_settings") };
 } catch (e) {
@@ -76,7 +76,7 @@ async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolea
     else return { status: "error", error: e  as any };
 }
 },
-async updateSettings(settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async updateSettings(settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_settings", { settings }) };
 } catch (e) {
@@ -84,7 +84,7 @@ async updateSettings(settings: { enableTier1: boolean; enableTier2: boolean; ena
     else return { status: "error", error: e  as any };
 }
 },
-async validateCustomPath(path: string) : Promise<Result<{ path: string; allowed: boolean; reason: string }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async validateCustomPath(path: string) : Promise<Result<{ path: string; allowed: boolean; reason: string }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("validate_custom_path", { path }) };
 } catch (e) {
@@ -92,7 +92,7 @@ async validateCustomPath(path: string) : Promise<Result<{ path: string; allowed:
     else return { status: "error", error: e  as any };
 }
 },
-async listLogs() : Promise<Result<({ id: string; name: string; modifiedUnixSecs: string | null; sizeBytes: string | null })[], { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async listLogs() : Promise<Result<({ id: string; name: string; modifiedUnixSecs: string | null; sizeBytes: string | null })[], ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_logs") };
 } catch (e) {
@@ -100,7 +100,7 @@ async listLogs() : Promise<Result<({ id: string; name: string; modifiedUnixSecs:
     else return { status: "error", error: e  as any };
 }
 },
-async readLog(logId: string) : Promise<Result<{ id: string; content: string }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async readLog(logId: string) : Promise<Result<{ id: string; content: string }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("read_log", { logId }) };
 } catch (e) {
@@ -108,7 +108,7 @@ async readLog(logId: string) : Promise<Result<{ id: string; content: string }, {
     else return { status: "error", error: e  as any };
 }
 },
-async getElevationStatus() : Promise<Result<{ isElevated: boolean }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async getElevationStatus() : Promise<Result<{ isElevated: boolean }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_elevation_status") };
 } catch (e) {
@@ -116,7 +116,7 @@ async getElevationStatus() : Promise<Result<{ isElevated: boolean }, { code: "se
     else return { status: "error", error: e  as any };
 }
 },
-async relaunchElevated() : Promise<Result<{ launched: boolean }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async relaunchElevated() : Promise<Result<{ launched: boolean }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("relaunch_elevated") };
 } catch (e) {
@@ -124,7 +124,7 @@ async relaunchElevated() : Promise<Result<{ launched: boolean }, { code: "sessio
     else return { status: "error", error: e  as any };
 }
 },
-async resolveClose(approved: boolean, requestId: string) : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async resolveClose(approved: boolean, requestId: string) : Promise<Result<null, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("resolve_close", { approved, requestId }) };
 } catch (e) {
@@ -132,7 +132,7 @@ async resolveClose(approved: boolean, requestId: string) : Promise<Result<null, 
     else return { status: "error", error: e  as any };
 }
 },
-async notifyCloseListenerReady() : Promise<Result<{ pendingRequest: CloseRequestDto | null }, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async notifyCloseListenerReady() : Promise<Result<{ pendingRequest: CloseRequestDto | null }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("notify_close_listener_ready") };
 } catch (e) {
@@ -140,7 +140,7 @@ async notifyCloseListenerReady() : Promise<Result<{ pendingRequest: CloseRequest
     else return { status: "error", error: e  as any };
 }
 },
-async resetPendingClose() : Promise<Result<null, { code: "sessionInvalid"; details: { reason: string } } | { code: "unknownItem"; details: { count: string } } | { code: "previewTokenInvalid"; details: { reason: string } } | { code: "invalidInput"; details: { reason: string } } | { code: "notFound"; details: { reason: string } } | { code: "internal"; details: { reason: string } } | { code: "scanCancelled"; details: { session_id: string } }>> {
+async resetPendingClose() : Promise<Result<null, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reset_pending_close") };
 } catch (e) {
