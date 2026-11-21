@@ -1,4 +1,6 @@
+use super::bounded::BoundedTopN;
 use super::*;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
@@ -332,26 +334,52 @@ pub(super) fn worker_loop(
     }
 }
 
-fn retain_top_files(files: &mut Vec<FileInfo>, max_files: usize) {
-    if files.len() <= max_files {
-        return;
-    }
-    files.sort_by(|a, b| {
-        b.size.cmp(&a.size).then_with(|| {
-            a.path
-                .to_ascii_lowercase()
-                .cmp(&b.path.to_ascii_lowercase())
-        })
-    });
-    files.truncate(max_files);
+/// A file paired with its precomputed prune key (lowercase path).
+///
+/// Keeping the key alongside the entry means ordering never re-lowercases a
+/// path inside a comparator, and the buffer can stay bounded while scanning.
+#[derive(Debug, Clone)]
+struct KeyedFile {
+    key: String,
+    file: FileInfo,
 }
 
-#[derive(Debug, Default)]
+/// Ranking for retained files: larger size first, then the precomputed key in
+/// ascending order. Exact ties keep the earlier entry, matching the stable
+/// ordering of the previous sort-then-truncate behaviour.
+fn keyed_file_compare(a: &KeyedFile, b: &KeyedFile) -> Ordering {
+    b.file
+        .size
+        .cmp(&a.file.size)
+        .then_with(|| a.key.cmp(&b.key))
+}
+
+/// Return retained files in rank order, discarding the bundled prune keys.
+fn into_sorted_files(files: BoundedTopN<KeyedFile>) -> Vec<FileInfo> {
+    files
+        .into_sorted()
+        .into_iter()
+        .map(|entry| entry.file)
+        .collect()
+}
+
+#[derive(Debug)]
 struct ScanAccum {
-    files: Vec<FileInfo>,
+    top_files: BoundedTopN<KeyedFile>,
     child_dirs: Vec<ChildDirEntry>,
     file_count: u64,
     byte_count: u64,
+}
+
+impl ScanAccum {
+    fn new(max_files: usize) -> Self {
+        Self {
+            top_files: BoundedTopN::new(max_files, keyed_file_compare),
+            child_dirs: Vec::new(),
+            file_count: 0,
+            byte_count: 0,
+        }
+    }
 }
 
 fn reparse_flags(class: &ReparseTagClass) -> (bool, bool, bool) {
@@ -390,14 +418,20 @@ fn push_file_entry(
     flags: (bool, bool, bool),
     is_vhdx: bool,
 ) {
-    acc.files.push(FileInfo {
-        name,
-        path: path_str,
-        size,
-        is_link_point: flags.0,
-        is_cloud_placeholder: flags.1,
-        reparse_other: flags.2,
-        is_vhdx,
+    // Precompute the prune key exactly once and bundle it with the entry, so
+    // ordering never re-lowercases a path and a huge directory stays bounded.
+    let key = path_str.to_ascii_lowercase();
+    acc.top_files.offer(KeyedFile {
+        key,
+        file: FileInfo {
+            name,
+            path: path_str,
+            size,
+            is_link_point: flags.0,
+            is_cloud_placeholder: flags.1,
+            reparse_other: flags.2,
+            is_vhdx,
+        },
     });
     acc.file_count += 1;
     acc.byte_count = acc.byte_count.saturating_add(size);
@@ -433,7 +467,7 @@ fn scan_directory(
     }
     let entries =
         sweeper_winfs::read_dir_entries(Path::new(dir_path)).map_err(|e| e.to_string())?;
-    let mut acc = ScanAccum::default();
+    let mut acc = ScanAccum::new(max_files_per_dir);
     for ent in entries {
         if cancel.load(AtomicOrdering::Relaxed) {
             break;
@@ -461,11 +495,46 @@ fn scan_directory(
             );
         }
     }
-    retain_top_files(&mut acc.files, max_files_per_dir);
     Ok(ScanDirOutput {
-        files: acc.files,
+        files: into_sorted_files(acc.top_files),
         child_dirs: acc.child_dirs,
         file_count: acc.file_count,
         byte_count: acc.byte_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, size: u64) -> FileInfo {
+        FileInfo {
+            name: name.to_string(),
+            path: format!(r"C:\Temp\{name}"),
+            size,
+            is_link_point: false,
+            is_cloud_placeholder: false,
+            reparse_other: false,
+            is_vhdx: false,
+        }
+    }
+
+    #[test]
+    fn bounded_top_files_never_retains_more_than_capacity() {
+        let mut top = BoundedTopN::new(4, keyed_file_compare);
+        for i in 0..5000u64 {
+            let f = file(&format!("f{i:05}.bin"), i);
+            top.offer(KeyedFile {
+                key: f.path.to_ascii_lowercase(),
+                file: f,
+            });
+            assert!(top.len() <= 4, "top-N buffer must stay bounded");
+        }
+        let files = into_sorted_files(top);
+        assert_eq!(files.len(), 4);
+        assert_eq!(
+            files.iter().map(|f| f.size).collect::<Vec<_>>(),
+            vec![4999, 4998, 4997, 4996]
+        );
+    }
 }

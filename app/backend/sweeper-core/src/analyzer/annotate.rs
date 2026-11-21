@@ -1,8 +1,10 @@
+use super::bounded::BoundedTopN;
 use super::walker::{DirRecord, FileInfo};
 use super::*;
 use crate::paths::CanonicalPath;
 use crate::policy;
 use crate::wildcard::segment_pattern_matches;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -159,6 +161,43 @@ fn build_file_node(
     }
 }
 
+/// Prune key computed once per candidate child. Ordering is size descending,
+/// then precomputed lowercase name/path ascending, then insertion order so the
+/// result matches the previous stable sort-then-truncate behavior exactly.
+#[derive(Debug)]
+struct ChildPruneKey {
+    size: u64,
+    name_key: String,
+    path_key: String,
+    seq: usize,
+}
+
+impl ChildPruneKey {
+    fn compare(&self, other: &Self) -> Ordering {
+        other
+            .size
+            .cmp(&self.size)
+            .then_with(|| self.name_key.cmp(&other.name_key))
+            .then_with(|| self.path_key.cmp(&other.path_key))
+            .then_with(|| self.seq.cmp(&other.seq))
+    }
+}
+
+enum ChildSource<'a> {
+    /// A child directory node already built bottom-up (removed from `built`).
+    Dir(AnalyzerNode),
+    /// A retained file entry, turned into a node only if it survives pruning.
+    File(&'a FileInfo),
+}
+
+/// A child candidate bundled with its precomputed prune key.
+type ChildEntry<'a> = (ChildPruneKey, ChildSource<'a>);
+
+/// Ranking for child candidates: the precomputed prune key decides order.
+fn child_entry_compare(a: &ChildEntry<'_>, b: &ChildEntry<'_>) -> Ordering {
+    a.0.compare(&b.0)
+}
+
 fn collect_directory_children(
     rec: &DirRecord,
     built: &mut HashMap<String, AnalyzerNode>,
@@ -166,45 +205,51 @@ fn collect_directory_children(
     settings: &EligibilitySettings,
     max_children: usize,
 ) -> Vec<AnalyzerNode> {
-    let mut children: Vec<AnalyzerNode> = Vec::new();
+    let mut selected: BoundedTopN<ChildEntry<'_>> =
+        BoundedTopN::new(max_children, child_entry_compare);
+    let mut seq = 0usize;
     let mut seen_child = HashSet::new();
+
     for child_path in &rec.children_dirs {
-        let ck = canonical_key(child_path);
-        if !seen_child.insert(ck.clone()) {
+        let child_key = canonical_key(child_path);
+        if !seen_child.insert(child_key.clone()) {
             continue;
         }
-        if let Some(child_node) = built.remove(&ck) {
-            children.push(child_node);
-        }
+        let Some(child_node) = built.remove(&child_key) else {
+            continue;
+        };
+        let key = ChildPruneKey {
+            size: child_node.size_bytes,
+            name_key: child_node.name.to_ascii_lowercase(),
+            path_key: child_node.path.to_ascii_lowercase(),
+            seq,
+        };
+        seq += 1;
+        selected.offer((key, ChildSource::Dir(child_node)));
     }
+
     for f in &rec.files {
         if f.name.is_empty() {
             continue;
         }
-        children.push(build_file_node(f, ctx, settings));
+        let key = ChildPruneKey {
+            size: f.size,
+            name_key: f.name.to_ascii_lowercase(),
+            path_key: f.path.to_ascii_lowercase(),
+            seq,
+        };
+        seq += 1;
+        selected.offer((key, ChildSource::File(f)));
     }
-    sort_and_truncate_children(&mut children, max_children);
-    children
-}
 
-fn sort_and_truncate_children(children: &mut Vec<AnalyzerNode>, max_children: usize) {
-    children.sort_by(|a, b| {
-        b.size_bytes
-            .cmp(&a.size_bytes)
-            .then_with(|| {
-                a.name
-                    .to_ascii_lowercase()
-                    .cmp(&b.name.to_ascii_lowercase())
-            })
-            .then_with(|| {
-                a.path
-                    .to_ascii_lowercase()
-                    .cmp(&b.path.to_ascii_lowercase())
-            })
-    });
-    if children.len() > max_children {
-        children.truncate(max_children);
-    }
+    selected
+        .into_sorted()
+        .into_iter()
+        .map(|(_, source)| match source {
+            ChildSource::Dir(node) => node,
+            ChildSource::File(f) => build_file_node(f, ctx, settings),
+        })
+        .collect()
 }
 
 fn build_directory_node(
