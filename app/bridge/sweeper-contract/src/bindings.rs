@@ -139,7 +139,17 @@ fn scan_and_clean_commands(
                 ("session_id", Some(ArgTy::Str)),
             ),
         )?,
-        cmd_cancel_scan(cfg, type_map)?,
+        // Session-scoped Scan cancellation. Only the session id crosses IPC;
+        // the backend sets a flag on that one in-flight ScanSession (#94).
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "cancelScan",
+                invoke: "cancel_scan",
+            },
+            &[("session_id", "string".to_string())],
+        )?,
         cmd_preview_clean(cfg, type_map)?,
         cmd_one::<ExecuteCleanResponse, String>(
             cfg,
@@ -163,7 +173,16 @@ fn analyzer_and_settings_commands(
             type_map,
             CmdOneSpec::new("startAnalyzer", "start_analyzer", ("root", None)),
         )?,
-        cmd_cancel_analyzer(cfg, type_map)?,
+        // Session-scoped Analyzer cancellation: only the session id crosses IPC.
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "cancelAnalyzer",
+                invoke: "cancel_analyzer",
+            },
+            &[("session_id", "string".to_string())],
+        )?,
         cmd_one::<ExplainItemResponse, String>(
             cfg,
             type_map,
@@ -216,54 +235,41 @@ fn host_lifecycle_commands(
     type_map: &mut TypeCollection,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     Ok(vec![
-        cmd_resolve_close(cfg, type_map)?,
+        // The window-close handshake: the webview answers the host's deferred
+        // CloseRequested event with its decision, and the host exits only on
+        // approval. The request id makes a late decision for an older request
+        // a no-op.
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "resolveClose",
+                invoke: "resolve_close",
+            },
+            &[
+                ("approved", "boolean".to_string()),
+                ("request_id", "string".to_string()),
+            ],
+        )?,
         cmd_noarg::<CloseReadyResultDto>(
             cfg,
             type_map,
             "notifyCloseListenerReady",
             "notify_close_listener_ready",
         )?,
-        cmd_reset_pending_close(cfg, type_map)?,
+        // Recovery for an unreachable host listener: clear the native pending
+        // close gate so a later attempt reaches a registered listener instead
+        // of hanging in `AlreadyPending`. Never approves a close.
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "resetPendingClose",
+                invoke: "reset_pending_close",
+            },
+            &[],
+        )?,
     ])
-}
-
-// The window-close handshake: the webview answers the host's deferred
-// CloseRequested event with its decision, and the host exits only on approval.
-// The request id makes a late decision for an older request a no-op.
-fn cmd_resolve_close(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    cmd_null_result(
-        cfg,
-        type_map,
-        CmdSpec {
-            name: "resolveClose",
-            invoke: "resolve_close",
-        },
-        &[
-            ("approved", "boolean".to_string()),
-            ("request_id", "string".to_string()),
-        ],
-    )
-}
-
-// Recovery for an unreachable host listener: clear the native pending close
-// gate so a later attempt reaches a registered listener instead of hanging in
-// `AlreadyPending`. Never approves a close.
-fn cmd_reset_pending_close(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    cmd_null_result(
-        cfg,
-        type_map,
-        CmdSpec {
-            name: "resetPendingClose",
-            invoke: "reset_pending_close",
-        },
-        &[],
-    )
 }
 
 #[derive(Clone, Copy)]
@@ -414,38 +420,6 @@ fn cmd_preview_clean(
         ],
         &format!("Result<{ok}, {err}>"),
     ))
-}
-
-// Session-scoped Scan cancellation. Only the session id crosses IPC; the
-// backend sets a flag on that one in-flight ScanSession (#94).
-fn cmd_cancel_scan(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    cmd_null_result(
-        cfg,
-        type_map,
-        CmdSpec {
-            name: "cancelScan",
-            invoke: "cancel_scan",
-        },
-        &[("session_id", "string".to_string())],
-    )
-}
-
-fn cmd_cancel_analyzer(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    cmd_null_result(
-        cfg,
-        type_map,
-        CmdSpec {
-            name: "cancelAnalyzer",
-            invoke: "cancel_analyzer",
-        },
-        &[("session_id", "string".to_string())],
-    )
 }
 
 fn render_events(
