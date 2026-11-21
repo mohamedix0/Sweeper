@@ -101,7 +101,7 @@ export function buildScanAnalyzerApi(ctx: MockCtx) {
       const { targets, itemsById } = makeScanResults({ settingsState: ctx.mutable.settingsState, tiers });
       ctx.sessions.set(sessionId, { id: sessionId, createdAtMs: ctx.state.nowMs, minAgeHours: ctx.mutable.settingsState.minAgeHours, targets, itemsById, settingsGeneration: ctx.state.settingsGeneration, cancelled: false });
       const completed = await emitScanProgress({ ctx, sessionId, targets: targets as ScanTarget[], onProgress });
-      if (!completed) err({ code: 'internal', reason: 'scan cancelled' });
+      if (!completed) err({ code: 'scanCancelled', session_id: sessionId });
       return { sessionId };
     },
     async getScanResults(sessionId: string) {

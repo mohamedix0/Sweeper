@@ -209,6 +209,7 @@ export function isContractError(e: unknown): e is ContractError {
 export function formatContractError(e: unknown): string {
   if (isContractError(e)) {
     if (e.code === 'unknownItem') return `Unknown item(s): ${e.details.count}`;
+    if (e.code === 'scanCancelled') return 'Scan cancelled.';
     return e.details.reason || e.code;
   }
   if (e instanceof Error) return e.message;

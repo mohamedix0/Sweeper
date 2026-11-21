@@ -5,6 +5,7 @@ import { createMockController } from '../../api/mock';
 import type { ContractError, ScanProgressEvent, SweeperClient, TierDto } from '../../api/client';
 import { makeAnalyzerNode, makeAnalyzerResult, makeScanResults, makeSettings } from '../../test/fixtures';
 import { ScanAndPreviewView } from '../ScanAndPreviewView';
+import { isScanCancellation } from './useScanWorkflowRuntime';
 
 function makeClient(overrides: Partial<SweeperClient> = {}): SweeperClient {
   const base: SweeperClient = {
@@ -54,7 +55,10 @@ function renderView(client: SweeperClient) {
   );
 }
 
-const cancelledError = { code: 'internal', details: { reason: 'scan cancelled' } } satisfies ContractError;
+const cancelledError = {
+  code: 'scanCancelled',
+  details: { session_id: 'scan-cancel-1' },
+} satisfies ContractError;
 
 describe('Scan cancellation', () => {
   it('a running Scan offers an accessible Stop that cancels by session id only and shows the cancelled state', async () => {
@@ -143,5 +147,13 @@ describe('Scan cancellation', () => {
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: 'Stop Scan' })).not.toBeInTheDocument(),
     );
+  });
+
+  it('recognises cancellation by the typed code, not by an English reason string', () => {
+    expect(isScanCancellation(cancelledError)).toBe(true);
+    expect(
+      isScanCancellation({ code: 'internal', details: { reason: 'scan cancelled' } } satisfies ContractError),
+    ).toBe(false);
+    expect(isScanCancellation({ code: 'invalidInput', details: { reason: 'nope' } } satisfies ContractError)).toBe(false);
   });
 });

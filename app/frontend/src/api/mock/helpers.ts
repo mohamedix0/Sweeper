@@ -2,8 +2,14 @@ import type { AnalyzerNodeDto, PreviewTargetBreakdownDto, RiskDto, ScanItemDto, 
 import type { ContractError, Settings } from '../client';
 import type { ScanItemInfo } from './data';
 
-export function err(input: { code: 'unknownItem'; count: string } | { code: Exclude<ContractError['code'], 'unknownItem'>; reason: string }): never {
+export function err(
+  input:
+    | { code: 'unknownItem'; count: string }
+    | { code: 'scanCancelled'; session_id: string }
+    | { code: Exclude<ContractError['code'], 'unknownItem' | 'scanCancelled'>; reason: string },
+): never {
   if (input.code === 'unknownItem') throw { code: input.code, details: { count: input.count } } satisfies ContractError;
+  if (input.code === 'scanCancelled') throw { code: input.code, details: { session_id: input.session_id } } satisfies ContractError;
   throw { code: input.code, details: { reason: input.reason } } satisfies ContractError;
 }
 

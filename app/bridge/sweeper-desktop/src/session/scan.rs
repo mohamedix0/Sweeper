@@ -129,13 +129,12 @@ impl SessionStore {
     ///
     /// Setting the flag is idempotent: unknown, already-finished, or
     /// already-cancelled ids are harmless no-ops. No session, token, or
-    /// unrelated scan is removed or changed here (#94).
-    pub fn cancel_scan(&mut self, session_id: &str) -> bool {
+    /// unrelated scan is removed or changed here (#94). There is deliberately
+    /// no result to inspect: callers need only know the request was accepted.
+    pub fn cancel_scan(&mut self, session_id: &str) {
         if let Some(flag) = self.active_scans.get(session_id) {
             flag.store(true, Ordering::Relaxed);
-            return true;
         }
-        false
     }
 
     /// Flag every in-flight scan on a window close request. The scans remove
@@ -301,8 +300,12 @@ impl SessionStore {
                 session_id: session_id.to_string(),
             },
         );
-        ContractError::Internal {
-            reason: "scan cancelled".to_string(),
+        // Map the core scanner's `ScanError::Cancelled` to the typed contract
+        // variant here, at the core/bridge boundary: the core crate stays
+        // contract-agnostic while the IPC discriminator is the variant's `code`
+        // rather than a matched English reason string (#94).
+        ContractError::ScanCancelled {
+            session_id: session_id.to_string(),
         }
     }
 

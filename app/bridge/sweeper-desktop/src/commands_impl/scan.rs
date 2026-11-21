@@ -206,8 +206,8 @@ where
             ScanProgressEvent::Cancelled {
                 session_id: ctx.session_id.to_string(),
             },
-            ContractError::Internal {
-                reason: "scan cancelled".to_string(),
+            ContractError::ScanCancelled {
+                session_id: ctx.session_id.to_string(),
             },
         ),
         ScanTerminal::Failed(err) => (

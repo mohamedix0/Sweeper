@@ -161,8 +161,10 @@ function runIsCurrent(ref: { current: number }, runId: number): boolean {
 }
 
 export function isScanCancellation(error: unknown): boolean {
+  // The typed variant's `code` is the discriminator (#94); never match a
+  // free-text English reason (the core `ScanError` keeps its own message).
   const contractError = error as ContractError | undefined;
-  return contractError?.code === 'internal' && contractError.details?.reason === 'scan cancelled';
+  return contractError?.code === 'scanCancelled';
 }
 
 export function applyProgress(args: { event: unknown; runId: number; ref: { current: number }; state: ScanState }) {

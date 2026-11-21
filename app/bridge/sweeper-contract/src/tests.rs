@@ -3,6 +3,31 @@ use crate::types::*;
 use std::fs;
 
 #[test]
+fn scan_cancelled_error_serializes_as_a_typed_variant() {
+    let err = ContractError::ScanCancelled {
+        session_id: "scan-1".to_string(),
+    };
+    let value = serde_json::to_value(&err).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "code": "scanCancelled",
+            "details": { "session_id": "scan-1" },
+        })
+    );
+    let back: ContractError = serde_json::from_value(value).unwrap();
+    assert_eq!(back, err);
+    // Cancellation is never confused with a generic internal error carrying
+    // the same English text; the discriminator is the structured `code`.
+    assert_ne!(
+        err,
+        ContractError::Internal {
+            reason: "scan cancelled".to_string()
+        }
+    );
+}
+
+#[test]
 fn u64_string_serializes_as_decimal_string() {
     let v = U64String(9_007_199_254_740_993);
     let json = serde_json::to_string(&v).unwrap();

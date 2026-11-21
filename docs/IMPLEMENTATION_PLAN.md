@@ -176,10 +176,12 @@ All matching resolves the opened handle via `GetFinalPathNameByHandle` and compa
 | Command | Input | Output |
 |---|---|---|
 | `start_scan` | `tiers?` | `session_id` + progress events |
+| `cancel_scan` | `session_id` | `()` (idempotent no-op for unknown/stale ids; cooperative flag only) |
 | `get_scan_results` | `session_id` | Item list (display metadata; no submitted paths) |
 | `preview_clean` | `session_id`, `item_ids[]`, `confirmations?` | Breakdown + `preview_token` |
 | `execute_clean` | `preview_token` | Progress events + final summary |
 | `start_analyzer` | `root?` | Progress events + tree nodes |
+| `cancel_analyzer` | `session_id` | `()` (idempotent no-op for unknown/stale ids; cooperative flag only) |
 | `explain_item` | `item_id` | Description + `Risk` |
 | `get_settings` / `update_settings` | Settings DTO | Validated settings DTO |
 | `validate_custom_path` | `path` | Verdict + reason (no side effects) |

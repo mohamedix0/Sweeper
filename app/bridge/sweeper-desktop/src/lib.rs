@@ -114,9 +114,10 @@ impl<C: Clock> AppState<C> {
     pub fn begin_close_request(&self) -> CloseRequest {
         let request = self.close_gate.begin_close();
         if matches!(request, CloseRequest::DeferAndAsk { .. }) {
-            if let Ok(mut sessions) = self.sessions.lock() {
-                sessions.cancel_all_active_scans();
-            }
+            // Match the poison-recovery convention used by close_gate/clean_gate:
+            // a poisoned sessions mutex must not silently skip cancelling scans.
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.cancel_all_active_scans();
         }
         request
     }
