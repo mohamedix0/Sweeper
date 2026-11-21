@@ -1,0 +1,4 @@
+version: 2
+exclude:
+  - pattern: 'app/frontend/src/contract/bindings.ts'
+    reason: 'Auto-generated from the typed contract by the exporter; not hand-maintained source.'

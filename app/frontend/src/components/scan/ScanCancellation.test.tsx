@@ -101,9 +101,42 @@ describe('Scan cancellation', () => {
     expect(cancelScan.mock.calls[0]).toEqual(['scan-cancel-1']);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Scan cancelled.');
+    expect(screen.queryByText('Stopping Scan…')).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: 'Stop Scan' })).not.toBeInTheDocument(),
     );
+  });
+
+  it('submits a Stop clicked before the first progress event once the id arrives', async () => {
+    const user = userEvent.setup();
+    let emitId!: () => void;
+    const idGate = new Promise<void>((resolve) => {
+      emitId = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const cancelScan = vi.fn(async (_sessionId: string) => {
+      release();
+    });
+    const startScan = vi.fn(
+      async (_tiers: TierDto[] | null, onProgress?: (event: ScanProgressEvent) => void) => {
+        await idGate;
+        onProgress?.({ kind: 'started', session_id: 'scan-cancel-1' });
+        await gate;
+        return { sessionId: 'scan-cancel-1' };
+      },
+    );
+
+    renderView(makeClient({ startScan, cancelScan }));
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await user.click(await screen.findByRole('button', { name: 'Stop Scan' }));
+    expect(cancelScan).not.toHaveBeenCalled();
+
+    emitId();
+    await waitFor(() => expect(cancelScan).toHaveBeenCalledTimes(1));
+    expect(cancelScan.mock.calls[0]).toEqual(['scan-cancel-1']);
   });
 
   it('reports a failed Stop request without changing the running Scan', async () => {

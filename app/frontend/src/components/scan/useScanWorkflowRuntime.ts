@@ -9,6 +9,15 @@ import type { useScanState } from './useScanState';
 export type ScanState = ReturnType<typeof useScanState>;
 export type ScanToolbar = { query: string; sort: 'size' | 'name'; filter: 'all' | 'eligible' | 'skipped' };
 
+/** Request-specific Stop notice; unrelated info messages must survive terminal outcomes. */
+export const STOPPING_SCAN_NOTICE = 'Stopping Scan…';
+
+function clearStoppingNotice(state: ScanState): void {
+  // Functional update: the run callbacks capture an older `state` render, so
+  // checking `state.info` here could miss the notice Stop just set (#94).
+  state.setInfo((current) => (current === STOPPING_SCAN_NOTICE ? null : current));
+}
+
 function timerActive(scanStartedAt: number | null, sessionId: string | null): boolean {
   if (scanStartedAt == null) return false;
   return sessionId != null;
@@ -187,10 +196,12 @@ export function finishScanRun(args: { ref: { current: number }; runId: number; s
   if (!runIsCurrent(args.ref, args.runId)) return;
   args.ref.current = 0;
   args.state.setScanning(false);
+  clearStoppingNotice(args.state);
 }
 
 export function handleScanError(args: { error: unknown; ref: { current: number }; runId: number; state: ScanState; reset: (m?: string) => void }) {
   if (!runIsCurrent(args.ref, args.runId)) return;
+  clearStoppingNotice(args.state);
   // A cancelled Scan ends with an Internal error carrying a stable reason.
   // Surface it as a cancelled state, not as a generic failure (#94).
   if (isScanCancellation(args.error)) {

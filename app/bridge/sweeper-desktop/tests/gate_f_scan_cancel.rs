@@ -8,7 +8,7 @@
 mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -166,11 +166,13 @@ fn close_request_still_waits_for_an_in_flight_clean_after_cancelling_scans() {
     let request_id = request_close(&state);
     assert!(scan_flag.load(Ordering::Relaxed));
 
+    let (result_tx, result_rx) = mpsc::channel();
     let worker_state = state.clone();
     let worker = thread::spawn(move || {
-        worker_state
+        let approval = worker_state
             .close_gate
-            .record_decision(CloseDecision::Approved, &request_id)
+            .record_decision(CloseDecision::Approved, &request_id);
+        let _ = result_tx.send(approval);
     });
 
     wait_for_clean_gate_sealed(&state);
@@ -178,6 +180,20 @@ fn close_request_still_waits_for_an_in_flight_clean_after_cancelling_scans() {
         state.clean_gate.enter().is_none(),
         "close must not exit while a Clean is in flight"
     );
+    // The sealed gate alone does not prove the worker is blocked; require that
+    // it has not produced a decision while the Clean still holds the gate.
+    assert_eq!(
+        result_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "decision worker must still be waiting for the in-flight Clean"
+    );
     drop(clean_guard);
-    assert_eq!(worker.join().expect("decision worker"), CloseApproval::Exit);
+    assert_eq!(
+        result_rx
+            .recv_timeout(SEAL_TIMEOUT)
+            .expect("decision after release"),
+        CloseApproval::Exit,
+        "close must exit once the in-flight Clean finishes"
+    );
+    worker.join().expect("decision worker");
 }
