@@ -54,6 +54,7 @@ function clearPreviewState(state: ScanState) {
   state.setCleanProgress(null);
   state.setScanProgress(null);
   state.setScanStatus('');
+  state.setRunningSessionId(null);
   state.setFocus(null);
   state.setInspected(null);
 }
@@ -159,9 +160,18 @@ function runIsCurrent(ref: { current: number }, runId: number): boolean {
   return ref.current === runId;
 }
 
+export function isScanCancellation(error: unknown): boolean {
+  const contractError = error as ContractError | undefined;
+  return contractError?.code === 'internal' && contractError.details?.reason === 'scan cancelled';
+}
+
 export function applyProgress(args: { event: unknown; runId: number; ref: { current: number }; state: ScanState }) {
   if (!runIsCurrent(args.ref, args.runId)) return;
-  const progress = progressFromEvent(args.event as { kind: string });
+  const event = args.event as { kind: string; session_id?: string };
+  // Progress events carry the session id allocated before the scan runs. That
+  // is the only id Stop needs; no path is submitted (#94).
+  if (event.session_id) args.state.setRunningSessionId(event.session_id);
+  const progress = progressFromEvent(event);
   if (!progress) return;
   args.state.setScanStatus(progress.status);
   if (progress.progress) args.state.setScanProgress(progress.progress);
@@ -179,6 +189,13 @@ export function finishScanRun(args: { ref: { current: number }; runId: number; s
 
 export function handleScanError(args: { error: unknown; ref: { current: number }; runId: number; state: ScanState; reset: (m?: string) => void }) {
   if (!runIsCurrent(args.ref, args.runId)) return;
+  // A cancelled Scan ends with an Internal error carrying a stable reason.
+  // Surface it as a cancelled state, not as a generic failure (#94).
+  if (isScanCancellation(args.error)) {
+    args.state.setScanStatus('Scan cancelled.');
+    args.state.setScanProgress(null);
+    return;
+  }
   args.state.setError(formatContractError(args.error));
   if (isSessionInvalid(args.error)) args.reset();
 }

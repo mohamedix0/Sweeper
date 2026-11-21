@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sweeper_contract::{
@@ -123,6 +123,28 @@ impl SessionStore {
             min_age_hours: input.effective_min_age_hours,
         };
         self.sessions.insert(input.session_id, session);
+    }
+
+    /// Request cancellation for one active scan session.
+    ///
+    /// Setting the flag is idempotent: unknown, already-finished, or
+    /// already-cancelled ids are harmless no-ops. No session, token, or
+    /// unrelated scan is removed or changed here (#94).
+    pub fn cancel_scan(&mut self, session_id: &str) -> bool {
+        if let Some(flag) = self.active_scans.get(session_id) {
+            flag.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    /// Flag every in-flight scan on a window close request. The scans remove
+    /// their own registrations as they unwind; finished sessions, preview
+    /// tokens, and analyzer work are deliberately left alone (#94).
+    pub fn cancel_all_active_scans(&mut self) {
+        for flag in self.active_scans.values() {
+            flag.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Mark a scan as no longer active (failure/cancel).

@@ -71,6 +71,16 @@ async fn get_scan_results(
     run_cmd!(state, s => commands_impl::get_scan_results(s, session_id))
 }
 
+/// Cancel one in-flight Scan by session id only. Never accepts or forwards a
+/// path; the backend flags just the named ScanSession (#94).
+#[tauri::command]
+async fn cancel_scan(
+    state: tauri::State<'_, AppState<SystemClock>>,
+    session_id: String,
+) -> Result<(), ContractError> {
+    run_blocking(state, move |s| commands_impl::cancel_scan(s, session_id)).await
+}
+
 #[tauri::command]
 async fn preview_clean(
     state: tauri::State<'_, AppState<SystemClock>>,
@@ -242,7 +252,9 @@ fn main() {
         }
     };
     let app_state = AppState::new_default().with_single_instance_guard(single_instance_guard);
-    let close_gate = app_state.close_gate.clone();
+    // The close hook shares the #93 handshake state with the managed app state;
+    // cloning the Arc-backed state keeps one gate, not a second close path.
+    let close_state = app_state.clone();
     #[cfg(has_frontend_dist)]
     let context = tauri::generate_context!();
     #[cfg(not(has_frontend_dist))]
@@ -253,6 +265,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_scan,
             get_scan_results,
+            cancel_scan,
             preview_clean,
             execute_clean,
             start_analyzer,
@@ -274,7 +287,8 @@ fn main() {
                 // Always prevent the native close first: an unsaved draft must
                 // never be lost just because the OS asked the window to close.
                 api.prevent_close();
-                if let CloseRequest::DeferAndAsk { request_id } = close_gate.begin_close() {
+                if let CloseRequest::DeferAndAsk { request_id } = close_state.begin_close_request()
+                {
                     let _ = window.emit(CLOSE_REQUESTED_EVENT, CloseRequestDto { request_id });
                 }
             }

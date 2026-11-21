@@ -312,6 +312,17 @@ where
     }
 }
 
+/// `cancel_scan` implementation.
+///
+/// Flags only the named in-flight `ScanSession`. A stale or unknown id is a
+/// safe no-op; no session store entry, preview token, or unrelated session is
+/// touched (#94).
+pub fn cancel_scan<C: Clock>(state: &AppState<C>, session_id: String) -> Result<(), ContractError> {
+    let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
+    sessions.cancel_scan(&session_id);
+    Ok(())
+}
+
 /// `get_scan_results` implementation.
 pub fn get_scan_results<C: Clock>(
     state: &AppState<C>,

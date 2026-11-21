@@ -24,6 +24,9 @@ use crate::clock::Clock;
 
 pub(crate) use clean::PreviewCleanRequest;
 pub(crate) use mapping::map_analyzer_error_pub;
+// Public so integration tests can register in-flight scans through the same
+// seam the command uses (session-scoped cancellation, #94).
+pub use scan::ScanBeginRequest;
 pub(crate) use support::{sanitize_reason_pub, MsgRef};
 
 pub(super) const SCAN_SESSION_TTL_SECS: u64 = 15 * 60;

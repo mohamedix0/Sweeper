@@ -15,6 +15,7 @@ function fakeScanState() {
     setCleanProgress: vi.fn(),
     setScanProgress: vi.fn(),
     setScanStatus: vi.fn(),
+    setRunningSessionId: vi.fn(),
     setFocus: vi.fn(),
     setInspected: vi.fn(),
     setPreviewProgress: vi.fn(),

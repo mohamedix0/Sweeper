@@ -10,6 +10,7 @@
     "allow": [
       "start_scan",
       "get_scan_results",
+      "cancel_scan",
       "preview_clean",
       "execute_clean",
       "start_analyzer",

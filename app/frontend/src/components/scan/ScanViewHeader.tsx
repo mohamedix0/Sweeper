@@ -16,6 +16,7 @@ interface Props {
   onTier1: (v: boolean) => void;
   onTier2: (v: boolean) => void;
   onRunScan: () => void;
+  onStopScan: () => void;
   onOpenSettings?: (focus?: 'allowDeleteUnknown' | 'enableTier3' | null, prefillCustomPath?: string | null) => void;
 }
 
@@ -104,6 +105,11 @@ function RescanButton(props: { hasResults: boolean; busy: boolean; hasActiveScop
   return <button key="scan" className={rescanClass({ hasResults: false })} onClick={props.onRunScan} disabled={disabled} aria-label="Start Scan">Start Scan</button>;
 }
 
+function StopButton(props: { scanning: boolean; onStop: () => void }) {
+  if (!props.scanning) return null;
+  return <button type="button" className="btn small danger scan-stop-btn" onClick={props.onStop} aria-label="Stop Scan">Stop</button>;
+}
+
 function HeroSubtitle(props: { show: boolean; bytes: string }) {
   if (!props.show) return null;
   return <span className="header-subtitle num" aria-label="Reclaimable total">{formatBytes({ bytes: props.bytes })} reclaimable</span>;
@@ -127,12 +133,13 @@ function ScopeControls(props: { tier1: boolean; tier2: boolean; busy: boolean; s
   );
 }
 
-function HeaderActions(props: { tier1: boolean; tier2: boolean; busy: boolean; settings: Settings | null; settingsStale: boolean; hasResults: boolean; hasActiveScope: boolean; onTier1: (v: boolean) => void; onTier2: (v: boolean) => void; onRunScan: () => void; onOpenSettings?: Props['onOpenSettings'] }) {
+function HeaderActions(props: { tier1: boolean; tier2: boolean; busy: boolean; scanning: boolean; settings: Settings | null; settingsStale: boolean; hasResults: boolean; hasActiveScope: boolean; onTier1: (v: boolean) => void; onTier2: (v: boolean) => void; onRunScan: () => void; onStopScan: () => void; onOpenSettings?: Props['onOpenSettings'] }) {
   return (
     <div className="page-header-right scan-header-actions scan-header-actions-v19">
       <ScopeControls tier1={props.tier1} tier2={props.tier2} busy={props.busy} settings={props.settings} onTier1={props.onTier1} onTier2={props.onTier2} onOpenSettings={props.onOpenSettings} />
       <div className="scan-header-rescan-wrap">
         <SettingsStalePill stale={props.settingsStale} />
+        <StopButton scanning={props.scanning} onStop={props.onStopScan} />
         <RescanButton hasResults={props.hasResults} busy={props.busy} hasActiveScope={props.hasActiveScope} onRunScan={props.onRunScan} />
       </div>
     </div>
@@ -146,7 +153,7 @@ export function ScanViewHeader(props: Props) {
       <div className="page-header-left scan-header-title-block">
         <div className="page-title-row"><h1 className="page-title" id="scan-heading">Scan &amp; Clean</h1><HeroSubtitle show={props.hasResults} bytes={props.heroReclaimable} /></div>
       </div>
-      <HeaderActions tier1={props.tier1} tier2={props.tier2} busy={busy} settings={props.settings} settingsStale={props.settingsStale} hasResults={props.hasResults} hasActiveScope={props.hasActiveScope} onTier1={props.onTier1} onTier2={props.onTier2} onRunScan={props.onRunScan} onOpenSettings={props.onOpenSettings} />
+      <HeaderActions tier1={props.tier1} tier2={props.tier2} busy={busy} scanning={props.scanning} settings={props.settings} settingsStale={props.settingsStale} hasResults={props.hasResults} hasActiveScope={props.hasActiveScope} onTier1={props.onTier1} onTier2={props.onTier2} onRunScan={props.onRunScan} onStopScan={props.onStopScan} onOpenSettings={props.onOpenSettings} />
     </header>
   );
 }

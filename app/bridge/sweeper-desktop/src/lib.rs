@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 pub use clock::{Clock, SystemClock};
 
 use clean_gate::CleanGate;
-use close_gate::CloseGate;
+use close_gate::{CloseGate, CloseRequest};
 use elevation::{ElevationProvider, RealElevationProvider, SingleInstanceState};
 use session::SessionStore;
 use settings_store::SettingsStore;
@@ -105,5 +105,19 @@ impl<C: Clock> AppState<C> {
         self.single_instance = single_instance;
         self.app_exit = app_exit;
         self
+    }
+
+    /// Begin the #93 close handshake and, on a fresh request, flag in-flight
+    /// Scans for cooperative cancellation. No session, token, or Clean is
+    /// dropped here: the draft decision and Clean gate remain authoritative,
+    /// so a close still waits for in-flight Cleans (#94).
+    pub fn begin_close_request(&self) -> CloseRequest {
+        let request = self.close_gate.begin_close();
+        if matches!(request, CloseRequest::DeferAndAsk { .. }) {
+            if let Ok(mut sessions) = self.sessions.lock() {
+                sessions.cancel_all_active_scans();
+            }
+        }
+        request
     }
 }

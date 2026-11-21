@@ -67,7 +67,17 @@ function useScanActions(args: { client: SweeperClient; settings: Settings | null
       finishScanRun({ ref: activeScanRunRef, runId, state });
     }
   }, [activeScanRunRef, cleaning, enableTier3, prepare, reset, runScanBody, state, tier1, tier2]);
-  return { runScan, hasActiveScanScope: hasActiveScope({ tier1, tier2, enableTier3 }) };
+  const stopScan = useCallback(async () => {
+    const sid = state.runningSessionId;
+    if (!sid || !state.scanning) return;
+    try {
+      await client.cancelScan(sid);
+      state.setInfo('Stopping Scan…');
+    } catch {
+      state.setError('Failed to stop Scan.');
+    }
+  }, [client, state]);
+  return { runScan, stopScan, hasActiveScanScope: hasActiveScope({ tier1, tier2, enableTier3 }) };
 }
 
 export function useScanWorkflow(args: WorkflowArgs) {
@@ -82,14 +92,14 @@ export function useScanWorkflow(args: WorkflowArgs) {
   const invalidate = useInvalidate(state);
   const reset = useReset(state, invalidate);
   const inspect = useInspect(client, state);
-  const { runScan, hasActiveScanScope } = useScanActions({ client, settings, settingsVersion, state, allow, invalidate, reset, inspect });
+  const { runScan, stopScan, hasActiveScanScope } = useScanActions({ client, settings, settingsVersion, state, allow, invalidate, reset, inspect });
   useTierRerun({ tier1, tier2 });
   const visibleTargets = useVisibleTargets({ results, toolbar, allow });
   return {
     ...baseView(state), settings, settingsVersion, allowDeleteUnknown: allow, effectiveMinAgeHours: minAgeForView({ results, settings }),
     targets, visibleBaseTargets: visibleBase, visibleTargets, isSessionExpired: expired, hasActiveScanScope,
     invalidatePreviewRequest: invalidate, inspectReqIdRef: state.inspectReqIdRef, activePreviewRequestRef: state.activePreviewRequestRef,
-    previewRevisionRef: state.previewRevisionRef, inspectItem: inspect, resetForInvalidSession: reset, runScan,
+    previewRevisionRef: state.previewRevisionRef, inspectItem: inspect, resetForInvalidSession: reset, runScan, stopScan,
     previewProgress: state.previewProgress, setPreviewProgress: state.setPreviewProgress,
     setPreview: state.setPreview, setResults: state.setResults,
   };

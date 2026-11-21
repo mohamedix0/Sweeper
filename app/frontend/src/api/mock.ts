@@ -97,6 +97,8 @@ export type LogContent = { id: string; content: string };
 
 export type MockController = SweeperClient & {
   advanceTimeMs: (ms: number) => void;
+  setScanStepDelayMs: (ms: number) => void;
+  cancelActiveScans: () => void;
   invalidateSettings: () => void;
   setElevationStatus: (status: { isElevated: boolean }) => void;
   setRelaunchResult: (result: { launched: boolean } | { error: ContractError }) => void;

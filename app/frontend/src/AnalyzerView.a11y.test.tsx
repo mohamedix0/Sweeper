@@ -9,6 +9,7 @@ function clientFor(result: StartAnalyzerResult): SweeperClient {
   return {
     startScan: async () => ({ sessionId: 'scan-a11y' }),
     getScanResults: async () => ({ sessionId: 'scan-a11y', startedUnixSecs: '0', minAgeHours: 24, targets: [] }),
+    cancelScan: async () => undefined,
     previewClean: async () => ({ previewToken: 'tok', breakdown: [], totalSelectedCount: '0', totalSelectedBytes: '0' }),
     executeClean: async () => ({ bytesFreed: '0', deletedCount: '0', skippedCount: '0', skippedReasons: [], aborted: false, abortReason: null, logId: null }),
     startAnalyzer: async () => result,

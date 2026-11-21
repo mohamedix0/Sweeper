@@ -16,6 +16,7 @@ export function resetMockCtx(ctx: MockCtx) {
   ctx.mutable.settingsState = defaultSettings();
   ctx.mutable.elevationStatus = { isElevated: false };
   ctx.mutable.relaunchResult = { launched: true };
+  ctx.mutable.scanStepDelayMs = 0;
   ctx.revalidation.clear();
   ctx.logs.length = 0;
   ctx.logs.push(...defaultSeedLogs({ nowMs: ctx.state.nowMs }));
@@ -28,6 +29,9 @@ export function buildTestApi(ctx: MockCtx) {
     },
     invalidateSettings() {
       ctx.bumpSettings();
+    },
+    setScanStepDelayMs(ms: number) {
+      ctx.mutable.scanStepDelayMs = Math.max(0, ms);
     },
     setElevationStatus(status: { isElevated: boolean }) {
       ctx.mutable.elevationStatus = { ...status };

@@ -145,6 +145,7 @@ fn scan_and_clean_commands(
                 ("session_id", Some(ArgTy::Str)),
             ),
         )?,
+        cmd_cancel_scan(cfg, type_map)?,
         cmd_preview_clean(cfg, type_map)?,
         cmd_one::<ExecuteCleanResponse, String>(
             cfg,
@@ -438,6 +439,24 @@ fn cmd_preview_clean(
         ],
         &format!("Result<{ok}, {err}>"),
     ))
+}
+
+// Session-scoped Scan cancellation. Only the session id crosses IPC; the
+// backend sets a flag on that one in-flight ScanSession (#94).
+fn cmd_cancel_scan(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, Box<dyn Error>> {
+    cmd_null_result(
+        cfg,
+        type_map,
+        CmdSpec {
+            name: "cancelScan",
+            invoke: "cancel_scan",
+            arg_obj: Some("{ sessionId }"),
+        },
+        &[("session_id", "string".to_string())],
+    )
 }
 
 fn cmd_cancel_analyzer(

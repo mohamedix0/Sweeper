@@ -103,6 +103,7 @@ export type Settings = {
 export interface SweeperClient {
   startScan(tiers: TierDto[] | null, onProgress?: (e: ScanProgressEvent) => void): Promise<{ sessionId: string }>;
   getScanResults(sessionId: string): Promise<ScanResults>;
+  cancelScan(sessionId: string): Promise<void>;
   previewClean(
     sessionId: string,
     itemIds: string[],
@@ -169,6 +170,7 @@ export function createTauriClient(): SweeperClient {
   return {
     startScan: (tiers, onProgress) => withScanProgress(onProgress, () => commands.startScan(tiers)),
     getScanResults: async (sessionId) => unwrap(await commands.getScanResults(sessionId)),
+    cancelScan: async (sessionId) => { unwrap(await commands.cancelScan(sessionId)); },
     previewClean: async (sessionId, itemIds, confirmations) => unwrap(await commands.previewClean(sessionId, itemIds, confirmations)),
     executeClean: (previewToken, onProgress) => withCleanProgress(previewToken, onProgress, () => commands.executeClean(previewToken)),
     startAnalyzer: (root, onProgress) => withAnalyzerProgress(onProgress, () => commands.startAnalyzer(root)),

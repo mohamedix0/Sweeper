@@ -238,6 +238,19 @@ fn preview_clean_response_serializes_counts_as_strings() {
 }
 
 #[test]
+fn typed_contract_exposes_session_scoped_cancel_scan() {
+    let rendered = crate::render_bindings().expect("render bindings");
+    assert!(
+        rendered.contains("async cancelScan(sessionId: string)"),
+        "cancelScan must be part of the typed command surface"
+    );
+    assert!(
+        rendered.contains("TAURI_INVOKE(\"cancel_scan\", { sessionId })"),
+        "cancelScan must invoke the scoped cancel_scan command with the session id only"
+    );
+}
+
+#[test]
 fn export_ts_bindings_matches_committed_file() {
     let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")

@@ -54,7 +54,15 @@ function scanProgressEvent(input: { sessionId: string; target: ScanTarget; index
   };
 }
 
-async function emitTargetProgress(input: { sessionId: string; target: ScanTarget; index: number; totalTargets: number; totals: ScanTotals; onProgress?: (p: ScanProgressEvent) => void }) {
+function isCancelled(ctx: MockCtx, sessionId: string): boolean {
+  return ctx.sessions.get(sessionId)?.cancelled ?? false;
+}
+
+async function emitTargetProgress(input: { ctx: MockCtx; sessionId: string; target: ScanTarget; index: number; totalTargets: number; totals: ScanTotals; onProgress?: (p: ScanProgressEvent) => void }) {
+  // Test-only delay keeps a Scan observably Running long enough for Stop E2E.
+  const delay = input.ctx.mutable.scanStepDelayMs;
+  if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+  if (isCancelled(input.ctx, input.sessionId)) return;
   const counts = targetCounts(input.target);
   input.totals.scannedItems += counts.count;
   input.totals.scannedBytes += counts.bytes;
@@ -62,17 +70,27 @@ async function emitTargetProgress(input: { sessionId: string; target: ScanTarget
   await Promise.resolve();
 }
 
-async function emitScanProgress(input: { sessionId: string; targets: ScanTarget[]; onProgress?: (p: ScanProgressEvent) => void }) {
+async function emitScanProgress(input: { ctx: MockCtx; sessionId: string; targets: ScanTarget[]; onProgress?: (p: ScanProgressEvent) => void }): Promise<boolean> {
   input.onProgress?.({ kind: 'started', session_id: input.sessionId });
   const totals = { scannedItems: 0n, scannedBytes: 0n };
   for (let i = 0; i < input.targets.length; i++) {
-    await emitTargetProgress({ sessionId: input.sessionId, target: input.targets[i], index: i, totalTargets: input.targets.length, totals, onProgress: input.onProgress });
+    if (isCancelled(input.ctx, input.sessionId)) break;
+    await emitTargetProgress({ ctx: input.ctx, sessionId: input.sessionId, target: input.targets[i], index: i, totalTargets: input.targets.length, totals, onProgress: input.onProgress });
+  }
+  if (isCancelled(input.ctx, input.sessionId)) {
+    input.onProgress?.({ kind: 'cancelled', session_id: input.sessionId });
+    return false;
   }
   if (input.targets.length === 0) {
     input.onProgress?.({ kind: 'progress', session_id: input.sessionId, completed_targets: 0, total_targets: 0, current_target_id: null, current_target_name: null, scanned_items: '0', scanned_bytes: '0' });
     await Promise.resolve();
   }
+  if (isCancelled(input.ctx, input.sessionId)) {
+    input.onProgress?.({ kind: 'cancelled', session_id: input.sessionId });
+    return false;
+  }
   input.onProgress?.({ kind: 'completed', session_id: input.sessionId });
+  return true;
 }
 
 export function buildScanAnalyzerApi(ctx: MockCtx) {
@@ -81,13 +99,23 @@ export function buildScanAnalyzerApi(ctx: MockCtx) {
       ctx.state.scanSeq += 1;
       const sessionId = 'mock-session-' + String(ctx.state.scanSeq);
       const { targets, itemsById } = makeScanResults({ settingsState: ctx.mutable.settingsState, tiers });
-      ctx.sessions.set(sessionId, { id: sessionId, createdAtMs: ctx.state.nowMs, minAgeHours: ctx.mutable.settingsState.minAgeHours, targets, itemsById, settingsGeneration: ctx.state.settingsGeneration });
-      await emitScanProgress({ sessionId, targets: targets as ScanTarget[], onProgress });
+      ctx.sessions.set(sessionId, { id: sessionId, createdAtMs: ctx.state.nowMs, minAgeHours: ctx.mutable.settingsState.minAgeHours, targets, itemsById, settingsGeneration: ctx.state.settingsGeneration, cancelled: false });
+      const completed = await emitScanProgress({ ctx, sessionId, targets: targets as ScanTarget[], onProgress });
+      if (!completed) err({ code: 'internal', reason: 'scan cancelled' });
       return { sessionId };
     },
     async getScanResults(sessionId: string) {
       const session = getValidSessionState({ ctx, sessions: ctx.sessions, sessionId });
       return { sessionId: session.id, startedUnixSecs: Math.floor(session.createdAtMs / 1000).toString(), minAgeHours: session.minAgeHours, targets: session.targets };
+    },
+    async cancelScan(sessionId: string) {
+      // Idempotent and session-scoped: unknown ids are harmless no-ops, just
+      // like the Rust `cancel_scan` command (#94).
+      const session = ctx.sessions.get(sessionId);
+      if (session) session.cancelled = true;
+    },
+    cancelActiveScans() {
+      for (const session of ctx.sessions.values()) session.cancelled = true;
     },
     async startAnalyzer(root: string | null | undefined, onProgress?: (p: AnalyzerProgressEvent) => void) {
       ctx.state.analyzerSeq += 1;

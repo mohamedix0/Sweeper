@@ -35,6 +35,7 @@ function invoke(cmd: string, payload: unknown = {}) {
 const VALID_ARGUMENTS: Record<string, unknown> = {
   start_scan: { tiers: null },
   get_scan_results: { sessionId: 'session-1' },
+  cancel_scan: { sessionId: 'session-1' },
   preview_clean: { sessionId: 'session-1', itemIds: ['t1::1'], confirmations: null },
   execute_clean: { previewToken: 'token-1' },
   start_analyzer: { root: null },
