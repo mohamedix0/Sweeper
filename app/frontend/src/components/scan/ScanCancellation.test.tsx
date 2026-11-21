@@ -107,6 +107,47 @@ describe('Scan cancellation', () => {
     );
   });
 
+  it('does not re-apply the Stop notice when the Scan finishes before cancelScan resolves', async () => {
+    const user = userEvent.setup();
+    let releaseScan!: () => void;
+    const scanGate = new Promise<void>((resolve) => {
+      releaseScan = resolve;
+    });
+    let releaseCancel!: () => void;
+    const cancelGate = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const startScan = vi.fn(
+      async (_tiers: TierDto[] | null, onProgress?: (event: ScanProgressEvent) => void) => {
+        onProgress?.({ kind: 'started', session_id: 'scan-cancel-1' });
+        await scanGate;
+        return { sessionId: 'scan-cancel-1' };
+      },
+    );
+    const cancelScan = vi.fn(async (_sessionId: string) => {
+      await cancelGate;
+    });
+
+    renderView(makeClient({ startScan, cancelScan }));
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await user.click(await screen.findByRole('button', { name: 'Stop Scan' }));
+    await waitFor(() => expect(cancelScan).toHaveBeenCalledTimes(1));
+
+    // The Scan reaches a terminal state while the Stop IPC is still pending.
+    await act(async () => {
+      releaseScan();
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Stop Scan' })).not.toBeInTheDocument(),
+    );
+
+    // The late Stop resolution must not resurrect the request-specific notice.
+    await act(async () => {
+      releaseCancel();
+    });
+    expect(screen.queryByText('Stopping Scan…')).not.toBeInTheDocument();
+  });
+
   it('submits a Stop clicked before the first progress event once the id arrives', async () => {
     const user = userEvent.setup();
     let emitId!: () => void;

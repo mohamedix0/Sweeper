@@ -76,9 +76,14 @@ function useStopScan(args: { client: SweeperClient; state: ReturnType<typeof use
   const { client, state } = args;
   const pendingStopRef = useRef(false);
   const submitStop = useCallback(async (sid: string) => {
+    const runId = state.activeScanRunRef.current;
     try {
       await client.cancelScan(sid);
-      state.setInfo(STOPPING_SCAN_NOTICE);
+      // A Scan can finish (and clear its notice) while cancelScan is in
+      // flight. Only show the notice if that same run is still active (#94).
+      if (runId !== 0 && state.activeScanRunRef.current === runId) {
+        state.setInfo(STOPPING_SCAN_NOTICE);
+      }
     } catch {
       state.setError('Failed to stop Scan.');
     }
