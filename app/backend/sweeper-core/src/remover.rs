@@ -2,7 +2,8 @@
 //!
 //! Sole module allowed to invoke `sweeper-winfs` deletion primitives (enforced by clippy/gate-a).
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1480,36 +1481,97 @@ fn root_parent_or_self(root: &CanonicalPath) -> CanonicalPath {
     root.clone()
 }
 
+/// Maximum number of directory levels kept in the ancestor-chain cache.
+/// Bounding it keeps memory flat even for a Clean run over a very large tree.
+const ANCESTOR_CHAIN_CACHE_CAPACITY: usize = 512;
+
+/// Precomputed canonical ancestor paths for a single directory level.
+///
+/// This caches only immutable path strings. It never stores a safety verdict:
+/// every item still opens and inspects each ancestor handle at the moment of
+/// deletion, so ADR 0003 handle-based revalidation and TOCTOU protection are
+/// unchanged. The optimization is avoiding repeated path construction for
+/// every item in the same directory ("cached per directory level").
+#[derive(Debug, Clone)]
+struct AncestorChain {
+    /// Canonical paths from the drive root down to and including this level.
+    paths: Vec<CanonicalPath>,
+}
+
+impl AncestorChain {
+    fn build(dir: &CanonicalPath) -> Self {
+        let drive = dir.drive_prefix();
+        let mut cur = PathBuf::from(format!(r"{}\", drive));
+        let mut paths = Vec::with_capacity(dir.segment_count());
+        for seg in dir.segments() {
+            cur.push(seg);
+            let Ok(canon) = CanonicalPath::parse_lexical(&cur.to_string_lossy()) else {
+                continue;
+            };
+            paths.push(canon);
+        }
+        Self { paths }
+    }
+}
+
+thread_local! {
+    static ANCESTOR_CHAIN_CACHE: RefCell<HashMap<String, AncestorChain>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Run `f` with the cached ancestor chain for `dir`, building it once per
+/// directory level. The cache is cleared when full, so it stays bounded.
+fn with_ancestor_chain<R, F>(dir: &CanonicalPath, f: F) -> R
+where
+    F: FnOnce(&AncestorChain) -> R,
+{
+    ANCESTOR_CHAIN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(dir.as_str()) {
+            if cache.len() >= ANCESTOR_CHAIN_CACHE_CAPACITY {
+                cache.clear();
+            }
+            let chain = AncestorChain::build(dir);
+            cache.insert(dir.as_str().to_string(), chain);
+        }
+        let chain = cache
+            .get(dir.as_str())
+            .expect("ancestor chain was just ensured to exist");
+        f(chain)
+    })
+}
+
+#[cfg(test)]
+fn ancestor_chain_cache_len() -> usize {
+    ANCESTOR_CHAIN_CACHE.with(|cache| cache.borrow().len())
+}
+
 fn path_has_link_point_ancestor(
     path: &CanonicalPath,
     boundary_root: &CanonicalPath,
     exclude_final_path: bool,
 ) -> Result<bool, String> {
-    let drive = path.drive_prefix();
-    let mut cur = PathBuf::from(format!(r"{}\", drive));
-    for seg in path.segments() {
-        cur.push(seg);
-        let Ok(cur_canon) = CanonicalPath::parse_lexical(&cur.to_string_lossy()) else {
-            continue;
-        };
-        if exclude_final_path && cur_canon.is_same_path(path) {
-            continue;
-        }
-        // If checking a specific boundary root context, we still must detect if boundary_root itself or
-        // any of its ancestors (down to this point) is a link point.
-        let _ = boundary_root; // boundary considered by callers
-        match sweeper_winfs::open_for_inspection(&cur)
-            .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
-        {
-            Ok(ReparseTagClass::LinkPoint) => return Ok(true),
-            Ok(_) => {}
-            Err(WinfsError::Win32 { code, .. }) if sweeper_winfs::is_not_found(code) => {
-                return Ok(false)
+    // A specific boundary root is considered by the callers; the full chain
+    // from the drive root is always inspected so no ancestor check is dropped.
+    let _ = boundary_root;
+    with_ancestor_chain(path, |chain| {
+        for cur_canon in &chain.paths {
+            if exclude_final_path && cur_canon.is_same_path(path) {
+                continue;
             }
-            Err(e) => return Err(e.to_string()),
+            match sweeper_winfs::open_for_inspection(Path::new(cur_canon.as_str()))
+                .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
+            {
+                Ok(ReparseTagClass::LinkPoint) => return Ok(true),
+                Ok(_) => {}
+                Err(WinfsError::Win32 { code, .. }) if sweeper_winfs::is_not_found(code) => {
+                    return Ok(false)
+                }
+                Err(e) => return Err(e.to_string()),
+            }
         }
-    }
-    Ok(false)
+        Ok(false)
+    })
 }
 
 fn get_handle_logical_size(
@@ -1663,6 +1725,25 @@ pub fn validated_item_for_tests(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn ancestor_chain_cache_precomputes_levels_and_stays_bounded() {
+        let dir = CanonicalPath::parse_lexical(r"C:\Temp\a\b\c").unwrap();
+        with_ancestor_chain(&dir, |chain| {
+            let paths: Vec<&str> = chain.paths.iter().map(|p| p.as_str()).collect();
+            assert_eq!(
+                paths,
+                vec![r"C:\Temp", r"C:\Temp\a", r"C:\Temp\a\b", r"C:\Temp\a\b\c"]
+            );
+        });
+
+        // The cache is a bounded optimization: it may not grow without limit.
+        for i in 0..(ANCESTOR_CHAIN_CACHE_CAPACITY * 3) {
+            let p = CanonicalPath::parse_lexical(&format!(r"C:\Temp\level{i}")).unwrap();
+            with_ancestor_chain(&p, |_| ());
+        }
+        assert!(ancestor_chain_cache_len() <= ANCESTOR_CHAIN_CACHE_CAPACITY);
+    }
 
     #[test]
     fn journal_failure_after_breaker_keeps_first_abort_reason() {
