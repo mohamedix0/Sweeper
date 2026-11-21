@@ -1498,20 +1498,55 @@ struct AncestorChain {
     paths: Vec<CanonicalPath>,
 }
 
+/// Lazily yield canonical prefixes from the drive root down to and including
+/// `directory_level`, skipping segments that fail lexical parsing.
+fn ancestor_prefixes(directory_level: &CanonicalPath) -> impl Iterator<Item = CanonicalPath> + '_ {
+    let drive_root = PathBuf::from(format!(r"{}\", directory_level.drive_prefix()));
+    directory_level
+        .segments()
+        .scan(drive_root, |current, segment| {
+            current.push(segment);
+            Some(current.clone())
+        })
+        .filter_map(|prefix| CanonicalPath::parse_lexical(&prefix.to_string_lossy()).ok())
+}
+
 impl AncestorChain {
     fn build(directory_level: &CanonicalPath) -> Self {
-        let drive = directory_level.drive_prefix();
-        let mut current = PathBuf::from(format!(r"{}\", drive));
-        let mut paths = Vec::with_capacity(directory_level.segment_count());
-        for segment in directory_level.segments() {
-            current.push(segment);
-            let Ok(canon) = CanonicalPath::parse_lexical(&current.to_string_lossy()) else {
-                continue;
-            };
-            paths.push(canon);
+        Self {
+            paths: ancestor_prefixes(directory_level).collect(),
         }
-        Self { paths }
     }
+}
+
+/// Canonical prefixes from the drive root down to `directory_level`, generated
+/// lazily. `None` means the caller should stop inspecting: either the prefix
+/// did not parse or it does not exist on disk.
+fn inspect_ancestor_prefix(prefix: &CanonicalPath) -> Result<Option<bool>, String> {
+    #[cfg(test)]
+    ANCESTOR_PREFIX_CHECKS.with(|checks| checks.set(checks.get() + 1));
+    match sweeper_winfs::open_for_inspection(Path::new(prefix.as_str()))
+        .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
+    {
+        Ok(ReparseTagClass::LinkPoint) => Ok(Some(true)),
+        Ok(_) => Ok(Some(false)),
+        Err(WinfsError::Win32 { code, .. }) if sweeper_winfs::is_not_found(code) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Inspect one prefix at a time for an over-budget chain. Each canonical path
+/// is dropped before the next is generated, so transient memory stays O(depth)
+/// rather than O(depth²) even though retained cache cost stays zero.
+fn inspect_deep_ancestors(directory_level: &CanonicalPath) -> Result<bool, String> {
+    for prefix in ancestor_prefixes(directory_level) {
+        match inspect_ancestor_prefix(&prefix)? {
+            Some(true) => return Ok(true),
+            Some(false) => {}
+            None => return Ok(false),
+        }
+    }
+    Ok(false)
 }
 
 /// Retained-cost budget, in segment slots across all cached chains. A chain of
@@ -1532,6 +1567,8 @@ thread_local! {
     static ANCESTOR_CHAIN_RETAINED_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     #[cfg(test)]
     static ANCESTOR_CHAIN_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[cfg(test)]
+    static ANCESTOR_PREFIX_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Run `f` with the ancestor chain for `directory_level`, building it at most
@@ -1606,20 +1643,22 @@ fn path_has_link_point_ancestor(
     } else {
         path.clone()
     };
+    if ancestor_chain_cost(directory_level.segment_count()) > ANCESTOR_CHAIN_RETAINED_COST_BUDGET {
+        // Stream expensive chains instead of materialising every prefix; the
+        // ordinary cached path below is unchanged for affordable directories.
+        #[cfg(test)]
+        ANCESTOR_CHAIN_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        return inspect_deep_ancestors(&directory_level);
+    }
     with_ancestor_chain(&directory_level, |chain| {
         for current in &chain.paths {
             // `current` is always an ancestor directory, never the item itself:
             // the chain stops at the parent level for per-item checks. Every
             // ancestor is still opened and inspected here at deletion time.
-            match sweeper_winfs::open_for_inspection(Path::new(current.as_str()))
-                .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
-            {
-                Ok(ReparseTagClass::LinkPoint) => return Ok(true),
-                Ok(_) => {}
-                Err(WinfsError::Win32 { code, .. }) if sweeper_winfs::is_not_found(code) => {
-                    return Ok(false)
-                }
-                Err(e) => return Err(e.to_string()),
+            match inspect_ancestor_prefix(current)? {
+                Some(true) => return Ok(true),
+                Some(false) => {}
+                None => return Ok(false),
             }
         }
         Ok(false)
@@ -1876,6 +1915,34 @@ mod tests {
         with_ancestor_chain(&shallow, |_| ());
         assert_eq!(ancestor_chain_cache_len(), 1);
         assert!(ancestor_chain_retained_cost() <= ANCESTOR_CHAIN_RETAINED_COST_BUDGET);
+    }
+
+    #[test]
+    fn deep_ancestor_chain_is_streamed_without_materialising_prefixes() {
+        use sweeper_testkit::Sandbox;
+
+        ANCESTOR_CHAIN_CACHE.with(|cache| cache.borrow_mut().clear());
+        ANCESTOR_CHAIN_RETAINED_COST.with(|cost| cost.set(0));
+        ANCESTOR_PREFIX_CHECKS.with(|checks| checks.set(0));
+
+        let sb = Sandbox::new();
+        // 185 real levels exceed the cached cost budget (depth >= 181).
+        let deep = sweeper_testkit::create_deep_tree(sb.root(), 185).unwrap();
+        let deep_canon = CanonicalPath::from_existing_path(&deep.to_string_lossy())
+            .unwrap()
+            .into_canonical();
+        assert!(
+            ancestor_chain_cost(deep_canon.segment_count()) > ANCESTOR_CHAIN_RETAINED_COST_BUDGET
+        );
+
+        assert!(!path_has_link_point_ancestor(&deep_canon, &deep_canon, false).unwrap());
+        assert_eq!(
+            ANCESTOR_PREFIX_CHECKS.with(|checks| checks.get()),
+            deep_canon.segment_count(),
+            "every prefix must be inspected one at a time"
+        );
+        assert_eq!(ancestor_chain_cache_len(), 0);
+        assert_eq!(ancestor_chain_retained_cost(), 0);
     }
 
     #[test]
