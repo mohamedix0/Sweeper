@@ -19,6 +19,11 @@ function runIsCurrent(args: { ref: { current: number }; runId: number }): boolea
   return args.ref.current === args.runId;
 }
 
+/** A captured Stop only applies while its own non-terminal run is still active (#94). */
+function isSameActiveRun(args: { ref: { current: number }; runId: number }): boolean {
+  return args.runId !== 0 && args.ref.current === args.runId;
+}
+
 function canStartRun(ref: { current: number }): boolean {
   return ref.current === 0;
 }
@@ -81,7 +86,7 @@ function useStopScan(args: { client: SweeperClient; state: ReturnType<typeof use
       await client.cancelScan(sid);
       // A Scan can finish (and clear its notice) while cancelScan is in
       // flight. Only show the notice if that same run is still active (#94).
-      if (runId !== 0 && state.activeScanRunRef.current === runId) {
+      if (isSameActiveRun({ ref: state.activeScanRunRef, runId })) {
         state.setInfo(STOPPING_SCAN_NOTICE);
       }
     } catch {
