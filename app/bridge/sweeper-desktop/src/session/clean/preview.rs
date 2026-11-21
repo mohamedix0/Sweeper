@@ -50,6 +50,9 @@ impl SessionStore {
         req: PreviewCleanRequest,
     ) -> Result<PreviewCleanResponse, ContractError> {
         self.cleanup(clock);
+        // A Clean must never start while a Scan is Running (#95). This check
+        // precedes token issuance, so a rejected Preview issues no token.
+        self.reject_while_scan_running("Clean")?;
         let req = PreviewRequest {
             session_id: req.session_id,
             item_ids: req.item_ids,

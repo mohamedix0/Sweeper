@@ -24,6 +24,10 @@ impl SessionStore {
         current_settings_generation: u64,
     ) -> Result<(u32, Vec<ValidatedItem>, u64), ContractError> {
         self.cleanup(clock);
+        // A Clean must never start while a Scan is Running (#95). The check
+        // comes before token lookup/consumption, so a rejected execute leaves
+        // the single-use preview token intact for a later, valid attempt.
+        self.reject_while_scan_running("Clean")?;
         let now = clock.now_unix_secs();
         let snapshot = self.snapshot_preview_token(preview_token)?;
         Self::validate_preview_snapshot(now, &snapshot)?;

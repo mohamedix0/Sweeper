@@ -77,6 +77,35 @@ impl SessionStore {
         })
     }
 
+    /// Reject a new operation while a Scan is Running (#95).
+    ///
+    /// `active_scans` holds one entry per in-flight `ScanSession`, registered by
+    /// `begin_scan` and removed on every terminal outcome: `finish_scan` on
+    /// success, `abort_scan` on cancel/error, and the cancel-and-clear path on
+    /// settings changes or a close request. Finished, expired, and cancelled
+    /// sessions therefore leave no stale entry, so sequential runs never see a
+    /// false positive. Callers check and register while holding the same
+    /// `&mut self`, so there is no window between preflight and registration.
+    pub fn reject_while_scan_running(&self, operation: &str) -> Result<(), ContractError> {
+        if self.active_scans.is_empty() {
+            Ok(())
+        } else {
+            Err(ContractError::Internal {
+                reason: format!("{operation} rejected: a Scan is already running"),
+            })
+        }
+    }
+
+    /// Register a scan only when no Scan is already running (#95).
+    pub fn begin_scan_checked<C: Clock>(
+        &mut self,
+        clock: &C,
+        req: ScanBeginRequest,
+    ) -> Result<PreparedScan, ContractError> {
+        self.reject_while_scan_running("a second Scan")?;
+        self.begin_scan(clock, req)
+    }
+
     fn effective_scan_settings(
         tiers: Option<Vec<TierDto>>,
         settings: &SweeperSettings,
@@ -171,7 +200,7 @@ impl SessionStore {
         C: Clock,
         F: FnMut(ScanProgressEvent) + Send + 'static,
     {
-        let prepared = self.begin_scan(
+        let prepared = self.begin_scan_checked(
             clock,
             ScanBeginRequest {
                 tiers: req.tiers,
