@@ -168,21 +168,21 @@ async function withAnalyzerProgress<T>(onProgress: ((e: AnalyzerProgressEvent) =
 
 export function createTauriClient(): SweeperClient {
   return {
-    startScan: (tiers, onProgress) => withScanProgress(onProgress, () => commands.startScan(tiers)),
-    getScanResults: async (sessionId) => unwrap(await commands.getScanResults(sessionId)),
-    cancelScan: async (sessionId) => { unwrap(await commands.cancelScan(sessionId)); },
-    previewClean: async (sessionId, itemIds, confirmations) => unwrap(await commands.previewClean(sessionId, itemIds, confirmations)),
-    executeClean: (previewToken, onProgress) => withCleanProgress(previewToken, onProgress, () => commands.executeClean(previewToken)),
-    startAnalyzer: (root, onProgress) => withAnalyzerProgress(onProgress, () => commands.startAnalyzer(root)),
-    cancelAnalyzer: async (sessionId) => { unwrap(await commands.cancelAnalyzer(sessionId)); },
-    explainItem: async (itemId) => unwrap(await commands.explainItem(itemId)),
+    startScan: (tiers, onProgress) => withScanProgress(onProgress, () => commands.startScan({ tiers })),
+    getScanResults: async (sessionId) => unwrap(await commands.getScanResults({ sessionId })),
+    cancelScan: async (sessionId) => { unwrap(await commands.cancelScan({ sessionId })); },
+    previewClean: async (sessionId, itemIds, confirmations) => unwrap(await commands.previewClean({ sessionId, itemIds, confirmations })),
+    executeClean: (previewToken, onProgress) => withCleanProgress(previewToken, onProgress, () => commands.executeClean({ previewToken })),
+    startAnalyzer: (root, onProgress) => withAnalyzerProgress(onProgress, () => commands.startAnalyzer({ root })),
+    cancelAnalyzer: async (sessionId) => { unwrap(await commands.cancelAnalyzer({ sessionId })); },
+    explainItem: async (itemId) => unwrap(await commands.explainItem({ itemId })),
     getSettings: async () => normalizeSettings(unwrap(await commands.getSettings()) as Settings & { enableElevationTargets?: boolean }),
-    updateSettings: async (settings) => normalizeSettings(unwrap(await commands.updateSettings(settings)) as Settings & { enableElevationTargets?: boolean }),
+    updateSettings: async (settings) => normalizeSettings(unwrap(await commands.updateSettings({ settings })) as Settings & { enableElevationTargets?: boolean }),
     getElevationStatus: async () => unwrap(await commands.getElevationStatus()),
     relaunchElevated: async () => unwrap(await commands.relaunchElevated()),
-    validateCustomPath: async (path) => unwrap(await commands.validateCustomPath(path)),
+    validateCustomPath: async (path) => unwrap(await commands.validateCustomPath({ path })),
     listLogs: async () => unwrap(await commands.listLogs()),
-    readLog: async (logId) => unwrap(await commands.readLog(logId)),
+    readLog: async (logId) => unwrap(await commands.readLog({ logId })),
   };
 }
 

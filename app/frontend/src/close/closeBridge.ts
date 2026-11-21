@@ -71,7 +71,7 @@ function defaultDeps(): CloseBridgeDeps {
     listenForHostClose: (handler) =>
       events.closeRequestedByHost.listen((event) => handler(event.payload)),
     resolve: async (approved, requestId) => {
-      const result = await commands.resolveClose(approved, requestId);
+      const result = await commands.resolveClose({ approved, requestId });
       if (result.status === 'error') throw result.error;
     },
     notifyListenerReady: async () => {

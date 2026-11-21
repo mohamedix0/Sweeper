@@ -266,12 +266,12 @@ fn preview_clean_response_serializes_counts_as_strings() {
 fn typed_contract_exposes_session_scoped_cancel_scan() {
     let rendered = crate::render_bindings().expect("render bindings");
     assert!(
-        rendered.contains("async cancelScan(sessionId: string)"),
-        "cancelScan must be part of the typed command surface"
+        rendered.contains("async cancelScan(args: { sessionId: string })"),
+        "cancelScan must take a single named argument object carrying only the session id"
     );
     assert!(
-        rendered.contains("TAURI_INVOKE(\"cancel_scan\", { sessionId })"),
-        "cancelScan must invoke the scoped cancel_scan command with the session id only"
+        rendered.contains("TAURI_INVOKE(\"cancel_scan\", args)"),
+        "cancelScan must forward that object unchanged to the scoped cancel_scan command"
     );
 }
 

@@ -4,65 +4,65 @@
 /** user-defined commands **/
 
 export const commands = {
-async startScan(tiers: ("Tier1" | "Tier2" | "Tier3")[] | null) : Promise<Result<{ sessionId: string }, ContractError>> {
+async startScan(args: { tiers: ("Tier1" | "Tier2" | "Tier3")[] | null }) : Promise<Result<{ sessionId: string }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_scan", { tiers }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_scan", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async getScanResults(sessionId: string) : Promise<Result<{ sessionId: string; startedUnixSecs: string; minAgeHours: number; targets: TargetScanResultDto[] }, ContractError>> {
+async getScanResults(args: { sessionId: string }) : Promise<Result<{ sessionId: string; startedUnixSecs: string; minAgeHours: number; targets: TargetScanResultDto[] }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_scan_results", { sessionId }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_scan_results", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async cancelScan(sessionId: string) : Promise<Result<null, ContractError>> {
+async cancelScan(args: { sessionId: string }) : Promise<Result<null, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_scan", { sessionId }) };
+    return { status: "ok", data: await TAURI_INVOKE("cancel_scan", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async previewClean(sessionId: string, itemIds: string[], confirmations: { typedConfirmation: string | null } | null) : Promise<Result<{ previewToken: string; breakdown: PreviewTargetBreakdownDto[]; totalSelectedCount: string; totalSelectedBytes: string; skippedCount?: string; skippedReasons?: string[] }, ContractError>> {
+async previewClean(args: { sessionId: string; itemIds: string[]; confirmations: { typedConfirmation: string | null } | null }) : Promise<Result<{ previewToken: string; breakdown: PreviewTargetBreakdownDto[]; totalSelectedCount: string; totalSelectedBytes: string; skippedCount?: string; skippedReasons?: string[] }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("preview_clean", { sessionId, itemIds, confirmations }) };
+    return { status: "ok", data: await TAURI_INVOKE("preview_clean", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async executeClean(previewToken: string) : Promise<Result<{ bytesFreed: string; deletedCount: string; skippedCount: string; skippedReasons: SkippedReasonDto[]; aborted: boolean; abortReason: string | null; logId: string | null; journalErrors?: string[] }, ContractError>> {
+async executeClean(args: { previewToken: string }) : Promise<Result<{ bytesFreed: string; deletedCount: string; skippedCount: string; skippedReasons: SkippedReasonDto[]; aborted: boolean; abortReason: string | null; logId: string | null; journalErrors?: string[] }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("execute_clean", { previewToken }) };
+    return { status: "ok", data: await TAURI_INVOKE("execute_clean", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async startAnalyzer(root: string | null) : Promise<Result<{ sessionId: string; rootPath: string; totalBytes: string; totalItems: string; scannedDirs: string; scannedFiles: string; cancelled: boolean; warnings: string[]; root: AnalyzerNodeDto }, ContractError>> {
+async startAnalyzer(args: { root: string | null }) : Promise<Result<{ sessionId: string; rootPath: string; totalBytes: string; totalItems: string; scannedDirs: string; scannedFiles: string; cancelled: boolean; warnings: string[]; root: AnalyzerNodeDto }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_analyzer", { root }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_analyzer", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async cancelAnalyzer(sessionId: string) : Promise<Result<null, ContractError>> {
+async cancelAnalyzer(args: { sessionId: string }) : Promise<Result<null, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_analyzer", { sessionId }) };
+    return { status: "ok", data: await TAURI_INVOKE("cancel_analyzer", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async explainItem(itemId: string) : Promise<Result<{ itemId: string; title: string; description: string; risk: RiskDto }, ContractError>> {
+async explainItem(args: { itemId: string }) : Promise<Result<{ itemId: string; title: string; description: string; risk: RiskDto }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("explain_item", { itemId }) };
+    return { status: "ok", data: await TAURI_INVOKE("explain_item", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -76,17 +76,17 @@ async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolea
     else return { status: "error", error: e  as any };
 }
 },
-async updateSettings(settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, ContractError>> {
+async updateSettings(args: { settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number } }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_settings", { settings }) };
+    return { status: "ok", data: await TAURI_INVOKE("update_settings", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async validateCustomPath(path: string) : Promise<Result<{ path: string; allowed: boolean; reason: string }, ContractError>> {
+async validateCustomPath(args: { path: string }) : Promise<Result<{ path: string; allowed: boolean; reason: string }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("validate_custom_path", { path }) };
+    return { status: "ok", data: await TAURI_INVOKE("validate_custom_path", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -100,9 +100,9 @@ async listLogs() : Promise<Result<({ id: string; name: string; modifiedUnixSecs:
     else return { status: "error", error: e  as any };
 }
 },
-async readLog(logId: string) : Promise<Result<{ id: string; content: string }, ContractError>> {
+async readLog(args: { logId: string }) : Promise<Result<{ id: string; content: string }, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("read_log", { logId }) };
+    return { status: "ok", data: await TAURI_INVOKE("read_log", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -124,9 +124,9 @@ async relaunchElevated() : Promise<Result<{ launched: boolean }, ContractError>>
     else return { status: "error", error: e  as any };
 }
 },
-async resolveClose(approved: boolean, requestId: string) : Promise<Result<null, ContractError>> {
+async resolveClose(args: { approved: boolean; requestId: string }) : Promise<Result<null, ContractError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("resolve_close", { approved, requestId }) };
+    return { status: "ok", data: await TAURI_INVOKE("resolve_close", args) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
