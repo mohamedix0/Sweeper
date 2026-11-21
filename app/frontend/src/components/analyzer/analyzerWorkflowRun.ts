@@ -1,6 +1,7 @@
 import { formatContractError, type CleanProgressEvent, type ExecuteCleanResponse, type SweeperClient } from '../../api/client';
 import type { AnalyzerNodeDto, ContractError } from '../../contract/bindings';
 import type { PreviewResult } from '../cleanShared';
+import { convergeStop } from './analyzerStop';
 
 type RunAnalyzerArgs = {
   client: SweeperClient;
@@ -80,9 +81,7 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
     // current (#99).
     if (!args.isCurrent()) return;
     if (res.cancelled) {
-      args.setResult(null);
-      args.setSessionId(null);
-      args.setAnalyzedPath(null);
+      convergeStop(args);
       args.setInfo('Analysis stopped.');
       return;
     }

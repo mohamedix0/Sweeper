@@ -3,6 +3,7 @@ import type { CleanProgressEvent, ExecuteCleanResponse, Settings, SweeperClient 
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import type { PreviewResult } from '../cleanShared';
 import { BROWSE_PATHS, analyzerStatusKey, dedupeAnalyzerNodesByCoverage, isNodeSelectable, type AnalyzerStatusFilter } from './analyzerHelpers';
+import { convergeStop } from './analyzerStop';
 import { runAnalyzerAction } from './analyzerWorkflowRun';
 import { runCleanAction } from './analyzerWorkflowClean';
 import { runPreviewAction } from './analyzerWorkflowPreview';
@@ -52,11 +53,7 @@ function useRunMessages() {
 type StopControl = { stopRequested: MutableRefObject<boolean>; runToken: MutableRefObject<number> };
 
 function convergeStoppedRun(args: { s: SessionModel; m: MessageState }) {
-  args.s.setAnalyzing(false);
-  args.s.setProgress(null);
-  args.s.setRunningSessionId(null);
-  args.s.setSessionId(null);
-  args.s.setResult(null);
+  convergeStop(args.s);
   args.m.setError(null);
   args.m.setInfo('Analysis stopped.');
 }
@@ -68,7 +65,7 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
   function inspectNodeById(id: string) { void s.inspectNode({ itemId: id }); }
   function resetAnalyzerSession(msg?: string) {
     invalidatePreviewRequest();
-    s.resetInspection(); s.setSessionId(null); s.setRunningSessionId(null); s.setStartedAt(null); s.setResult(null); s.setSelectedIds(new Set()); s.setExpanded(new Set()); s.setShowAllAnalyzerNodes(new Set());
+    convergeStop(s);
     p.setPreview(null); p.setConfirmText(''); p.setCleanProgress(null);
     if (msg) m.setInfo(msg);
   }
@@ -84,13 +81,17 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
     const sid = s.runningSessionId;
     if (!sid) return;
     stop.stopRequested.current = true;
-    stop.runToken.current += 1;
+    const stoppedToken = ++stop.runToken.current;
     convergeStoppedRun({ s, m });
     try {
       await args.client.cancelAnalyzer(sid);
     } catch {
-      m.setInfo(null);
-      m.setError('Failed to stop analysis.');
+      // A newer run may have started while this cancel was in flight; its
+      // messages must not be clobbered by a stale rejection (#99).
+      if (stop.runToken.current === stoppedToken) {
+        m.setInfo(null);
+        m.setError('Failed to stop analysis.');
+      }
     }
   }
   function toggleSelect(node: AnalyzerNodeDto) {
@@ -139,7 +140,7 @@ export function useAnalyzerWorkflow(args: WfArgs) {
   const actions = createAnalyzerActions({ args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes, stop });
 
   return {
-    rootPath: s.rootPath, setRootPath: s.setRootPath, analyzedPath: s.analyzedPath, analyzing: s.analyzing, progress: s.progress,
+    rootPath: s.rootPath, setRootPath: s.setRootPath, analyzedPath: s.analyzedPath, startedAt: s.startedAt, analyzing: s.analyzing, progress: s.progress,
     sessionId: s.sessionId, runningSessionId: s.runningSessionId, result: s.result, expanded: s.expanded, selectedIds: s.selectedIds, inspected: s.inspected,
     preview: p.preview, previewLoading: p.previewLoading, confirmText: p.confirmText, setConfirmText: p.setConfirmText,
     cleaning: p.cleaning, cleanProgress: p.cleanProgress, cleanSummary: p.cleanSummary, error: m.error, info: m.info,

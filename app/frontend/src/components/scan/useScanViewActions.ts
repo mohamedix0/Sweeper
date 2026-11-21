@@ -205,9 +205,11 @@ async function refreshAfterClean(w: Workflow, client: SweeperClient) {
   try {
     w.setResults(await client.getScanResults(w.sessionId));
   } catch {
-    // Never leave pre-Clean results looking current when the refresh fails;
-    // keep the Clean summary and surface a non-blocking notice instead (#99).
-    w.setResults(null);
+    // Drop pre-Clean items but keep the results shell mounted: the Clean
+    // Summary is rendered in its inspector and would otherwise unmount with
+    // the whole layout. Surface a non-blocking notice alongside it (#99).
+    const current = w.results;
+    w.setResults(current ? { ...current, targets: [] } : null);
     w.setInfo(REFRESH_FAILED_NOTICE);
   }
 }

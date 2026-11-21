@@ -93,6 +93,7 @@ describe('ScanAndPreviewView post-Clean refresh notice', () => {
     await waitFor(() => expect(executeClean).toHaveBeenCalledTimes(1));
     expect(getScanResults).toHaveBeenCalledTimes(2);
     expect(await screen.findByText(/could not be refreshed/i)).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Clean Summary' })).toBeVisible();
     await waitFor(() => expect(screen.queryByLabelText(`Select ${STALE_ITEM}`)).not.toBeInTheDocument());
   });
 });

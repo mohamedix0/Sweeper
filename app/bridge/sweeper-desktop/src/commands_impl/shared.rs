@@ -119,24 +119,27 @@ where
     )
 }
 
+/// The complete allowlist of blocking-worker failure texts we surface verbatim.
+/// Tokio renders a panicked task as "task panicked" and a cancelled one as
+/// "task was cancelled"; the worker's categorized panic message is listed too.
+/// Every other string collapses to the constant reason, so arbitrary internal
+/// text can never reach the webview through this contract (#99).
+const SAFE_JOIN_DETAILS: [&str; 3] = [
+    "worker panicked while unlocking the session store",
+    "task panicked",
+    "task was cancelled",
+];
+
 /// Map a blocking-task join error to `ContractError` without leaking internals.
 ///
-/// The join failure is surfaced in the human-safe reason instead of being
-/// discarded behind a constant message, so a panicked/cancelled worker is
-/// distinguishable from an ordinary command failure (#99).
+/// Only allowlisted, human-safe failure shapes are surfaced; everything else is
+/// reduced to a constant reason rather than guessed at with a denylist (#99).
 pub fn join_error_to_contract_error<E: std::fmt::Display>(e: E) -> ContractError {
     let detail = e.to_string().trim().to_string();
-    let lower = detail.to_lowercase();
-    let unsafe_detail = lower.contains('\\')
-        || lower.contains('/')
-        || lower.contains("stack")
-        || lower.contains("path")
-        || detail.is_empty()
-        || detail.len() > 120;
-    let reason = if unsafe_detail {
-        "background task failed".to_string()
-    } else {
+    let reason = if SAFE_JOIN_DETAILS.contains(&detail.as_str()) {
         format!("background task failed: {detail}")
+    } else {
+        "background task failed".to_string()
     };
     ContractError::Internal { reason }
 }

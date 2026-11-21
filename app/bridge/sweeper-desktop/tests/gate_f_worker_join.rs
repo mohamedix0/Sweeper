@@ -20,6 +20,23 @@ fn blocking_worker_join_error_is_surfaced() {
 }
 
 #[test]
+fn arbitrary_worker_join_text_cannot_leak() {
+    let secret = "database password hunter2 connection string";
+    let err = join_error_to_contract_error(secret);
+
+    match err {
+        ContractError::Internal { reason } => {
+            assert_eq!(
+                reason, "background task failed",
+                "arbitrary text leaked: {reason}"
+            );
+            assert!(!reason.contains(secret), "arbitrary text leaked: {reason}");
+        }
+        other => panic!("expected a structured internal error, got {other:?}"),
+    }
+}
+
+#[test]
 fn blocking_worker_join_error_stays_sanitized() {
     let err = join_error_to_contract_error("panic at C:\\Temp\\synthetic\\module.rs:42");
 
