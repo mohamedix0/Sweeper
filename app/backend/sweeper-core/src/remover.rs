@@ -1481,11 +1481,11 @@ fn root_parent_or_self(root: &CanonicalPath) -> CanonicalPath {
     root.clone()
 }
 
-/// Maximum number of directory levels kept in the ancestor-chain cache.
+/// Maximum number of directory-level ancestor chains kept in the cache.
 /// Bounding it keeps memory flat even for a Clean run over a very large tree.
 const ANCESTOR_CHAIN_CACHE_CAPACITY: usize = 512;
 
-/// Precomputed canonical ancestor paths for a single directory level.
+/// Precomputed canonical ancestor paths for one directory level.
 ///
 /// This caches only immutable path strings. It never stores a safety verdict:
 /// every item still opens and inspects each ancestor handle at the moment of
@@ -1499,13 +1499,13 @@ struct AncestorChain {
 }
 
 impl AncestorChain {
-    fn build(dir: &CanonicalPath) -> Self {
-        let drive = dir.drive_prefix();
-        let mut cur = PathBuf::from(format!(r"{}\", drive));
-        let mut paths = Vec::with_capacity(dir.segment_count());
-        for seg in dir.segments() {
-            cur.push(seg);
-            let Ok(canon) = CanonicalPath::parse_lexical(&cur.to_string_lossy()) else {
+    fn build(directory_level: &CanonicalPath) -> Self {
+        let drive = directory_level.drive_prefix();
+        let mut current = PathBuf::from(format!(r"{}\", drive));
+        let mut paths = Vec::with_capacity(directory_level.segment_count());
+        for segment in directory_level.segments() {
+            current.push(segment);
+            let Ok(canon) = CanonicalPath::parse_lexical(&current.to_string_lossy()) else {
                 continue;
             };
             paths.push(canon);
@@ -1514,28 +1514,63 @@ impl AncestorChain {
     }
 }
 
+/// Retained-cost budget, in segment slots across all cached chains. A chain of
+/// depth `d` retains `1 + 2 + ... + d` segment slots because every canonical
+/// prefix owns its segment strings. Bounding the *complete* cost (not just the
+/// entry count) stops a handful of very deep directories from exhausting memory.
+const ANCESTOR_CHAIN_RETAINED_COST_BUDGET: usize = 16 * 1024;
+
+/// Segment slots retained by one chain of the given depth: every canonical
+/// prefix owns its segment strings, so the cost grows quadratically.
+fn ancestor_chain_cost(segment_count: usize) -> usize {
+    segment_count.saturating_mul(segment_count.saturating_add(1)) / 2
+}
+
 thread_local! {
     static ANCESTOR_CHAIN_CACHE: RefCell<HashMap<String, AncestorChain>> =
         RefCell::new(HashMap::new());
+    static ANCESTOR_CHAIN_RETAINED_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[cfg(test)]
+    static ANCESTOR_CHAIN_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Run `f` with the cached ancestor chain for `dir`, building it once per
-/// directory level. The cache is cleared when full, so it stays bounded.
-fn with_ancestor_chain<R, F>(dir: &CanonicalPath, f: F) -> R
+/// Run `f` with the ancestor chain for `directory_level`, building it at most
+/// once per level. `directory_level` is always a directory: for a per-item
+/// check it is the item's parent directory, so siblings share one entry.
+/// Entries are immutable path strings only, never safety verdicts. Expensive
+/// deep chains are built for this call but not retained; ordinary shallow
+/// directories stay cached within both the entry cap and the cost budget.
+fn with_ancestor_chain<R, F>(directory_level: &CanonicalPath, f: F) -> R
 where
     F: FnOnce(&AncestorChain) -> R,
 {
+    let cost = ancestor_chain_cost(directory_level.segment_count());
+    if cost > ANCESTOR_CHAIN_RETAINED_COST_BUDGET {
+        // A deep chain would dominate the budget on its own. Still build and
+        // inspect every prefix for this item, but never retain it in the cache.
+        let chain = AncestorChain::build(directory_level);
+        #[cfg(test)]
+        ANCESTOR_CHAIN_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        return f(&chain);
+    }
     ANCESTOR_CHAIN_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !cache.contains_key(dir.as_str()) {
-            if cache.len() >= ANCESTOR_CHAIN_CACHE_CAPACITY {
+        if !cache.contains_key(directory_level.as_str()) {
+            let retained = ANCESTOR_CHAIN_RETAINED_COST.get();
+            if cache.len() >= ANCESTOR_CHAIN_CACHE_CAPACITY
+                || retained.saturating_add(cost) > ANCESTOR_CHAIN_RETAINED_COST_BUDGET
+            {
                 cache.clear();
+                ANCESTOR_CHAIN_RETAINED_COST.set(0);
             }
-            let chain = AncestorChain::build(dir);
-            cache.insert(dir.as_str().to_string(), chain);
+            let chain = AncestorChain::build(directory_level);
+            cache.insert(directory_level.as_str().to_string(), chain);
+            ANCESTOR_CHAIN_RETAINED_COST.set(ANCESTOR_CHAIN_RETAINED_COST.get() + cost);
+            #[cfg(test)]
+            ANCESTOR_CHAIN_BUILDS.with(|builds| builds.set(builds.get() + 1));
         }
         let chain = cache
-            .get(dir.as_str())
+            .get(directory_level.as_str())
             .expect("ancestor chain was just ensured to exist");
         f(chain)
     })
@@ -1546,20 +1581,37 @@ fn ancestor_chain_cache_len() -> usize {
     ANCESTOR_CHAIN_CACHE.with(|cache| cache.borrow().len())
 }
 
+#[cfg(test)]
+fn ancestor_chain_retained_cost() -> usize {
+    ANCESTOR_CHAIN_RETAINED_COST.with(|cost| cost.get())
+}
+
+#[cfg(test)]
+fn ancestor_chain_build_count() -> usize {
+    ANCESTOR_CHAIN_BUILDS.with(|builds| builds.get())
+}
+
 fn path_has_link_point_ancestor(
     path: &CanonicalPath,
-    boundary_root: &CanonicalPath,
+    _boundary_root: &CanonicalPath,
     exclude_final_path: bool,
 ) -> Result<bool, String> {
     // A specific boundary root is considered by the callers; the full chain
     // from the drive root is always inspected so no ancestor check is dropped.
-    let _ = boundary_root;
-    with_ancestor_chain(path, |chain| {
-        for cur_canon in &chain.paths {
-            if exclude_final_path && cur_canon.is_same_path(path) {
-                continue;
-            }
-            match sweeper_winfs::open_for_inspection(Path::new(cur_canon.as_str()))
+    // The chain is keyed by directory level: per-item checks use the item's
+    // parent directory (so siblings share one cached chain), while a check
+    // that must inspect `path` itself is already a directory level.
+    let directory_level = if exclude_final_path {
+        path.parent().unwrap_or_else(|| path.clone())
+    } else {
+        path.clone()
+    };
+    with_ancestor_chain(&directory_level, |chain| {
+        for current in &chain.paths {
+            // `current` is always an ancestor directory, never the item itself:
+            // the chain stops at the parent level for per-item checks. Every
+            // ancestor is still opened and inspected here at deletion time.
+            match sweeper_winfs::open_for_inspection(Path::new(current.as_str()))
                 .and_then(|h| sweeper_winfs::inspect_reparse_point(&h))
             {
                 Ok(ReparseTagClass::LinkPoint) => return Ok(true),
@@ -1743,6 +1795,87 @@ mod tests {
             with_ancestor_chain(&p, |_| ());
         }
         assert!(ancestor_chain_cache_len() <= ANCESTOR_CHAIN_CACHE_CAPACITY);
+    }
+
+    #[test]
+    fn ancestor_chain_cache_shares_siblings_and_revalidates_handles_after_tamper() {
+        use sweeper_testkit::{create_junction, Sandbox};
+
+        // Reset this thread's cache so the build count is unambiguous.
+        ANCESTOR_CHAIN_CACHE.with(|cache| cache.borrow_mut().clear());
+        ANCESTOR_CHAIN_RETAINED_COST.with(|cost| cost.set(0));
+        ANCESTOR_CHAIN_BUILDS.with(|builds| builds.set(0));
+
+        let sb = Sandbox::new();
+        let parent = sb.create_dir("target/level0").unwrap();
+        let level = parent.join("level1");
+        let level_canon = CanonicalPath::parse_lexical(&level.to_string_lossy()).unwrap();
+        let mirror = sb.create_dir("mirror").unwrap();
+
+        // Per-item checks exclude the final path, so all sibling files map to
+        // the same parent directory level and must share a single cache entry.
+        for i in 0..64 {
+            let sibling = CanonicalPath::parse_lexical(
+                &level.join(format!("sibling{i}.bin")).to_string_lossy(),
+            )
+            .unwrap();
+            assert!(!path_has_link_point_ancestor(&sibling, &level_canon, true).unwrap());
+        }
+        assert_eq!(
+            ancestor_chain_cache_len(),
+            1,
+            "siblings must share one entry"
+        );
+        assert_eq!(
+            ancestor_chain_build_count(),
+            1,
+            "chain built once per level"
+        );
+
+        // Tamper after the cache is warm: the level becomes a Link Point. The
+        // cached strings are unchanged, but each call opens and inspects the
+        // ancestor handle again, so the Link Point is detected with no rebuild.
+        create_junction(&level, &mirror).unwrap();
+        assert!(path_has_link_point_ancestor(&level_canon, &level_canon, false).unwrap());
+        assert_eq!(
+            ancestor_chain_build_count(),
+            1,
+            "warm cache must be reused, not trusted as a verdict"
+        );
+    }
+
+    #[test]
+    fn ancestor_chain_cache_bounds_complete_cost_of_deep_chains() {
+        ANCESTOR_CHAIN_CACHE.with(|cache| cache.borrow_mut().clear());
+        ANCESTOR_CHAIN_RETAINED_COST.with(|cost| cost.set(0));
+
+        let mut deep = String::from(r"C:\Temp");
+        for i in 0..200 {
+            deep.push_str(&format!(r"\level{i}"));
+        }
+        let deep_canon = CanonicalPath::parse_lexical(&deep).unwrap();
+        assert!(
+            ancestor_chain_cost(deep_canon.segment_count()) > ANCESTOR_CHAIN_RETAINED_COST_BUDGET,
+            "fixture must exceed the retained-cost budget"
+        );
+
+        for _ in 0..8 {
+            with_ancestor_chain(&deep_canon, |chain| {
+                assert_eq!(chain.paths.len(), deep_canon.segment_count());
+            });
+        }
+        assert_eq!(
+            ancestor_chain_cache_len(),
+            0,
+            "deep chains must not be retained"
+        );
+        assert_eq!(ancestor_chain_retained_cost(), 0);
+
+        // Ordinary shallow directories remain cacheable within the budget.
+        let shallow = CanonicalPath::parse_lexical(r"C:\Temp\a\b\c").unwrap();
+        with_ancestor_chain(&shallow, |_| ());
+        assert_eq!(ancestor_chain_cache_len(), 1);
+        assert!(ancestor_chain_retained_cost() <= ANCESTOR_CHAIN_RETAINED_COST_BUDGET);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use super::bounded::BoundedTopN;
 use super::walker::{DirRecord, FileInfo};
 use super::*;
 use crate::paths::CanonicalPath;
@@ -189,43 +190,12 @@ enum ChildSource<'a> {
     File(&'a FileInfo),
 }
 
-/// Bounded top-N of child candidates. Non-retained nodes are dropped as soon
-/// as they are displaced, so building a large directory never holds a Vec of
-/// every child node at once.
-struct BoundedChildren<'a> {
-    capacity: usize,
-    items: Vec<(ChildPruneKey, ChildSource<'a>)>,
-}
+/// A child candidate bundled with its precomputed prune key.
+type ChildEntry<'a> = (ChildPruneKey, ChildSource<'a>);
 
-impl<'a> BoundedChildren<'a> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            items: Vec::new(),
-        }
-    }
-
-    fn offer(&mut self, key: ChildPruneKey, source: ChildSource<'a>) {
-        if self.items.len() < self.capacity {
-            self.items.push((key, source));
-            return;
-        }
-        let mut worst = 0usize;
-        for i in 1..self.items.len() {
-            if self.items[i].0.compare(&self.items[worst].0) == Ordering::Greater {
-                worst = i;
-            }
-        }
-        if key.compare(&self.items[worst].0) == Ordering::Less {
-            self.items[worst] = (key, source);
-        }
-    }
-
-    fn into_sorted(self) -> Vec<(ChildPruneKey, ChildSource<'a>)> {
-        let mut items = self.items;
-        items.sort_by(|a, b| a.0.compare(&b.0));
-        items
-    }
+/// Ranking for child candidates: the precomputed prune key decides order.
+fn child_entry_compare(a: &ChildEntry<'_>, b: &ChildEntry<'_>) -> Ordering {
+    a.0.compare(&b.0)
 }
 
 fn collect_directory_children(
@@ -235,16 +205,17 @@ fn collect_directory_children(
     settings: &EligibilitySettings,
     max_children: usize,
 ) -> Vec<AnalyzerNode> {
-    let mut selected = BoundedChildren::new(max_children);
+    let mut selected: BoundedTopN<ChildEntry<'_>> =
+        BoundedTopN::new(max_children, child_entry_compare);
     let mut seq = 0usize;
     let mut seen_child = HashSet::new();
 
     for child_path in &rec.children_dirs {
-        let ck = canonical_key(child_path);
-        if !seen_child.insert(ck.clone()) {
+        let child_key = canonical_key(child_path);
+        if !seen_child.insert(child_key.clone()) {
             continue;
         }
-        let Some(child_node) = built.remove(&ck) else {
+        let Some(child_node) = built.remove(&child_key) else {
             continue;
         };
         let key = ChildPruneKey {
@@ -254,7 +225,7 @@ fn collect_directory_children(
             seq,
         };
         seq += 1;
-        selected.offer(key, ChildSource::Dir(child_node));
+        selected.offer((key, ChildSource::Dir(child_node)));
     }
 
     for f in &rec.files {
@@ -268,7 +239,7 @@ fn collect_directory_children(
             seq,
         };
         seq += 1;
-        selected.offer(key, ChildSource::File(f));
+        selected.offer((key, ChildSource::File(f)));
     }
 
     selected

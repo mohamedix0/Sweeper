@@ -349,6 +349,7 @@ fn assemble_analyzer_result(
 }
 
 mod annotate;
+mod bounded;
 mod convert;
 mod walker;
 

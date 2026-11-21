@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sweeper_core::analyzer::{analyze_path, AnalyzerOptions};
+use sweeper_core::analyzer::{analyze_path, AnalyzerNode, AnalyzerOptions};
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::remover::{self, CleanOptions, ValidatedSource};
 use sweeper_testkit::{CanaryTree, Sandbox};
@@ -34,6 +34,15 @@ fn make_many_files(root: &Path, count: usize) -> u64 {
         expected_bytes += size;
     }
     expected_bytes
+}
+
+fn find_node_by_suffix<'a>(node: &'a AnalyzerNode, suffix: &str) -> Option<&'a AnalyzerNode> {
+    if node.path.ends_with(suffix) {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_node_by_suffix(child, suffix))
 }
 
 #[test]
@@ -92,6 +101,99 @@ fn analyzer_prunes_many_files_with_bounded_children_and_exact_totals() {
     assert_eq!(
         top_sizes, expected_top,
         "retained children must be the largest files by size"
+    );
+    assert_sentinel_intact(&sb);
+}
+
+#[test]
+fn analyzer_prunes_large_multi_level_tree_within_budget_and_exact_totals() {
+    let sb = Sandbox::new();
+    let root = sb.create_dir("multi").unwrap();
+
+    const DIRS: usize = 20;
+    const SUBDIRS: usize = 12;
+    const FILES: usize = 16;
+    let mut next_size = 1u64;
+    let mut expected_files = 0u64;
+    let mut expected_bytes = 0u64;
+    for d in 0..DIRS {
+        for s in 0..SUBDIRS {
+            let dir = root.join(format!("d{d:02}/s{s:02}"));
+            for f in 0..FILES {
+                let size = next_size;
+                next_size += 1;
+                let path = dir.join(format!("f{f:02}.bin"));
+                write_file(&path, &vec![b'x'; size as usize]);
+                sweeper_testkit::set_last_write_time(
+                    &path,
+                    sweeper_testkit::filetime_from_unix_secs(old_mtime_secs()),
+                )
+                .unwrap();
+                expected_files += 1;
+                expected_bytes += size;
+            }
+        }
+    }
+
+    let start = Instant::now();
+    let res = analyze_path(
+        Some(&root.to_string_lossy()),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        AnalyzerOptions {
+            worker_threads: 4,
+            max_files_per_dir: CAP,
+            max_children_per_dir: CAP,
+            ..AnalyzerOptions::default()
+        },
+    )
+    .expect("analyze multi-level sandbox");
+    let elapsed = start.elapsed();
+    eprintln!(
+        "ISSUE97_ANALYZER_MULTI: files={} dirs={} elapsed_ms={} retained_children={}",
+        res.progress.scanned_files,
+        res.progress.scanned_dirs,
+        elapsed.as_millis(),
+        res.root.children.len()
+    );
+
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "multi-level analyzer exceeded time budget: {elapsed:?}"
+    );
+    assert_eq!(
+        res.progress.scanned_files, expected_files,
+        "every file across every level must be scanned"
+    );
+    assert_eq!(
+        res.progress.scanned_bytes, expected_bytes,
+        "progress bytes must remain exact across levels"
+    );
+    assert_eq!(
+        res.root.size_bytes, expected_bytes,
+        "recursive size must remain exact across levels"
+    );
+    assert!(
+        res.root.children.len() <= CAP,
+        "root must retain at most {CAP} children, got {}",
+        res.root.children.len()
+    );
+
+    // Pruning is bounded at every level, not just the root. The largest leaf
+    // (d19/s11) is always retained; its files have the last 16 unique sizes.
+    let leaf = find_node_by_suffix(&res.root, "d19\\s11")
+        .or_else(|| find_node_by_suffix(&res.root, "d19/s11"))
+        .expect("largest leaf directory must be present");
+    assert!(leaf.children.len() <= CAP, "leaf children must be bounded");
+    let top_sizes: Vec<u64> = leaf.children.iter().map(|c| c.size_bytes).collect();
+    let first_size = (1 + ((DIRS - 1) * SUBDIRS + (SUBDIRS - 1)) * FILES) as u64;
+    let expected_top: Vec<u64> = (first_size + (FILES - CAP) as u64..first_size + FILES as u64)
+        .rev()
+        .collect();
+    assert_eq!(
+        top_sizes, expected_top,
+        "leaf must retain the largest files (leaf path={})",
+        leaf.path
     );
     assert_sentinel_intact(&sb);
 }
@@ -193,7 +295,8 @@ fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
         ValidatedSource::CustomPath,
     );
 
-    // Prime the per-directory ancestor-chain cache with a first (safe) clean run.
+    // Prime the per-directory ancestor-chain cache with a first (safe) clean
+    // run in the same directory level as the victim.
     let warm_victim = target.join("warm.bin");
     fs::write(&warm_victim, b"warm").unwrap();
     set_filetime(&warm_victim, old_mtime_secs());
@@ -211,10 +314,17 @@ fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
     assert_eq!(warm_report.bytes_freed, 4, "warm-up clean must succeed");
 
     // Tamper with the Target root *after* warming the cache: replace it with a
-    // Link Point to the external canary. Moment-of-deletion revalidation must
-    // still reject the target even though its ancestor chain was cached.
+    // Link Point to a mirror directory that still holds a file at the victim
+    // path. The victim path therefore still exists, so the item cannot be
+    // rejected by a "missing path" check. Moment-of-deletion revalidation must
+    // reject it by Link-Point detection even with a warm ancestor-chain cache.
+    let mirror = sb.create_dir("mirror").unwrap();
+    let mirrored_victim = mirror.join("victim.bin");
+    fs::write(&mirrored_victim, b"must survive").unwrap();
+    set_filetime(&mirrored_victim, old_mtime_secs());
     fs::remove_dir_all(&target).unwrap();
-    sweeper_testkit::create_junction(&target, canary.root()).unwrap();
+    sweeper_testkit::create_junction(&target, &mirror).unwrap();
+    assert!(victim.exists(), "victim path must survive the tamper");
 
     let report = remover::execute_clean(vec![item], clean_options(&journal, 12)).unwrap();
     assert_eq!(
@@ -224,6 +334,21 @@ fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
     assert!(
         report.aborted || report.skipped_count > 0,
         "tampered target must be rejected"
+    );
+    let reasons = report
+        .items
+        .iter()
+        .map(|r| r.reason.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(
+        reasons.contains("link point"),
+        "rejection must come from Link-Point detection, not a missing file: {reasons}"
+    );
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        b"must survive",
+        "the victim must remain byte-for-byte intact"
     );
     assert!(
         canary.verify().is_ok(),

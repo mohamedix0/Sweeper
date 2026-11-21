@@ -1,4 +1,6 @@
+use super::bounded::BoundedTopN;
 use super::*;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
@@ -342,63 +344,28 @@ struct KeyedFile {
     file: FileInfo,
 }
 
-/// `true` when `a` should rank ahead of `b`: larger size first, then the
-/// precomputed key in ascending order. Exact ties keep the earlier entry,
-/// matching the stable ordering of the previous sort-then-truncate behavior.
-fn keyed_file_is_better(a: &KeyedFile, b: &KeyedFile) -> bool {
-    a.file.size > b.file.size || (a.file.size == b.file.size && a.key < b.key)
+/// Ranking for retained files: larger size first, then the precomputed key in
+/// ascending order. Exact ties keep the earlier entry, matching the stable
+/// ordering of the previous sort-then-truncate behaviour.
+fn keyed_file_compare(a: &KeyedFile, b: &KeyedFile) -> Ordering {
+    b.file
+        .size
+        .cmp(&a.file.size)
+        .then_with(|| a.key.cmp(&b.key))
 }
 
-/// Bounded top-N buffer. Holds at most `capacity` entries regardless of how
-/// many files a directory contains, so pruning never allocates proportional
-/// to the full directory size.
-#[derive(Debug)]
-struct BoundedTopFiles {
-    capacity: usize,
-    items: Vec<KeyedFile>,
-}
-
-impl BoundedTopFiles {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            // Deliberately not pre-allocated: the caller may configure a very
-            // large cap, and an empty directory must not pay for it.
-            items: Vec::new(),
-        }
-    }
-
-    fn offer(&mut self, file: FileInfo, key: String) {
-        let candidate = KeyedFile { key, file };
-        if self.items.len() < self.capacity {
-            self.items.push(candidate);
-            return;
-        }
-        let mut worst = 0usize;
-        for i in 1..self.items.len() {
-            if keyed_file_is_better(&self.items[worst], &self.items[i]) {
-                worst = i;
-            }
-        }
-        if keyed_file_is_better(&candidate, &self.items[worst]) {
-            self.items[worst] = candidate;
-        }
-    }
-
-    fn into_sorted_files(mut self) -> Vec<FileInfo> {
-        self.items.sort_by(|a, b| {
-            b.file
-                .size
-                .cmp(&a.file.size)
-                .then_with(|| a.key.cmp(&b.key))
-        });
-        self.items.into_iter().map(|k| k.file).collect()
-    }
+/// Return retained files in rank order, discarding the bundled prune keys.
+fn into_sorted_files(files: BoundedTopN<KeyedFile>) -> Vec<FileInfo> {
+    files
+        .into_sorted()
+        .into_iter()
+        .map(|entry| entry.file)
+        .collect()
 }
 
 #[derive(Debug)]
 struct ScanAccum {
-    top_files: BoundedTopFiles,
+    top_files: BoundedTopN<KeyedFile>,
     child_dirs: Vec<ChildDirEntry>,
     file_count: u64,
     byte_count: u64,
@@ -407,7 +374,7 @@ struct ScanAccum {
 impl ScanAccum {
     fn new(max_files: usize) -> Self {
         Self {
-            top_files: BoundedTopFiles::new(max_files),
+            top_files: BoundedTopN::new(max_files, keyed_file_compare),
             child_dirs: Vec::new(),
             file_count: 0,
             byte_count: 0,
@@ -451,11 +418,12 @@ fn push_file_entry(
     flags: (bool, bool, bool),
     is_vhdx: bool,
 ) {
-    // Precompute the prune key exactly once, then offer the entry to a
-    // bounded buffer so a directory with a huge file count stays bounded.
+    // Precompute the prune key exactly once and bundle it with the entry, so
+    // ordering never re-lowercases a path and a huge directory stays bounded.
     let key = path_str.to_ascii_lowercase();
-    acc.top_files.offer(
-        FileInfo {
+    acc.top_files.offer(KeyedFile {
+        key,
+        file: FileInfo {
             name,
             path: path_str,
             size,
@@ -464,8 +432,7 @@ fn push_file_entry(
             reparse_other: flags.2,
             is_vhdx,
         },
-        key,
-    );
+    });
     acc.file_count += 1;
     acc.byte_count = acc.byte_count.saturating_add(size);
 }
@@ -529,7 +496,7 @@ fn scan_directory(
         }
     }
     Ok(ScanDirOutput {
-        files: acc.top_files.into_sorted_files(),
+        files: into_sorted_files(acc.top_files),
         child_dirs: acc.child_dirs,
         file_count: acc.file_count,
         byte_count: acc.byte_count,
@@ -554,13 +521,16 @@ mod tests {
 
     #[test]
     fn bounded_top_files_never_retains_more_than_capacity() {
-        let mut top = BoundedTopFiles::new(4);
+        let mut top = BoundedTopN::new(4, keyed_file_compare);
         for i in 0..5000u64 {
             let f = file(&format!("f{i:05}.bin"), i);
-            top.offer(f.clone(), f.path.to_ascii_lowercase());
-            assert!(top.items.len() <= 4, "top-N buffer must stay bounded");
+            top.offer(KeyedFile {
+                key: f.path.to_ascii_lowercase(),
+                file: f,
+            });
+            assert!(top.len() <= 4, "top-N buffer must stay bounded");
         }
-        let files = top.into_sorted_files();
+        let files = into_sorted_files(top);
         assert_eq!(files.len(), 4);
         assert_eq!(
             files.iter().map(|f| f.size).collect::<Vec<_>>(),
