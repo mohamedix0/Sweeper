@@ -138,6 +138,45 @@ fn scan_logs_base_dir() -> PathBuf {
         .unwrap_or_else(sweeper_core::journal::default_logs_base_dir)
 }
 
+/// Borrowed per-target fields used to assemble the scan activity-log record.
+///
+/// Every string field is a reference into the source [`scanner::ScanReport`]
+/// and every count is a primitive. Building this view is O(number of targets),
+/// never O(number of items), and carrying only borrows makes a deep clone of
+/// the (potentially huge) report structurally impossible along this path
+/// (#96). The focused unit test below asserts the reference identity of these
+/// borrows so reintroducing a copy fails loudly.
+#[derive(Debug)]
+struct BorrowedLogTarget<'a> {
+    target_id: &'a str,
+    target_name: &'a str,
+    tier: sweeper_core::Tier,
+    risk: sweeper_core::Risk,
+    eligible_bytes: u64,
+    total_bytes: u64,
+    eligible_count: u64,
+    file_count: u64,
+    skipped_count: u64,
+}
+
+fn borrow_log_targets(report: &scanner::ScanReport) -> Vec<BorrowedLogTarget<'_>> {
+    report
+        .targets
+        .iter()
+        .map(|t| BorrowedLogTarget {
+            target_id: &t.target_id,
+            target_name: &t.target_name,
+            tier: t.tier,
+            risk: t.risk,
+            eligible_bytes: t.eligible_bytes,
+            total_bytes: t.total_bytes,
+            eligible_count: t.eligible_count,
+            file_count: t.file_count,
+            skipped_count: t.skipped_count,
+        })
+        .collect()
+}
+
 /// Build the scan activity-log record from a borrow of the report (#96).
 ///
 /// Only the small JSON record is materialised here; the full `ScanReport` is
@@ -147,15 +186,33 @@ fn build_scan_activity_log_record(
     settings: &sweeper_core::settings::SweeperSettings,
     report: &scanner::ScanReport,
 ) -> Option<serde_json::Value> {
+    build_scan_activity_log_record_observed(settings, report, |_| {})
+}
+
+/// Instrumented core of [`build_scan_activity_log_record`]. The `observe`
+/// callback receives the borrowed target view built from the live report. The
+/// focused unit test uses it to assert, by reference identity, that the record
+/// is derived from borrows of the source report and never from a deep copy
+/// (#96). Production passes a no-op observer.
+fn build_scan_activity_log_record_observed<F>(
+    settings: &sweeper_core::settings::SweeperSettings,
+    report: &scanner::ScanReport,
+    observe: F,
+) -> Option<serde_json::Value>
+where
+    F: FnOnce(&[BorrowedLogTarget<'_>]),
+{
     if is_sandbox_scan(settings, report) {
         return None;
     }
-    let total_reclaimable_bytes: u64 = report.targets.iter().map(|t| t.eligible_bytes).sum();
-    let total_eligible_files: u64 = report.targets.iter().map(|t| t.eligible_count).sum();
-    let total_skipped_files: u64 = report.targets.iter().map(|t| t.skipped_count).sum();
-    let categories: Vec<serde_json::Value> = report
-        .targets
-        .iter()
+    // Materialise only a borrowed view of the targets — never owned item data.
+    let borrowed = borrow_log_targets(report);
+    observe(&borrowed);
+    let total_reclaimable_bytes: u64 = borrowed.iter().map(|t| t.eligible_bytes).sum();
+    let total_eligible_files: u64 = borrowed.iter().map(|t| t.eligible_count).sum();
+    let total_skipped_files: u64 = borrowed.iter().map(|t| t.skipped_count).sum();
+    let categories: Vec<serde_json::Value> = borrowed
+        .into_iter()
         .filter(|t| t.eligible_count > 0 || t.file_count > 0)
         .map(|t| {
             serde_json::json!({
@@ -389,16 +446,21 @@ pub fn explain_item<C: Clock>(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use sweeper_core::scanner::{ScanItem, TargetScanResult};
     use sweeper_core::settings::SweeperSettings;
     use sweeper_core::{Risk, Tier};
+    use sweeper_testkit::Sandbox;
 
-    fn log_test_report() -> scanner::ScanReport {
+    // All paths below come from a per-test Sandbox temp root. They are synthetic
+    // fixtures resolved at runtime — never a real user name or machine path.
+    fn log_test_report(root: &Path) -> scanner::ScanReport {
         let items = vec![ScanItem {
             id: "user-temp::a".to_string(),
             target_id: "user-temp".to_string(),
-            path: r"C:\Users\Alice\AppData\Local\Temp\a.tmp".to_string(),
+            path: root.join("a.tmp").to_string_lossy().into_owned(),
             file_identity: None,
             size: 10,
             mtime_unix_secs: 1_600_000_000,
@@ -413,7 +475,7 @@ mod tests {
                     target_name: "User Temp".to_string(),
                     tier: Tier::Tier1,
                     risk: Risk::Safe,
-                    resolved_paths: vec![r"C:\Users\Alice\AppData\Local\Temp".to_string()],
+                    resolved_paths: vec![root.join("Temp").to_string_lossy().into_owned()],
                     scanned: true,
                     status_reason: None,
                     total_bytes: 10,
@@ -430,7 +492,7 @@ mod tests {
                     target_name: "Empty".to_string(),
                     tier: Tier::Tier2,
                     risk: Risk::Caution,
-                    resolved_paths: vec![r"C:\Users\Alice\AppData\Local\Empty".to_string()],
+                    resolved_paths: vec![root.join("Empty").to_string_lossy().into_owned()],
                     scanned: true,
                     status_reason: None,
                     total_bytes: 0,
@@ -446,13 +508,59 @@ mod tests {
         }
     }
 
+    /// Memory oracle (#96): prove the log-record builder borrows the report
+    /// instead of copying it. A deep clone would allocate fresh `String`s for
+    /// the target metadata, so the borrowed view's string references would no
+    /// longer be the very same slices as the source report's — this test fails
+    /// in that case. Because the view holds only references and primitives, the
+    /// builder has no owned report data to copy, which keeps the logging path
+    /// O(targets) and independent of the item count.
     #[test]
-    fn log_record_is_built_from_a_borrow_and_preserves_totals() {
+    fn log_record_build_borrows_report_fields_without_copying() {
+        let sandbox = Sandbox::new();
+        let report = log_test_report(sandbox.root());
         let settings = SweeperSettings {
             enable_tier1: true,
             ..SweeperSettings::default()
         };
-        let report = log_test_report();
+
+        // Drive the real production builder; the observer runs with the exact
+        // borrowed view the record is assembled from, so a deep copy inserted
+        // anywhere in the record-building path fails the identity checks below.
+        let record = build_scan_activity_log_record_observed(&settings, &report, |borrowed| {
+            assert_eq!(borrowed.len(), report.targets.len());
+            for (view, source) in borrowed.iter().zip(report.targets.iter()) {
+                // `std::ptr::eq` compares the data pointer AND length of `&str`.
+                // Identical slices prove no per-target `String` was copied or
+                // cloned — the view aliases the live report, not a copy.
+                assert!(
+                    std::ptr::eq(view.target_id, source.target_id.as_str()),
+                    "target_id was copied instead of borrowed (deep clone reintroduced)"
+                );
+                assert!(
+                    std::ptr::eq(view.target_name, source.target_name.as_str()),
+                    "target_name was copied instead of borrowed (deep clone reintroduced)"
+                );
+                assert_eq!(view.eligible_bytes, source.eligible_bytes);
+                assert_eq!(view.file_count, source.file_count);
+            }
+        })
+        .expect("non-sandbox scan logs");
+
+        assert_eq!(record["categories_count"], 1);
+        // Even after the record is built, the original report is untouched and
+        // fully usable: it was never moved or deep-cloned.
+        assert_eq!(report.targets[0].items[0].id, "user-temp::a");
+    }
+
+    #[test]
+    fn log_record_is_built_from_a_borrow_and_preserves_totals() {
+        let sandbox = Sandbox::new();
+        let settings = SweeperSettings {
+            enable_tier1: true,
+            ..SweeperSettings::default()
+        };
+        let report = log_test_report(sandbox.root());
 
         let record =
             build_scan_activity_log_record(&settings, &report).expect("non-sandbox scan logs");
@@ -472,21 +580,27 @@ mod tests {
 
     #[test]
     fn sandbox_scan_produces_no_log_record() {
-        let sentinel = r"C:\Users\Alice\AppData\Local\Temp\.sweeper_sandbox_sentinel\cache";
+        let sandbox = Sandbox::new();
+        // A synthetic path containing the sentinel marker component is enough
+        // for the sandbox hint; it never touches a real user or system path.
+        let sentinel = sandbox
+            .guarded_path(".sweeper_sandbox_sentinel/cache")
+            .to_string_lossy()
+            .into_owned();
         let settings = SweeperSettings {
             enable_tier1: false,
             enable_tier2: false,
             enable_tier3: false,
-            custom_paths: vec![sentinel.to_string()],
+            custom_paths: vec![sentinel.clone()],
             ..SweeperSettings::default()
         };
-        let mut report = log_test_report();
+        let mut report = log_test_report(sandbox.root());
         report.targets = report
             .targets
             .into_iter()
             .map(|mut t| {
                 t.target_id = "custom-path-sandbox".to_string();
-                t.resolved_paths = vec![sentinel.to_string()];
+                t.resolved_paths = vec![sentinel.clone()];
                 t
             })
             .collect();

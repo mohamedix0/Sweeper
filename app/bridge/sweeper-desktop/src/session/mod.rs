@@ -196,7 +196,13 @@ pub fn build_prepared_scan_session(
 }
 
 /// Build the Analyzer response DTO tree without touching any store lock.
-pub fn build_analyzer_response(session_id: &str, result: &AnalyzerResult) -> StartAnalyzerResponse {
+///
+/// Crate-internal: only the bridge's command/session modules build this tree;
+/// no integration test needs it to be part of the public surface.
+pub(crate) fn build_analyzer_response(
+    session_id: &str,
+    result: &AnalyzerResult,
+) -> StartAnalyzerResponse {
     mapping::map_analyzer_result_to_dto(session_id, result)
 }
 
