@@ -5,8 +5,11 @@ use sweeper_contract::{AnalyzerProgressEvent, ContractError, StartAnalyzerRespon
 use sweeper_core::analyzer::{self, AnalyzerOptions, AnalyzerProgress};
 use sweeper_core::settings::SweeperSettings;
 
-use super::mapping::{map_analyzer_error, map_analyzer_result_to_dto};
-use super::{AnalyzerFinishInput, AnalyzerSessionInput, PreparedAnalyzer, SessionStore};
+use super::mapping::map_analyzer_error;
+use super::{
+    build_analyzer_response, AnalyzerFinishInput, AnalyzerSessionInput, PreparedAnalyzer,
+    SessionStore,
+};
 use crate::clock::Clock;
 
 /// Cohesive request for synchronous analyzer store helper.
@@ -62,21 +65,28 @@ impl SessionStore {
     }
 
     /// Commit a completed analyzer session (short lock).
+    ///
+    /// On a generation mismatch the whole input is handed back with the error so
+    /// the caller can drop the (potentially large) response DTO tree *after* it
+    /// has released the commit guards, instead of extending the locked section
+    /// with a large-tree drop (#96).
     pub fn finish_analyzer<C: Clock>(
         &mut self,
         clock: &C,
         input: AnalyzerFinishInput,
-    ) -> Result<StartAnalyzerResponse, ContractError> {
+    ) -> Result<StartAnalyzerResponse, (ContractError, Box<AnalyzerFinishInput>)> {
         self.active_analyzers.remove(&input.session_id);
         if input.settings_generation_at_start != input.current_settings_generation
             || input.analyzer_generation_at_start != input.current_analyzer_generation
         {
-            return Err(ContractError::SessionInvalid {
-                reason: "session invalidated by settings change".to_string(),
-            });
+            return Err((
+                ContractError::SessionInvalid {
+                    reason: "session invalidated by settings change".to_string(),
+                },
+                Box::new(input),
+            ));
         }
         let now = clock.now_unix_secs();
-        let dto = map_analyzer_result_to_dto(&input.session_id, &input.result);
         self.insert_analyzer_session(AnalyzerSessionInput {
             id: input.session_id.clone(),
             created_at: now,
@@ -84,7 +94,7 @@ impl SessionStore {
             result: input.result,
             min_age_hours: input.min_age_hours,
         });
-        Ok(dto)
+        Ok(input.dto)
     }
 
     /// Mark an analyzer run as no longer active.
@@ -122,6 +132,9 @@ impl SessionStore {
                 return Err(map_analyzer_error(e));
             }
         };
+        // Build the response DTO tree before the store is touched; the lock is
+        // held only for the short session insertion in `finish_analyzer` (#96).
+        let dto = build_analyzer_response(&prepared.session_id, &result);
         self.finish_analyzer(
             clock,
             AnalyzerFinishInput {
@@ -132,8 +145,10 @@ impl SessionStore {
                 current_analyzer_generation: run.analyzer_generation,
                 min_age_hours: run.settings.min_age_hours,
                 result,
+                dto,
             },
         )
+        .map_err(|(err, _rejected_input)| err)
     }
 
     fn analyzer_progress_cb<P>(

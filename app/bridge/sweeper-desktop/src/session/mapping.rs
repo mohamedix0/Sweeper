@@ -9,7 +9,7 @@ use sweeper_core::scanner::ScanReport;
 use sweeper_core::{Risk, Tier};
 
 use super::support::sanitize_reason;
-use super::StoredItem;
+use super::{PreparedScanSession, StoredItem};
 
 pub(crate) fn session_fields_valid_at(
     created_at: u64,
@@ -169,14 +169,7 @@ struct TargetMeta {
     risk: Risk,
 }
 
-pub(crate) fn map_report_to_session(
-    session_id: &str,
-    report: ScanReport,
-) -> (
-    ScanResultsDto,
-    HashMap<String, StoredItem>,
-    HashMap<String, Vec<String>>,
-) {
+pub(crate) fn map_report_to_session(session_id: &str, report: ScanReport) -> PreparedScanSession {
     let mut items_map = HashMap::new();
     let mut target_roots = HashMap::new();
     let targets = report
@@ -194,7 +187,11 @@ pub(crate) fn map_report_to_session(
         min_age_hours: report.min_age_hours,
         targets,
     };
-    (results, items_map, target_roots)
+    PreparedScanSession {
+        results,
+        items: items_map,
+        target_roots,
+    }
 }
 
 pub(crate) fn sanitize_analyzer_build_msg(msg: &str) -> ContractError {
