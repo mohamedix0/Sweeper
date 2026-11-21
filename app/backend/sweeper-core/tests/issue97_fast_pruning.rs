@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sweeper_core::analyzer::{analyze_path, AnalyzerNode, AnalyzerOptions};
+use sweeper_core::analyzer::{analyze_path, AnalyzerNode, AnalyzerOptions, AnalyzerResult};
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::remover::{self, CleanOptions, ValidatedSource};
 use sweeper_testkit::{CanaryTree, Sandbox};
@@ -105,36 +105,51 @@ fn analyzer_prunes_many_files_with_bounded_children_and_exact_totals() {
     assert_sentinel_intact(&sb);
 }
 
-#[test]
-fn analyzer_prunes_large_multi_level_tree_within_budget_and_exact_totals() {
-    let sb = Sandbox::new();
-    let root = sb.create_dir("multi").unwrap();
+const MULTI_DIRS: usize = 20;
+const MULTI_SUBDIRS: usize = 12;
+const MULTI_FILES: usize = 16;
 
-    const DIRS: usize = 20;
-    const SUBDIRS: usize = 12;
-    const FILES: usize = 16;
+/// Exact totals for the seeded multi-level tree (root + dirs + leaf dirs).
+struct MultiTreeTotals {
+    files: u64,
+    bytes: u64,
+    dirs: u64,
+}
+
+/// Seed one leaf directory with consecutive unique sizes; return its byte sum.
+fn seed_multi_leaf_dir(dir: &Path, first_size: u64) -> u64 {
+    let mut total = 0u64;
+    for f in 0..MULTI_FILES {
+        let size = first_size + f as u64;
+        let path = dir.join(format!("f{f:02}.bin"));
+        write_file(&path, &vec![b'x'; size as usize]);
+        set_filetime(&path, old_mtime_secs());
+        total += size;
+    }
+    total
+}
+
+fn seed_multi_level_tree(root: &Path) -> MultiTreeTotals {
+    let mut totals = MultiTreeTotals {
+        files: 0,
+        bytes: 0,
+        dirs: 1,
+    };
     let mut next_size = 1u64;
-    let mut expected_files = 0u64;
-    let mut expected_bytes = 0u64;
-    for d in 0..DIRS {
-        for s in 0..SUBDIRS {
+    for d in 0..MULTI_DIRS {
+        totals.dirs += 1;
+        for s in 0..MULTI_SUBDIRS {
             let dir = root.join(format!("d{d:02}/s{s:02}"));
-            for f in 0..FILES {
-                let size = next_size;
-                next_size += 1;
-                let path = dir.join(format!("f{f:02}.bin"));
-                write_file(&path, &vec![b'x'; size as usize]);
-                sweeper_testkit::set_last_write_time(
-                    &path,
-                    sweeper_testkit::filetime_from_unix_secs(old_mtime_secs()),
-                )
-                .unwrap();
-                expected_files += 1;
-                expected_bytes += size;
-            }
+            totals.bytes += seed_multi_leaf_dir(&dir, next_size);
+            totals.files += MULTI_FILES as u64;
+            totals.dirs += 1;
+            next_size += MULTI_FILES as u64;
         }
     }
+    totals
+}
 
+fn run_multi_level_analyzer(root: &Path) -> (AnalyzerResult, Duration) {
     let start = Instant::now();
     let res = analyze_path(
         Some(&root.to_string_lossy()),
@@ -156,21 +171,28 @@ fn analyzer_prunes_large_multi_level_tree_within_budget_and_exact_totals() {
         elapsed.as_millis(),
         res.root.children.len()
     );
+    (res, elapsed)
+}
 
+fn assert_multi_level_totals(res: &AnalyzerResult, expected: &MultiTreeTotals, elapsed: Duration) {
     assert!(
         elapsed < Duration::from_secs(30),
         "multi-level analyzer exceeded time budget: {elapsed:?}"
     );
     assert_eq!(
-        res.progress.scanned_files, expected_files,
+        res.progress.scanned_files, expected.files,
         "every file across every level must be scanned"
     );
     assert_eq!(
-        res.progress.scanned_bytes, expected_bytes,
+        res.progress.scanned_dirs, expected.dirs,
+        "every directory in the tree must be scanned"
+    );
+    assert_eq!(
+        res.progress.scanned_bytes, expected.bytes,
         "progress bytes must remain exact across levels"
     );
     assert_eq!(
-        res.root.size_bytes, expected_bytes,
+        res.root.size_bytes, expected.bytes,
         "recursive size must remain exact across levels"
     );
     assert!(
@@ -178,16 +200,20 @@ fn analyzer_prunes_large_multi_level_tree_within_budget_and_exact_totals() {
         "root must retain at most {CAP} children, got {}",
         res.root.children.len()
     );
+}
 
-    // Pruning is bounded at every level, not just the root. The largest leaf
-    // (d19/s11) is always retained; its files have the last 16 unique sizes.
-    let leaf = find_node_by_suffix(&res.root, "d19\\s11")
-        .or_else(|| find_node_by_suffix(&res.root, "d19/s11"))
+fn assert_multi_level_leaf_pruning(root: &AnalyzerNode) {
+    // The largest leaf (last dir/subdir) is always retained; its files have
+    // the last 16 unique sizes.
+    let leaf = find_node_by_suffix(root, "d19\\s11")
+        .or_else(|| find_node_by_suffix(root, "d19/s11"))
         .expect("largest leaf directory must be present");
     assert!(leaf.children.len() <= CAP, "leaf children must be bounded");
     let top_sizes: Vec<u64> = leaf.children.iter().map(|c| c.size_bytes).collect();
-    let first_size = (1 + ((DIRS - 1) * SUBDIRS + (SUBDIRS - 1)) * FILES) as u64;
-    let expected_top: Vec<u64> = (first_size + (FILES - CAP) as u64..first_size + FILES as u64)
+    let first_size =
+        (1 + ((MULTI_DIRS - 1) * MULTI_SUBDIRS + (MULTI_SUBDIRS - 1)) * MULTI_FILES) as u64;
+    let expected_top: Vec<u64> = (first_size + (MULTI_FILES - CAP) as u64
+        ..first_size + MULTI_FILES as u64)
         .rev()
         .collect();
     assert_eq!(
@@ -195,6 +221,17 @@ fn analyzer_prunes_large_multi_level_tree_within_budget_and_exact_totals() {
         "leaf must retain the largest files (leaf path={})",
         leaf.path
     );
+}
+
+#[test]
+fn analyzer_prunes_large_multi_level_tree_within_budget_and_exact_totals() {
+    let sb = Sandbox::new();
+    let root = sb.create_dir("multi").unwrap();
+    let expected = seed_multi_level_tree(&root);
+
+    let (res, elapsed) = run_multi_level_analyzer(&root);
+    assert_multi_level_totals(&res, &expected, elapsed);
+    assert_multi_level_leaf_pruning(&res.root);
     assert_sentinel_intact(&sb);
 }
 
@@ -273,19 +310,10 @@ fn clean_revalidates_many_files_with_cached_ancestor_chains() {
     assert_sentinel_intact(&sb);
 }
 
-#[test]
-fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
-    let sb = Sandbox::new();
-    let target = sb.create_dir("target/deep/chain").unwrap();
-    let journal = sb.create_dir("journal").unwrap();
-    let canary = CanaryTree::seed_external("issue97_tampered").unwrap();
-
-    let victim = target.join("victim.bin");
-    fs::write(&victim, b"must survive").unwrap();
-    set_filetime(&victim, old_mtime_secs());
+fn make_tamper_item(target: &Path, victim: &Path) -> remover::ValidatedItem {
     let victim_canon = CanonicalPath::from_existing_path(&victim.to_string_lossy()).unwrap();
     let target_canon = CanonicalPath::from_existing_path(&target.to_string_lossy()).unwrap();
-    let item = remover::validated_item_for_tests(
+    remover::validated_item_for_tests(
         "tampered-1",
         "issue97-target",
         target_canon.as_str().to_string(),
@@ -293,14 +321,17 @@ fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
         12,
         Some(old_mtime_secs()),
         ValidatedSource::CustomPath,
-    );
+    )
+}
 
-    // Prime the per-directory ancestor-chain cache with a first (safe) clean
-    // run in the same directory level as the victim.
+/// Prime the per-directory ancestor-chain cache with a safe clean in the
+/// victim's directory level.
+fn warm_tamper_cache(target: &Path, journal: &Path) {
     let warm_victim = target.join("warm.bin");
     fs::write(&warm_victim, b"warm").unwrap();
     set_filetime(&warm_victim, old_mtime_secs());
     let warm_canon = CanonicalPath::from_existing_path(&warm_victim.to_string_lossy()).unwrap();
+    let target_canon = CanonicalPath::from_existing_path(&target.to_string_lossy()).unwrap();
     let warm_item = remover::validated_item_for_tests(
         "warm-1",
         "issue97-target",
@@ -310,23 +341,23 @@ fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
         Some(old_mtime_secs()),
         ValidatedSource::CustomPath,
     );
-    let warm_report = remover::execute_clean(vec![warm_item], clean_options(&journal, 4)).unwrap();
-    assert_eq!(warm_report.bytes_freed, 4, "warm-up clean must succeed");
+    let report = remover::execute_clean(vec![warm_item], clean_options(journal, 4)).unwrap();
+    assert_eq!(report.bytes_freed, 4, "warm-up clean must succeed");
+}
 
-    // Tamper with the Target root *after* warming the cache: replace it with a
-    // Link Point to a mirror directory that still holds a file at the victim
-    // path. The victim path therefore still exists, so the item cannot be
-    // rejected by a "missing path" check. Moment-of-deletion revalidation must
-    // reject it by Link-Point detection even with a warm ancestor-chain cache.
+/// Replace the Target root with a Link Point to a mirror that still holds a
+/// file at the victim path, so the item cannot be rejected as merely missing.
+fn tamper_target_with_mirror(sb: &Sandbox, target: &Path, victim: &Path) {
     let mirror = sb.create_dir("mirror").unwrap();
     let mirrored_victim = mirror.join("victim.bin");
     fs::write(&mirrored_victim, b"must survive").unwrap();
     set_filetime(&mirrored_victim, old_mtime_secs());
-    fs::remove_dir_all(&target).unwrap();
-    sweeper_testkit::create_junction(&target, &mirror).unwrap();
+    fs::remove_dir_all(target).unwrap();
+    sweeper_testkit::create_junction(target, &mirror).unwrap();
     assert!(victim.exists(), "victim path must survive the tamper");
+}
 
-    let report = remover::execute_clean(vec![item], clean_options(&journal, 12)).unwrap();
+fn assert_tamper_rejected(report: &remover::CleanReport, victim: &Path) {
     assert_eq!(
         report.bytes_freed, 0,
         "tampered target must cause zero deletions: {report:?}"
@@ -346,10 +377,29 @@ fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
         "rejection must come from Link-Point detection, not a missing file: {reasons}"
     );
     assert_eq!(
-        fs::read(&victim).unwrap(),
+        fs::read(victim).unwrap(),
         b"must survive",
         "the victim must remain byte-for-byte intact"
     );
+}
+
+#[test]
+fn clean_revalidation_rejects_tampered_target_with_cached_ancestor_chains() {
+    let sb = Sandbox::new();
+    let target = sb.create_dir("target/deep/chain").unwrap();
+    let journal = sb.create_dir("journal").unwrap();
+    let canary = CanaryTree::seed_external("issue97_tampered").unwrap();
+
+    let victim = target.join("victim.bin");
+    fs::write(&victim, b"must survive").unwrap();
+    set_filetime(&victim, old_mtime_secs());
+    let item = make_tamper_item(&target, &victim);
+
+    warm_tamper_cache(&target, &journal);
+    tamper_target_with_mirror(&sb, &target, &victim);
+
+    let report = remover::execute_clean(vec![item], clean_options(&journal, 12)).unwrap();
+    assert_tamper_rejected(&report, &victim);
     assert!(
         canary.verify().is_ok(),
         "external canary must remain intact"
