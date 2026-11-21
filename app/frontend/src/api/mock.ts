@@ -34,7 +34,8 @@ export type ContractError =
   | { code: 'previewTokenInvalid'; details: { reason: string } }
   | { code: 'invalidInput'; details: { reason: string } }
   | { code: 'notFound'; details: { reason: string } }
-  | { code: 'internal'; details: { reason: string } };
+  | { code: 'internal'; details: { reason: string } }
+  | { code: 'scanCancelled'; details: { session_id: string } };
 
 export type ScanProgressEvent =
   | { kind: 'started'; session_id: string }
@@ -97,6 +98,8 @@ export type LogContent = { id: string; content: string };
 
 export type MockController = SweeperClient & {
   advanceTimeMs: (ms: number) => void;
+  setScanStepDelayMs: (ms: number) => void;
+  cancelActiveScans: () => void;
   invalidateSettings: () => void;
   setElevationStatus: (status: { isElevated: boolean }) => void;
   setRelaunchResult: (result: { launched: boolean } | { error: ContractError }) => void;

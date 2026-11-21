@@ -21,6 +21,8 @@ function initialInit() {
 
 export function createMockController(): SweeperClient & {
   advanceTimeMs: (ms: number) => void;
+  setScanStepDelayMs: (ms: number) => void;
+  cancelActiveScans: () => void;
   invalidateSettings: () => void;
   setElevationStatus: (status: { isElevated: boolean }) => void;
   setRelaunchResult: (result: { launched: boolean } | { error: ContractError }) => void;
@@ -36,6 +38,7 @@ export function createMockController(): SweeperClient & {
       settingsState: defaultSettings(),
       elevationStatus: { isElevated: init?.elevationStatus?.isElevated ?? false },
       relaunchResult: init?.relaunchResult ?? ({ launched: true } as const),
+      scanStepDelayMs: 0,
     },
     sessions: new Map<string, ScanSessionState>(),
     analyzerSessions: new Map<string, AnalyzerSessionState>(),

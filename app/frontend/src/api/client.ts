@@ -103,6 +103,7 @@ export type Settings = {
 export interface SweeperClient {
   startScan(tiers: TierDto[] | null, onProgress?: (e: ScanProgressEvent) => void): Promise<{ sessionId: string }>;
   getScanResults(sessionId: string): Promise<ScanResults>;
+  cancelScan(sessionId: string): Promise<void>;
   previewClean(
     sessionId: string,
     itemIds: string[],
@@ -167,20 +168,21 @@ async function withAnalyzerProgress<T>(onProgress: ((e: AnalyzerProgressEvent) =
 
 export function createTauriClient(): SweeperClient {
   return {
-    startScan: (tiers, onProgress) => withScanProgress(onProgress, () => commands.startScan(tiers)),
-    getScanResults: async (sessionId) => unwrap(await commands.getScanResults(sessionId)),
-    previewClean: async (sessionId, itemIds, confirmations) => unwrap(await commands.previewClean(sessionId, itemIds, confirmations)),
-    executeClean: (previewToken, onProgress) => withCleanProgress(previewToken, onProgress, () => commands.executeClean(previewToken)),
-    startAnalyzer: (root, onProgress) => withAnalyzerProgress(onProgress, () => commands.startAnalyzer(root)),
-    cancelAnalyzer: async (sessionId) => { unwrap(await commands.cancelAnalyzer(sessionId)); },
-    explainItem: async (itemId) => unwrap(await commands.explainItem(itemId)),
+    startScan: (tiers, onProgress) => withScanProgress(onProgress, () => commands.startScan({ tiers })),
+    getScanResults: async (sessionId) => unwrap(await commands.getScanResults({ sessionId })),
+    cancelScan: async (sessionId) => { unwrap(await commands.cancelScan({ sessionId })); },
+    previewClean: async (sessionId, itemIds, confirmations) => unwrap(await commands.previewClean({ sessionId, itemIds, confirmations })),
+    executeClean: (previewToken, onProgress) => withCleanProgress(previewToken, onProgress, () => commands.executeClean({ previewToken })),
+    startAnalyzer: (root, onProgress) => withAnalyzerProgress(onProgress, () => commands.startAnalyzer({ root })),
+    cancelAnalyzer: async (sessionId) => { unwrap(await commands.cancelAnalyzer({ sessionId })); },
+    explainItem: async (itemId) => unwrap(await commands.explainItem({ itemId })),
     getSettings: async () => normalizeSettings(unwrap(await commands.getSettings()) as Settings & { enableElevationTargets?: boolean }),
-    updateSettings: async (settings) => normalizeSettings(unwrap(await commands.updateSettings(settings)) as Settings & { enableElevationTargets?: boolean }),
+    updateSettings: async (settings) => normalizeSettings(unwrap(await commands.updateSettings({ settings })) as Settings & { enableElevationTargets?: boolean }),
     getElevationStatus: async () => unwrap(await commands.getElevationStatus()),
     relaunchElevated: async () => unwrap(await commands.relaunchElevated()),
-    validateCustomPath: async (path) => unwrap(await commands.validateCustomPath(path)),
+    validateCustomPath: async (path) => unwrap(await commands.validateCustomPath({ path })),
     listLogs: async () => unwrap(await commands.listLogs()),
-    readLog: async (logId) => unwrap(await commands.readLog(logId)),
+    readLog: async (logId) => unwrap(await commands.readLog({ logId })),
   };
 }
 
@@ -207,6 +209,7 @@ export function isContractError(e: unknown): e is ContractError {
 export function formatContractError(e: unknown): string {
   if (isContractError(e)) {
     if (e.code === 'unknownItem') return `Unknown item(s): ${e.details.count}`;
+    if (e.code === 'scanCancelled') return 'Scan cancelled.';
     return e.details.reason || e.code;
   }
   if (e instanceof Error) return e.message;

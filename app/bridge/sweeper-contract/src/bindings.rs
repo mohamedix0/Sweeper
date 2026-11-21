@@ -128,12 +128,7 @@ fn scan_and_clean_commands(
         cmd_one::<StartScanResponse, Option<Vec<TierDto>>>(
             cfg,
             type_map,
-            CmdOneSpec::new(
-                "startScan",
-                "start_scan",
-                Some("{ tiers }"),
-                ("tiers", None),
-            ),
+            CmdOneSpec::new("startScan", "start_scan", ("tiers", None)),
         )?,
         cmd_one::<ScanResultsDto, String>(
             cfg,
@@ -141,9 +136,19 @@ fn scan_and_clean_commands(
             CmdOneSpec::new(
                 "getScanResults",
                 "get_scan_results",
-                Some("{ sessionId }"),
                 ("session_id", Some(ArgTy::Str)),
             ),
+        )?,
+        // Session-scoped Scan cancellation. Only the session id crosses IPC;
+        // the backend sets a flag on that one in-flight ScanSession (#94).
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "cancelScan",
+                invoke: "cancel_scan",
+            },
+            &[("session_id", "string".to_string())],
         )?,
         cmd_preview_clean(cfg, type_map)?,
         cmd_one::<ExecuteCleanResponse, String>(
@@ -152,7 +157,6 @@ fn scan_and_clean_commands(
             CmdOneSpec::new(
                 "executeClean",
                 "execute_clean",
-                Some("{ previewToken }"),
                 ("preview_token", Some(ArgTy::Str)),
             ),
         )?,
@@ -167,34 +171,28 @@ fn analyzer_and_settings_commands(
         cmd_one::<StartAnalyzerResponse, Option<String>>(
             cfg,
             type_map,
-            CmdOneSpec::new(
-                "startAnalyzer",
-                "start_analyzer",
-                Some("{ root }"),
-                ("root", None),
-            ),
+            CmdOneSpec::new("startAnalyzer", "start_analyzer", ("root", None)),
         )?,
-        cmd_cancel_analyzer(cfg, type_map)?,
+        // Session-scoped Analyzer cancellation: only the session id crosses IPC.
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "cancelAnalyzer",
+                invoke: "cancel_analyzer",
+            },
+            &[("session_id", "string".to_string())],
+        )?,
         cmd_one::<ExplainItemResponse, String>(
             cfg,
             type_map,
-            CmdOneSpec::new(
-                "explainItem",
-                "explain_item",
-                Some("{ itemId }"),
-                ("item_id", Some(ArgTy::Str)),
-            ),
+            CmdOneSpec::new("explainItem", "explain_item", ("item_id", Some(ArgTy::Str))),
         )?,
         cmd_noarg::<SettingsDto>(cfg, type_map, "getSettings", "get_settings")?,
         cmd_one::<SettingsDto, SettingsDto>(
             cfg,
             type_map,
-            CmdOneSpec::new(
-                "updateSettings",
-                "update_settings",
-                Some("{ settings }"),
-                ("settings", None),
-            ),
+            CmdOneSpec::new("updateSettings", "update_settings", ("settings", None)),
         )?,
         cmd_one::<ValidateCustomPathResponse, String>(
             cfg,
@@ -202,7 +200,6 @@ fn analyzer_and_settings_commands(
             CmdOneSpec::new(
                 "validateCustomPath",
                 "validate_custom_path",
-                Some("{ path }"),
                 ("path", Some(ArgTy::Str)),
             ),
         )?,
@@ -218,12 +215,7 @@ fn logs_and_elevation_commands(
         cmd_one::<LogReadResponse, String>(
             cfg,
             type_map,
-            CmdOneSpec::new(
-                "readLog",
-                "read_log",
-                Some("{ logId }"),
-                ("log_id", Some(ArgTy::Str)),
-            ),
+            CmdOneSpec::new("readLog", "read_log", ("log_id", Some(ArgTy::Str))),
         )?,
         cmd_noarg::<ElevationStatusDto>(
             cfg,
@@ -243,74 +235,67 @@ fn host_lifecycle_commands(
     type_map: &mut TypeCollection,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     Ok(vec![
-        cmd_resolve_close(cfg, type_map)?,
+        // The window-close handshake: the webview answers the host's deferred
+        // CloseRequested event with its decision, and the host exits only on
+        // approval. The request id makes a late decision for an older request
+        // a no-op.
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "resolveClose",
+                invoke: "resolve_close",
+            },
+            &[
+                ("approved", "boolean".to_string()),
+                ("request_id", "string".to_string()),
+            ],
+        )?,
         cmd_noarg::<CloseReadyResultDto>(
             cfg,
             type_map,
             "notifyCloseListenerReady",
             "notify_close_listener_ready",
         )?,
-        cmd_reset_pending_close(cfg, type_map)?,
+        // Recovery for an unreachable host listener: clear the native pending
+        // close gate so a later attempt reaches a registered listener instead
+        // of hanging in `AlreadyPending`. Never approves a close.
+        cmd_null_result(
+            cfg,
+            type_map,
+            CmdSpec {
+                name: "resetPendingClose",
+                invoke: "reset_pending_close",
+            },
+            &[],
+        )?,
     ])
-}
-
-// The window-close handshake: the webview answers the host's deferred
-// CloseRequested event with its decision, and the host exits only on approval.
-// The request id makes a late decision for an older request a no-op.
-fn cmd_resolve_close(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    cmd_null_result(
-        cfg,
-        type_map,
-        CmdSpec {
-            name: "resolveClose",
-            invoke: "resolve_close",
-            arg_obj: Some("{ approved, requestId }"),
-        },
-        &[
-            ("approved", "boolean".to_string()),
-            ("request_id", "string".to_string()),
-        ],
-    )
-}
-
-// Recovery for an unreachable host listener: clear the native pending close
-// gate so a later attempt reaches a registered listener instead of hanging in
-// `AlreadyPending`. Never approves a close.
-fn cmd_reset_pending_close(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    cmd_null_result(
-        cfg,
-        type_map,
-        CmdSpec {
-            name: "resetPendingClose",
-            invoke: "reset_pending_close",
-            arg_obj: None,
-        },
-        &[],
-    )
 }
 
 #[derive(Clone, Copy)]
 struct CmdSpec<'a> {
     name: &'a str,
     invoke: &'a str,
-    arg_obj: Option<&'a str>,
 }
 
+// Commands that take parameters receive ONE named argument object. Its fields
+// mirror the Rust parameter names (lower-camel-cased for the Tauri wire format)
+// and are forwarded to `TAURI_INVOKE` unchanged, so the payload keys are exactly
+// the same as in the former positional-argument form. Zero-parameter commands
+// keep their no-argument signature.
 fn cmd_fn(spec: CmdSpec<'_>, args: &[(&str, String)], ret: &str) -> String {
-    let args_str = args
-        .iter()
-        .map(|(n, t)| format!("{}: {}", n.to_lower_camel_case(), t))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let arg_usage = spec.arg_obj.map(|s| format!(", {s}")).unwrap_or_default();
+    let (signature_arg, arg_usage) = if args.is_empty() {
+        (String::new(), String::new())
+    } else {
+        let fields = args
+            .iter()
+            .map(|(n, t)| format!("{}: {}", n.to_lower_camel_case(), t))
+            .collect::<Vec<_>>()
+            .join("; ");
+        (format!("args: {{ {fields} }}"), ", args".to_string())
+    };
     format!(
-        "async {}({args_str}) : Promise<{ret}> {{\n    try {{\n    return {{ status: \"ok\", data: await TAURI_INVOKE(\"{}\"{arg_usage}) }};\n}} catch (e) {{\n    if(e instanceof Error) throw e;\n    else return {{ status: \"error\", error: e  as any }};\n}}\n}}",
+        "async {}({signature_arg}) : Promise<{ret}> {{\n    try {{\n    return {{ status: \"ok\", data: await TAURI_INVOKE(\"{}\"{arg_usage}) }};\n}} catch (e) {{\n    if(e instanceof Error) throw e;\n    else return {{ status: \"error\", error: e  as any }};\n}}\n}}",
         spec.name, spec.invoke
     )
 }
@@ -322,6 +307,20 @@ fn ty<T: Type + 'static>(
     datatype_str(cfg, <T as Type>::inline(type_map, Generics::NONE), type_map)
 }
 
+/// Render a *reference* to the single exported `ContractError` alias instead of
+/// inlining the whole discriminated union into every command signature. The
+/// alias itself is emitted exactly once in the user-defined types section from
+/// the `NamedType` registration in `register_types`; using it here keeps the
+/// wire format identical and makes adding an error variant a one-line change
+/// rather than rewriting the same ~47 lines in every command signature.
+fn contract_error_ty(
+    cfg: &specta_typescript::Typescript,
+    type_map: &mut TypeCollection,
+) -> Result<String, specta_typescript::ExportError> {
+    let reference = <ContractError as Type>::reference(type_map, &[]);
+    datatype_str(cfg, reference.inner, type_map)
+}
+
 #[derive(Clone, Copy)]
 enum ArgTy {
     Str,
@@ -330,23 +329,12 @@ enum ArgTy {
 struct CmdOneSpec<'a> {
     name: &'a str,
     invoke: &'a str,
-    arg_obj: Option<&'a str>,
     arg: (&'a str, Option<ArgTy>),
 }
 
 impl<'a> CmdOneSpec<'a> {
-    const fn new(
-        name: &'a str,
-        invoke: &'a str,
-        arg_obj: Option<&'a str>,
-        arg: (&'a str, Option<ArgTy>),
-    ) -> Self {
-        Self {
-            name,
-            invoke,
-            arg_obj,
-            arg,
-        }
+    const fn new(name: &'a str, invoke: &'a str, arg: (&'a str, Option<ArgTy>)) -> Self {
+        Self { name, invoke, arg }
     }
 }
 
@@ -370,7 +358,7 @@ fn cmd_null_result(
     spec: CmdSpec<'_>,
     args: &[(&str, String)],
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     Ok(cmd_fn(spec, args, &format!("Result<null, {err}>")))
 }
 
@@ -380,14 +368,10 @@ fn cmd_noarg<R: Type + 'static>(
     name: &'static str,
     invoke: &'static str,
 ) -> Result<String, Box<dyn Error>> {
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     let ok = ty::<R>(cfg, type_map)?;
     Ok(cmd_fn(
-        CmdSpec {
-            name,
-            invoke,
-            arg_obj: None,
-        },
+        CmdSpec { name, invoke },
         &[],
         &format!("Result<{ok}, {err}>"),
     ))
@@ -402,7 +386,7 @@ where
     R: Type + 'static,
     A: Type + 'static,
 {
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     let ok = ty::<R>(cfg, type_map)?;
     let (arg_name, kind) = spec.arg;
     let args = vec![(arg_name, arg_type::<A>(cfg, type_map, kind)?)];
@@ -410,7 +394,6 @@ where
         CmdSpec {
             name: spec.name,
             invoke: spec.invoke,
-            arg_obj: spec.arg_obj,
         },
         &args,
         &format!("Result<{ok}, {err}>"),
@@ -424,12 +407,11 @@ fn cmd_preview_clean(
     let ids = ty::<Vec<String>>(cfg, type_map)?;
     let conf = ty::<Option<PreviewConfirmationsDto>>(cfg, type_map)?;
     let ok = ty::<PreviewCleanResponse>(cfg, type_map)?;
-    let err = ty::<ContractError>(cfg, type_map)?;
+    let err = contract_error_ty(cfg, type_map)?;
     Ok(cmd_fn(
         CmdSpec {
             name: "previewClean",
             invoke: "preview_clean",
-            arg_obj: Some("{ sessionId, itemIds, confirmations }"),
         },
         &[
             ("session_id", "string".to_string()),
@@ -438,22 +420,6 @@ fn cmd_preview_clean(
         ],
         &format!("Result<{ok}, {err}>"),
     ))
-}
-
-fn cmd_cancel_analyzer(
-    cfg: &specta_typescript::Typescript,
-    type_map: &mut TypeCollection,
-) -> Result<String, Box<dyn Error>> {
-    cmd_null_result(
-        cfg,
-        type_map,
-        CmdSpec {
-            name: "cancelAnalyzer",
-            invoke: "cancel_analyzer",
-            arg_obj: Some("{ sessionId }"),
-        },
-        &[("session_id", "string".to_string())],
-    )
 }
 
 fn render_events(

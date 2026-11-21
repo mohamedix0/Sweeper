@@ -554,4 +554,11 @@ pub enum ContractError {
         /// Human-safe reason.
         reason: String,
     },
+    /// A Scan was cooperatively cancelled (e.g. via `cancel_scan` or a close request).
+    /// The typed `code` is the discriminator; no English reason string is matched (#94).
+    #[error("scan cancelled")]
+    ScanCancelled {
+        /// Session identifier that was cancelled.
+        session_id: String,
+    },
 }

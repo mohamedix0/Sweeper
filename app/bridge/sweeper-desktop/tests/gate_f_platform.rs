@@ -70,6 +70,7 @@ fn tauri_capability_command_surface_snapshot() {
         cmds,
         vec![
             "cancel_analyzer".to_string(),
+            "cancel_scan".to_string(),
             "execute_clean".to_string(),
             "explain_item".to_string(),
             "get_elevation_status".to_string(),

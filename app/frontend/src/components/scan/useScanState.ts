@@ -10,6 +10,9 @@ export function useScanState() {
   const [scanStatus, setScanStatus] = useState('');
   const [scanProgress, setScanProgress] = useState<{ completedTargets: number; totalTargets: number; currentTargetName: string | null; scannedItems: string; scannedBytes: string } | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // Id of the in-flight run, learned from its progress events. Stop uses this
+  // id only; no path ever crosses IPC (#94).
+  const [runningSessionId, setRunningSessionId] = useState<string | null>(null);
   const [scanStartedAt, setScanStartedAt] = useState<number | null>(null);
   const [results, setResults] = useState<ScanResults | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -38,7 +41,8 @@ export function useScanState() {
   const activeScanRunRef = useRef(0);
   return {
     tier1, setTier1, tier2, setTier2, scanning, setScanning, scanStatus, setScanStatus, scanProgress, setScanProgress,
-    sessionId, setSessionId, scanStartedAt, setScanStartedAt, results, setResults, selectedIds, setSelectedIds,
+    sessionId, setSessionId, runningSessionId, setRunningSessionId,
+    scanStartedAt, setScanStartedAt, results, setResults, selectedIds, setSelectedIds,
     collapsedTargets, setCollapsedTargets, toolbar, setToolbar, focus, setFocus, inspected, setInspected,
     preview, setPreview, previewLoading, setPreviewLoading, previewProgress, setPreviewProgress, confirmText, setConfirmText, cleaning, setCleaning,
     cleanProgress, setCleanProgress, cleanSummary, setCleanSummary, error, setError, info, setInfo,

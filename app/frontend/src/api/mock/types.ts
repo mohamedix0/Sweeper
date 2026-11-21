@@ -8,6 +8,8 @@ export type ScanSessionState = {
   targets: import('../../contract/bindings').TargetScanResultDto[];
   itemsById: Map<string, ScanItemInfo>;
   settingsGeneration: number;
+  /** Set by cancelScan / the host-close hook; stops further progress emission. */
+  cancelled: boolean;
 };
 
 export type AnalyzerSessionState = {
@@ -40,7 +42,13 @@ export type LogEntry = { id: string; name: string; modifiedUnixSecs: string; siz
 export type MockCtx = {
   state: { nowMs: number; settingsGeneration: number; scanSeq: number; analyzerSeq: number; logSeq: number };
   previewSeq: { value: number };
-  mutable: { settingsState: Settings; elevationStatus: { isElevated: boolean }; relaunchResult: { launched: boolean } | { error: ContractError } };
+  mutable: {
+    settingsState: Settings;
+    elevationStatus: { isElevated: boolean };
+    relaunchResult: { launched: boolean } | { error: ContractError };
+    /** Test-only delay per scan progress step, used to exercise Stop in E2E. */
+    scanStepDelayMs: number;
+  };
   sessions: Map<string, ScanSessionState>;
   analyzerSessions: Map<string, AnalyzerSessionState>;
   previews: Map<string, PreviewState>;

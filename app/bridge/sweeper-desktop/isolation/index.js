@@ -9,6 +9,7 @@
 const ALLOWED_COMMANDS = new Set([
   'start_scan',
   'get_scan_results',
+  'cancel_scan',
   'preview_clean',
   'execute_clean',
   'start_analyzer',
@@ -61,6 +62,7 @@ function isOptional(value, predicate) {
 const ARGUMENT_SHAPES = {
   start_scan: { tiers: (v) => isOptional(v, isStringArray) },
   get_scan_results: { sessionId: isString },
+  cancel_scan: { sessionId: isString },
   preview_clean: {
     sessionId: isString,
     itemIds: isStringArray,
