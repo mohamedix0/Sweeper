@@ -8,7 +8,7 @@ use sweeper_contract::{
 use sweeper_core::scanner::{self, ScanError};
 
 use crate::clock::Clock;
-use crate::session::ScanFinishInput;
+use crate::session::{build_prepared_scan_session, ScanFinishInput};
 use crate::AppState;
 
 use super::shared::{
@@ -32,6 +32,9 @@ fn commit_scan_outcome<C: Clock>(
     prepared: &crate::session::PreparedScan,
     report: scanner::ScanReport,
 ) -> Result<(), ContractError> {
+    // Build the large DTO tree while no global lock is held; the commit below
+    // only inserts the finished tree under the short store lock (#96).
+    let prepared_tree = build_prepared_scan_session(session_id, report);
     commit_async_outcome(
         state,
         AsyncOutcomeCommit::new(
@@ -42,12 +45,12 @@ fn commit_scan_outcome<C: Clock>(
                 // generation is unused here but carried by the shared commit seam.
                 analyzer: 0,
             },
-            (prepared.effective_settings.min_age_hours, report),
+            (prepared.effective_settings.min_age_hours, prepared_tree),
             |clock: &C,
              sessions: &mut crate::session::SessionStore,
              sid: String,
              gens: super::shared::CommitGenerations,
-             payload: (u32, scanner::ScanReport)| {
+             payload: (u32, crate::session::PreparedScanSession)| {
                 sessions.finish_scan(
                     clock,
                     ScanFinishInput {
@@ -55,7 +58,7 @@ fn commit_scan_outcome<C: Clock>(
                         settings_generation_at_start: gens.scan_at_start,
                         current_settings_generation: gens.scan_current,
                         effective_min_age_hours: payload.0,
-                        report: payload.1,
+                        prepared: payload.1,
                     },
                 )
             },
@@ -135,12 +138,17 @@ fn scan_logs_base_dir() -> PathBuf {
         .unwrap_or_else(sweeper_core::journal::default_logs_base_dir)
 }
 
-fn write_scan_activity_log(
+/// Build the scan activity-log record from a borrow of the report (#96).
+///
+/// Only the small JSON record is materialised here; the full `ScanReport` is
+/// never cloned. Returns `None` for synthetic sandbox scans, which are not
+/// logged (same rule the previous in-place logger applied).
+fn build_scan_activity_log_record(
     settings: &sweeper_core::settings::SweeperSettings,
     report: &scanner::ScanReport,
-) {
+) -> Option<serde_json::Value> {
     if is_sandbox_scan(settings, report) {
-        return;
+        return None;
     }
     let total_reclaimable_bytes: u64 = report.targets.iter().map(|t| t.eligible_bytes).sum();
     let total_eligible_files: u64 = report.targets.iter().map(|t| t.eligible_count).sum();
@@ -163,7 +171,7 @@ fn write_scan_activity_log(
             })
         })
         .collect();
-    let record = serde_json::json!({
+    Some(serde_json::json!({
         "kind": "scan",
         "record": "outcome",
         "event": "scan",
@@ -174,7 +182,13 @@ fn write_scan_activity_log(
         "total_skipped_files": total_skipped_files.to_string(),
         "categories_count": categories.len(),
         "targets": categories,
-    });
+    }))
+}
+
+/// Write an already-built scan activity-log record and surface retirement/IO
+/// warnings. Kept separate from record construction so the report can be
+/// borrowed and released before the long-lived commit path takes ownership.
+fn write_scan_log_record(record: serde_json::Value) {
     match sweeper_core::journal::write_scan_log(&scan_logs_base_dir(), &record) {
         Ok(outcome) => {
             for warning in outcome.retirement_warnings {
@@ -286,11 +300,17 @@ where
 {
     match scan_result {
         Ok(report) => {
-            let log_report = report.clone();
+            // Build the small log record from a borrow of the report so the
+            // (potentially very large) report is never deep-cloned (#96). The
+            // record is written after a successful commit, as before.
+            let log_record =
+                build_scan_activity_log_record(&ctx.prepared.effective_settings, &report);
             if let Err(err) = commit_scan_outcome(state, ctx.session_id, ctx.prepared, report) {
                 return Err(handle_scan_terminal(state, ctx, ScanTerminal::Failed(err)));
             }
-            write_scan_activity_log(&ctx.prepared.effective_settings, &log_report);
+            if let Some(record) = log_record {
+                write_scan_log_record(record);
+            }
             emit_scan_event(
                 ctx.shared_cb,
                 ScanProgressEvent::Completed {
@@ -365,4 +385,112 @@ pub fn explain_item<C: Clock>(
     let settings_gen = settings.generation();
     let mut sessions = state.sessions.lock().map_err(|_| lock_state_error())?;
     sessions.explain_item(&state.clock, &item_id, settings_gen)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sweeper_core::scanner::{ScanItem, TargetScanResult};
+    use sweeper_core::settings::SweeperSettings;
+    use sweeper_core::{Risk, Tier};
+
+    fn log_test_report() -> scanner::ScanReport {
+        let items = vec![ScanItem {
+            id: "user-temp::a".to_string(),
+            target_id: "user-temp".to_string(),
+            path: r"C:\Users\Alice\AppData\Local\Temp\a.tmp".to_string(),
+            file_identity: None,
+            size: 10,
+            mtime_unix_secs: 1_600_000_000,
+            age_eligible: true,
+        }];
+        scanner::ScanReport {
+            started_unix_secs: 1_800_000_000,
+            min_age_hours: 24,
+            targets: vec![
+                TargetScanResult {
+                    target_id: "user-temp".to_string(),
+                    target_name: "User Temp".to_string(),
+                    tier: Tier::Tier1,
+                    risk: Risk::Safe,
+                    resolved_paths: vec![r"C:\Users\Alice\AppData\Local\Temp".to_string()],
+                    scanned: true,
+                    status_reason: None,
+                    total_bytes: 10,
+                    eligible_bytes: 10,
+                    file_count: 1,
+                    eligible_count: 1,
+                    skipped_count: 2,
+                    skipped_reasons: Default::default(),
+                    skipped_diagnostics: Vec::new(),
+                    items,
+                },
+                TargetScanResult {
+                    target_id: "empty-target".to_string(),
+                    target_name: "Empty".to_string(),
+                    tier: Tier::Tier2,
+                    risk: Risk::Caution,
+                    resolved_paths: vec![r"C:\Users\Alice\AppData\Local\Empty".to_string()],
+                    scanned: true,
+                    status_reason: None,
+                    total_bytes: 0,
+                    eligible_bytes: 0,
+                    file_count: 0,
+                    eligible_count: 0,
+                    skipped_count: 0,
+                    skipped_reasons: Default::default(),
+                    skipped_diagnostics: Vec::new(),
+                    items: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn log_record_is_built_from_a_borrow_and_preserves_totals() {
+        let settings = SweeperSettings {
+            enable_tier1: true,
+            ..SweeperSettings::default()
+        };
+        let report = log_test_report();
+
+        let record =
+            build_scan_activity_log_record(&settings, &report).expect("non-sandbox scan logs");
+
+        assert_eq!(record["kind"], "scan");
+        assert_eq!(record["total_reclaimable_bytes"], "10");
+        assert_eq!(record["total_eligible_files"], "1");
+        assert_eq!(record["total_skipped_files"], "2");
+        assert_eq!(record["categories_count"], 1);
+        assert_eq!(record["targets"][0]["target_id"], "user-temp");
+
+        // The report was borrowed, never moved or deep-cloned, and remains
+        // entirely usable here.
+        assert_eq!(report.targets.len(), 2);
+        assert_eq!(report.targets[0].items[0].id, "user-temp::a");
+    }
+
+    #[test]
+    fn sandbox_scan_produces_no_log_record() {
+        let sentinel = r"C:\Users\Alice\AppData\Local\Temp\.sweeper_sandbox_sentinel\cache";
+        let settings = SweeperSettings {
+            enable_tier1: false,
+            enable_tier2: false,
+            enable_tier3: false,
+            custom_paths: vec![sentinel.to_string()],
+            ..SweeperSettings::default()
+        };
+        let mut report = log_test_report();
+        report.targets = report
+            .targets
+            .into_iter()
+            .map(|mut t| {
+                t.target_id = "custom-path-sandbox".to_string();
+                t.resolved_paths = vec![sentinel.to_string()];
+                t
+            })
+            .collect();
+
+        assert!(build_scan_activity_log_record(&settings, &report).is_none());
+    }
 }

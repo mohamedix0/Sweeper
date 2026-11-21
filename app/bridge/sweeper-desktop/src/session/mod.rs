@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use sweeper_contract::{ScanItemDto, ScanResultsDto};
+use sweeper_contract::{ScanItemDto, ScanResultsDto, StartAnalyzerResponse};
 use sweeper_core::analyzer::AnalyzerResult;
 use sweeper_core::remover::ValidatedItem;
 use sweeper_core::settings::SweeperSettings;
@@ -170,7 +170,39 @@ pub struct PreparedAnalyzer {
     pub cancel: Arc<AtomicBool>,
 }
 
+/// Fully built DTO tree for a completed Scan.
+///
+/// Constructing this tree is the expensive part of committing a large Scan. It
+/// is deliberately built by [`build_prepared_scan_session`] *before* the global
+/// session-store lock is taken, so that the lock only guards the short HashMap
+/// insertion in [`SessionStore::finish_scan`] (#96).
+#[derive(Debug)]
+pub struct PreparedScanSession {
+    /// Display DTO tree returned to the UI.
+    pub results: ScanResultsDto,
+    /// Per-item metadata, keyed by item id.
+    pub items: HashMap<String, StoredItem>,
+    /// Resolved target roots, keyed by target id.
+    pub target_roots: HashMap<String, Vec<String>>,
+}
+
+/// Build the complete DTO tree for a Scan report without touching any store
+/// lock. The returned value is ready for a short, lock-guarded insertion.
+pub fn build_prepared_scan_session(
+    session_id: &str,
+    report: sweeper_core::scanner::ScanReport,
+) -> PreparedScanSession {
+    mapping::map_report_to_session(session_id, report)
+}
+
+/// Build the Analyzer response DTO tree without touching any store lock.
+pub fn build_analyzer_response(session_id: &str, result: &AnalyzerResult) -> StartAnalyzerResponse {
+    mapping::map_analyzer_result_to_dto(session_id, result)
+}
+
 /// Cohesive input for committing a completed scan session.
+///
+/// `prepared` is already-built DTO data; finishing a scan only inserts it.
 #[derive(Debug)]
 pub struct ScanFinishInput {
     /// Session id.
@@ -181,11 +213,14 @@ pub struct ScanFinishInput {
     pub current_settings_generation: u64,
     /// Effective minimum age hours for this scan.
     pub effective_min_age_hours: u32,
-    /// Completed scan report.
-    pub report: sweeper_core::scanner::ScanReport,
+    /// Pre-built DTO tree for this scan (constructed outside the store lock).
+    pub prepared: PreparedScanSession,
 }
 
 /// Cohesive input for committing a completed analyzer session.
+///
+/// `dto` is the already-built response tree; finishing an analyzer session only
+/// inserts the stored result and returns that DTO.
 #[derive(Debug)]
 pub struct AnalyzerFinishInput {
     /// Session id.
@@ -200,8 +235,10 @@ pub struct AnalyzerFinishInput {
     pub current_analyzer_generation: u64,
     /// Minimum age hours at analysis time.
     pub min_age_hours: u32,
-    /// Completed analyzer result.
+    /// Completed analyzer result (stored in the session).
     pub result: AnalyzerResult,
+    /// Pre-built response DTO tree (constructed outside the store lock).
+    pub dto: StartAnalyzerResponse,
 }
 
 /// Cohesive request for issuing a preview token.

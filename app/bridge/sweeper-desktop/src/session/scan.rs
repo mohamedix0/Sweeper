@@ -8,9 +8,11 @@ use sweeper_contract::{
 use sweeper_core::scanner::{self, ScanError, ScanReport};
 use sweeper_core::settings::SweeperSettings;
 
-use super::mapping::map_report_to_session;
 use super::support::{build_store_scan_cb, emit_scan_progress, sanitize_reason, SessionIdRef};
-use super::{ActiveScan, PreparedScan, ScanFinishInput, ScanSession, SessionStore};
+use super::{
+    build_prepared_scan_session, ActiveScan, PreparedScan, ScanFinishInput, ScanSession,
+    SessionStore,
+};
 use crate::clock::Clock;
 
 type SharedScanCb<F> = Arc<Mutex<F>>;
@@ -171,14 +173,13 @@ impl SessionStore {
 
     fn insert_finished_scan<C: Clock>(&mut self, clock: &C, input: ScanFinishInput) {
         let now = clock.now_unix_secs();
-        let (results, items, target_roots) = map_report_to_session(&input.session_id, input.report);
         let session = ScanSession {
             id: input.session_id.clone(),
             created_at: now,
             settings_generation: input.settings_generation_at_start,
-            results,
-            items,
-            target_roots,
+            results: input.prepared.results,
+            items: input.prepared.items,
+            target_roots: input.prepared.target_roots,
             min_age_hours: input.effective_min_age_hours,
         };
         self.sessions.insert(input.session_id, session);
@@ -316,12 +317,15 @@ impl SessionStore {
         F: FnMut(ScanProgressEvent),
     {
         let ctx = input.ctx;
+        // Build the large DTO tree before the store is touched; `finish_scan`
+        // only inserts the finished tree under the (short) store lock (#96).
+        let prepared = build_prepared_scan_session(&ctx.session_id, input.report);
         let finish = ScanFinishInput {
             session_id: ctx.session_id.clone(),
             settings_generation_at_start: ctx.prepared.settings_generation,
             current_settings_generation: ctx.current_settings_generation,
             effective_min_age_hours: ctx.prepared.effective_settings.min_age_hours,
-            report: input.report,
+            prepared,
         };
         if let Err(err) = self.finish_scan(clock, finish) {
             emit_scan_progress(
