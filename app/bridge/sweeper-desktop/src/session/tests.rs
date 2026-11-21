@@ -9,7 +9,7 @@ use crate::clock::FixedClock;
 
 use super::scan::ScanRunRequest;
 use super::support::find_containing_root;
-use super::{ScanFinishInput, SessionStore};
+use super::{build_prepared_scan_session, ScanFinishInput, SessionStore};
 
 impl SessionStore {
     fn is_scan_active(&self, session_id: &str) -> bool {
@@ -59,7 +59,7 @@ fn check_finish_scan_settings_mismatch_clears_active_tracking() {
                 settings_generation_at_start: 1,
                 current_settings_generation: 2,
                 effective_min_age_hours: settings.min_age_hours,
-                report: empty_scan_report(),
+                prepared: build_prepared_scan_session(&prepared.session_id, empty_scan_report()),
             },
         )
         .unwrap_err();

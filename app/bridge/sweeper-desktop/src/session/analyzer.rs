@@ -5,8 +5,11 @@ use sweeper_contract::{AnalyzerProgressEvent, ContractError, StartAnalyzerRespon
 use sweeper_core::analyzer::{self, AnalyzerOptions, AnalyzerProgress};
 use sweeper_core::settings::SweeperSettings;
 
-use super::mapping::{map_analyzer_error, map_analyzer_result_to_dto};
-use super::{AnalyzerFinishInput, AnalyzerSessionInput, PreparedAnalyzer, SessionStore};
+use super::mapping::map_analyzer_error;
+use super::{
+    build_analyzer_response, AnalyzerFinishInput, AnalyzerSessionInput, PreparedAnalyzer,
+    SessionStore,
+};
 use crate::clock::Clock;
 
 /// Cohesive request for synchronous analyzer store helper.
@@ -76,7 +79,6 @@ impl SessionStore {
             });
         }
         let now = clock.now_unix_secs();
-        let dto = map_analyzer_result_to_dto(&input.session_id, &input.result);
         self.insert_analyzer_session(AnalyzerSessionInput {
             id: input.session_id.clone(),
             created_at: now,
@@ -84,7 +86,7 @@ impl SessionStore {
             result: input.result,
             min_age_hours: input.min_age_hours,
         });
-        Ok(dto)
+        Ok(input.dto)
     }
 
     /// Mark an analyzer run as no longer active.
@@ -122,6 +124,9 @@ impl SessionStore {
                 return Err(map_analyzer_error(e));
             }
         };
+        // Build the response DTO tree before the store is touched; the lock is
+        // held only for the short session insertion in `finish_analyzer` (#96).
+        let dto = build_analyzer_response(&prepared.session_id, &result);
         self.finish_analyzer(
             clock,
             AnalyzerFinishInput {
@@ -132,6 +137,7 @@ impl SessionStore {
                 current_analyzer_generation: run.analyzer_generation,
                 min_age_hours: run.settings.min_age_hours,
                 result,
+                dto,
             },
         )
     }

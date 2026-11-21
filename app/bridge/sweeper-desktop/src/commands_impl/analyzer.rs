@@ -4,7 +4,7 @@ use sweeper_contract::{AnalyzerProgressEvent, ContractError, StartAnalyzerRespon
 use sweeper_core::analyzer::{self, AnalyzerProgress};
 
 use crate::clock::Clock;
-use crate::session::AnalyzerFinishInput;
+use crate::session::{build_analyzer_response, AnalyzerFinishInput};
 use crate::AppState;
 
 use super::shared::{
@@ -95,6 +95,10 @@ fn commit_analyzer_outcome<C: Clock>(
     min_age_hours: u32,
     result: analyzer::AnalyzerResult,
 ) -> Result<StartAnalyzerResponse, ContractError> {
+    // Build the (potentially large) response DTO tree while no global lock is
+    // held; the commit below only inserts the stored result and returns this
+    // DTO under the short store lock (#96).
+    let dto = build_analyzer_response(&prepared.session_id, &result);
     commit_async_outcome(
         state,
         AsyncOutcomeCommit::new(
@@ -103,12 +107,12 @@ fn commit_analyzer_outcome<C: Clock>(
                 scan: prepared.settings_generation,
                 analyzer: prepared.analyzer_generation,
             },
-            (min_age_hours, result),
+            (min_age_hours, result, dto),
             |clock: &C,
              sessions: &mut crate::session::SessionStore,
              sid: String,
              gens: super::shared::CommitGenerations,
-             payload: (u32, analyzer::AnalyzerResult)| {
+             payload: (u32, analyzer::AnalyzerResult, StartAnalyzerResponse)| {
                 sessions.finish_analyzer(
                     clock,
                     AnalyzerFinishInput {
@@ -119,6 +123,7 @@ fn commit_analyzer_outcome<C: Clock>(
                         current_analyzer_generation: gens.analyzer_current,
                         min_age_hours: payload.0,
                         result: payload.1,
+                        dto: payload.2,
                     },
                 )
             },
