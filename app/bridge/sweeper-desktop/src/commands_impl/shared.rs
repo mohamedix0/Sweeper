@@ -119,27 +119,49 @@ where
     )
 }
 
-/// The complete allowlist of blocking-worker failure texts we surface verbatim.
-/// Tokio renders a panicked task as "task panicked" and a cancelled one as
-/// "task was cancelled"; the worker's categorized panic message is listed too.
-/// Every other string collapses to the constant reason, so arbitrary internal
-/// text can never reach the webview through this contract (#99).
+const GENERIC_REASON: &str = "background task failed";
+const CANCELLED_REASON: &str = "background task was cancelled";
+const PANICKED_REASON: &str = "background task panicked";
+
+/// Already-safe display strings, retained only as a fallback for callers that
+/// pass a plain string instead of the typed `tauri::Error` from `spawn_blocking`.
 const SAFE_JOIN_DETAILS: [&str; 3] = [
     "worker panicked while unlocking the session store",
     "task panicked",
     "task was cancelled",
 ];
 
+/// Classify the real Tauri/tokio join error by kind. `JoinError`'s display text
+/// embeds a task id and possibly a panic payload, so it is never surfaced (#99).
+fn typed_join_reason<E: std::fmt::Display + 'static>(e: &E) -> Option<&'static str> {
+    let err = (e as &dyn std::any::Any).downcast_ref::<tauri::Error>()?;
+    let tauri::Error::JoinError(join) = err else {
+        return None;
+    };
+    Some(if join.is_cancelled() {
+        CANCELLED_REASON
+    } else if join.is_panic() {
+        PANICKED_REASON
+    } else {
+        GENERIC_REASON
+    })
+}
+
 /// Map a blocking-task join error to `ContractError` without leaking internals.
 ///
-/// Only allowlisted, human-safe failure shapes are surfaced; everything else is
-/// reduced to a constant reason rather than guessed at with a denylist (#99).
-pub fn join_error_to_contract_error<E: std::fmt::Display>(e: E) -> ContractError {
-    let detail = e.to_string().trim().to_string();
-    let reason = if SAFE_JOIN_DETAILS.contains(&detail.as_str()) {
-        format!("background task failed: {detail}")
-    } else {
-        "background task failed".to_string()
-    };
+/// Real `tauri::Error::JoinError` values are classified by kind into fixed safe
+/// reasons; plain strings fall back to the small allowlist of safe shapes (#99).
+pub fn join_error_to_contract_error<E: std::fmt::Display + 'static>(e: E) -> ContractError {
+    let reason = typed_join_reason(&e)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let detail = e.to_string();
+            let detail = detail.trim();
+            if SAFE_JOIN_DETAILS.contains(&detail) {
+                format!("{GENERIC_REASON}: {detail}")
+            } else {
+                GENERIC_REASON.to_string()
+            }
+        });
     ContractError::Internal { reason }
 }
