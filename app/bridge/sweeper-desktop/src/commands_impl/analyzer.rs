@@ -99,7 +99,12 @@ fn commit_analyzer_outcome<C: Clock>(
     // held; the commit below only inserts the stored result and returns this
     // DTO under the short store lock (#96).
     let dto = build_analyzer_response(&prepared.session_id, &result);
-    commit_async_outcome(
+    // If a generation change rejects the commit, `finish_analyzer` hands the
+    // built DTO back instead of dropping it. Hold it here — outside
+    // `commit_async_outcome` — so the large tree is freed only after that
+    // helper has released both the settings and the sessions guards.
+    let mut rejected_input: Option<crate::session::AnalyzerFinishInput> = None;
+    let outcome = commit_async_outcome(
         state,
         AsyncOutcomeCommit::new(
             prepared.session_id.clone(),
@@ -113,7 +118,7 @@ fn commit_analyzer_outcome<C: Clock>(
              sid: String,
              gens: super::shared::CommitGenerations,
              payload: (u32, analyzer::AnalyzerResult, StartAnalyzerResponse)| {
-                sessions.finish_analyzer(
+                match sessions.finish_analyzer(
                     clock,
                     AnalyzerFinishInput {
                         session_id: sid,
@@ -125,8 +130,18 @@ fn commit_analyzer_outcome<C: Clock>(
                         result: payload.1,
                         dto: payload.2,
                     },
-                )
+                ) {
+                    Ok(response) => Ok(response),
+                    Err((err, input)) => {
+                        rejected_input = Some(*input);
+                        Err(err)
+                    }
+                }
             },
         ),
-    )
+    );
+    // Guards are released by `commit_async_outcome` before this point; the
+    // rejected DTO tree (and result) are dropped here, outside the locks.
+    drop(rejected_input);
+    outcome
 }

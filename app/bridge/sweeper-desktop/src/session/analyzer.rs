@@ -65,18 +65,26 @@ impl SessionStore {
     }
 
     /// Commit a completed analyzer session (short lock).
+    ///
+    /// On a generation mismatch the whole input is handed back with the error so
+    /// the caller can drop the (potentially large) response DTO tree *after* it
+    /// has released the commit guards, instead of extending the locked section
+    /// with a large-tree drop (#96).
     pub fn finish_analyzer<C: Clock>(
         &mut self,
         clock: &C,
         input: AnalyzerFinishInput,
-    ) -> Result<StartAnalyzerResponse, ContractError> {
+    ) -> Result<StartAnalyzerResponse, (ContractError, Box<AnalyzerFinishInput>)> {
         self.active_analyzers.remove(&input.session_id);
         if input.settings_generation_at_start != input.current_settings_generation
             || input.analyzer_generation_at_start != input.current_analyzer_generation
         {
-            return Err(ContractError::SessionInvalid {
-                reason: "session invalidated by settings change".to_string(),
-            });
+            return Err((
+                ContractError::SessionInvalid {
+                    reason: "session invalidated by settings change".to_string(),
+                },
+                Box::new(input),
+            ));
         }
         let now = clock.now_unix_secs();
         self.insert_analyzer_session(AnalyzerSessionInput {
@@ -140,6 +148,7 @@ impl SessionStore {
                 dto,
             },
         )
+        .map_err(|(err, _rejected_input)| err)
     }
 
     fn analyzer_progress_cb<P>(
