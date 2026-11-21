@@ -120,8 +120,23 @@ where
 }
 
 /// Map a blocking-task join error to `ContractError` without leaking internals.
-pub fn join_error_to_contract_error<E>(_e: E) -> ContractError {
-    ContractError::Internal {
-        reason: "background task failed".into(),
-    }
+///
+/// The join failure is surfaced in the human-safe reason instead of being
+/// discarded behind a constant message, so a panicked/cancelled worker is
+/// distinguishable from an ordinary command failure (#99).
+pub fn join_error_to_contract_error<E: std::fmt::Display>(e: E) -> ContractError {
+    let detail = e.to_string().trim().to_string();
+    let lower = detail.to_lowercase();
+    let unsafe_detail = lower.contains('\\')
+        || lower.contains('/')
+        || lower.contains("stack")
+        || lower.contains("path")
+        || detail.is_empty()
+        || detail.len() > 120;
+    let reason = if unsafe_detail {
+        "background task failed".to_string()
+    } else {
+        format!("background task failed: {detail}")
+    };
+    ContractError::Internal { reason }
 }

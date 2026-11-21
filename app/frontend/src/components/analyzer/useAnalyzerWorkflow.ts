@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState, type MutableRefObject } from 'react';
 import type { CleanProgressEvent, ExecuteCleanResponse, Settings, SweeperClient } from '../../api/client';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import type { PreviewResult } from '../cleanShared';
@@ -49,8 +49,20 @@ function useRunMessages() {
   return { error, setError, info, setInfo: setInfoState };
 }
 
-function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: DerivedModel; m: MessageState; p: PreviewCleanState; allowDeleteUnknown: boolean; safeSelectableNodes: AnalyzerNodeDto[] }) {
-  const { args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes } = input;
+type StopControl = { stopRequested: MutableRefObject<boolean>; runToken: MutableRefObject<number> };
+
+function convergeStoppedRun(args: { s: SessionModel; m: MessageState }) {
+  args.s.setAnalyzing(false);
+  args.s.setProgress(null);
+  args.s.setRunningSessionId(null);
+  args.s.setSessionId(null);
+  args.s.setResult(null);
+  args.m.setError(null);
+  args.m.setInfo('Analysis stopped.');
+}
+
+function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: DerivedModel; m: MessageState; p: PreviewCleanState; allowDeleteUnknown: boolean; safeSelectableNodes: AnalyzerNodeDto[]; stop: StopControl }) {
+  const { args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes, stop } = input;
   function invalidatePreviewRequest() { p.rev.current += 1; p.active.current += 1; p.setPreviewLoading(false); }
   function clearPreviewState() { p.setPreview(null); p.setCleanSummary(null); p.setCleanProgress(null); }
   function inspectNodeById(id: string) { void s.inspectNode({ itemId: id }); }
@@ -61,15 +73,23 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
     if (msg) m.setInfo(msg);
   }
   async function runAnalyzer(run?: { path?: string }) {
-    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, setRunningSessionId: s.setRunningSessionId, inspectNode: ({ id }) => inspectNodeById(id), setError: m.setError, setInfo: m.setInfo });
+    stop.stopRequested.current = false;
+    const token = ++stop.runToken.current;
+    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, setRunningSessionId: s.setRunningSessionId, inspectNode: ({ id }) => inspectNodeById(id), setError: m.setError, setInfo: m.setInfo, isCurrent: () => stop.runToken.current === token });
   }
   async function stopAnalyzer() {
+    // Stop is a one-way, one-shot action: the first press claims the in-flight
+    // run, converges every visible trace of it, and any repeat is a no-op (#99).
+    if (stop.stopRequested.current) return;
     const sid = s.runningSessionId;
     if (!sid) return;
+    stop.stopRequested.current = true;
+    stop.runToken.current += 1;
+    convergeStoppedRun({ s, m });
     try {
       await args.client.cancelAnalyzer(sid);
-      m.setInfo('Stopping analysis…');
-    } catch (e) {
+    } catch {
+      m.setInfo(null);
       m.setError('Failed to stop analysis.');
     }
   }
@@ -115,7 +135,8 @@ export function useAnalyzerWorkflow(args: WfArgs) {
   const allowDeleteUnknown = args.settings?.allowDeleteUnknown ?? false;
   const d = useAnalyzerDerived({ result: s.result, query, sort, statusFilter, expanded: s.expanded, showAllAnalyzerNodes: s.showAllAnalyzerNodes, selectedIds: s.selectedIds });
   const safeSelectableNodes = useMemo(() => collectSafeSelectable({ nodesById: d.nodesById, allowDeleteUnknown }), [d.nodesById, allowDeleteUnknown]);
-  const actions = createAnalyzerActions({ args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes });
+  const stop: StopControl = { stopRequested: useRef(false), runToken: useRef(0) };
+  const actions = createAnalyzerActions({ args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes, stop });
 
   return {
     rootPath: s.rootPath, setRootPath: s.setRootPath, analyzedPath: s.analyzedPath, analyzing: s.analyzing, progress: s.progress,

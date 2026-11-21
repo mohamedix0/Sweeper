@@ -198,9 +198,18 @@ function handleCleanError(args: { w: Workflow; error: unknown }) {
   }
 }
 
+const REFRESH_FAILED_NOTICE = 'Clean completed, but the latest Scan results could not be refreshed. Start a new Scan to see current results.';
+
 async function refreshAfterClean(w: Workflow, client: SweeperClient) {
   if (!w.sessionId) return;
-  try { w.setResults(await client.getScanResults(w.sessionId)); } catch { /* ignore */ }
+  try {
+    w.setResults(await client.getScanResults(w.sessionId));
+  } catch {
+    // Never leave pre-Clean results looking current when the refresh fails;
+    // keep the Clean summary and surface a non-blocking notice instead (#99).
+    w.setResults(null);
+    w.setInfo(REFRESH_FAILED_NOTICE);
+  }
 }
 
 export async function runScanClean(args: { w: Workflow; client: SweeperClient }) {
