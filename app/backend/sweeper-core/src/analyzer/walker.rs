@@ -136,7 +136,7 @@ impl WalkState {
                 self.condvar.notify_all();
                 return None;
             }
-            work = self.condvar.wait(work).unwrap();
+            work = self.condvar.wait(work).unwrap_or_else(|e| e.into_inner());
         }
     }
     fn finish_work(&self) {
@@ -312,6 +312,18 @@ impl ProgressState {
     }
 }
 
+/// Releases a worker's reserved work slot when the loop exits, including via
+/// panic unwinding. Without this guard a panicking worker leaves `active > 0`
+/// forever, so peer workers blocked in `Condvar::wait` never observe `done`
+/// and the join loop in `spawn_and_join_walkers` deadlocks (issue #134).
+struct ActiveGuard<'a>(&'a WalkState);
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish_work();
+    }
+}
+
 pub(super) fn worker_loop(
     state: Arc<WalkState>,
     cancel: Arc<AtomicBool>,
@@ -325,6 +337,9 @@ pub(super) fn worker_loop(
         let Some(dir_path) = state.wait_for_work(&cancel) else {
             return;
         };
+        // Registered immediately after the slot is reserved so any panic in
+        // the scan/commit/progress path still releases the slot and wakes peers.
+        let _active_guard = ActiveGuard(state.as_ref());
         match scan_directory(&dir_path, &cancel, state.max_files_per_dir) {
             Ok(out) => {
                 state.commit_directory_scan(
@@ -341,11 +356,11 @@ pub(super) fn worker_loop(
                 progress.maybe_emit(&state);
             }
         }
-        state.finish_work();
         if cancel.load(AtomicOrdering::Relaxed) {
             state.condvar.notify_all();
             return;
         }
+        // `_active_guard` is dropped here, releasing the work slot.
     }
 }
 
