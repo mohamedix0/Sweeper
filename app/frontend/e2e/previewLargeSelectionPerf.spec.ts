@@ -1,4 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
+import {
+  MAX_MAIN_THREAD_GAP_MS,
+  MIN_SAMPLES,
+  WARMUP_FRAMES,
+  WINDOW_FRAMES,
+  summarizeGaps,
+  type GapSummary,
+} from '../src/previewGapCalibration';
 
 /**
  * R4 regression (#61): generating a Preview for a very large selection must
@@ -11,63 +19,20 @@ import { expect, test, type Page } from '@playwright/test';
  * load (observed 206 ms) failed an otherwise-healthy run. We now discard
  * warm-up frames, keep a bounded window of recent preview-phase frames, assert
  * on p95 instead of the single max, and retry the whole measurement locally.
- * The 80 ms threshold is unchanged. The ~90 ms stall guard is preserved: a
- * real loss of responsiveness produces many slow frames (p95 >= 80) and/or
- * starves the sampler (MIN_SAMPLES), while a single scheduling spike is
- * rejected by p95.
+ * The 80 ms threshold is unchanged. A single mid-band stall is still caught by
+ * a raw-max gate below an explicit spike band, so the ~90 ms guard is not
+ * weakened; a lone scheduling spike above that band is rejected by p95. A
+ * real loss of responsiveness also starves the sampler (MIN_SAMPLES).
+ * The pure metric lives in src/previewGapCalibration.ts and has a dedicated
+ * Vitest regression suite next to it.
  */
 const ITEM_COUNT = 20_000;
 const EXPLAIN_CALL_BOUND = 32;
 const PREVIEW_ID_BOUND = 8;
-// Shared CI runners add scheduling jitter, so leave headroom above the
-// ~60 ms typical frame cost while still catching the 90 ms final-render
-// stall this regression guards against.
-const MAX_MAIN_THREAD_GAP_MS = 80;
+// The acceptance bound and calibration knobs are imported from the shared
+// module above; only E2E-flow constants stay local.
 const CTA_BOUND_MS = 15_000;
-
-// T5 calibration knobs. These change how the gap is *measured*, never the
-// 80 ms acceptance threshold above.
-const WARMUP_FRAMES = 3;
-const WINDOW_FRAMES = 24;
-const MIN_SAMPLES = 6;
-const P95 = 0.95;
 const MAX_ATTEMPTS = 3;
-
-type GapSummary = {
-  sampleCount: number;
-  maxMs: number;
-  p95Ms: number;
-  calibratedGapMs: number;
-};
-
-/** Nearest-rank percentile of an already sorted ascending numeric array. */
-function nearestRankPercentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  const rank = Math.max(0, Math.min(Math.ceil(p * sorted.length) - 1, sorted.length - 1));
-  return sorted[rank];
-}
-
-/**
- * Pure calibration metric, shared by the E2E run and its regression test so
- * the two cannot drift. p95 over a short, warm-up-discarded window rejects a
- * single scheduling spike while still failing when responsiveness is broadly
- * lost. The acceptance threshold (80 ms) is applied to p95, never lowered.
- */
-function summarizeGaps(samples: number[]): GapSummary {
-  const sorted = samples.slice().sort((a, b) => a - b);
-  const maxMs = sorted.length > 0 ? sorted[sorted.length - 1] : 0;
-  const p95Ms = nearestRankPercentile(sorted, P95);
-  // Nearest-rank p95 drops the single largest frame for a full 24-sample
-  // window, but equals the max when the window is short (e.g. 19 samples, as
-  // observed under load). Cap the rank so one scheduling spike is always
-  // trimmed; a sustained stall leaves plenty of >= 80 ms frames behind.
-  const p95Index = Math.min(
-    sorted.length > 0 ? Math.ceil(P95 * sorted.length) - 1 : 0,
-    Math.max(0, sorted.length - 2),
-  );
-  const calibratedGapMs = sorted[Math.max(0, p95Index)] ?? 0;
-  return { sampleCount: sorted.length, maxMs, p95Ms, calibratedGapMs };
-}
 
 type Metrics = {
   explainCalls: number;
@@ -127,16 +92,21 @@ async function installGapSampler(page: Page, config: SamplerConfig): Promise<voi
       if (value <= 0 || value >= max) return;
       g.__perf.determinateProgressSeen = true;
     };
-    const tick = (now: number) => {
-      if (g.__lastFrame > 0) {
-        if (g.__warmupRemaining > 0) {
-          g.__warmupRemaining -= 1;
-        } else {
-          // Bounded window: only the most recent preview-phase frames count.
-          g.__gapSamples.push(now - g.__lastFrame);
-          if (g.__gapSamples.length > cfg.windowFrames) g.__gapSamples.shift();
-        }
+    // Per-frame gap bookkeeping: discard warm-up frames, then keep only the
+    // most recent preview-phase frames. It reads __lastFrame, so it must run
+    // before the callback advances that baseline. Extracted to keep the rAF
+    // callback a straight-line sequence (CodeScene: Bumpy Road Ahead on tick).
+    const recordFrameGap = (now: number) => {
+      if (g.__lastFrame <= 0) return;
+      if (g.__warmupRemaining > 0) {
+        g.__warmupRemaining -= 1;
+        return;
       }
+      g.__gapSamples.push(now - g.__lastFrame);
+      if (g.__gapSamples.length > cfg.windowFrames) g.__gapSamples.shift();
+    };
+    const tick = (now: number) => {
+      recordFrameGap(now);
       g.__lastFrame = now;
       recordDeterminateProgress();
       requestAnimationFrame(tick);
@@ -291,39 +261,46 @@ test.describe('Sweeper Preview responsiveness at large selections (mock sandbox)
       expect(summary.sampleCount, 'sampler must record enough preview-phase frames').toBeGreaterThanOrEqual(MIN_SAMPLES);
 
       console.log('T3 preview perf @20k', { attempt, ...summary, elapsedMs });
-      if (summary.calibratedGapMs > 0 && summary.calibratedGapMs < MAX_MAIN_THREAD_GAP_MS) return;
+      if (summary.effectiveGapMs > 0 && summary.effectiveGapMs < MAX_MAIN_THREAD_GAP_MS) return;
 
       last = summary;
       if (attempt < MAX_ATTEMPTS) {
-        console.log(`preview perf gap ${summary.calibratedGapMs}ms >= ${MAX_MAIN_THREAD_GAP_MS}ms; local retry ${attempt}/${MAX_ATTEMPTS}`);
+        console.log(`preview perf gap ${summary.effectiveGapMs}ms >= ${MAX_MAIN_THREAD_GAP_MS}ms; local retry ${attempt}/${MAX_ATTEMPTS}`);
       }
     }
 
-    // All local attempts failed: report the last calibrated gap as the failure.
-    expect(last?.calibratedGapMs, `main thread must not block after ${MAX_ATTEMPTS} local attempts`).toBeLessThan(MAX_MAIN_THREAD_GAP_MS);
-    expect(last?.calibratedGapMs, 'main thread gap must be positive').toBeGreaterThan(0);
+    // All local attempts failed: report the last gate gap as the failure.
+    expect(last?.effectiveGapMs, `main thread must not block after ${MAX_ATTEMPTS} local attempts`).toBeLessThan(MAX_MAIN_THREAD_GAP_MS);
+    expect(last?.effectiveGapMs, 'main thread gap must be positive').toBeGreaterThan(0);
   });
 
-  test('T5 calibration: a single contention spike is rejected but a sustained ~90 ms stall is still caught', () => {
+  test('T5 calibration: one spike is rejected, one or many ~90 ms stalls are caught', () => {
     // ~58-62 ms typical preview frames.
     const healthy = Array.from({ length: WINDOW_FRAMES }, (_, i) => 58 + (i % 5));
 
     // Old single-max metric: one 206 ms scheduling spike fails the 80 ms bound.
-    // New p95 metric: the single spike is rejected, so a healthy run passes.
+    // The spike band classifies it as an outlier, so it must be rejected.
     const withOutlier = [...healthy.slice(0, 12), 206, ...healthy.slice(12)];
     const contaminated = summarizeGaps(withOutlier);
     expect(contaminated.maxMs, 'the old single-max metric would fail here').toBeGreaterThan(MAX_MAIN_THREAD_GAP_MS);
-    expect(contaminated.calibratedGapMs, 'a single OS scheduling spike must be rejected').toBeLessThan(MAX_MAIN_THREAD_GAP_MS);
+    expect(contaminated.effectiveGapMs, 'a single OS scheduling spike must be rejected').toBeLessThan(MAX_MAIN_THREAD_GAP_MS);
+
+    // A single mid-band stall is below the spike band, so the raw-max gate
+    // must still catch it even though p95 trims the largest frame.
+    const oneStall = [...healthy.slice(0, 12), 90, ...healthy.slice(12)];
+    const singleStall = summarizeGaps(oneStall);
+    expect(singleStall.calibratedGapMs, 'p95 alone trims one stall (the rank-cap bug)').toBeLessThan(MAX_MAIN_THREAD_GAP_MS);
+    expect(singleStall.effectiveGapMs, 'one ~90 ms frame must still fail the guard').toBeGreaterThanOrEqual(MAX_MAIN_THREAD_GAP_MS);
 
     // A real loss of responsiveness shows up across many frames: p95 must stay
     // at or above the unchanged 80 ms threshold so the stall guard still trips.
     const sustainedStall = healthy.map((gap, i) => (i >= 8 ? 92 : gap));
     const stalled = summarizeGaps(sustainedStall);
-    expect(stalled.calibratedGapMs, 'a sustained ~90 ms stall must still be caught').toBeGreaterThanOrEqual(MAX_MAIN_THREAD_GAP_MS);
+    expect(stalled.effectiveGapMs, 'a sustained ~90 ms stall must still be caught').toBeGreaterThanOrEqual(MAX_MAIN_THREAD_GAP_MS);
 
     // One spike must not mask a stall that is also present in the window.
     const stallAndOutlier = [...sustainedStall.slice(0, 12), 206, ...sustainedStall.slice(12)];
     const both = summarizeGaps(stallAndOutlier);
-    expect(both.calibratedGapMs, 'a sustained stall alongside one spike is still caught').toBeGreaterThanOrEqual(MAX_MAIN_THREAD_GAP_MS);
+    expect(both.effectiveGapMs, 'a sustained stall alongside one spike is still caught').toBeGreaterThanOrEqual(MAX_MAIN_THREAD_GAP_MS);
   });
 });
