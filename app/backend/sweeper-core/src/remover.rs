@@ -1426,10 +1426,14 @@ fn age_check_applies(
     if matches!(item.source, ValidatedSource::WholeCache { .. }) {
         return false;
     }
-    ignore_emptied_dir_age
+    // Pre-existing carve-out: a directory actually emptied during this run had
+    // its LastWriteTime bumped by our own deletions, so its age is not meaningful.
+    // Every other ordinary item MUST still be checked against Minimum Age.
+    let emptied_directory_carve_out = ignore_emptied_dir_age
         && inspection_is_directory(inspection)
         && inspection.reparse_tag == 0
-        && matches!(inspection.reparse, ReparseTagClass::NotReparse)
+        && matches!(inspection.reparse, ReparseTagClass::NotReparse);
+    !emptied_directory_carve_out
 }
 
 fn revalidate_handle(
