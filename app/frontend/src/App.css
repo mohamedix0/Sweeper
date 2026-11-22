@@ -44,6 +44,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 
 /* Shell */
 .app-shell { min-height: 100vh; height: 100vh; display: grid; grid-template-columns: 216px minmax(0, 1fr); background: var(--bg-workspace); }
+/* Shell-level notices are direct grid children; span both columns so they never
+   steal the 216px sidebar track and squeeze the main UI (#147). */
+.boot-settings-notice { grid-column: 1 / -1; align-self: start; }
+.close-error-notice { grid-column: 1 / -1; align-self: start; }
 .sidebar { width: 216px; background: var(--bg-sidebar); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; justify-content: space-between; min-width: 0; }
 .sidebar-top { padding: 14px 10px 10px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
 .sidebar-footer { padding: 10px 12px; border-top: 1px solid var(--border-divider); }

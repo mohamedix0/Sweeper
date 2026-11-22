@@ -62,7 +62,7 @@ function RelaunchErrorNotice(props: { message: string | null }) {
 function BootSettingsErrorNotice(props: { message: string | null; onDismiss: () => void }) {
   if (!props.message) return null;
   return (
-    <div className="notice error" role="alert" aria-label="Settings load error">
+    <div className="notice error boot-settings-notice" role="alert" aria-label="Settings load error">
       Settings could not be loaded on startup. Shown values are fallbacks. {props.message}
       <button type="button" className="notice-dismiss" onClick={props.onDismiss} aria-label="Dismiss">Dismiss</button>
     </div>
@@ -211,19 +211,24 @@ function useSettingsState(client: ReturnType<typeof createClient>) {
   const [settingsVersion, setSettingsVersion] = useState(0);
   const [bootLoadError, setBootLoadError] = useState<string | null>(null);
   const [bootErrorDismissed, setBootErrorDismissed] = useState(false);
+  // A late boot rejection must not re-show the banner once real settings have
+  // already arrived (the Settings controller's retry delivers them via onSaved).
+  const settingsDelivered = useRef(false);
   useEffect(() => {
     let c = false;
     client.getSettings().then((s) => {
       if (!c) {
+        settingsDelivered.current = true;
         setSettings(s);
         setBootLoadError(null);
       }
     }).catch((e) => {
-      if (!c) setBootLoadError(formatContractError(e));
+      if (!c && !settingsDelivered.current) setBootLoadError(formatContractError(e));
     });
     return () => { c = true; };
   }, [client]);
   const handleSaved = (next: Settings) => {
+    settingsDelivered.current = true;
     setSettings(next);
     setSettingsVersion((v) => v + 1);
     // Real settings have arrived (boot retry or a save), so the "fallbacks"
@@ -407,7 +412,7 @@ export function App({ closeBridge }: { closeBridge?: CloseBridge } = {}) {
   return (
     <div className="app-shell">
       {close.error && !close.promptOpen && (
-        <p className="notice error" role="alert">{close.error}</p>
+        <p className="notice error close-error-notice" role="alert">{close.error}</p>
       )}
       <BootSettingsErrorNotice message={bootLoadError} onDismiss={dismissBootLoadError} />
       <AppSidebar
