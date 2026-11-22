@@ -3,6 +3,7 @@
 //! Crash-resilient: intent records are flushed/synced before deletion batches,
 //! outcomes recorded after each item/batch, and readers ignore a truncated trailing line.
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -509,6 +510,141 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+/// Sum byte counts or item counts with saturating arithmetic. Log aggregates
+/// are serialized as decimal strings; a wrap-around would silently emit a wrong
+/// value, so every such aggregate funnels through this helper (issue #98).
+/// Kept here (rather than a generic util module) because it is the shared
+/// serialization policy for journal and scan-log records; call sites only pass
+/// iterators and never depend on the storage details.
+pub fn saturating_sum_u64(values: impl IntoIterator<Item = u64>) -> u64 {
+    values.into_iter().fold(0u64, u64::saturating_add)
+}
+
+/// File name of the persistent log-summary index inside a logs directory.
+const LOG_SUMMARY_INDEX_NAME: &str = "log-summaries.json";
+/// Temporary file used for atomic replacement of the summary index.
+const LOG_SUMMARY_INDEX_TMP: &str = "log-summaries.json.tmp";
+
+/// Path of the persistent summary index for `log_dir`.
+pub fn log_summary_index_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(LOG_SUMMARY_INDEX_NAME)
+}
+
+/// Whether `name` is the internal summary index file or its atomic temp file.
+/// These are metadata, never activity logs, so listings must skip them.
+pub fn is_summary_index_file_name(name: &str) -> bool {
+    name == LOG_SUMMARY_INDEX_NAME || name == LOG_SUMMARY_INDEX_TMP
+}
+
+/// Compact, fixed-size summary of a single log file.
+///
+/// Persisted once when a log is created so `list_logs` can build its listing
+/// from this metadata (plus filesystem metadata) instead of reading and parsing
+/// every JSONL record of every log on each call (issue #98).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LogSummary {
+    /// Number of intent records (saturating).
+    pub intent_count: u64,
+    /// Number of outcome records (saturating).
+    pub outcome_count: u64,
+    /// Total bytes recorded by outcome records (saturating).
+    pub total_bytes: u64,
+    /// Whether every recorded path is a sandbox path hint.
+    pub sandbox_only: bool,
+    /// Intents without a matching outcome (saturating).
+    pub intent_without_outcome: u64,
+    /// On-disk byte length when the summary was written. Compared against the
+    /// current length so a stale or tampered entry is never trusted.
+    #[serde(default)]
+    pub recorded_len: u64,
+}
+
+/// Convert a `usize` count to `u64`, saturating instead of wrapping.
+fn saturating_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+impl LogSummary {
+    /// Build a summary from parsed counts. Each count converts with a
+    /// saturating cast so an over-large value can never wrap into a small one.
+    pub fn from_counts(
+        intent_count: usize,
+        outcome_count: usize,
+        total_bytes: u64,
+        sandbox_only: bool,
+        intent_without_outcome: usize,
+    ) -> Self {
+        Self {
+            intent_count: saturating_u64(intent_count),
+            outcome_count: saturating_u64(outcome_count),
+            total_bytes,
+            sandbox_only,
+            intent_without_outcome: saturating_u64(intent_without_outcome),
+            recorded_len: 0,
+        }
+    }
+
+    /// Bind this summary to the log length observed at write time.
+    pub fn with_recorded_len(mut self, len: u64) -> Self {
+        self.recorded_len = len;
+        self
+    }
+
+    /// Whether this summary still describes a log of `current_len` bytes.
+    pub fn matches_len(&self, current_len: u64) -> bool {
+        self.recorded_len == current_len
+    }
+}
+
+/// Persistent map from log id (filename stem) to its [`LogSummary`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogSummaryIndex {
+    /// Summaries keyed by log id.
+    #[serde(default)]
+    pub summaries: BTreeMap<String, LogSummary>,
+}
+
+impl LogSummaryIndex {
+    /// Load the index from `log_dir`. Missing, unreadable, or malformed files
+    /// yield an empty index so a damaged summary can never break log listing.
+    pub fn load(log_dir: &Path) -> Self {
+        match fs::read(log_summary_index_path(log_dir)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Look up the summary for `log_id`.
+    pub fn get(&self, log_id: &str) -> Option<&LogSummary> {
+        self.summaries.get(log_id)
+    }
+
+    /// Insert or replace a log's summary.
+    pub fn insert(&mut self, log_id: String, summary: LogSummary) {
+        self.summaries.insert(log_id, summary);
+    }
+
+    /// Drop summaries whose log files no longer exist (e.g. after rotation).
+    /// Returns how many entries were removed.
+    pub fn remove_stale(&mut self, live_ids: &HashSet<String>) -> usize {
+        let before = self.summaries.len();
+        self.summaries.retain(|id, _| live_ids.contains(id));
+        before.saturating_sub(self.summaries.len())
+    }
+
+    /// Persist the index atomically (write temp, then rename over the target).
+    pub fn save(&self, log_dir: &Path) -> Result<(), JournalError> {
+        fs::create_dir_all(log_dir)?;
+        let mut bytes = serde_json::to_vec(self)?;
+        bytes.push(b'\n');
+        let tmp = log_dir.join(LOG_SUMMARY_INDEX_TMP);
+        fs::write(&tmp, bytes)?;
+        fs::rename(&tmp, log_summary_index_path(log_dir))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +903,64 @@ mod tests {
             parsed, record,
             "on-disk scan record format must be unchanged"
         );
+    }
+
+    #[test]
+    fn saturating_sum_u64_never_overflows() {
+        assert_eq!(saturating_sum_u64([]), 0);
+        assert_eq!(saturating_sum_u64([10, 20, 30]), 60);
+        assert_eq!(saturating_sum_u64([u64::MAX, 1]), u64::MAX);
+        assert_eq!(saturating_sum_u64([u64::MAX, u64::MAX]), u64::MAX);
+    }
+
+    #[test]
+    fn log_summary_from_counts_saturates_oversized_counts() {
+        // Counts arriving from `usize` must saturate, never wrap into a small
+        // value (issue #98: consistent saturating arithmetic in serialization).
+        let summary = LogSummary::from_counts(usize::MAX, 3, u64::MAX - 1, true, usize::MAX)
+            .with_recorded_len(99);
+        assert_eq!(summary.intent_count, u64::MAX);
+        assert_eq!(summary.outcome_count, 3);
+        assert_eq!(summary.total_bytes, u64::MAX - 1);
+        assert!(summary.sandbox_only);
+        assert_eq!(summary.intent_without_outcome, u64::MAX);
+        assert!(summary.matches_len(99));
+        assert!(!summary.matches_len(100));
+    }
+
+    #[test]
+    fn log_summary_index_round_trips_and_prunes_stale_entries() {
+        let dir = tempdir().unwrap();
+        let live = "clean-1700000000-1-1".to_string();
+        let stale = "clean-1699999999-1-0".to_string();
+        let mut index = LogSummaryIndex::default();
+        index.insert(live.clone(), LogSummary::from_counts(2, 2, 300, true, 0));
+        index.insert(stale.clone(), LogSummary::from_counts(1, 1, 10, false, 0));
+        index.save(dir.path()).unwrap();
+
+        let loaded = LogSummaryIndex::load(dir.path());
+        assert_eq!(loaded.summaries.len(), 2);
+        assert_eq!(loaded.get(&live).unwrap().total_bytes, 300);
+
+        let mut loaded = loaded;
+        let removed = loaded.remove_stale(&[live.clone()].into_iter().collect());
+        assert_eq!(removed, 1);
+        loaded.save(dir.path()).unwrap();
+
+        let final_index = LogSummaryIndex::load(dir.path());
+        assert_eq!(final_index.summaries.len(), 1);
+        assert!(final_index.get(&stale).is_none());
+        assert_eq!(final_index.get(&live).unwrap().intent_count, 2);
+    }
+
+    #[test]
+    fn log_summary_index_load_tolerates_missing_and_malformed_files() {
+        let dir = tempdir().unwrap();
+        assert!(LogSummaryIndex::load(dir.path()).summaries.is_empty());
+
+        let path = log_summary_index_path(dir.path());
+        fs::write(&path, b"{not valid json").unwrap();
+        assert!(LogSummaryIndex::load(dir.path()).summaries.is_empty());
     }
 
     #[test]
