@@ -548,11 +548,16 @@ fn stop_after_journal_failure(
 /// per-item accounting of the circuit-breaker path. Items that already carry a
 /// partial Deleted result are left untouched.
 fn record_missing_statuses(report: &mut CleanReport, items: &[ValidatedItem], reason: &str) {
+    // Membership is O(1) via a set built once from the rows already recorded;
+    // the old per-item linear scan over the growing `report.items` was O(n^2).
+    // Insert-while-iterating also mirrors the old behaviour for duplicate ids.
+    let mut recorded: HashSet<&str> = report.items.iter().map(|row| row.id.as_str()).collect();
+    let mut additions = Vec::with_capacity(items.len());
     for item in items {
-        if report.items.iter().any(|row| row.id == item.id) {
+        if !recorded.insert(item.id.as_str()) {
             continue;
         }
-        report.items.push(ItemCleanResult {
+        additions.push(ItemCleanResult {
             id: item.id.clone(),
             path: item.path.clone(),
             status: "Skipped".to_string(),
@@ -561,6 +566,7 @@ fn record_missing_statuses(report: &mut CleanReport, items: &[ValidatedItem], re
         });
         report.skipped_count += 1;
     }
+    report.items.extend(additions);
 }
 
 /// Build a fresh, empty report for a Clean run of `item_count` items.
