@@ -29,23 +29,48 @@ fn is_policy_protected_path(path: &str) -> bool {
     false
 }
 
-fn is_policy_excluded_file(path: &str, include_all_entries: bool) -> bool {
+/// Display-only VHD/VHDX exclusion. Whole-cache measurement includes these
+/// files because the remover deletes them; normal Targets keep the old policy.
+fn is_display_only_vhd_file(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    // The remover deletes .vhd/.vhdx files, so a whole-cache estimate must
-    // include them too; normal Targets keep the existing display-only policy.
-    if !include_all_entries && (lower.ends_with(".vhdx") || lower.ends_with(".vhd")) {
+    if lower.ends_with(".vhdx") {
         return true;
     }
+    lower.ends_with(".vhd")
+}
+
+fn should_exclude_display_only_file(path: &str, include_all_entries: bool) -> bool {
+    if include_all_entries {
+        return false;
+    }
+    is_display_only_vhd_file(path)
+}
+
+/// Files that must be excluded for both normal Targets and whole caches:
+/// unparseable paths and Protected Paths (the remover skips those too).
+fn is_unparseable_or_protected_file(path: &str) -> bool {
     if CanonicalPath::parse_lexical(path).is_err() {
         return true;
     }
     is_policy_protected_path(path)
 }
 
+fn is_policy_excluded_file(path: &str, include_all_entries: bool) -> bool {
+    if should_exclude_display_only_file(path, include_all_entries) {
+        return true;
+    }
+    is_unparseable_or_protected_file(path)
+}
+
+fn should_exclude_node_modules(name_lower: &str, include_all_entries: bool) -> bool {
+    if include_all_entries {
+        return false;
+    }
+    name_lower == "node_modules"
+}
+
 fn is_excluded_scan_dir(path: &str, name_lower: &str, include_all_entries: bool) -> bool {
-    // node_modules is display-only for normal Targets but is deleted by a
-    // whole-cache clean, so it must be measured for those targets.
-    if !include_all_entries && name_lower == "node_modules" {
+    if should_exclude_node_modules(name_lower, include_all_entries) {
         return true;
     }
     is_policy_protected_path(path)
