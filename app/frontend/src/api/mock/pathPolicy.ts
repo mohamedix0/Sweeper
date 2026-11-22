@@ -90,8 +90,14 @@ function hasInvalidSegment(segments: readonly PathSegment[]): boolean {
   return segments.some((s) => s.text === '.' || s.text === '..' || /[. ]$/.test(s.text));
 }
 
-/** Parse a Windows path into drive prefix + segments, or null for invalid syntax. */
-function parseMockPath(input: string): ParsedMockPath | null {
+/**
+ * Parse a Windows path into drive prefix + segments, or null for invalid syntax.
+ *
+ * Exported so Analyzer roots can reuse this exact lexical validation (backend
+ * `validate_analyzer_root` parity) without applying Custom Path Policy rules:
+ * protected container roots and the drive root stay valid here.
+ */
+export function parseMockPath(input: string): ParsedMockPath | null {
   if (!/^[A-Za-z]:[\\/]/.test(input)) return null;
   // Normalize separators once, then validate the raw structure. Empty or
   // malformed components are never filtered/trimmed into a valid-looking path.
