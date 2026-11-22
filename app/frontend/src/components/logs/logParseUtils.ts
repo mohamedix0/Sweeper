@@ -78,18 +78,38 @@ export function cleanOutcomeRecords(objs: Record<string, unknown>[]): Record<str
   return objs.filter((o) => isJournalPerItemOutcome(o));
 }
 
-/** Normalize a log path for ancestry checks (Windows/POSIX separators, case-insensitive). */
-function normalizedLogPath(raw: string): string {
+/** Normalize a log path for byte-index keys (both separators, case-insensitive). */
+function normalizeLogPath(raw: string): string {
   return raw.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
 }
 
-function isStrictDescendantPath(child: string, parent: string): boolean {
-  const c = normalizedLogPath(child);
-  const p = normalizedLogPath(parent);
-  if (!c) return false;
-  if (!p) return false;
-  if (c === p) return false;
-  return c.startsWith(p + '\\');
+/** Every strict ancestor of a normalized path (separator boundary, no self). */
+function strictAncestorKeys(normalized: string): string[] {
+  if (!normalized) return [];
+  const parts = normalized.split('\\');
+  const keys: string[] = [];
+  for (let count = 1; count < parts.length; count += 1) {
+    keys.push(parts.slice(0, count).join('\\'));
+  }
+  return keys;
+}
+
+function bytesToBig(raw: unknown): bigint {
+  const text = bytesToString(raw);
+  if (text == null) return 0n;
+  try { return BigInt(text); } catch { return 0n; }
+}
+
+function isAggregateRoot(
+  root: Record<string, unknown>,
+  path: string,
+  index: Map<string, bigint> | undefined,
+): boolean {
+  if (!path) return false;
+  if (!index) return false;
+  const descendantBytes = index.get(path) ?? 0n;
+  if (descendantBytes === 0n) return false;
+  return bytesToBig(root.bytes ?? root.size ?? 0) >= descendantBytes;
 }
 
 /**
@@ -97,37 +117,38 @@ function isStrictDescendantPath(child: string, parent: string): boolean {
  * plus a root outcome whose `bytes` repeats the sum of those children. Summing
  * every `deleted` outcome double-counts reclaimed bytes.
  *
- * Return the outcome references that are such aggregate roots so callers can
- * omit them from byte totals while still keeping them for audit rows and
- * counts. An outcome qualifies only when it shares a target with deleted
- * descendants (by path ancestry) and its bytes cover their sum; ordinary
- * per-file outcomes and legacy single-outcome logs are left untouched.
+ * Return the original outcome references that are such aggregate roots so
+ * callers can omit them from byte totals while keeping them for audit rows and
+ * counts. Paths are normalized once and descendant bytes are indexed per target
+ * ancestor, so classification is a single lookup per outcome (no O(n^2) scan).
  */
 export function aggregateDeletedOutcomes(
   outcomes: Record<string, unknown>[],
 ): Set<Record<string, unknown>> {
   const deleted = outcomes.filter((o) => String(o.status ?? '').toLowerCase() === 'deleted');
-  const toBig = (raw: unknown): bigint => {
-    const text = bytesToString(raw);
-    if (text == null) return 0n;
-    try { return BigInt(text); } catch { return 0n; }
-  };
+  const byTarget = new Map<string, Map<string, bigint>>();
+  const normalizedPaths = new Map<Record<string, unknown>, string>();
+
+  for (const outcome of deleted) {
+    const target = String(outcome.target_id ?? '');
+    const normalized = normalizeLogPath(String(outcome.path ?? ''));
+    normalizedPaths.set(outcome, normalized);
+    let index = byTarget.get(target);
+    if (!index) {
+      index = new Map<string, bigint>();
+      byTarget.set(target, index);
+    }
+    const bytes = bytesToBig(outcome.bytes ?? outcome.size ?? 0);
+    for (const ancestor of strictAncestorKeys(normalized)) {
+      index.set(ancestor, (index.get(ancestor) ?? 0n) + bytes);
+    }
+  }
+
   const aggregates = new Set<Record<string, unknown>>();
   for (const root of deleted) {
-    const rootPath = String(root.path ?? '');
-    const rootTarget = String(root.target_id ?? '');
-    if (!rootPath) continue;
-    const descendants = deleted.filter(
-      (child) => child !== root
-        && String(child.target_id ?? '') === rootTarget
-        && isStrictDescendantPath(String(child.path ?? ''), rootPath),
-    );
-    if (descendants.length === 0) continue;
-    const descendantBytes = descendants.reduce(
-      (sum, child) => sum + toBig(child.bytes ?? child.size ?? 0), 0n,
-    );
-    if (descendantBytes === 0n) continue;
-    if (toBig(root.bytes ?? root.size ?? 0) >= descendantBytes) aggregates.add(root);
+    const path = normalizedPaths.get(root) ?? '';
+    const target = String(root.target_id ?? '');
+    if (isAggregateRoot(root, path, byTarget.get(target))) aggregates.add(root);
   }
   return aggregates;
 }

@@ -30,7 +30,7 @@ function cleanActivity(objs: Record<string, unknown>[]): ActivitySummary {
       if (target) cleanedCats.add(target);
       // Issue #135: skip the repeating root outcome when summing bytes.
       if (!aggregates.has(o)) {
-        const b = bytesToString(o.bytes ?? 0) ?? '0';
+        const b = bytesToString(o.bytes ?? o.size ?? 0) ?? '0';
         try { freed += BigInt(b); } catch { /* ignore */ }
       }
     } else if (status === 'skipped' || status === 'aborted') {

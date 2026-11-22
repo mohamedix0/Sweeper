@@ -29,4 +29,26 @@ describe('issue #135: log byte totals are not double-counted', () => {
     expect(summary.title).toContain('1 KB');
     expect(summary.title).not.toContain('2 KB');
   });
+
+  it('falls back to size when bytes is absent', () => {
+    const sizeOnly = lines(
+      { record: 'outcome', target_id: 'wc-2', path: 'C:\\cache\\size-a.bin', size: 512, status: 'deleted' },
+      { record: 'outcome', target_id: 'wc-2', path: 'C:\\cache\\size-b.bin', size: 512, status: 'deleted' },
+      { record: 'outcome', target_id: 'wc-2', path: 'C:\\cache', size: 1024, status: 'deleted' },
+    );
+    expect(deriveActivitySummary(sizeOnly).primaryValue).toBe('1 KB');
+  });
+
+  it('classifies a large deleted-outcome set without an O(n^2) scan', () => {
+    const rows: object[] = [];
+    for (let i = 0; i < 10_240; i += 1) {
+      rows.push({ record: 'outcome', target_id: 'wc-3', path: `C:\\cache\\f${i}.bin`, bytes: 1, status: 'deleted' });
+    }
+    rows.push({ record: 'outcome', target_id: 'wc-3', path: 'C:\\cache', bytes: 10_240, status: 'deleted' });
+    const started = Date.now();
+    const summary = summarizeLog(meta, lines(...rows));
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(summary.title).toContain('10 KB');
+    expect(summary.title).not.toContain('20 KB');
+  });
 });

@@ -136,10 +136,11 @@ struct CleanLogScanState {
     /// each outcome satisfy at most one intent when `item_ids` repeats an ID
     /// and the journal therefore holds duplicate intents for the same key.
     outcomes: HashMap<(String, String), usize>,
-    /// (target_id, path, bytes) of `deleted` outcomes seen so far, used to
-    /// detect aggregate root outcomes that repeat their children's bytes
-    /// (issue #135). Children are journaled before the root that removes them.
-    deleted_outcomes: Vec<(String, String, u64)>,
+    /// (target_id, normalized strict-ancestor path) -> sum of bytes of the
+    /// deleted descendants seen so far (issue #135). Updated incrementally so
+    /// each aggregate root is classified with one lookup. Children are
+    /// journaled before the root that removes them.
+    descendant_bytes: HashMap<(String, String), u64>,
 }
 
 impl CleanLogScanState {
@@ -185,51 +186,56 @@ fn note_path_hint(state: &mut CleanLogScanState, path: &str) {
     }
 }
 
-/// True when `child` is strictly inside `parent` (Windows/POSIX separators,
-/// case-insensitive), after trimming trailing separators.
-fn is_strict_descendant_path(child: &str, parent: &str) -> bool {
-    fn normalize(path: &str) -> String {
-        path.replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_ascii_lowercase()
-    }
-    let child = normalize(child);
-    let parent = normalize(parent);
-    if child.is_empty() {
-        return false;
-    }
-    if parent.is_empty() {
-        return false;
-    }
-    if child == parent {
-        return false;
-    }
-    child.starts_with(&format!("{parent}\\"))
+/// Normalize a log path for byte-index keys (both separators, case-insensitive).
+fn normalize_log_path(path: &str) -> String {
+    path.replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
 }
 
-/// Whether this deleted outcome is a Tier 3 / WholeCache root that repeats the
-/// bytes of deleted descendants sharing its target (issue #135).
-fn is_repeating_root_outcome(
-    state: &CleanLogScanState,
-    target_id: &str,
-    path: &str,
-    bytes: u64,
-) -> bool {
-    let descendants: Vec<u64> = state
-        .deleted_outcomes
-        .iter()
-        .filter(|(tid, child_path, _)| {
-            tid == target_id && is_strict_descendant_path(child_path, path)
-        })
-        .map(|(_, _, child_bytes)| *child_bytes)
-        .collect();
-    if descendants.is_empty() {
-        return false;
+/// Every strict ancestor of a normalized path, from the drive prefix outward.
+/// A separator boundary is implied by joining path components.
+fn strict_ancestor_keys(normalized: &str) -> Vec<String> {
+    let parts: Vec<&str> = normalized.split('\\').collect();
+    let mut keys = Vec::with_capacity(parts.len().saturating_sub(1));
+    for count in 1..parts.len() {
+        keys.push(parts[..count].join("\\"));
     }
-    let descendant_bytes = descendants
-        .iter()
-        .fold(0u64, |sum, child| sum.saturating_add(*child));
-    descendant_bytes > 0 && bytes >= descendant_bytes
+    keys
+}
+
+/// Bytes of a root outcome not already represented by journaled descendants
+/// (issue #135). A complete child set contributes zero; a missing child's
+/// bytes are recovered instead of dropping the whole root record.
+fn root_contribution(bytes: u64, descendants: u64) -> u64 {
+    if descendants == 0 {
+        return bytes;
+    }
+    if bytes < descendants {
+        return bytes;
+    }
+    bytes.saturating_sub(descendants)
+}
+
+/// Account for one `deleted` outcome in the summary byte total and index its
+/// bytes under every strict ancestor for later root classification (issue #135).
+fn account_deleted_outcome(state: &mut CleanLogScanState, target_id: &str, path: &str, bytes: u64) {
+    let normalized = normalize_log_path(path);
+    let descendants = state
+        .descendant_bytes
+        .get(&(target_id.to_string(), normalized.clone()))
+        .copied()
+        .unwrap_or(0);
+    state.total_bytes = state
+        .total_bytes
+        .saturating_add(root_contribution(bytes, descendants));
+    for ancestor in strict_ancestor_keys(&normalized) {
+        let entry = state
+            .descendant_bytes
+            .entry((target_id.to_string(), ancestor))
+            .or_insert(0);
+        *entry = entry.saturating_add(bytes);
+    }
 }
 
 fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Value) {
@@ -256,14 +262,7 @@ fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Va
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if status == "deleted" {
-                // Issue #135: do not add the bytes of an aggregate root that
-                // merely repeats deleted children already counted above.
-                if !is_repeating_root_outcome(state, &target_id, &path, bytes) {
-                    state.total_bytes = state.total_bytes.saturating_add(bytes);
-                }
-                state
-                    .deleted_outcomes
-                    .push((target_id.clone(), path.clone(), bytes));
+                account_deleted_outcome(state, &target_id, &path, bytes);
             } else {
                 state.total_bytes = state.total_bytes.saturating_add(bytes);
             }
@@ -2271,6 +2270,21 @@ mod tests {
         assert_eq!(
             state.total_bytes, 1024,
             "root outcome must not repeat the children's 1024 bytes"
+        );
+    }
+
+    /// Issue #135: a failed best-effort child journal write can leave only one
+    /// of two 512-byte children in the log while the root still records 1024.
+    /// The root must contribute the 512 bytes that are missing from the log.
+    #[test]
+    fn issue135_partial_child_journal_keeps_unrecorded_root_bytes() {
+        let content = "\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\\\\a.bin\",\"bytes\":512,\"status\":\"deleted\"}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\",\"bytes\":1024,\"status\":\"deleted\"}\n";
+        let state = accumulate_clean_log_state(content);
+        assert_eq!(
+            state.total_bytes, 1024,
+            "root must add the unrecorded 512 bytes, not be skipped entirely"
         );
     }
 }
