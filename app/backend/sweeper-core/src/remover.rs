@@ -1426,7 +1426,7 @@ fn delete_path_entry_inner(
 
 fn revalidate_handle(
     item: &ValidatedItem,
-    _requested_path: &str,
+    requested_path: &str,
     inspection: &sweeper_winfs::HandleInspection,
     opts: &CleanOptions,
     allow_delete_root: bool,
@@ -1437,6 +1437,25 @@ fn revalidate_handle(
         .map_err(|e| format!("Skipped: final path invalid: {e}"))?;
     let target_root = CanonicalPath::parse_lexical(&item.target_root)
         .map_err(|e| format!("Skipped: target root invalid: {e}"))?;
+
+    // D1 / ADR 0003: `requested_path` is the confirmed selection from Preview,
+    // whereas `inspection.final_path` comes from a handle opened by path with
+    // FILE_FLAG_OPEN_REPARSE_POINT, which protects only the final component. An
+    // interior junction swapped in after enumeration is therefore traversed and
+    // then erased from the resolved path, so checking `final_canon` alone misses
+    // it. Inspect the REQUESTED path's ancestors at the moment of deletion; each
+    // prefix is reopened without following reparse points, so a Link Point in the
+    // confirmed parent chain aborts the clean. The final component is excluded so
+    // an item that is itself a link point can still be unlinked.
+    let requested_canon = CanonicalPath::parse_lexical(requested_path)
+        .map_err(|e| format!("Skipped: requested path invalid: {e}"))?;
+    if path_has_link_point_ancestor(&requested_canon, &target_root, true)
+        .map_err(|e| format!("Skipped: requested-path ancestor check failed: {e}"))?
+    {
+        return Err(
+            "aborted: requested-path ancestor link point detected under target root".to_string(),
+        );
+    }
 
     // 1) Authorized source (allowlisted target, validated custom path, or opt-in Tier 3 conditional target).
     match &item.source {
