@@ -3,19 +3,58 @@ use crate::remover::{self, CleanOptions, ValidatedItem};
 use crate::scanner::allowlist::{scan_resolved_roots, ResolvedRootsScanCtx};
 use sweeper_knowledge::{KnownFolder, Risk, Scope, Tier};
 
-fn sample_target(id: &str, rel: &str) -> TargetDefinition {
+/// Parameters that differ between test targets. Shared so every test target
+/// is assembled by exactly one builder and cannot drift in its fixed fields.
+struct TargetSpec<'a> {
+    id: &'a str,
+    name: &'a str,
+    tier: Tier,
+    risk: Risk,
+    known_folder: KnownFolder,
+    relative_subpath: &'a str,
+    scope: Scope,
+    min_age_hours: u32,
+}
+
+const WHOLE_CACHE_TEST_SPEC: TargetSpec<'static> = TargetSpec {
+    id: "uv-cache",
+    name: "uv Cache",
+    tier: Tier::Tier2,
+    risk: Risk::Caution,
+    known_folder: KnownFolder::LocalAppData,
+    relative_subpath: r"uv\cache",
+    scope: Scope::WholeCache,
+    min_age_hours: 0,
+};
+
+/// The single assembly point for test TargetDefinitions.
+fn build_target(spec: &TargetSpec<'_>) -> TargetDefinition {
     TargetDefinition {
-        id: id.to_string(),
-        name: id.to_string(),
-        tier: Tier::Tier1,
-        risk: Risk::Safe,
-        known_folder: KnownFolder::LocalAppData,
-        relative_subpath: rel.to_string(),
-        scope: Scope::Contents,
-        min_age_hours: 24,
+        id: spec.id.to_string(),
+        name: spec.name.to_string(),
+        tier: spec.tier,
+        risk: spec.risk,
+        known_folder: spec.known_folder,
+        relative_subpath: spec.relative_subpath.to_string(),
+        scope: spec.scope,
+        min_age_hours: spec.min_age_hours,
         description: "test".to_string(),
         requires_elevation: false,
     }
+}
+
+fn sample_target(id: &str, rel: &str) -> TargetDefinition {
+    let spec = TargetSpec {
+        id,
+        name: id,
+        tier: Tier::Tier1,
+        risk: Risk::Safe,
+        known_folder: KnownFolder::LocalAppData,
+        relative_subpath: rel,
+        scope: Scope::Contents,
+        min_age_hours: 24,
+    };
+    build_target(&spec)
 }
 
 fn seed_node_modules_cache(sb: &sweeper_testkit::Sandbox) -> (std::path::PathBuf, CanonicalPath) {
@@ -30,18 +69,7 @@ fn seed_node_modules_cache(sb: &sweeper_testkit::Sandbox) -> (std::path::PathBuf
 }
 
 fn whole_cache_test_target() -> TargetDefinition {
-    TargetDefinition {
-        id: "uv-cache".to_string(),
-        name: "uv Cache".to_string(),
-        tier: Tier::Tier2,
-        risk: Risk::Caution,
-        known_folder: KnownFolder::LocalAppData,
-        relative_subpath: r"uv\cache".to_string(),
-        scope: Scope::WholeCache,
-        min_age_hours: 0,
-        description: "test".to_string(),
-        requires_elevation: false,
-    }
+    build_target(&WHOLE_CACHE_TEST_SPEC)
 }
 
 fn estimate_whole_cache(target: &TargetDefinition, canon: &CanonicalPath) -> u64 {
