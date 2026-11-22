@@ -142,10 +142,19 @@ fn whole_cache_estimate_matches_deleted_bytes_with_node_modules() {
     );
     let canary =
         sweeper_testkit::CanaryTree::seed_external("whole-cache-parity").expect("seed canary");
-    let report = clean_whole_cache(&sb, &canon, estimated);
-    assert_estimate_and_clean(&report, &root, estimated);
+
+    // The canary must be checked after a failure OR panic (plan §6.1), so run
+    // the deletion and its assertions inside catch_unwind and verify before
+    // resuming the panic. No Drop impl that can panic during unwinding.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let report = clean_whole_cache(&sb, &canon, estimated);
+        assert_estimate_and_clean(&report, &root, estimated);
+    }));
     sb.assert_sentinel_present();
     canary.verify().expect("canary must remain intact");
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[test]
