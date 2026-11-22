@@ -318,7 +318,24 @@ fn spawn_and_join_walkers(state: &Arc<walker::WalkState>, exec: WalkExec) {
         }));
     }
     for h in handles {
-        let _ = h.join();
+        if let Err(payload) = h.join() {
+            // A panicking worker must not be silently discarded: record it so
+            // `run_walker_with_progress` surfaces a typed AnalyzerError::Walk
+            // instead of returning a truncated tree with cancelled=false.
+            let detail = panic_payload_message(payload.as_ref());
+            state.record_error(format!("analyzer worker panicked: {detail}"));
+        }
+    }
+}
+
+/// Best-effort extraction of a panic payload into a diagnostic string.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(msg) = payload.downcast_ref::<&'static str>() {
+        (*msg).to_string()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 

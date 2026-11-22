@@ -116,12 +116,12 @@ impl WalkState {
         }
     }
     pub(super) fn enqueue_initial(&self, dir_path: String) {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         work.queue.push_back(dir_path);
         self.condvar.notify_all();
     }
     fn wait_for_work(&self, cancel: &AtomicBool) -> Option<String> {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if cancel.load(AtomicOrdering::Relaxed) {
                 self.condvar.notify_all();
@@ -140,7 +140,7 @@ impl WalkState {
         }
     }
     fn finish_work(&self) {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         work.active = work.active.saturating_sub(1);
         if work.active == 0 && work.queue.is_empty() {
             work.done = true;
@@ -157,7 +157,7 @@ impl WalkState {
     ) {
         let mut traverse_children = Vec::new();
         {
-            let mut records = self.records.lock().unwrap();
+            let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
             let dir_key = annotate::canonical_key(dir_path);
             records.entry(dir_key.clone()).or_insert_with(|| {
                 DirRecord::new(dir_path.to_string(), annotate::display_name(dir_path), None)
@@ -212,7 +212,7 @@ impl WalkState {
             }
         }
         if !traverse_children.is_empty() {
-            let mut work = self.work.lock().unwrap();
+            let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
             for c in traverse_children {
                 work.queue.push_back(c);
             }
@@ -223,18 +223,29 @@ impl WalkState {
             .fetch_add(file_count, AtomicOrdering::Relaxed);
         self.scanned_bytes
             .fetch_add(byte_count, AtomicOrdering::Relaxed);
-        *self.current_path.lock().unwrap() = Some(dir_path.to_string());
+        *self.current_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir_path.to_string());
+    }
+    /// Records a walk failure so it surfaces as a typed `AnalyzerError::Walk`
+    /// rather than being silently discarded. The first error wins.
+    pub(super) fn record_error(&self, message: String) {
+        let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
+        if error.is_none() {
+            *error = Some(message);
+        }
     }
     pub(super) fn had_error(&self) -> bool {
-        self.error.lock().unwrap().is_some()
+        self.error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
     pub(super) fn take_error(&self) -> Option<String> {
-        self.error.lock().unwrap().take()
+        self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
     pub(super) fn into_records(self: Arc<Self>) -> HashMap<String, DirRecord> {
         match Arc::try_unwrap(self) {
             Ok(s) => s.records.into_inner().unwrap_or_default(),
-            Err(s) => s.records.lock().unwrap().clone(),
+            Err(s) => s.records.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }
     }
 }
@@ -274,7 +285,7 @@ impl ProgressState {
         let Some(cb) = &self.cb else {
             return;
         };
-        let mut last = self.last_emit.lock().unwrap();
+        let mut last = self.last_emit.lock().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() >= self.interval {
             *last = Instant::now();
             let snap = self.snapshot(state);
@@ -292,7 +303,11 @@ impl ProgressState {
             scanned_dirs: state.scanned_dirs.load(AtomicOrdering::Relaxed),
             scanned_files: state.scanned_files.load(AtomicOrdering::Relaxed),
             scanned_bytes: state.scanned_bytes.load(AtomicOrdering::Relaxed),
-            current_path: state.current_path.lock().unwrap().clone(),
+            current_path: state
+                .current_path
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 }
