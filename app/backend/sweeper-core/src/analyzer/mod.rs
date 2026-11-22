@@ -35,6 +35,11 @@ pub struct AnalyzerOptions {
     pub max_children_per_dir: usize,
     /// Maximum directory depth emitted in the returned tree. `0` uses default.
     pub max_tree_depth: usize,
+    /// Hard cap on directory records retained during the walk. `0` uses default.
+    /// When reached, the walk stops early and the result reports truncation.
+    pub max_walk_dirs: usize,
+    /// Hard cap on child directory paths retained per directory during the walk. `0` uses default.
+    pub max_child_dirs_per_dir: usize,
 }
 
 impl Default for AnalyzerOptions {
@@ -46,6 +51,8 @@ impl Default for AnalyzerOptions {
             max_files_per_dir: 64,
             max_children_per_dir: 50,
             max_tree_depth: 4096,
+            max_walk_dirs: 100_000,
+            max_child_dirs_per_dir: 4_096,
         }
     }
 }
@@ -207,6 +214,7 @@ pub fn analyze_validated_root(
         ..annotate::EligibilitySettings::default()
     };
     let (max_files_per_dir, max_children_per_dir, max_tree_depth) = resolve_tree_limits(&options);
+    let (max_walk_dirs, max_child_dirs_per_dir) = resolve_walk_limits(&options);
     let walk = run_walker_with_progress(
         &root,
         WalkRun {
@@ -214,9 +222,11 @@ pub fn analyze_validated_root(
             progress,
             options,
             max_files_per_dir,
+            max_walk_dirs,
+            max_child_dirs_per_dir,
         },
     )?;
-    let tree = assemble_analyzer_result(
+    let mut tree = assemble_analyzer_result(
         &root,
         AssemblyInput {
             records: &walk.records,
@@ -226,11 +236,36 @@ pub fn analyze_validated_root(
             max_tree_depth,
         },
     )?;
+    if walk.truncated {
+        if !tree.description.is_empty() {
+            tree.description.push(' ');
+        }
+        tree.description.push_str(WALK_TRUNCATION_WARNING);
+    }
     Ok(AnalyzerResult {
         root: tree,
         progress: walk.progress,
         cancelled: walk.cancelled,
     })
+}
+
+/// Appended to the root description when the walk hits a hard retention bound.
+/// Kept on the existing human-readable description channel so truncation is
+/// surfaced without changing the public result/contract shapes.
+const WALK_TRUNCATION_WARNING: &str = "Analysis truncated: the directory walk limit was reached; remaining directories were not scanned and totals are partial.";
+
+fn resolve_walk_limits(options: &AnalyzerOptions) -> (usize, usize) {
+    let max_walk_dirs = if options.max_walk_dirs == 0 {
+        100_000
+    } else {
+        options.max_walk_dirs
+    };
+    let max_child_dirs_per_dir = if options.max_child_dirs_per_dir == 0 {
+        4_096
+    } else {
+        options.max_child_dirs_per_dir
+    };
+    (max_walk_dirs, max_child_dirs_per_dir)
 }
 
 fn resolve_tree_limits(options: &AnalyzerOptions) -> (usize, usize, usize) {
@@ -257,12 +292,15 @@ struct WalkRun {
     progress: Option<Arc<dyn Fn(AnalyzerProgress) + Send + Sync>>,
     options: AnalyzerOptions,
     max_files_per_dir: usize,
+    max_walk_dirs: usize,
+    max_child_dirs_per_dir: usize,
 }
 
 struct WalkOutput {
     progress: AnalyzerProgress,
     records: HashMap<String, walker::DirRecord>,
     cancelled: bool,
+    truncated: bool,
 }
 
 fn run_walker_with_progress(
@@ -272,6 +310,8 @@ fn run_walker_with_progress(
     let state = Arc::new(walker::WalkState::new(
         root.as_str().to_string(),
         run.max_files_per_dir,
+        run.max_walk_dirs,
+        run.max_child_dirs_per_dir,
     ));
     state.enqueue_initial(root.as_str().to_string());
     let progress_state = Arc::new(walker::ProgressState::new(
@@ -293,10 +333,12 @@ fn run_walker_with_progress(
     if let Some(err) = state.take_error() {
         return Err(AnalyzerError::Walk(err));
     }
+    let truncated = state.was_truncated();
     Ok(WalkOutput {
         progress: progress_state.snapshot(&state),
         records: state.into_records(),
         cancelled,
+        truncated,
     })
 }
 

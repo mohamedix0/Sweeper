@@ -69,6 +69,12 @@ pub(super) struct WalkState {
     scanned_bytes: AtomicU64,
     current_path: Mutex<Option<String>>,
     max_files_per_dir: usize,
+    /// Hard bound on the number of directory records retained for the whole walk.
+    max_dir_records: usize,
+    /// Hard bound on child-directory paths retained per directory record.
+    max_child_dirs: usize,
+    /// Set when either bound forces the walk to stop retaining/enqueuing directories.
+    truncated: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -98,7 +104,12 @@ struct ScanDirOutput {
 }
 
 impl WalkState {
-    pub(super) fn new(root_path: String, max_files_per_dir: usize) -> Self {
+    pub(super) fn new(
+        root_path: String,
+        max_files_per_dir: usize,
+        max_dir_records: usize,
+        max_child_dirs: usize,
+    ) -> Self {
         let mut records = HashMap::new();
         let root_key = annotate::canonical_key(&root_path);
         let root_name = annotate::display_name(&root_path);
@@ -113,6 +124,10 @@ impl WalkState {
             scanned_bytes: AtomicU64::new(0),
             current_path: Mutex::new(None),
             max_files_per_dir: max_files_per_dir.max(1),
+            // The root record is inserted above, so both bounds are at least 1.
+            max_dir_records: max_dir_records.max(1),
+            max_child_dirs: max_child_dirs.max(1),
+            truncated: AtomicBool::new(false),
         }
     }
     pub(super) fn enqueue_initial(&self, dir_path: String) {
@@ -156,6 +171,7 @@ impl WalkState {
         byte_count: u64,
     ) {
         let mut traverse_children = Vec::new();
+        let mut did_truncate = false;
         {
             let mut records = self.records.lock().unwrap();
             let dir_key = annotate::canonical_key(dir_path);
@@ -163,17 +179,31 @@ impl WalkState {
                 DirRecord::new(dir_path.to_string(), annotate::display_name(dir_path), None)
             });
             let mut seen: HashSet<String> = HashSet::new();
+            let mut retained_children = 0usize;
             if let Some(parent) = records.get(&dir_key) {
                 for c in &parent.children_dirs {
                     seen.insert(annotate::canonical_key(c));
                 }
+                retained_children = parent.children_dirs.len();
             }
             let mut new_children: Vec<String> = Vec::new();
             for child in child_dirs {
                 let ck = annotate::canonical_key(&child.path);
-                if seen.insert(ck.clone()) {
-                    new_children.push(child.path.clone());
+                if !seen.insert(ck.clone()) {
+                    continue;
                 }
+                // Bound retention *during* traversal: a skipped child gets no record,
+                // no parent link and no queue entry, so the walk terminates early
+                // instead of retaining one record per directory on the whole drive.
+                if !records.contains_key(&ck) && records.len() >= self.max_dir_records {
+                    did_truncate = true;
+                    continue;
+                }
+                if retained_children + new_children.len() >= self.max_child_dirs {
+                    did_truncate = true;
+                    continue;
+                }
+                new_children.push(child.path.clone());
                 records.entry(ck.clone()).or_insert_with(|| {
                     DirRecord::new(
                         child.path.clone(),
@@ -211,6 +241,9 @@ impl WalkState {
                 }
             }
         }
+        if did_truncate {
+            self.truncated.store(true, AtomicOrdering::Relaxed);
+        }
         if !traverse_children.is_empty() {
             let mut work = self.work.lock().unwrap();
             for c in traverse_children {
@@ -230,6 +263,9 @@ impl WalkState {
     }
     pub(super) fn take_error(&self) -> Option<String> {
         self.error.lock().unwrap().take()
+    }
+    pub(super) fn was_truncated(&self) -> bool {
+        self.truncated.load(AtomicOrdering::Relaxed)
     }
     pub(super) fn into_records(self: Arc<Self>) -> HashMap<String, DirRecord> {
         match Arc::try_unwrap(self) {
