@@ -1401,8 +1401,18 @@ fn delete_path_entry_inner(
                 .saturating_add(bytes_accounted);
             // The deletion already succeeded; a journal failure must not throw away
             // this outcome or abort the remaining batch.
+            // Issue #135: journal only this entry's own bytes. For a Tier 3 /
+            // WholeCache root, `base_bytes_deleted` is already recorded by the
+            // per-child outcomes, so writing it here double-counts byte totals in
+            // the log/summary path. The returned `reported` still carries the full
+            // total so CleanReport accounting is unchanged.
             journal.write_outcome_best_effort(&journal::outcome_record(
-                &item.id, path_str, reported, "deleted", "", None,
+                &item.id,
+                path_str,
+                bytes_accounted,
+                "deleted",
+                "",
+                None,
             ));
             Ok(ProcessOutcome::Deleted(reported))
         }

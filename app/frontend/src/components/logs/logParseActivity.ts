@@ -1,5 +1,5 @@
 import type { ActivitySummary, AuditRow, Flags } from './logParseTypes';
-import { bytesToString, cleanOutcomeRecords, countFrom, detectCleanScan, formatMaybeBytes, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
+import { aggregateDeletedOutcomes, bytesToString, cleanOutcomeRecords, countFrom, detectCleanScan, formatMaybeBytes, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
 import { parseAuditRows } from './logParseRows';
 import { pluralize } from '../../utils/format';
 
@@ -16,6 +16,7 @@ function countSkippedCategories(skippedFileRows: AuditRow[]): number {
 
 function cleanActivity(objs: Record<string, unknown>[]): ActivitySummary {
   const outcomes = cleanOutcomeRecords(objs);
+  const aggregates = aggregateDeletedOutcomes(outcomes);
   let freed = 0n;
   let deletedCount = 0;
   let skippedCount = 0;
@@ -27,8 +28,11 @@ function cleanActivity(objs: Record<string, unknown>[]): ActivitySummary {
     if (status === 'deleted') {
       deletedCount += 1;
       if (target) cleanedCats.add(target);
-      const b = bytesToString(o.bytes ?? 0) ?? '0';
-      try { freed += BigInt(b); } catch { /* ignore */ }
+      // Issue #135: skip the repeating root outcome when summing bytes.
+      if (!aggregates.has(o)) {
+        const b = bytesToString(o.bytes ?? 0) ?? '0';
+        try { freed += BigInt(b); } catch { /* ignore */ }
+      }
     } else if (status === 'skipped' || status === 'aborted') {
       skippedCount += 1;
       if (target) skippedCats.add(target);

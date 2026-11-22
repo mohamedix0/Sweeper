@@ -136,6 +136,10 @@ struct CleanLogScanState {
     /// each outcome satisfy at most one intent when `item_ids` repeats an ID
     /// and the journal therefore holds duplicate intents for the same key.
     outcomes: HashMap<(String, String), usize>,
+    /// (target_id, path, bytes) of `deleted` outcomes seen so far, used to
+    /// detect aggregate root outcomes that repeat their children's bytes
+    /// (issue #135). Children are journaled before the root that removes them.
+    deleted_outcomes: Vec<(String, String, u64)>,
 }
 
 impl CleanLogScanState {
@@ -181,6 +185,47 @@ fn note_path_hint(state: &mut CleanLogScanState, path: &str) {
     }
 }
 
+/// True when `child` is strictly inside `parent` (Windows/POSIX separators,
+/// case-insensitive), after trimming trailing separators.
+fn is_strict_descendant_path(child: &str, parent: &str) -> bool {
+    fn normalize(path: &str) -> String {
+        path.replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    }
+    let child = normalize(child);
+    let parent = normalize(parent);
+    if child.is_empty() || parent.is_empty() || child == parent {
+        return false;
+    }
+    child.starts_with(&format!("{parent}\\"))
+}
+
+/// Whether this deleted outcome is a Tier 3 / WholeCache root that repeats the
+/// bytes of deleted descendants sharing its target (issue #135).
+fn is_repeating_root_outcome(
+    state: &CleanLogScanState,
+    target_id: &str,
+    path: &str,
+    bytes: u64,
+) -> bool {
+    let descendants: Vec<u64> = state
+        .deleted_outcomes
+        .iter()
+        .filter(|(tid, child_path, _)| {
+            tid == target_id && is_strict_descendant_path(child_path, path)
+        })
+        .map(|(_, _, child_bytes)| *child_bytes)
+        .collect();
+    if descendants.is_empty() {
+        return false;
+    }
+    let descendant_bytes = descendants
+        .iter()
+        .fold(0u64, |sum, child| sum.saturating_add(*child));
+    descendant_bytes > 0 && bytes >= descendant_bytes
+}
+
 fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Value) {
     let kind = json_record_kind(value);
     let target_id = value
@@ -199,7 +244,23 @@ fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Va
             state.saw_outcome = true;
             state.outcome_count = state.outcome_count.saturating_add(1);
             let bytes = value.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-            state.total_bytes = state.total_bytes.saturating_add(bytes);
+            let status = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if status == "deleted" {
+                // Issue #135: do not add the bytes of an aggregate root that
+                // merely repeats deleted children already counted above.
+                if !is_repeating_root_outcome(state, &target_id, &path, bytes) {
+                    state.total_bytes = state.total_bytes.saturating_add(bytes);
+                }
+                state
+                    .deleted_outcomes
+                    .push((target_id.clone(), path.clone(), bytes));
+            } else {
+                state.total_bytes = state.total_bytes.saturating_add(bytes);
+            }
             let count = state.outcomes.entry((target_id, path)).or_insert(0);
             *count = count.saturating_add(1);
         }
@@ -996,8 +1057,8 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
 #[cfg(test)]
 mod tests {
     use super::{
-        inspect_clean_log, list_logs_in_dir_impl, read_bounded_log_content, read_log_in_dir,
-        record_clean_log_summary, MAX_LOG_READ_BYTES,
+        accumulate_clean_log_state, inspect_clean_log, list_logs_in_dir_impl,
+        read_bounded_log_content, read_log_in_dir, record_clean_log_summary, MAX_LOG_READ_BYTES,
     };
     use std::io::Read;
     use sweeper_contract::ContractError;
@@ -2188,6 +2249,22 @@ mod tests {
             read.content.contains('\u{FFFD}'),
             "malformed terminated record must be preserved lossily: {}",
             read.content
+        );
+    }
+
+    /// Issue #135: a WholeCache/Tier 3 root repeats its children's bytes in a
+    /// root `deleted` outcome. The summary index must sum child bytes once.
+    #[test]
+    fn issue135_summary_bytes_do_not_double_count_root_outcome() {
+        let content = "\
+{\"record\":\"intent\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\",\"size\":1024}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\\\\a.bin\",\"bytes\":512,\"status\":\"deleted\"}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\\\\b.bin\",\"bytes\":512,\"status\":\"deleted\"}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\",\"bytes\":1024,\"status\":\"deleted\"}\n";
+        let state = accumulate_clean_log_state(content);
+        assert_eq!(
+            state.total_bytes, 1024,
+            "root outcome must not repeat the children's 1024 bytes"
         );
     }
 }

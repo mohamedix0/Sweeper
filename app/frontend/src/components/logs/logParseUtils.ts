@@ -78,6 +78,58 @@ export function cleanOutcomeRecords(objs: Record<string, unknown>[]): Record<str
   return objs.filter((o) => isJournalPerItemOutcome(o));
 }
 
+/** Normalize a log path for ancestry checks (Windows/POSIX separators, case-insensitive). */
+function normalizedLogPath(raw: string): string {
+  return raw.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+function isStrictDescendantPath(child: string, parent: string): boolean {
+  const c = normalizedLogPath(child);
+  const p = normalizedLogPath(parent);
+  if (!c || !p || c === p) return false;
+  return c.startsWith(p + '\\');
+}
+
+/**
+ * Issue #135: a Tier 3 / WholeCache root writes one `deleted` outcome per child
+ * plus a root outcome whose `bytes` repeats the sum of those children. Summing
+ * every `deleted` outcome double-counts reclaimed bytes.
+ *
+ * Return the outcome references that are such aggregate roots so callers can
+ * omit them from byte totals while still keeping them for audit rows and
+ * counts. An outcome qualifies only when it shares a target with deleted
+ * descendants (by path ancestry) and its bytes cover their sum; ordinary
+ * per-file outcomes and legacy single-outcome logs are left untouched.
+ */
+export function aggregateDeletedOutcomes(
+  outcomes: Record<string, unknown>[],
+): Set<Record<string, unknown>> {
+  const deleted = outcomes.filter((o) => String(o.status ?? '').toLowerCase() === 'deleted');
+  const toBig = (raw: unknown): bigint => {
+    const text = bytesToString(raw);
+    if (text == null) return 0n;
+    try { return BigInt(text); } catch { return 0n; }
+  };
+  const aggregates = new Set<Record<string, unknown>>();
+  for (const root of deleted) {
+    const rootPath = String(root.path ?? '');
+    const rootTarget = String(root.target_id ?? '');
+    if (!rootPath) continue;
+    const descendants = deleted.filter(
+      (child) => child !== root
+        && String(child.target_id ?? '') === rootTarget
+        && isStrictDescendantPath(String(child.path ?? ''), rootPath),
+    );
+    if (descendants.length === 0) continue;
+    const descendantBytes = descendants.reduce(
+      (sum, child) => sum + toBig(child.bytes ?? child.size ?? 0), 0n,
+    );
+    if (descendantBytes === 0n) continue;
+    if (toBig(root.bytes ?? root.size ?? 0) >= descendantBytes) aggregates.add(root);
+  }
+  return aggregates;
+}
+
 export function outcomeAndIntent(objs: Record<string, unknown>[]) {
   const outcomes = objs.filter((o) => String(o.record ?? '') === 'outcome');
   const summary = [...outcomes].reverse().find((o) => isScanSummaryRecord(o) || o.bytesFreed != null || o.deletedCount != null || o.total_reclaimable_bytes != null || o.totalBytes != null) ?? null;
