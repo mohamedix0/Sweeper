@@ -162,6 +162,98 @@ impl WalkState {
         }
         self.condvar.notify_all();
     }
+    /// Dedup keys already linked to this parent, plus the number of them.
+    fn existing_children(
+        records: &HashMap<String, DirRecord>,
+        dir_key: &str,
+    ) -> (HashSet<String>, usize) {
+        let mut seen = HashSet::new();
+        let mut retained = 0usize;
+        if let Some(parent) = records.get(dir_key) {
+            for c in &parent.children_dirs {
+                seen.insert(annotate::canonical_key(c));
+            }
+            retained = parent.children_dirs.len();
+        }
+        (seen, retained)
+    }
+
+    /// True when retaining this child would exceed the whole-walk record bound.
+    fn dir_cap_reached(&self, records: &HashMap<String, DirRecord>, ck: &str) -> bool {
+        !records.contains_key(ck) && records.len() >= self.max_dir_records
+    }
+
+    /// True when retaining another child would exceed this directory's child bound.
+    fn child_cap_reached(&self, retained: usize, pending: usize) -> bool {
+        retained + pending >= self.max_child_dirs
+    }
+
+    /// Insert/link one retained child and apply its traversal or special-marker semantics.
+    fn retain_child(
+        records: &mut HashMap<String, DirRecord>,
+        child: ChildDirEntry,
+        ck: String,
+        dir_path: &str,
+        traverse_children: &mut Vec<String>,
+    ) {
+        let path = child.path.clone();
+        records.entry(ck.clone()).or_insert_with(|| {
+            DirRecord::new(
+                path.clone(),
+                annotate::display_name(&path),
+                Some(dir_path.to_string()),
+            )
+        });
+        if let Some(r) = records.get_mut(&ck) {
+            if r.parent.is_none() {
+                r.parent = Some(dir_path.to_string());
+            }
+            if r.name.is_empty() {
+                r.name = annotate::display_name(&path);
+            }
+            match child.kind {
+                ChildDirKind::Traverse => traverse_children.push(child.path),
+                ChildDirKind::Special(marker) => {
+                    r.own_file_count = 0;
+                    r.own_bytes = 0;
+                    r.files = vec![marker];
+                    r.children_dirs.clear();
+                    r.scanned = true;
+                }
+            }
+        }
+    }
+
+    /// Store the scan results on the directory record itself.
+    fn finalize_parent(
+        records: &mut HashMap<String, DirRecord>,
+        dir_key: &str,
+        dir_path: &str,
+        new_children: Vec<String>,
+        files: Vec<FileInfo>,
+        file_count: u64,
+        byte_count: u64,
+    ) {
+        if let Some(rec) = records.get_mut(dir_key) {
+            rec.children_dirs.extend(new_children);
+            rec.files = files;
+            rec.own_file_count = file_count;
+            rec.own_bytes = byte_count;
+            rec.scanned = true;
+            if rec.name.is_empty() {
+                rec.name = annotate::display_name(dir_path);
+            }
+        }
+    }
+
+    fn enqueue_children(&self, traverse_children: Vec<String>) {
+        if !traverse_children.is_empty() {
+            let mut work = self.work.lock().unwrap();
+            work.queue.extend(traverse_children);
+            self.condvar.notify_all();
+        }
+    }
+
     fn commit_directory_scan(
         &self,
         dir_path: &str,
@@ -178,14 +270,7 @@ impl WalkState {
             records.entry(dir_key.clone()).or_insert_with(|| {
                 DirRecord::new(dir_path.to_string(), annotate::display_name(dir_path), None)
             });
-            let mut seen: HashSet<String> = HashSet::new();
-            let mut retained_children = 0usize;
-            if let Some(parent) = records.get(&dir_key) {
-                for c in &parent.children_dirs {
-                    seen.insert(annotate::canonical_key(c));
-                }
-                retained_children = parent.children_dirs.len();
-            }
+            let (mut seen, retained_children) = Self::existing_children(&records, &dir_key);
             let mut new_children: Vec<String> = Vec::new();
             for child in child_dirs {
                 let ck = annotate::canonical_key(&child.path);
@@ -195,62 +280,29 @@ impl WalkState {
                 // Bound retention *during* traversal: a skipped child gets no record,
                 // no parent link and no queue entry, so the walk terminates early
                 // instead of retaining one record per directory on the whole drive.
-                if !records.contains_key(&ck) && records.len() >= self.max_dir_records {
-                    did_truncate = true;
-                    continue;
-                }
-                if retained_children + new_children.len() >= self.max_child_dirs {
+                if self.dir_cap_reached(&records, &ck)
+                    || self.child_cap_reached(retained_children, new_children.len())
+                {
                     did_truncate = true;
                     continue;
                 }
                 new_children.push(child.path.clone());
-                records.entry(ck.clone()).or_insert_with(|| {
-                    DirRecord::new(
-                        child.path.clone(),
-                        annotate::display_name(&child.path),
-                        Some(dir_path.to_string()),
-                    )
-                });
-                if let Some(r) = records.get_mut(&ck) {
-                    if r.parent.is_none() {
-                        r.parent = Some(dir_path.to_string());
-                    }
-                    if r.name.is_empty() {
-                        r.name = annotate::display_name(&child.path);
-                    }
-                    match child.kind {
-                        ChildDirKind::Traverse => traverse_children.push(child.path),
-                        ChildDirKind::Special(marker) => {
-                            r.own_file_count = 0;
-                            r.own_bytes = 0;
-                            r.files = vec![marker];
-                            r.children_dirs.clear();
-                            r.scanned = true;
-                        }
-                    }
-                }
+                Self::retain_child(&mut records, child, ck, dir_path, &mut traverse_children);
             }
-            if let Some(rec) = records.get_mut(&dir_key) {
-                rec.children_dirs.extend(new_children);
-                rec.files = files;
-                rec.own_file_count = file_count;
-                rec.own_bytes = byte_count;
-                rec.scanned = true;
-                if rec.name.is_empty() {
-                    rec.name = annotate::display_name(dir_path);
-                }
-            }
+            Self::finalize_parent(
+                &mut records,
+                &dir_key,
+                dir_path,
+                new_children,
+                files,
+                file_count,
+                byte_count,
+            );
         }
         if did_truncate {
             self.truncated.store(true, AtomicOrdering::Relaxed);
         }
-        if !traverse_children.is_empty() {
-            let mut work = self.work.lock().unwrap();
-            for c in traverse_children {
-                work.queue.push_back(c);
-            }
-            self.condvar.notify_all();
-        }
+        self.enqueue_children(traverse_children);
         self.scanned_dirs.fetch_add(1, AtomicOrdering::Relaxed);
         self.scanned_files
             .fetch_add(file_count, AtomicOrdering::Relaxed);
