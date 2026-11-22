@@ -105,3 +105,66 @@ fn gate_d_long_paths_deep_tree_reserved_ads_trailing_dots_arabic_emoji_case_sens
     assert!(target_root.exists(), "target root must remain");
     assert_sentinel_intact(&sb);
 }
+
+/// D1 follow-up: on a case-sensitive directory, a junction to a sibling whose
+/// name differs only by case is a distinct entry. The folded path comparison
+/// alone cannot see the swap, so Clean must abort and leave the sibling intact.
+#[test]
+fn gate_d_case_distinct_sibling_swap_is_aborted_and_canary_survives() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("target").unwrap();
+    let journal_dir = sb.create_dir("journal").unwrap();
+
+    try_enable_case_sensitive_dir(&target_root);
+    let case_dir = target_root.join("casedir");
+    let names: Vec<String> = fs::read_dir(&case_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    if !(names.iter().any(|name| name == "Case.txt") && names.iter().any(|name| name == "case.txt"))
+    {
+        eprintln!("skipping: case-sensitive directory unavailable (requires elevation)");
+        return;
+    }
+
+    let sub = case_dir.join("sub");
+    let sibling = case_dir.join("SUB");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&sibling).unwrap();
+    let victim = sub.join("victim.txt");
+    let canary = sibling.join("victim.txt");
+    write_file(&victim, b"confirmed selection");
+    write_file(&canary, b"never selected");
+    set_filetime(&victim, old_mtime_secs());
+    set_filetime(&sub, old_mtime_secs());
+    set_filetime(&canary, old_mtime_secs());
+    let item = make_item("case-swap", &target_root, &victim, 1024);
+
+    // Swap the confirmed directory for a junction to the case-distinct sibling.
+    fs::remove_file(&victim).unwrap();
+    fs::remove_dir(&sub).unwrap();
+    sweeper_testkit::create_junction(&sub, &sibling).unwrap();
+
+    let report = remover::execute_clean(
+        vec![item],
+        CleanOptions {
+            preview_estimated_bytes: 1024 * 1024,
+            min_age: Duration::from_secs(3600),
+            now: now(),
+            journal_base_dir: Some(journal_dir),
+        },
+    )
+    .unwrap();
+
+    assert!(
+        report.aborted,
+        "case-variant redirect must abort: {report:?}"
+    );
+    assert_eq!(
+        report.bytes_freed, 0,
+        "no unselected bytes freed: {report:?}"
+    );
+    assert!(canary.exists(), "case-distinct sibling canary must survive");
+    assert_sentinel_intact(&sb);
+}
