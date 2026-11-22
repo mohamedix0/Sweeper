@@ -130,6 +130,20 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
     assertAudit(report);
   });
 
+  // Regression guard: re-adding the withdrawn advisory to IGNORED_ADVISORY_IDS
+  // must fail this test. Exit code 1 is required; 2 would mean a processing
+  // error rather than a correctly classified blocking advisory.
+  it('blocks the withdrawn picomatch advisory ID', () => {
+    const result = runGate({
+      vulnerabilities: { picomatch: highVuln([highCause('GHSA-FC5Q-39XC-VJPF')]) },
+    });
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('BLOCKING high/critical advisories:');
+    expect(result.output).toContain('GHSA-FC5Q-39XC-VJPF');
+    expect(result.output).toContain('FAIL: high/critical advisory gate failed.');
+    expect(result.output).not.toContain('IGNORED');
+  });
+
   it('passes an unrelated low advisory', () => {
     expectPassed({
       vulnerabilities: {
