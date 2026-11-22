@@ -94,7 +94,7 @@ export function PreviewRiskCallouts(props: { items: PreviewRiskCalloutItem[] }) 
               </div>
               <div className="preview-risk-callout-identity">
                 <span className="preview-risk-callout-identity-label">{PREVIEW_RISK_CALLOUT_STRINGS.identityLabel}:</span>{' '}
-                <span className="preview-risk-callout-identity-text">{item.identity}</span>
+                <span className="preview-risk-callout-identity-text"><bdi>{item.identity}</bdi></span>
               </div>
               <p className="preview-risk-callout-explanation">{item.explanation}</p>
               <p className="preview-risk-callout-consequence">{copy.consequence}</p>

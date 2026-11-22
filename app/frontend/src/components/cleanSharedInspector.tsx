@@ -11,7 +11,7 @@ function splitPathParts(args: { fullPath: string }) {
 
 function PathDirLine(props: { dirPart: string }) {
   if (!props.dirPart) return null;
-  return <div className="path-well-dir path-well-line">{props.dirPart}</div>;
+  return <div className="path-well-dir path-well-line"><bdi>{props.dirPart}</bdi></div>;
 }
 
 export function PathWell(props: { path: string }) {
@@ -23,7 +23,7 @@ export function PathWell(props: { path: string }) {
     <div className="path-well path-well-compact" aria-label="Full path" title={fullPath}>
       <div className="path-well-lines mono">
         <PathDirLine dirPart={parts.dirPart} />
-        <div className="path-well-file path-well-line">{leaf}</div>
+        <div className="path-well-file path-well-line"><bdi>{leaf}</bdi></div>
       </div>
     </div>
   );
