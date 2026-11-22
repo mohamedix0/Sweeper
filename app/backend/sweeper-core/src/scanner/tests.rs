@@ -1,4 +1,5 @@
 use super::*;
+use crate::remover::{self, CleanOptions, ValidatedItem};
 use crate::scanner::allowlist::{scan_resolved_roots, ResolvedRootsScanCtx};
 use sweeper_knowledge::{KnownFolder, Risk, Scope, Tier};
 
@@ -15,6 +16,87 @@ fn sample_target(id: &str, rel: &str) -> TargetDefinition {
         description: "test".to_string(),
         requires_elevation: false,
     }
+}
+
+#[test]
+fn whole_cache_estimate_matches_deleted_bytes_with_node_modules() {
+    let sb = sweeper_testkit::Sandbox::new();
+    let root = sb.create_dir("uv-cache").unwrap();
+    let node_modules = root.join("node_modules");
+    std::fs::create_dir_all(&node_modules).unwrap();
+    std::fs::write(node_modules.join("pkg.bin"), vec![b'x'; 4096]).unwrap();
+    std::fs::write(root.join("normal.bin"), vec![b'y'; 1024]).unwrap();
+    let canon = CanonicalPath::from_existing_path(&root.to_string_lossy())
+        .unwrap()
+        .into_canonical();
+
+    let target = TargetDefinition {
+        id: "uv-cache".to_string(),
+        name: "uv Cache".to_string(),
+        tier: Tier::Tier2,
+        risk: Risk::Caution,
+        known_folder: KnownFolder::LocalAppData,
+        relative_subpath: r"uv\cache".to_string(),
+        scope: Scope::WholeCache,
+        min_age_hours: 0,
+        description: "test".to_string(),
+        requires_elevation: false,
+    };
+    let roots = vec![(target.id.clone(), canon.clone())];
+    let estimated = {
+        let mut progress =
+            ScanProgressRuntime::new(1, std::sync::Arc::new(AtomicBool::new(false)), None);
+        let mut ctx = ResolvedRootsScanCtx {
+            target: &target,
+            roots: &roots,
+            min_age: Duration::from_secs(24 * 3600),
+            now: SystemTime::now(),
+            progress: &mut progress,
+        };
+        let mut out = empty_target_result(TargetResultMeta {
+            target_id: target.id.clone(),
+            target_name: target.name.clone(),
+            tier: target.tier,
+            risk: target.risk,
+        });
+        scan_resolved_roots(&mut ctx, &mut out).expect("whole-cache scan");
+        assert_eq!(out.items.len(), 1);
+        out.items[0].size
+    };
+    assert_eq!(
+        estimated,
+        4096 + 1024,
+        "node_modules bytes must be in the Preview estimate"
+    );
+
+    let item =
+        ValidatedItem::from_whole_cache_root("wc-nm-1", "uv-cache", canon.as_str(), estimated)
+            .expect("whole-cache root must validate");
+    let journal = sb.create_dir("journal").unwrap();
+    let report = remover::execute_clean(
+        vec![item],
+        CleanOptions {
+            preview_estimated_bytes: estimated,
+            min_age: Duration::from_secs(24 * 3600),
+            now: SystemTime::now(),
+            journal_base_dir: Some(journal),
+        },
+    )
+    .expect("whole-cache clean");
+
+    assert!(
+        !report.aborted,
+        "120% breaker must not trip: {:?}",
+        report.abort_reason
+    );
+    assert!(!root.exists(), "whole cache root must be removed");
+    assert!(
+        report.bytes_freed >= estimated,
+        "deleted bytes must cover the estimate: {} < {}",
+        report.bytes_freed,
+        estimated
+    );
+    sb.assert_sentinel_present();
 }
 
 #[test]

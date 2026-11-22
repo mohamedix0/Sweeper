@@ -648,6 +648,16 @@ fn apply_process_outcome(
     }
 }
 
+/// Outcome for a whole-cache clean whose root still holds entries after the
+/// content sweep. The cache was not fully removed, so it is reported Skipped,
+/// but the bytes already deleted are carried into the report.
+fn whole_cache_partial_outcome(bytes: u64) -> ProcessOutcome {
+    ProcessOutcome::Skipped(
+        "Skipped: whole-cache not fully cleaned (entries remain in cache root)".to_string(),
+        bytes,
+    )
+}
+
 /// Whether the item's source removes the directory root after its contents
 /// are cleaned (Tier 3 stale project directories and issue #41 whole caches).
 fn source_removes_root_after_contents(source: &ValidatedSource) -> bool {
@@ -819,6 +829,14 @@ fn process_item(
                                 Err(err)
                             }
                         };
+                    }
+                    // A whole-cache is all-or-nothing. Leftover entries (for
+                    // example a locked file) mean it was NOT fully cleaned, so
+                    // report Skipped while still accounting for bytes already
+                    // deleted. Tier 3 project directories keep their existing
+                    // Deleted outcome.
+                    if matches!(item.source, ValidatedSource::WholeCache { .. }) {
+                        return Ok(whole_cache_partial_outcome(bytes));
                     }
                     return Ok(ProcessOutcome::Deleted(bytes));
                 }

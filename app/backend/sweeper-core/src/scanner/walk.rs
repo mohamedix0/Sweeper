@@ -9,6 +9,9 @@ pub(super) struct ScanWalkCtx<'a> {
     stack: &'a mut Vec<PathBuf>,
     next_item_seq: &'a mut u64,
     progress: &'a mut ScanProgressRuntime,
+    /// Whole-cache measurement walks everything the remover will delete, so
+    /// the Preview estimate cannot under-count the 120% circuit breaker.
+    include_all_entries: bool,
 }
 
 fn is_policy_protected_path(path: &str) -> bool {
@@ -26,9 +29,11 @@ fn is_policy_protected_path(path: &str) -> bool {
     false
 }
 
-fn is_policy_excluded_file(path: &str) -> bool {
+fn is_policy_excluded_file(path: &str, include_all_entries: bool) -> bool {
     let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".vhdx") || lower.ends_with(".vhd") {
+    // The remover deletes .vhd/.vhdx files, so a whole-cache estimate must
+    // include them too; normal Targets keep the existing display-only policy.
+    if !include_all_entries && (lower.ends_with(".vhdx") || lower.ends_with(".vhd")) {
         return true;
     }
     if CanonicalPath::parse_lexical(path).is_err() {
@@ -37,8 +42,10 @@ fn is_policy_excluded_file(path: &str) -> bool {
     is_policy_protected_path(path)
 }
 
-fn is_excluded_scan_dir(path: &str, name_lower: &str) -> bool {
-    if name_lower == "node_modules" {
+fn is_excluded_scan_dir(path: &str, name_lower: &str, include_all_entries: bool) -> bool {
+    // node_modules is display-only for normal Targets but is deleted by a
+    // whole-cache clean, so it must be measured for those targets.
+    if !include_all_entries && name_lower == "node_modules" {
         return true;
     }
     is_policy_protected_path(path)
@@ -52,6 +59,7 @@ pub(super) struct RootWalk<'a> {
     pub out: &'a mut TargetScanResult,
     pub next_item_seq: &'a mut u64,
     pub progress: &'a mut ScanProgressRuntime,
+    pub include_all_entries: bool,
 }
 
 pub(super) fn scan_one_root_iterative(req: &mut RootWalk<'_>) -> Result<(), ScanError> {
@@ -64,6 +72,7 @@ pub(super) fn scan_one_root_iterative(req: &mut RootWalk<'_>) -> Result<(), Scan
         stack: &mut stack,
         next_item_seq: req.next_item_seq,
         progress: req.progress,
+        include_all_entries: req.include_all_entries,
     };
     while let Some(dir) = ctx.stack.pop() {
         scan_directory_in_walk(&mut ctx, &dir)?;
@@ -90,6 +99,7 @@ pub(super) fn scan_one_root_whole_cache(req: &mut RootWalk<'_>) -> Result<(), Sc
             out: &mut staged,
             next_item_seq: req.next_item_seq,
             progress: req.progress,
+            include_all_entries: true,
         };
         scan_one_root_iterative(&mut staged_walk)?;
     }
@@ -212,7 +222,7 @@ pub(super) fn skip_reason_for_reparse(reparse: ReparseTagClass) -> Option<SkipRe
 pub(super) fn handle_directory_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
     let path_str = ent.path.to_string_lossy().to_string();
     let name_lower = ent.name.to_string_lossy().to_ascii_lowercase();
-    if is_excluded_scan_dir(&path_str, &name_lower) {
+    if is_excluded_scan_dir(&path_str, &name_lower, ctx.include_all_entries) {
         bump_skip_with_context(ctx.out, SkipReason::PolicyExcluded, path_str);
         ctx.progress
             .maybe_emit_throttled(Some(ctx.target.id.as_str()), Some(ctx.target.name.as_str()));
@@ -247,7 +257,7 @@ fn record_skipped_file(
 
 pub(super) fn record_file_entry(ctx: &mut ScanWalkCtx<'_>, ent: &DirEntry) {
     let path_str = ent.path.to_string_lossy().to_string();
-    if is_policy_excluded_file(&path_str) {
+    if is_policy_excluded_file(&path_str, ctx.include_all_entries) {
         record_skipped_file(ctx, ent.size, SkipReason::PolicyExcluded, &path_str);
         return;
     }
