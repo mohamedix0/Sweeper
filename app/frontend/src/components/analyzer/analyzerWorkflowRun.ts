@@ -1,6 +1,7 @@
 import { formatContractError, type CleanProgressEvent, type ExecuteCleanResponse, type SweeperClient } from '../../api/client';
 import type { AnalyzerNodeDto, ContractError } from '../../contract/bindings';
 import type { PreviewResult } from '../cleanShared';
+import { convergeStop } from './analyzerStop';
 
 type RunAnalyzerArgs = {
   client: SweeperClient;
@@ -23,6 +24,7 @@ type RunAnalyzerArgs = {
   inspectNode: (input: { id: string }) => void;
   setError: (v: string | null) => void;
   setInfo: (v: string | null) => void;
+  isCurrent: () => boolean;
 };
 
 function targetPathOf(args: { pathOverride?: string; rootPath: string }): string {
@@ -70,13 +72,16 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
   args.setProgress(null);
   try {
     const res = await args.client.startAnalyzer(targetPath, (p) => {
+      if (!args.isCurrent()) return;
       args.setRunningSessionId(p.sessionId);
       args.setProgress(p);
     });
+    // A Stop can converge the UI while startAnalyzer is still in flight. Its
+    // late result must never repopulate results for a run that is no longer
+    // current (#99).
+    if (!args.isCurrent()) return;
     if (res.cancelled) {
-      args.setResult(null);
-      args.setSessionId(null);
-      args.setAnalyzedPath(null);
+      convergeStop(args);
       args.setInfo('Analysis stopped.');
       return;
     }
@@ -87,9 +92,11 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
     args.setAnalyzedPath(res.rootPath || targetPath);
     args.inspectNode({ id: autoInspectId(res.root) });
   } catch (e) {
-    args.setError(formatContractError(e));
+    if (args.isCurrent()) args.setError(formatContractError(e));
   } finally {
-    args.setAnalyzing(false);
-    args.setRunningSessionId(null);
+    if (args.isCurrent()) {
+      args.setAnalyzing(false);
+      args.setRunningSessionId(null);
+    }
   }
 }

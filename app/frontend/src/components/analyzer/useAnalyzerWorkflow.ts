@@ -1,8 +1,9 @@
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState, type MutableRefObject } from 'react';
 import type { CleanProgressEvent, ExecuteCleanResponse, Settings, SweeperClient } from '../../api/client';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import type { PreviewResult } from '../cleanShared';
 import { BROWSE_PATHS, analyzerStatusKey, dedupeAnalyzerNodesByCoverage, isNodeSelectable, type AnalyzerStatusFilter } from './analyzerHelpers';
+import { convergeStop } from './analyzerStop';
 import { runAnalyzerAction } from './analyzerWorkflowRun';
 import { runCleanAction } from './analyzerWorkflowClean';
 import { runPreviewAction } from './analyzerWorkflowPreview';
@@ -49,28 +50,48 @@ function useRunMessages() {
   return { error, setError, info, setInfo: setInfoState };
 }
 
-function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: DerivedModel; m: MessageState; p: PreviewCleanState; allowDeleteUnknown: boolean; safeSelectableNodes: AnalyzerNodeDto[] }) {
-  const { args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes } = input;
+type StopControl = { stopRequested: MutableRefObject<boolean>; runToken: MutableRefObject<number> };
+
+function convergeStoppedRun(args: { s: SessionModel; m: MessageState }) {
+  convergeStop(args.s);
+  args.m.setError(null);
+  args.m.setInfo('Analysis stopped.');
+}
+
+function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: DerivedModel; m: MessageState; p: PreviewCleanState; allowDeleteUnknown: boolean; safeSelectableNodes: AnalyzerNodeDto[]; stop: StopControl }) {
+  const { args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes, stop } = input;
   function invalidatePreviewRequest() { p.rev.current += 1; p.active.current += 1; p.setPreviewLoading(false); }
   function clearPreviewState() { p.setPreview(null); p.setCleanSummary(null); p.setCleanProgress(null); }
   function inspectNodeById(id: string) { void s.inspectNode({ itemId: id }); }
   function resetAnalyzerSession(msg?: string) {
     invalidatePreviewRequest();
-    s.resetInspection(); s.setSessionId(null); s.setRunningSessionId(null); s.setStartedAt(null); s.setResult(null); s.setSelectedIds(new Set()); s.setExpanded(new Set()); s.setShowAllAnalyzerNodes(new Set());
+    convergeStop(s);
     p.setPreview(null); p.setConfirmText(''); p.setCleanProgress(null);
     if (msg) m.setInfo(msg);
   }
   async function runAnalyzer(run?: { path?: string }) {
-    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, setRunningSessionId: s.setRunningSessionId, inspectNode: ({ id }) => inspectNodeById(id), setError: m.setError, setInfo: m.setInfo });
+    stop.stopRequested.current = false;
+    const token = ++stop.runToken.current;
+    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, setRunningSessionId: s.setRunningSessionId, inspectNode: ({ id }) => inspectNodeById(id), setError: m.setError, setInfo: m.setInfo, isCurrent: () => stop.runToken.current === token });
   }
   async function stopAnalyzer() {
+    // Stop is a one-way, one-shot action: the first press claims the in-flight
+    // run, converges every visible trace of it, and any repeat is a no-op (#99).
+    if (stop.stopRequested.current) return;
     const sid = s.runningSessionId;
     if (!sid) return;
+    stop.stopRequested.current = true;
+    const stoppedToken = ++stop.runToken.current;
+    convergeStoppedRun({ s, m });
     try {
       await args.client.cancelAnalyzer(sid);
-      m.setInfo('Stopping analysis…');
-    } catch (e) {
-      m.setError('Failed to stop analysis.');
+    } catch {
+      // A newer run may have started while this cancel was in flight; its
+      // messages must not be clobbered by a stale rejection (#99).
+      if (stop.runToken.current === stoppedToken) {
+        m.setInfo(null);
+        m.setError('Failed to stop analysis.');
+      }
     }
   }
   function toggleSelect(node: AnalyzerNodeDto) {
@@ -115,10 +136,11 @@ export function useAnalyzerWorkflow(args: WfArgs) {
   const allowDeleteUnknown = args.settings?.allowDeleteUnknown ?? false;
   const d = useAnalyzerDerived({ result: s.result, query, sort, statusFilter, expanded: s.expanded, showAllAnalyzerNodes: s.showAllAnalyzerNodes, selectedIds: s.selectedIds });
   const safeSelectableNodes = useMemo(() => collectSafeSelectable({ nodesById: d.nodesById, allowDeleteUnknown }), [d.nodesById, allowDeleteUnknown]);
-  const actions = createAnalyzerActions({ args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes });
+  const stop: StopControl = { stopRequested: useRef(false), runToken: useRef(0) };
+  const actions = createAnalyzerActions({ args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes, stop });
 
   return {
-    rootPath: s.rootPath, setRootPath: s.setRootPath, analyzedPath: s.analyzedPath, analyzing: s.analyzing, progress: s.progress,
+    rootPath: s.rootPath, setRootPath: s.setRootPath, analyzedPath: s.analyzedPath, startedAt: s.startedAt, analyzing: s.analyzing, progress: s.progress,
     sessionId: s.sessionId, runningSessionId: s.runningSessionId, result: s.result, expanded: s.expanded, selectedIds: s.selectedIds, inspected: s.inspected,
     preview: p.preview, previewLoading: p.previewLoading, confirmText: p.confirmText, setConfirmText: p.setConfirmText,
     cleaning: p.cleaning, cleanProgress: p.cleanProgress, cleanSummary: p.cleanSummary, error: m.error, info: m.info,

@@ -198,9 +198,20 @@ function handleCleanError(args: { w: Workflow; error: unknown }) {
   }
 }
 
+const REFRESH_FAILED_NOTICE = 'Clean completed, but the latest Scan results could not be refreshed. Start a new Scan to see current results.';
+
 async function refreshAfterClean(w: Workflow, client: SweeperClient) {
   if (!w.sessionId) return;
-  try { w.setResults(await client.getScanResults(w.sessionId)); } catch { /* ignore */ }
+  try {
+    w.setResults(await client.getScanResults(w.sessionId));
+  } catch {
+    // Drop pre-Clean items but keep the results shell mounted: the Clean
+    // Summary is rendered in its inspector and would otherwise unmount with
+    // the whole layout. Surface a non-blocking notice alongside it (#99).
+    const current = w.results;
+    w.setResults(current ? { ...current, targets: [] } : null);
+    w.setInfo(REFRESH_FAILED_NOTICE);
+  }
 }
 
 export async function runScanClean(args: { w: Workflow; client: SweeperClient }) {
