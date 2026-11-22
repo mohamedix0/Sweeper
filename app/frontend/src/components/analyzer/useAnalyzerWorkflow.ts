@@ -62,7 +62,10 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
   const { args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes, stop } = input;
   function invalidatePreviewRequest() { p.rev.current += 1; p.active.current += 1; p.setPreviewLoading(false); }
   function clearPreviewState() { p.setPreview(null); p.setCleanSummary(null); p.setCleanProgress(null); }
-  function inspectNodeById(id: string) { void s.inspectNode({ itemId: id }); }
+  function inspectNodeById(id: string) {
+    const node = d.nodesById.get(id);
+    void s.inspectNode({ itemId: id, known: node ? { title: node.name, risk: node.risk } : undefined });
+  }
   function resetAnalyzerSession(msg?: string) {
     invalidatePreviewRequest();
     convergeStop(s);

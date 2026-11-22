@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { formatContractError, type AnalyzerProgressEvent, type StartAnalyzerResult, type SweeperClient } from '../../api/client';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
-import { type ExplainState } from '../cleanShared';
+import { failedExplanation, type ExplainState, type ExplanationFallback } from '../cleanShared';
 
 export function useAnalyzerSession(args: { client: SweeperClient }) {
   const [rootPath, setRootPath] = useState('C:\\');
@@ -22,13 +22,18 @@ export function useAnalyzerSession(args: { client: SweeperClient }) {
     if (inspectReqIdRef.current === input.reqId) setInspected(input.result);
   }
 
-  async function inspectNode(input: { itemId: string }) {
+  async function inspectNode(input: { itemId: string; known?: ExplanationFallback }) {
     const reqId = inspectReqIdRef.current + 1;
     inspectReqIdRef.current = reqId;
     try {
       const result = await args.client.explainItem(input.itemId);
       applyInspectResult({ reqId, result });
-    } catch { /* ignore */ }
+    } catch (error) {
+      // A failed explain must not leave the inspector empty: surface an explicit
+      // notice while keeping the node's known identity/Risk on display.
+      console.warn(`Sweeper: explanation unavailable for analyzer node ${input.itemId}.`, error);
+      applyInspectResult({ reqId, result: failedExplanation({ itemId: input.itemId, known: input.known }) });
+    }
   }
 
   function resetInspection() {
