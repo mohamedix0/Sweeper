@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -445,6 +445,7 @@ where
     let mut report = new_clean_report(items.len());
     let mut deleted_total: u64 = 0;
     let mut completed: u64 = 0;
+    let mut progress_throttle = CleanProgressThrottle::new();
 
     for (index, item) in items.iter().enumerate() {
         if report.aborted {
@@ -454,6 +455,7 @@ where
                 item,
                 &mut completed,
                 total_items,
+                &mut progress_throttle,
                 &mut on_progress,
             ) {
                 return Ok(stop_after_journal_failure(
@@ -484,6 +486,7 @@ where
         let status = apply_process_outcome(item, outcome, &mut report);
         completed = completed.saturating_add(1);
         emit_item_progress(
+            &mut progress_throttle,
             &mut on_progress,
             item,
             completed,
@@ -576,13 +579,15 @@ fn new_clean_report(item_count: usize) -> CleanReport {
 }
 
 /// Record the skip of an item not processed because the batch already aborted,
-/// then emit its progress update.
+/// then emit its (throttled) progress update.
+#[allow(clippy::too_many_arguments)]
 fn record_post_abort_skip<F>(
     journal: &mut JournalWriter,
     report: &mut CleanReport,
     item: &ValidatedItem,
     completed: &mut u64,
     total_items: u64,
+    throttle: &mut CleanProgressThrottle,
     on_progress: &mut F,
 ) -> Result<(), CleanError>
 where
@@ -594,13 +599,15 @@ where
         .unwrap_or_else(|| "aborted".to_string());
     record_skip(journal, report, item, &reason)?;
     *completed = completed.saturating_add(1);
-    on_progress(CleanProgress {
-        target_id: item.target_id.clone(),
-        completed_items: *completed,
+    emit_item_progress(
+        throttle,
+        on_progress,
+        item,
+        *completed,
         total_items,
-        bytes_freed_so_far: report.bytes_freed,
-        status: "Skipped".to_string(),
-    });
+        report.bytes_freed,
+        "Skipped".to_string(),
+    );
     Ok(())
 }
 
@@ -676,8 +683,76 @@ fn root_outcome_with_child_bytes(outcome: ProcessOutcome, child_bytes: u64) -> P
     }
 }
 
-/// Emit a progress update for a single processed item.
+/// Clean progress is throttled with the same 64-item / 100 ms limits used by
+/// scan progress (`scanner::runtime::ScanProgressRuntime`) to avoid flooding
+/// the IPC event bus during large cleans.
+const CLEAN_PROGRESS_ITEM_THRESHOLD: u64 = 64;
+const CLEAN_PROGRESS_TIME_THRESHOLD: Duration = Duration::from_millis(100);
+
+/// Rate-limits per-item Clean progress the same way scan progress is limited:
+/// at most one emit per 64 items, or one per 100 ms. The state is per-run and
+/// lives on the stack, so concurrent Clean runs never share throttle state.
+#[derive(Debug)]
+struct CleanProgressThrottle {
+    last_emit_at: Instant,
+    last_emit_items: u64,
+}
+
+impl CleanProgressThrottle {
+    fn new() -> Self {
+        Self {
+            last_emit_at: Instant::now(),
+            last_emit_items: 0,
+        }
+    }
+
+    fn emit<F>(&mut self, on_progress: &mut F, progress: CleanProgress)
+    where
+        F: FnMut(CleanProgress),
+    {
+        self.last_emit_at = Instant::now();
+        self.last_emit_items = progress.completed_items;
+        on_progress(progress);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_emit<F>(
+        &mut self,
+        on_progress: &mut F,
+        target_id: &str,
+        completed: u64,
+        total_items: u64,
+        bytes_freed: u64,
+        status: String,
+        force: bool,
+    ) where
+        F: FnMut(CleanProgress),
+    {
+        let items_delta = completed.saturating_sub(self.last_emit_items);
+        if force
+            || items_delta >= CLEAN_PROGRESS_ITEM_THRESHOLD
+            || self.last_emit_at.elapsed() >= CLEAN_PROGRESS_TIME_THRESHOLD
+        {
+            self.emit(
+                on_progress,
+                CleanProgress {
+                    target_id: target_id.to_owned(),
+                    completed_items: completed,
+                    total_items,
+                    bytes_freed_so_far: bytes_freed,
+                    status,
+                },
+            );
+        }
+    }
+}
+
+/// Emit a progress update for a single processed item, throttled to at most one
+/// event per 64 items or 100 ms. Terminal updates (the last item of the run or
+/// an abort) bypass the throttle so final totals always reach the caller.
+#[allow(clippy::too_many_arguments)]
 fn emit_item_progress<F>(
+    throttle: &mut CleanProgressThrottle,
     on_progress: &mut F,
     item: &ValidatedItem,
     completed: u64,
@@ -687,13 +762,16 @@ fn emit_item_progress<F>(
 ) where
     F: FnMut(CleanProgress),
 {
-    on_progress(CleanProgress {
-        target_id: item.target_id.clone(),
-        completed_items: completed,
+    let terminal = status == "aborted" || completed == total_items;
+    throttle.maybe_emit(
+        on_progress,
+        &item.target_id,
+        completed,
         total_items,
-        bytes_freed_so_far: bytes_freed,
+        bytes_freed,
         status,
-    });
+        terminal,
+    );
 }
 
 enum ProcessOutcome {
