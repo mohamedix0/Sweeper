@@ -117,18 +117,27 @@ fn preview_and_clean(state: &AppState<FixedClock>) -> ExecuteCleanResponse {
     .expect("whole-cache clean must execute")
 }
 
-fn assert_clean_effects(
-    resp: &ExecuteCleanResponse,
-    cache_root: &Path,
-    bystander: &Path,
-    canary: &CanaryTree,
-    sandbox: &Sandbox,
-) {
+/// Everything the whole-cache clean must leave behind (or remove), grouped so
+/// the assertion helper takes only the response and this expectation.
+struct CleanEffectsExpectation<'a> {
+    cache_root: &'a Path,
+    bystander: &'a Path,
+    canary: &'a CanaryTree,
+    sandbox: &'a Sandbox,
+}
+
+fn assert_clean_effects(resp: &ExecuteCleanResponse, expected: &CleanEffectsExpectation<'_>) {
     assert!(!resp.aborted, "abort_reason={:?}", resp.abort_reason);
-    assert!(!cache_root.exists(), "whole cache root must be removed");
-    assert!(bystander.exists(), "non-targeted file must survive");
-    canary.verify().expect("canary must remain intact");
-    sandbox.assert_sentinel_present();
+    assert!(
+        !expected.cache_root.exists(),
+        "whole cache root must be removed"
+    );
+    assert!(
+        expected.bystander.exists(),
+        "non-targeted file must survive"
+    );
+    expected.canary.verify().expect("canary must remain intact");
+    expected.sandbox.assert_sentinel_present();
 }
 
 #[test]
@@ -145,5 +154,11 @@ fn whole_cache_scan_item_previews_and_cleans_entire_cache_root() {
     let canonical = canonical_str(&cache_root);
     seed_whole_cache_session(&state, &canonical);
     let resp = preview_and_clean(&state);
-    assert_clean_effects(&resp, &cache_root, &bystander, &canary, &sandbox);
+    let expected = CleanEffectsExpectation {
+        cache_root: &cache_root,
+        bystander: &bystander,
+        canary: &canary,
+        sandbox: &sandbox,
+    };
+    assert_clean_effects(&resp, &expected);
 }
