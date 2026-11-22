@@ -20,7 +20,7 @@ use crate::policy;
 mod clean_progress;
 mod remover_whole_cache;
 
-use clean_progress::{emit_item_progress, CleanProgressThrottle};
+use clean_progress::{emit_item_progress, CleanProgressThrottle, ItemProgress};
 use remover_whole_cache::{age_check_applies, whole_cache_partial_outcome};
 
 /// Errors from clean/remover operations.
@@ -490,11 +490,13 @@ where
         emit_item_progress(
             &mut progress_throttle,
             &mut on_progress,
-            item,
-            completed,
-            total_items,
-            report.bytes_freed,
-            status,
+            ItemProgress {
+                item,
+                completed,
+                total_items,
+                bytes_freed: report.bytes_freed,
+                status,
+            },
         );
     }
 
@@ -604,11 +606,13 @@ where
     emit_item_progress(
         throttle,
         on_progress,
-        item,
-        *completed,
-        total_items,
-        report.bytes_freed,
-        "Skipped".to_string(),
+        ItemProgress {
+            item,
+            completed: *completed,
+            total_items,
+            bytes_freed: report.bytes_freed,
+            status: "Skipped".to_string(),
+        },
     );
     Ok(())
 }

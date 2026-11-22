@@ -64,30 +64,35 @@ impl CleanProgressThrottle {
     }
 }
 
+/// Per-item progress data, grouped so the emit helper stays within the
+/// function-argument limit.
+pub(super) struct ItemProgress<'a> {
+    pub(super) item: &'a ValidatedItem,
+    pub(super) completed: u64,
+    pub(super) total_items: u64,
+    pub(super) bytes_freed: u64,
+    pub(super) status: String,
+}
+
 /// Emit a progress update for a single processed item, throttled to at most one
 /// event per 64 items or 100 ms. Terminal updates (the last item of the run or
 /// an abort) bypass the throttle so final totals always reach the caller.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_item_progress<F>(
     throttle: &mut CleanProgressThrottle,
     on_progress: &mut F,
-    item: &ValidatedItem,
-    completed: u64,
-    total_items: u64,
-    bytes_freed: u64,
-    status: String,
+    progress: ItemProgress<'_>,
 ) where
     F: FnMut(CleanProgress),
 {
-    let terminal = status == "aborted" || completed == total_items;
+    let terminal = progress.status == "aborted" || progress.completed == progress.total_items;
     throttle.maybe_emit(
         on_progress,
         CleanProgress {
-            target_id: item.target_id.clone(),
-            completed_items: completed,
-            total_items,
-            bytes_freed_so_far: bytes_freed,
-            status,
+            target_id: progress.item.target_id.clone(),
+            completed_items: progress.completed,
+            total_items: progress.total_items,
+            bytes_freed_so_far: progress.bytes_freed,
+            status: progress.status,
         },
         terminal,
     );
