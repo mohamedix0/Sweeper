@@ -200,6 +200,41 @@ impl ValidatedItem {
         })
     }
 
+    /// Validate a root path with the strict Tier 3 root policy and return its
+    /// canonical string form. Shared by the root-style constructors so the
+    /// validation/canonicalisation sequence exists in exactly one place.
+    fn validated_tier3_root(path: &str, label: &str) -> Result<String, String> {
+        let verdict = policy::validate_tier3_target_root(path);
+        if !verdict.allowed {
+            return Err(format!("{label} not allowed: {}", verdict.reason));
+        }
+        CanonicalPath::parse_lexical(path)
+            .map(|p| p.to_string())
+            .map_err(|e| format!("invalid {label}: {e}"))
+    }
+
+    /// Build a root-style item whose `target_root` and `path` are the same
+    /// canonical directory. All root-style sources carry `Risk::Caution`.
+    fn new_root_item(
+        id: String,
+        target_id: String,
+        canon: String,
+        size_bytes: u64,
+        mtime_unix_secs: Option<u64>,
+        source: ValidatedSource,
+    ) -> Self {
+        Self {
+            id,
+            target_id,
+            target_root: canon.clone(),
+            path: canon,
+            size_bytes,
+            mtime_unix_secs,
+            source,
+            risk: Some(Risk::Caution),
+        }
+    }
+
     /// Construct a validated custom-path root item (contents-only clean of the root directory).
     ///
     /// The path is validated with `policy::validate_custom_path` and stored as both `target_root`
@@ -218,16 +253,14 @@ impl ValidatedItem {
         let canon = CanonicalPath::parse_lexical(&path)
             .map_err(|e| format!("invalid custom path: {e}"))?
             .to_string();
-        Ok(Self {
+        Ok(Self::new_root_item(
             id,
-            target_id: "custom-path".to_string(),
-            target_root: canon.clone(),
-            path: canon,
+            "custom-path".to_string(),
+            canon,
             size_bytes,
-            mtime_unix_secs: None,
-            source: ValidatedSource::CustomPath,
-            risk: Some(Risk::Caution),
-        })
+            None,
+            ValidatedSource::CustomPath,
+        ))
     }
 
     /// Construct a validated Tier 3 recycle-bin root item (contents-only; root kept).
@@ -240,23 +273,15 @@ impl ValidatedItem {
     ) -> Result<Self, String> {
         let id = id.into();
         let path = path.into();
-        let verdict = policy::validate_tier3_target_root(&path);
-        if !verdict.allowed {
-            return Err(format!("recycle bin path not allowed: {}", verdict.reason));
-        }
-        let canon = CanonicalPath::parse_lexical(&path)
-            .map_err(|e| format!("invalid recycle bin path: {e}"))?
-            .to_string();
-        Ok(Self {
+        let canon = Self::validated_tier3_root(&path, "recycle bin path")?;
+        Ok(Self::new_root_item(
             id,
-            target_id: "recycle-bin".to_string(),
-            target_root: canon.clone(),
-            path: canon,
+            "recycle-bin".to_string(),
+            canon,
             size_bytes,
-            mtime_unix_secs: None,
-            source: ValidatedSource::Tier3RecycleBin,
-            risk: Some(Risk::Caution),
-        })
+            None,
+            ValidatedSource::Tier3RecycleBin,
+        ))
     }
 
     /// Construct a validated Tier 3 stale project directory item.
@@ -273,28 +298,18 @@ impl ValidatedItem {
         let id = id.into();
         let logical_target_id = logical_target_id.into();
         let path = path.into();
-        let verdict = policy::validate_tier3_target_root(&path);
-        if !verdict.allowed {
-            return Err(format!(
-                "stale project directory not allowed: {}",
-                verdict.reason
-            ));
-        }
-        let canon = CanonicalPath::parse_lexical(&path)
-            .map_err(|e| format!("invalid stale project directory: {e}"))?
-            .to_string();
-        Ok(Self {
-            id,
+        let canon = Self::validated_tier3_root(&path, "stale project directory")?;
+        let source = ValidatedSource::Tier3ProjectDirectory {
             target_id: logical_target_id.clone(),
-            target_root: canon.clone(),
-            path: canon,
+        };
+        Ok(Self::new_root_item(
+            id,
+            logical_target_id,
+            canon,
             size_bytes,
             mtime_unix_secs,
-            source: ValidatedSource::Tier3ProjectDirectory {
-                target_id: logical_target_id,
-            },
-            risk: Some(Risk::Caution),
-        })
+            source,
+        ))
     }
 
     /// Construct a validated whole-cache root item (issue #41).
@@ -313,25 +328,13 @@ impl ValidatedItem {
         let id = id.into();
         let target_id = target_id.into();
         let path = path.into();
-        let verdict = policy::validate_tier3_target_root(&path);
-        if !verdict.allowed {
-            return Err(format!("whole-cache root not allowed: {}", verdict.reason));
-        }
-        let canon = CanonicalPath::parse_lexical(&path)
-            .map_err(|e| format!("invalid whole-cache root: {e}"))?
-            .to_string();
-        Ok(Self {
-            id,
-            target_root: canon.clone(),
-            path: canon,
-            size_bytes,
-            mtime_unix_secs: None,
-            source: ValidatedSource::WholeCache {
-                target_id: target_id.clone(),
-            },
-            target_id,
-            risk: Some(Risk::Caution),
-        })
+        let canon = Self::validated_tier3_root(&path, "whole-cache root")?;
+        let source = ValidatedSource::WholeCache {
+            target_id: target_id.clone(),
+        };
+        Ok(Self::new_root_item(
+            id, target_id, canon, size_bytes, None, source,
+        ))
     }
 }
 
@@ -1409,6 +1412,26 @@ fn delete_path_entry_inner(
     }
 }
 
+/// Whether Minimum Age must be enforced for this opened handle.
+///
+/// Issue #41 whole-cache sources never filter by age (the cache is cleaned as
+/// one unit). Otherwise the only exemption is a directory we actually emptied
+/// during this run, provided it is still a real directory on the opened handle
+/// (TOCTOU replaced-by-file/reparse entries still get the full age check).
+fn age_check_applies(
+    item: &ValidatedItem,
+    inspection: &sweeper_winfs::HandleInspection,
+    ignore_emptied_dir_age: bool,
+) -> bool {
+    if matches!(item.source, ValidatedSource::WholeCache { .. }) {
+        return false;
+    }
+    ignore_emptied_dir_age
+        && inspection_is_directory(inspection)
+        && inspection.reparse_tag == 0
+        && matches!(inspection.reparse, ReparseTagClass::NotReparse)
+}
+
 fn revalidate_handle(
     item: &ValidatedItem,
     _requested_path: &str,
@@ -1479,15 +1502,9 @@ fn revalidate_handle(
     }
 
     // 5) Minimum Age check (exact boundary and future mtime treated as recent / Skipped).
-    // NTFS bumps directory LastWriteTime when we delete children inside it during contents clean;
-    // allow skipping age checks only for directories we actually emptied in this run. TOCTOU:
-    // if replaced by file/reparse, age checks must still run.
-    let skip_age_check = matches!(item.source, ValidatedSource::WholeCache { .. })
-        || (ignore_emptied_dir_age
-            && inspection_is_directory(inspection)
-            && inspection.reparse_tag == 0
-            && matches!(inspection.reparse, ReparseTagClass::NotReparse));
-    if !skip_age_check {
+    // Whole-cache sources are exempt; otherwise only directories emptied this
+    // run are exempt, and the opened handle must still be a real directory.
+    if age_check_applies(item, inspection, ignore_emptied_dir_age) {
         let mtime_secs = filetime_to_unix_secs(inspection.last_write_time);
         let mtime = UNIX_EPOCH + Duration::from_secs(mtime_secs);
         if mtime > opts.now {

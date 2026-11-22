@@ -148,13 +148,28 @@ fn terr(id: &str, msg: impl Into<String>) -> LintError {
 }
 
 fn validate_target(t: &LintTarget) -> Result<(), LintError> {
+    validate_target_identity(t)?;
+    validate_tier_risk_and_scope(t)?;
+    validate_known_folder(&t.id, &t.known_folder)?;
+    let segments = validate_relative_subpath(&t.id, &t.relative_subpath)?;
+    let audited_elevated = is_audited_elevation_target(&t.known_folder, &segments);
+    validate_elevation_policy(t, audited_elevated)?;
+    validate_target_protected_paths(&t.id, &t.known_folder, &segments, audited_elevated)?;
+    validate_browser_profile_leaf_rule(&t.id, &segments)?;
+    Ok(())
+}
+
+fn validate_target_identity(t: &LintTarget) -> Result<(), LintError> {
     if t.id.trim().is_empty() {
         return Err(terr("<empty>", "id must not be empty"));
     }
     if t.name.trim().is_empty() {
         return Err(terr(&t.id, "name must not be empty"));
     }
-    // Tier/risk/scope basic sanity (embedded allowlist is controlled, but linter must be strict)
+    Ok(())
+}
+
+fn validate_tier_risk_and_scope(t: &LintTarget) -> Result<(), LintError> {
     match t.tier.as_str() {
         "Tier1" | "Tier2" | "Tier3" => {}
         _ => return Err(terr(&t.id, "tier must be Tier1, Tier2, or Tier3")),
@@ -168,50 +183,52 @@ fn validate_target(t: &LintTarget) -> Result<(), LintError> {
             ))
         }
     }
+    validate_scope_and_age(t)
+}
+
+/// Validate the scope and its age semantics. Whole-cache targets are removed
+/// as one unit; per-file age-based deletion of package contents is prohibited
+/// (issue #41), so no minimum age may be configured for them.
+fn validate_scope_and_age(t: &LintTarget) -> Result<(), LintError> {
     match t.scope.as_str() {
         "contents" | "whole_cache" => {}
         other => return Err(terr(&t.id, format!("invalid scope `{other}`"))),
     }
-    // Whole-cache targets are removed as one unit; per-file age-based deletion
-    // is prohibited (issue #41). No minimum age may apply to them.
-    if t.scope == "whole_cache" && t.min_age_hours != 0 {
+    if is_whole_cache_with_age_filter(t) {
         return Err(terr(
             &t.id,
             "whole_cache scope forbids per-file age-based deletion (min_age_hours must be 0)",
         ));
     }
-    validate_known_folder(&t.id, &t.known_folder)?;
-    let segments = validate_relative_subpath(&t.id, &t.relative_subpath)?;
-    let audited_elevated = is_audited_elevation_target(&t.known_folder, &segments);
-    validate_elevation_policy(t, audited_elevated)?;
+    Ok(())
+}
 
-    // Reject direct targeting of Protected Container Roots
-    if is_protected_container_root_target(&t.known_folder, &segments) {
+/// Predicate for the forbidden whole-cache + age-filter combination.
+fn is_whole_cache_with_age_filter(t: &LintTarget) -> bool {
+    t.scope == "whole_cache" && t.min_age_hours != 0
+}
+
+/// All Protected Path / container-root checks for one target, kept together so
+/// the top-level validator stays a short sequence of validation steps.
+fn validate_target_protected_paths(
+    id: &str,
+    known_folder: &str,
+    segments: &[String],
+    audited_elevated: bool,
+) -> Result<(), LintError> {
+    if is_protected_container_root_target(known_folder, segments) {
         return Err(terr(
-            &t.id,
+            id,
             "target directly targets a Protected Container Root",
         ));
     }
-
-    // Reject overlap with any Subtree-Protected Path (ancestor, exact, or descendant)
-    if overlaps_subtree_protected(&t.known_folder, &segments) {
+    if overlaps_subtree_protected(known_folder, segments) {
         return Err(terr(
-            &t.id,
+            id,
             "target overlaps a Subtree-Protected Path (ancestor, exact, or descendant)",
         ));
     }
-
-    validate_not_protected_container_descendant(
-        &t.id,
-        &t.known_folder,
-        &segments,
-        audited_elevated,
-    )?;
-
-    // Browser profile roots must not be targeted directly without a leaf cache subfolder
-    validate_browser_profile_leaf_rule(&t.id, &segments)?;
-
-    Ok(())
+    validate_not_protected_container_descendant(id, known_folder, segments, audited_elevated)
 }
 
 fn validate_elevation_policy(t: &LintTarget, audited_elevated: bool) -> Result<(), LintError> {

@@ -111,7 +111,7 @@ description = "bad"
 }
 
 #[test]
-fn whole_cache_targets_do_not_overlap_each_other_or_protected_paths() {
+fn whole_cache_targets_have_distinct_leaf_scoped_roots() {
     let targets = embedded_targets();
     let a = targets.iter().find(|t| t.id == "uv-cache").unwrap();
     let b = targets
