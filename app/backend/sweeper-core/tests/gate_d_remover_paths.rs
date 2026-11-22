@@ -165,6 +165,10 @@ fn gate_d_case_distinct_sibling_swap_is_aborted_and_canary_survives() {
         report.bytes_freed, 0,
         "no unselected bytes freed: {report:?}"
     );
+    assert!(
+        report.items.iter().all(|row| row.bytes_deleted == 0),
+        "no outcome may record a deletion: {report:?}"
+    );
     assert!(canary.exists(), "case-distinct sibling canary must survive");
     assert_sentinel_intact(&sb);
 }
