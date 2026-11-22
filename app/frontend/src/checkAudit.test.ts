@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 // Vitest runs with the frontend package as its cwd. `import.meta.url` is a
 // Vite dev-server URL here, so resolve the script from the project root.
 const SCRIPT_PATH = resolve(process.cwd(), 'scripts', 'check-audit.mjs');
-const EXCEPTED_ID = 'GHSA-FC5Q-39XC-VJPF';
 
 interface GateResult {
   status: number | null;
@@ -30,18 +29,22 @@ function runGate(report: unknown, options: { piped?: boolean } = {}): GateResult
   };
 }
 
-function exceptedPicomatchCause() {
+function highCause(id: string, name = 'picomatch') {
   return {
     source: 123,
-    name: 'picomatch',
-    title: 'picomatch ReDoS',
-    url: `https://github.com/advisories/${EXCEPTED_ID}`,
+    name,
+    title: `${name} ReDoS`,
+    url: `https://github.com/advisories/${id}`,
     severity: 'high',
   };
 }
 
 function highVuln(via: Array<unknown>) {
   return { severity: 'high', via, fixAvailable: false };
+}
+
+function lowVuln(via: Array<unknown>) {
+  return { severity: 'low', via, fixAvailable: false };
 }
 
 function expectBlocked(report: unknown, reason?: string): void {
@@ -55,32 +58,41 @@ function expectPassed(report: unknown): void {
 }
 
 describe('check-audit.mjs gate (synthetic reports)', () => {
-  // Table-driven exception-regression cases: each row keeps its descriptive
-  // title, exact synthetic report, and the original assertion verbatim.
+  // Table-driven cases: every high/critical advisory blocks the gate, while
+  // lower-severity findings are reported without failing it.
   it.each([
     {
-      name: 'blocks an unrelated high advisory alongside the exception',
+      name: 'blocks a single high advisory',
+      report: { vulnerabilities: { picomatch: highVuln([highCause('GHSA-aaaa-bbbb-cccc')]) } },
+      assert: (report: unknown) => expectBlocked(report),
+    },
+    {
+      name: 'blocks a high advisory alongside an unrelated high advisory',
       report: {
         vulnerabilities: {
           picomatch: highVuln([
-            exceptedPicomatchCause(),
-            {
-              source: 456,
-              name: 'picomatch',
-              title: 'Unrelated high advisory',
-              url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
-              severity: 'high',
-            },
+            highCause('GHSA-aaaa-bbbb-cccc'),
+            highCause('GHSA-bbbb-cccc-dddd', 'tinyglobby'),
           ]),
         },
       },
       assert: (report: unknown) => expectBlocked(report),
     },
     {
-      name: 'fails closed when an excepted cause is combined with a cycle',
+      name: 'blocks a high advisory inherited through a parent package',
       report: {
         vulnerabilities: {
-          picomatch: highVuln([exceptedPicomatchCause()]),
+          picomatch: highVuln([highCause('GHSA-aaaa-bbbb-cccc')]),
+          tinyglobby: highVuln(['picomatch']),
+        },
+      },
+      assert: (report: unknown) => expectBlocked(report),
+    },
+    {
+      name: 'fails closed when a high advisory is combined with a cycle',
+      report: {
+        vulnerabilities: {
+          picomatch: highVuln([highCause('GHSA-aaaa-bbbb-cccc')]),
           tinyglobby: highVuln(['tinyglobby']),
           parentpkg: highVuln(['picomatch', 'tinyglobby']),
         },
@@ -89,10 +101,10 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
         expectBlocked(report, 'Unresolved audit reference: tinyglobby (cycle)'),
     },
     {
-      name: 'fails closed when an excepted cause is combined with a missing reference',
+      name: 'fails closed when a high advisory is combined with a missing reference',
       report: {
         vulnerabilities: {
-          picomatch: highVuln([exceptedPicomatchCause()]),
+          picomatch: highVuln([highCause('GHSA-aaaa-bbbb-cccc')]),
           parentpkg: highVuln(['picomatch', 'does-not-exist']),
         },
       },
@@ -100,48 +112,13 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
         expectBlocked(report, 'Unresolved audit reference: does-not-exist (missing)'),
     },
     {
-      name: 'passes an unrelated low advisory alongside the exception',
-      report: {
-        vulnerabilities: {
-          picomatch: highVuln([
-            exceptedPicomatchCause(),
-            {
-              source: 456,
-              name: 'other',
-              title: 'Unrelated low advisory',
-              url: 'https://github.com/advisories/GHSA-dddd-eeee-ffff',
-              severity: 'low',
-            },
-          ]),
-        },
-      },
-      assert: (report: unknown) => expectPassed(report),
-    },
-    {
-      name: 'blocks a high advisory whose title names the exception but whose url does not (v2)',
-      report: {
-        vulnerabilities: {
-          other: highVuln([
-            {
-              source: 789,
-              name: 'other',
-              title: `ReDoS via ${EXCEPTED_ID}`,
-              url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
-              severity: 'high',
-            },
-          ]),
-        },
-      },
-      assert: (report: unknown) => expectBlocked(report),
-    },
-    {
-      name: 'blocks a high advisory whose title names the exception but whose id does not (v1)',
+      name: 'blocks a high advisory in the v1 advisories shape',
       report: {
         advisories: {
           'GHSA-aaaa-bbbb-cccc': {
             github_advisory_id: 'GHSA-aaaa-bbbb-cccc',
             npm_advisory_id: 'GHSA-aaaa-bbbb-cccc',
-            title: `ReDoS via ${EXCEPTED_ID}`,
+            title: 'ReDoS',
             severity: 'high',
             module_name: 'other',
           },
@@ -149,24 +126,50 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
       },
       assert: (report: unknown) => expectBlocked(report),
     },
-    {
-      name: 'passes the excepted advisory identified by its own url',
-      report: {
-        vulnerabilities: {
-          picomatch: highVuln([exceptedPicomatchCause()]),
-        },
-      },
-      assert: (report: unknown) => expectPassed(report),
-    },
   ])('$name', ({ report, assert: assertAudit }) => {
     assertAudit(report);
   });
 
-  it('passes a plain inherited picomatch exception with no cycle', () => {
+  // Regression guard: re-adding the withdrawn advisory to IGNORED_ADVISORY_IDS
+  // must fail this test. Exit code 1 is required; 2 would mean a processing
+  // error rather than a correctly classified blocking advisory.
+  it('blocks the withdrawn picomatch advisory ID', () => {
+    const result = runGate({
+      vulnerabilities: { picomatch: highVuln([highCause('GHSA-FC5Q-39XC-VJPF')]) },
+    });
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('BLOCKING high/critical advisories:');
+    expect(result.output).toContain('GHSA-FC5Q-39XC-VJPF');
+    expect(result.output).toContain('FAIL: high/critical advisory gate failed.');
+    expect(result.output).not.toContain('IGNORED');
+  });
+
+  it('passes an unrelated low advisory', () => {
     expectPassed({
       vulnerabilities: {
-        picomatch: highVuln([exceptedPicomatchCause()]),
-        tinyglobby: highVuln(['picomatch']),
+        other: lowVuln([
+          {
+            source: 456,
+            name: 'other',
+            title: 'Unrelated low advisory',
+            url: 'https://github.com/advisories/GHSA-dddd-eeee-ffff',
+            severity: 'low',
+          },
+        ]),
+      },
+    });
+  });
+
+  it('passes a low advisory in the v1 advisories shape', () => {
+    expectPassed({
+      advisories: {
+        'GHSA-dddd-eeee-ffff': {
+          github_advisory_id: 'GHSA-dddd-eeee-ffff',
+          npm_advisory_id: 'GHSA-dddd-eeee-ffff',
+          title: 'Low finding',
+          severity: 'low',
+          module_name: 'other',
+        },
       },
     });
   });
@@ -175,10 +178,20 @@ describe('check-audit.mjs gate (synthetic reports)', () => {
     expectPassed({ advisories: {} });
   });
 
+  it('passes a valid empty vulnerabilities object', () => {
+    expectPassed({ vulnerabilities: {} });
+  });
+
   it('rejects an array-shaped advisories container', () => {
     const result = runGate({ advisories: [] });
     expect(result.status).toBeGreaterThan(0);
     expect(result.output).toContain('Unsupported audit report shape');
+  });
+
+  it('rejects a registry error report', () => {
+    const result = runGate({ error: { message: 'registry unavailable' } });
+    expect(result.status).toBeGreaterThan(0);
+    expect(result.output).toContain('Audit reported an error');
   });
 
   // Piped falsy JSON must be forwarded to validateReport and rejected, not

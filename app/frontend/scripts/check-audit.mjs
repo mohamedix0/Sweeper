@@ -1,20 +1,13 @@
 #!/usr/bin/env node
 /**
- * Frontend dependency-audit gate with one tightly scoped, documented exception.
+ * Frontend dependency-audit gate.
  *
  * Runs `pnpm audit --json` in app/frontend (or consumes a JSON report from
- * stdin) and fails when ANY high or critical advisory is present, EXCEPT the
- * single known advisory listed in IGNORED_ADVISORY_IDS. Lower-severity
- * advisories are reported but never fail the gate.
+ * stdin) and fails when ANY high or critical advisory is present.
+ * Lower-severity advisories are reported but never fail the gate.
  *
- * TEMPORARY EXCEPTION - GHSA-fc5q-39xc-vjpf (CVE-2026-112366)
- *   picomatch <= 4.0.7 ReDoS. The GitHub Advisory Database reports NO patched
- *   version (latest published picomatch is 4.0.7; advisory updated 2026-11-17).
- *   It is reachable only through devDependencies
- *   (@typescript-eslint -> tinyglobby -> picomatch) and never ships in the
- *   runtime bundle.
- *   REMOVE this id from IGNORED_ADVISORY_IDS as soon as picomatch publishes a
- *   patched version. Tracked in the GitHub issue referenced by ci.yml.
+ * IGNORED_ADVISORY_IDS is intentionally empty: no advisory is exempted, so
+ * every high/critical advisory fails the gate.
  *
  * The implementation is deliberately split into small single-purpose helpers:
  * parsing, normalization, classification, and printing stay separate so each
@@ -25,7 +18,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 
-const IGNORED_ADVISORY_IDS = new Set(['GHSA-FC5Q-39XC-VJPF']);
+// No advisories are exempted: every high/critical advisory fails the gate.
+const IGNORED_ADVISORY_IDS = new Set();
 const BLOCKING_SEVERITIES = new Set(['high', 'critical']);
 const FRONTEND_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ADVISORY_URL_PREFIX = 'https://github.com/advisories/';
@@ -125,7 +119,7 @@ function unique(values) {
 }
 
 // Identity comes only from identifier/URL fields. `entry.title` is deliberately
-// excluded: a high advisory whose title merely mentions the excepted GHSA must
+// excluded: a high advisory whose title merely mentions an exempted GHSA must
 // not be mistaken for that advisory and exempted.
 function collectViaIds(entry) {
   return unique([entry.url, entry.source, entry.id].map(normalizeGhsaId).filter(Boolean));
@@ -175,7 +169,7 @@ function childPath(path, pkg) {
  * object entry is one cause with its own ids and severity. A string entry is a
  * reference to another vulnerability entry and is followed through
  * `vulnerabilities`. Missing references and cycles produce a blocking cause
- * with no exemptable ids, so they can never be masked by an excepted cause.
+ * with no exemptable ids, so they can never be masked by an exempted cause.
  * `path` is the current chain, copied per branch so shared but non-cyclic
  * references are not mistaken for cycles.
  */
@@ -374,10 +368,10 @@ function countBySeverity(advisories) {
 }
 
 /**
- * The exception applies to individual advisory causes, never to a whole
+ * An exemption applies to individual advisory causes, never to a whole
  * package. Each v2 `via` cause is normalized into its own advisory, so a
- * package carrying both an excepted advisory and an unrelated one still
- * produces a separate blocking advisory for the unrelated cause.
+ * package carrying an exempted and an unrelated cause is still classified
+ * independently.
  */
 function isIgnoredAdvisory(advisory) {
   return advisory.allIds.some((id) => IGNORED_ADVISORY_IDS.has(id.toUpperCase()));
@@ -430,17 +424,9 @@ function printInformational(advisories) {
 
 function printIgnoredOne(advisory) {
   console.log('');
-  console.log(
-    `[IGNORED - TEMPORARY EXCEPTION] ${advisory.id} - ${advisory.moduleName} ` +
-      `(severity: ${advisory.severity})`,
-  );
+  console.log(`[IGNORED] ${advisory.id} - ${advisory.moduleName} (severity: ${advisory.severity})`);
   console.log(`    Title: ${advisory.title}`);
   console.log(`    Patched versions: ${advisory.patchedVersions || 'NONE'}`);
-  console.log('    Why ignored: NO patched version is available (advisory updated 2026-11-17).');
-  console.log('                 It is reachable only via devDependencies');
-  console.log('                 (@typescript-eslint -> tinyglobby -> picomatch) and never');
-  console.log('                 ships in the runtime bundle.');
-  console.log('    ACTION REQUIRED: remove this exception once a patched version is released.');
   printUrl(advisory.url, '    ');
 }
 
@@ -458,18 +444,15 @@ function printBlockingOne(advisory) {
 
 function printBlocking(blocking) {
   console.log('');
-  console.log('BLOCKING high/critical advisories (not on the exception list):');
+  console.log('BLOCKING high/critical advisories:');
   for (const advisory of blocking) printBlockingOne(advisory);
   console.log('');
   console.log('FAIL: high/critical advisory gate failed.');
 }
 
 function printPass() {
-  const ignoredLabel = [...IGNORED_ADVISORY_IDS].join(', ');
   console.log('');
-  console.log(
-    `PASS: no high/critical advisories other than the documented exception (${ignoredLabel}).`,
-  );
+  console.log('PASS: no high/critical advisories reported.');
 }
 
 function reportResult(blocking) {
