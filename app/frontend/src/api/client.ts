@@ -98,6 +98,9 @@ export type Settings = {
   allowDeleteUnknown: boolean;
   customPaths: string[];
   staleProjectDays: number;
+  // Non-fatal sanitization diagnostics from the store's load/parse (#146).
+  // Optional so older persisted payloads and mock clients stay compatible.
+  warnings?: string[];
 };
 
 export interface SweeperClient {
