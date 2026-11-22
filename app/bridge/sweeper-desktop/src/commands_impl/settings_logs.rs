@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use sweeper_contract::{
     ContractError, LogMetadataDto, LogReadResponse, SettingsDto, U64String,
@@ -419,15 +420,22 @@ fn annotate_unreconciled_clean_log(content: String) -> String {
     out
 }
 
+/// Serializes process-local index updates. Two Clean completions that race
+/// would otherwise load the same snapshot and lose one another's entry.
+static SUMMARY_INDEX_LOCK: Mutex<()> = Mutex::new(());
+
 /// Compute a clean log's compact summary once, at write time, and persist it to
 /// the index. Listing then reads only this small metadata instead of parsing
 /// every JSONL record of every log (issue #98).
 pub(crate) fn record_clean_log_summary(log_dir: &Path, log_id: &str) {
     let log_path = log_dir.join(format!("{log_id}.jsonl"));
+    // Capture the length BEFORE inspecting counts. If a later append races with
+    // inspection, the stored length lags the file and the listing falls back to
+    // content inspection instead of trusting pre-append counts.
+    let recorded_len = fs::metadata(&log_path).map_or(0, |meta| meta.len());
     let Some(state) = inspect_clean_log(&log_path) else {
         return;
     };
-    let recorded_len = fs::metadata(&log_path).map_or(0, |meta| meta.len());
     let summary = LogSummary::from_counts(
         state.intent_count,
         state.outcome_count,
@@ -436,6 +444,14 @@ pub(crate) fn record_clean_log_summary(log_dir: &Path, log_id: &str) {
         state.intent_without_outcome(),
     )
     .with_recorded_len(recorded_len);
+    persist_clean_log_summary(log_dir, log_id, summary);
+}
+
+/// Atomically apply one summary to the index under the process-local lock.
+fn persist_clean_log_summary(log_dir: &Path, log_id: &str, summary: LogSummary) {
+    let _guard = SUMMARY_INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut index = LogSummaryIndex::load(log_dir);
     index.insert(log_id.to_string(), summary);
     index.remove_stale(&live_log_ids(log_dir));
@@ -1282,6 +1298,79 @@ mod tests {
             listed.iter().any(|entry| entry.id == log_id),
             "stale summary must not hide a real log: {listed:?}"
         );
+    }
+
+    /// A log appended after the summary captured its length must not be hidden
+    /// by the now-stale summary; the listing falls back to content inspection.
+    #[test]
+    fn append_after_length_capture_invalidates_summary() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = outer.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).expect("sandbox dir");
+        std::fs::write(sandbox.join(".sweeper_sandbox_sentinel"), "").expect("sentinel");
+        let logs = outer.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        let log_id = "clean-1700000000-10-10";
+        let path = logs.join(format!("{log_id}.jsonl"));
+        let escaped = sandbox
+            .join("a.tmp")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let mut content = format!(
+            "{{\"record\":\"intent\",\"target_id\":\"t\",\"path\":\"{escaped}\"}}\n\
+             {{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"{escaped}\",\"bytes\":1,\"status\":\"deleted\"}}\n"
+        );
+        std::fs::write(&path, &content).expect("write log");
+
+        record_clean_log_summary(&logs, log_id);
+
+        // Append a non-sandbox outcome after the length was captured.
+        content.push_str(
+            "{\"record\":\"outcome\",\"target_id\":\"other\",\"path\":\"C:\\\\Temp\\\\real.tmp\",\"bytes\":1,\"status\":\"deleted\"}\n",
+        );
+        std::fs::write(&path, &content).expect("append log");
+
+        let index = LogSummaryIndex::load(&logs);
+        let summary = index.get(log_id).expect("summary");
+        assert!(
+            !summary.matches_len(std::fs::metadata(&path).expect("metadata").len()),
+            "appended log must invalidate the captured length"
+        );
+
+        let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
+        assert!(
+            listed.iter().any(|entry| entry.id == log_id),
+            "stale summary must fall back to inspection and reveal the log: {listed:?}"
+        );
+    }
+
+    /// Two concurrent completions must not lose one another's index entry.
+    #[test]
+    fn concurrent_summary_records_all_survive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        let ids = ["clean-1700000000-11-11", "clean-1700000000-12-12"];
+        for id in ids {
+            let content = "{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"C:\\\\Temp\\\\f.tmp\",\"bytes\":1,\"status\":\"deleted\"}\n";
+            std::fs::write(logs.join(format!("{id}.jsonl")), content).expect("write log");
+        }
+
+        let logs_ref = &logs;
+        std::thread::scope(|scope| {
+            for id in ids {
+                scope.spawn(move || record_clean_log_summary(logs_ref, id));
+            }
+        });
+
+        let index = LogSummaryIndex::load(&logs);
+        for id in ids {
+            assert!(
+                index.get(id).is_some(),
+                "summary for {id} was lost: {index:?}"
+            );
+        }
     }
 
     #[test]

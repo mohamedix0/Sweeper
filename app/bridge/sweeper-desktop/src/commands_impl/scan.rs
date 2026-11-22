@@ -568,6 +568,11 @@ mod tests {
         report.targets[0].eligible_bytes = u64::MAX;
         report.targets[0].eligible_count = u64::MAX;
         report.targets[0].skipped_count = u64::MAX;
+        // A second non-zero target makes a reverted plain `.sum()` overflow
+        // (and fail) instead of silently producing the same u64::MAX total.
+        report.targets[1].eligible_bytes = 1;
+        report.targets[1].eligible_count = 1;
+        report.targets[1].skipped_count = 1;
 
         let record =
             build_scan_activity_log_record(&settings, &report).expect("non-sandbox scan logs");
