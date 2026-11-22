@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use sweeper_contract::{
     ValidateCustomPathResponse,
 };
 
+use sweeper_core::journal::{is_summary_index_file_name, LogSummary, LogSummaryIndex};
 use sweeper_core::paths::{get_final_path_from_raw_handle, CanonicalPath};
 
 /// Upper bound on bytes returned by a single `read_log` IPC call (8 MiB).
@@ -121,6 +122,12 @@ struct CleanLogScanState {
     saw_outcome: bool,
     saw_path: bool,
     all_sandbox: bool,
+    /// Intent record count (saturating).
+    intent_count: usize,
+    /// Outcome record count (saturating).
+    outcome_count: usize,
+    /// Bytes recorded by outcome records (saturating).
+    total_bytes: u64,
     /// (target_id, path) pairs for intent records.
     intents: Vec<(String, String)>,
     /// Outcome counts by (target_id, path). A count (rather than a set) lets
@@ -188,9 +195,16 @@ fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Va
     match kind {
         Some("outcome") => {
             state.saw_outcome = true;
-            *state.outcomes.entry((target_id, path)).or_insert(0) += 1;
+            state.outcome_count = state.outcome_count.saturating_add(1);
+            let bytes = value.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            state.total_bytes = state.total_bytes.saturating_add(bytes);
+            let count = state.outcomes.entry((target_id, path)).or_insert(0);
+            *count = count.saturating_add(1);
         }
-        Some("intent") => state.intents.push((target_id, path)),
+        Some("intent") => {
+            state.intent_count = state.intent_count.saturating_add(1);
+            state.intents.push((target_id, path));
+        }
         _ => {}
     }
 
@@ -256,6 +270,14 @@ fn complete_records_bytes(bytes: Vec<u8>) -> Vec<u8> {
     bytes[..end].to_vec()
 }
 
+/// True for the internal summary-index files, which are metadata rather than
+/// activity logs and must never appear in the listing.
+fn is_summary_index_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_summary_index_file_name)
+}
+
 fn is_clean_log_file_name(path: &Path) -> bool {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -272,7 +294,15 @@ fn inspect_clean_log(path: &Path) -> Option<CleanLogScanState> {
     Some(accumulate_clean_log_state(&content))
 }
 
-fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool) -> bool {
+/// Decide whether a log belongs in the listing using only filesystem metadata
+/// and the compact summary index — never by parsing the log's full records.
+fn should_include_log_file(
+    path: &Path,
+    size: u64,
+    log_id: &str,
+    filter_sandbox_phantoms: bool,
+    index: Option<&LogSummaryIndex>,
+) -> bool {
     if size == 0 {
         return false;
     }
@@ -280,9 +310,10 @@ fn should_include_log_file(path: &Path, size: u64, filter_sandbox_phantoms: bool
         // An intent-without-outcome log is reconciled and surfaced rather than
         // hidden: a post-delete journal failure may have left it outcome-less
         // even though the deletion succeeded. Sandbox-only test logs remain
-        // filtered from the real user's list.
-        if let Some(state) = inspect_clean_log(path) {
-            if state.sandbox_only() && state.intent_without_outcome() == 0 {
+        // filtered from the real user's list. Both facts come from the summary
+        // written once at log-creation time, so no record parsing happens here.
+        if let Some(summary) = index.and_then(|i| i.get(log_id)) {
+            if summary.sandbox_only && summary.intent_without_outcome == 0 {
                 return false;
             }
         }
@@ -310,6 +341,61 @@ fn annotate_unreconciled_clean_log(content: String) -> String {
     out
 }
 
+/// Compute a clean log's compact summary once, at write time, and persist it to
+/// the index. Listing then reads only this small metadata instead of parsing
+/// every JSONL record of every log (issue #98).
+pub(crate) fn record_clean_log_summary(log_dir: &Path, log_id: &str) {
+    let log_path = log_dir.join(format!("{log_id}.jsonl"));
+    let Some(state) = inspect_clean_log(&log_path) else {
+        return;
+    };
+    let summary = LogSummary::from_counts(
+        state.intent_count,
+        state.outcome_count,
+        state.total_bytes,
+        state.sandbox_only(),
+        state.intent_without_outcome(),
+    );
+    let mut index = LogSummaryIndex::load(log_dir);
+    index.insert(log_id.to_string(), summary);
+    index.remove_stale(&live_log_ids(log_dir));
+    // Best effort: a failed summary write only means the log is listed without
+    // the sandbox-phantom filter; it never turns a successful Clean into a failure.
+    let _ = index.save(log_dir);
+}
+
+/// Ids of the activity log files currently present in `log_dir`.
+fn live_log_ids(log_dir: &Path) -> HashSet<String> {
+    let Ok(read_dir) = fs::read_dir(log_dir) else {
+        return HashSet::new();
+    };
+    read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                return None;
+            }
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Derive the optional modified-time/size strings from filesystem metadata.
+fn log_metadata(meta: &Option<fs::Metadata>) -> (Option<U64String>, Option<U64String>) {
+    let Some(meta) = meta else {
+        return (None, None);
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| U64String(d.as_secs()));
+    (modified, Some(U64String(meta.len())))
+}
+
 fn list_logs_in_dir_impl(
     dir: Option<&Path>,
     filter_sandbox_phantoms: bool,
@@ -324,10 +410,11 @@ fn list_logs_in_dir_impl(
         Ok(r) => r,
         Err(_) => return Ok(vec![]),
     };
+    let summary_index = filter_sandbox_phantoms.then(|| LogSummaryIndex::load(dir));
     let mut out = Vec::new();
     for entry in rd.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        if !path.is_file() || is_summary_index_file(&path) {
             continue;
         }
         let id = path
@@ -343,22 +430,17 @@ fn list_logs_in_dir_impl(
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        let meta = entry.metadata().ok();
-        let size_u64 = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        if !should_include_log_file(&path, size_u64, filter_sandbox_phantoms) {
+        let (modified, size) = log_metadata(&entry.metadata().ok());
+        let size_u64 = size.as_ref().map(|v| v.0).unwrap_or(0);
+        if !should_include_log_file(
+            &path,
+            size_u64,
+            &id,
+            filter_sandbox_phantoms,
+            summary_index.as_ref(),
+        ) {
             continue;
         }
-        let (modified, size) = meta
-            .map(|m| {
-                let modified = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| U64String(d.as_secs()));
-                let size = Some(U64String(m.len()));
-                (modified, size)
-            })
-            .unwrap_or((None, None));
         out.push(LogMetadataDto {
             id,
             name,
@@ -847,10 +929,11 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
 mod tests {
     use super::{
         inspect_clean_log, list_logs_in_dir_impl, read_bounded_log_content, read_log_in_dir,
-        MAX_LOG_READ_BYTES,
+        record_clean_log_summary, MAX_LOG_READ_BYTES,
     };
     use std::io::Read;
     use sweeper_contract::ContractError;
+    use sweeper_core::journal::{LogSummary, LogSummaryIndex};
     use sweeper_testkit::{create_file_symlink, Sandbox};
 
     /// True when a filesystem error means the sandbox lacks the privilege to
@@ -952,6 +1035,120 @@ mod tests {
         assert!(
             listed.iter().any(|entry| entry.name == "clean-huge.jsonl"),
             "an uninspectable log stays listed: {listed:?}"
+        );
+    }
+
+    #[test]
+    fn recording_clean_log_summary_persists_counts_and_sandbox_flag() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = outer.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).expect("sandbox dir");
+        std::fs::write(sandbox.join(".sweeper_sandbox_sentinel"), "").expect("sentinel");
+        let logs = outer.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        let log_id = "clean-1700000000-9-9";
+        let escaped = sandbox
+            .join("a.tmp")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let content = format!(
+            "{{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"{escaped}\",\"size\":100}}\n\
+             {{\"record\":\"outcome\",\"target_id\":\"t1\",\"path\":\"{escaped}\",\"bytes\":100,\"status\":\"deleted\"}}\n"
+        );
+        std::fs::write(logs.join(format!("{log_id}.jsonl")), content).expect("write log");
+
+        record_clean_log_summary(&logs, log_id);
+
+        let index = LogSummaryIndex::load(&logs);
+        let summary = index.get(log_id).expect("summary must be persisted");
+        assert_eq!(summary.intent_count, 1);
+        assert_eq!(summary.outcome_count, 1);
+        assert_eq!(summary.total_bytes, 100);
+        assert!(summary.sandbox_only);
+        assert_eq!(summary.intent_without_outcome, 0);
+    }
+
+    /// A large log listing must be built from the summary index, not by parsing
+    /// every JSONL record. Each log below contains many NON-sandbox records, so
+    /// a listing that still parsed records would show all of them; the index
+    /// marks half as sandbox-only and the correct listing shows only the rest.
+    #[test]
+    fn many_log_listing_uses_summaries_and_completes_quickly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        const COUNT: usize = 120;
+        let mut index = LogSummaryIndex::default();
+        let mut expected_ids = Vec::new();
+        for i in 0..COUNT {
+            let id = format!("clean-1700000000-1-{i}");
+            let mut content = String::with_capacity(40_000);
+            for line in 0..400 {
+                content.push_str(&format!(
+                    "{{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"C:\\\\Temp\\\\f{line}.tmp\",\"bytes\":1,\"status\":\"deleted\"}}\n"
+                ));
+            }
+            std::fs::write(logs.join(format!("{id}.jsonl")), content).expect("write log");
+            let hidden = i % 2 == 0;
+            if !hidden {
+                expected_ids.push(id.clone());
+            }
+            index.insert(id, LogSummary::from_counts(1, 400, 400, hidden, 0));
+        }
+        index.save(&logs).expect("save index");
+
+        let start = std::time::Instant::now();
+        let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "many-log listing took {elapsed:?}"
+        );
+        assert_eq!(listed.len(), expected_ids.len(), "listed={listed:?}");
+        for entry in &listed {
+            assert!(
+                expected_ids.contains(&entry.id),
+                "unexpected entry: {}",
+                entry.id
+            );
+        }
+    }
+
+    /// A summarized listing never replaces the full log: hiding a log from the
+    /// list via its summary must not hide its content from `read_log`.
+    #[test]
+    fn read_log_returns_full_content_even_when_summary_hides_it_from_listing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        let log_id = "clean-1700000000-7-7";
+        let content: String = (0..50)
+            .map(|i| {
+                format!("{{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"C:\\\\Temp\\\\f{i}.tmp\",\"bytes\":{i},\"status\":\"deleted\"}}\n")
+            })
+            .collect();
+        std::fs::write(logs.join(format!("{log_id}.jsonl")), &content).expect("write log");
+
+        let mut index = LogSummaryIndex::default();
+        index.insert(
+            log_id.to_string(),
+            LogSummary::from_counts(0, 50, 1225, true, 0),
+        );
+        index.save(&logs).expect("save index");
+
+        let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
+        assert!(
+            listed.is_empty(),
+            "sandbox summary must hide the log from listing"
+        );
+
+        let read = read_log_in_dir(Some(&logs), log_id).expect("read log");
+        assert_eq!(
+            read.content, content,
+            "full content must remain available on read"
         );
     }
 

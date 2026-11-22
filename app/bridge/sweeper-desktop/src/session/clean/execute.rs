@@ -154,6 +154,11 @@ impl SessionStore {
             &mut on_progress,
         )?;
         let log_id = detect_new_log_id(&resolved_log_dir, &existing_logs);
+        if let Some(ref id) = log_id {
+            // Summarize once at write time so future log listings never have to
+            // parse the full journal (issue #98). Full content stays on read.
+            crate::commands_impl::record_clean_log_summary(&resolved_log_dir, id);
+        }
         Ok(Self::summarize_clean(report, log_id))
     }
 
@@ -231,7 +236,8 @@ impl SessionStore {
                 } else {
                     item.reason.clone()
                 };
-                *reasons.entry(key).or_insert(0) += 1;
+                let count = reasons.entry(key).or_insert(0);
+                *count = count.saturating_add(1);
             }
         }
         reasons

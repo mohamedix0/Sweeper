@@ -208,9 +208,13 @@ where
     // Materialise only a borrowed view of the targets — never owned item data.
     let borrowed = borrow_log_targets(report);
     observe(&borrowed);
-    let total_reclaimable_bytes: u64 = borrowed.iter().map(|t| t.eligible_bytes).sum();
-    let total_eligible_files: u64 = borrowed.iter().map(|t| t.eligible_count).sum();
-    let total_skipped_files: u64 = borrowed.iter().map(|t| t.skipped_count).sum();
+    // Serialized log aggregates must saturate rather than overflow/wrap.
+    let total_reclaimable_bytes =
+        sweeper_core::journal::saturating_sum_u64(borrowed.iter().map(|t| t.eligible_bytes));
+    let total_eligible_files =
+        sweeper_core::journal::saturating_sum_u64(borrowed.iter().map(|t| t.eligible_count));
+    let total_skipped_files =
+        sweeper_core::journal::saturating_sum_u64(borrowed.iter().map(|t| t.skipped_count));
     let categories: Vec<serde_json::Value> = borrowed
         .into_iter()
         .filter(|t| t.eligible_count > 0 || t.file_count > 0)
@@ -551,6 +555,25 @@ mod tests {
         // Even after the record is built, the original report is untouched and
         // fully usable: it was never moved or deep-cloned.
         assert_eq!(report.targets[0].items[0].id, "user-temp::a");
+    }
+
+    #[test]
+    fn scan_log_record_saturates_overflowing_totals() {
+        let sandbox = Sandbox::new();
+        let settings = SweeperSettings {
+            enable_tier1: true,
+            ..SweeperSettings::default()
+        };
+        let mut report = log_test_report(sandbox.root());
+        report.targets[0].eligible_bytes = u64::MAX;
+        report.targets[0].eligible_count = u64::MAX;
+        report.targets[0].skipped_count = u64::MAX;
+
+        let record =
+            build_scan_activity_log_record(&settings, &report).expect("non-sandbox scan logs");
+        assert_eq!(record["total_reclaimable_bytes"], u64::MAX.to_string());
+        assert_eq!(record["total_eligible_files"], u64::MAX.to_string());
+        assert_eq!(record["total_skipped_files"], u64::MAX.to_string());
     }
 
     #[test]
