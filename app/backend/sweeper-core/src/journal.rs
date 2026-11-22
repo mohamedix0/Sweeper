@@ -513,6 +513,9 @@ fn unix_now_secs() -> u64 {
 /// Sum byte counts or item counts with saturating arithmetic. Log aggregates
 /// are serialized as decimal strings; a wrap-around would silently emit a wrong
 /// value, so every such aggregate funnels through this helper (issue #98).
+/// Kept here (rather than a generic util module) because it is the shared
+/// serialization policy for journal and scan-log records; call sites only pass
+/// iterators and never depend on the storage details.
 pub fn saturating_sum_u64(values: impl IntoIterator<Item = u64>) -> u64 {
     values.into_iter().fold(0u64, u64::saturating_add)
 }
@@ -551,6 +554,15 @@ pub struct LogSummary {
     pub sandbox_only: bool,
     /// Intents without a matching outcome (saturating).
     pub intent_without_outcome: u64,
+    /// On-disk byte length when the summary was written. Compared against the
+    /// current length so a stale or tampered entry is never trusted.
+    #[serde(default)]
+    pub recorded_len: u64,
+}
+
+/// Convert a `usize` count to `u64`, saturating instead of wrapping.
+fn saturating_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 impl LogSummary {
@@ -564,12 +576,24 @@ impl LogSummary {
         intent_without_outcome: usize,
     ) -> Self {
         Self {
-            intent_count: u64::try_from(intent_count).unwrap_or(u64::MAX),
-            outcome_count: u64::try_from(outcome_count).unwrap_or(u64::MAX),
+            intent_count: saturating_u64(intent_count),
+            outcome_count: saturating_u64(outcome_count),
             total_bytes,
             sandbox_only,
-            intent_without_outcome: u64::try_from(intent_without_outcome).unwrap_or(u64::MAX),
+            intent_without_outcome: saturating_u64(intent_without_outcome),
+            recorded_len: 0,
         }
+    }
+
+    /// Bind this summary to the log length observed at write time.
+    pub fn with_recorded_len(mut self, len: u64) -> Self {
+        self.recorded_len = len;
+        self
+    }
+
+    /// Whether this summary still describes a log of `current_len` bytes.
+    pub fn matches_len(&self, current_len: u64) -> bool {
+        self.recorded_len == current_len
     }
 }
 
@@ -893,12 +917,15 @@ mod tests {
     fn log_summary_from_counts_saturates_oversized_counts() {
         // Counts arriving from `usize` must saturate, never wrap into a small
         // value (issue #98: consistent saturating arithmetic in serialization).
-        let summary = LogSummary::from_counts(usize::MAX, 3, u64::MAX - 1, true, usize::MAX);
+        let summary = LogSummary::from_counts(usize::MAX, 3, u64::MAX - 1, true, usize::MAX)
+            .with_recorded_len(99);
         assert_eq!(summary.intent_count, u64::MAX);
         assert_eq!(summary.outcome_count, 3);
         assert_eq!(summary.total_bytes, u64::MAX - 1);
         assert!(summary.sandbox_only);
         assert_eq!(summary.intent_without_outcome, u64::MAX);
+        assert!(summary.matches_len(99));
+        assert!(!summary.matches_len(100));
     }
 
     #[test]

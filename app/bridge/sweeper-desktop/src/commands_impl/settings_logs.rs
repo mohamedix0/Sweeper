@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -270,12 +271,11 @@ fn complete_records_bytes(bytes: Vec<u8>) -> Vec<u8> {
     bytes[..end].to_vec()
 }
 
-/// True for the internal summary-index files, which are metadata rather than
-/// activity logs and must never appear in the listing.
-fn is_summary_index_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(is_summary_index_file_name)
+/// Log id from a file stem. Shared by listing and index-pruning so the two
+/// agree on what identifies a log.
+fn log_id_from_path(path: &Path) -> Option<String> {
+    let id = path.file_stem()?.to_str()?.to_string();
+    (!id.is_empty()).then_some(id)
 }
 
 fn is_clean_log_file_name(path: &Path) -> bool {
@@ -294,31 +294,109 @@ fn inspect_clean_log(path: &Path) -> Option<CleanLogScanState> {
     Some(accumulate_clean_log_state(&content))
 }
 
-/// Decide whether a log belongs in the listing using only filesystem metadata
-/// and the compact summary index — never by parsing the log's full records.
-fn should_include_log_file(
-    path: &Path,
+/// A listing candidate derived purely from filesystem metadata — no log records
+/// are read or parsed to build it.
+struct LogFileMeta {
+    path: PathBuf,
+    id: String,
+    name: String,
     size: u64,
-    log_id: &str,
-    filter_sandbox_phantoms: bool,
-    index: Option<&LogSummaryIndex>,
-) -> bool {
-    if size == 0 {
-        return false;
-    }
-    if is_clean_log_file_name(path) && filter_sandbox_phantoms {
-        // An intent-without-outcome log is reconciled and surfaced rather than
-        // hidden: a post-delete journal failure may have left it outcome-less
-        // even though the deletion succeeded. Sandbox-only test logs remain
-        // filtered from the real user's list. Both facts come from the summary
-        // written once at log-creation time, so no record parsing happens here.
-        if let Some(summary) = index.and_then(|i| i.get(log_id)) {
-            if summary.sandbox_only && summary.intent_without_outcome == 0 {
-                return false;
-            }
+    modified: Option<U64String>,
+    size_string: Option<U64String>,
+    is_clean: bool,
+}
+
+impl LogFileMeta {
+    fn into_dto(self) -> LogMetadataDto {
+        LogMetadataDto {
+            id: self.id,
+            name: self.name,
+            modified_unix_secs: self.modified,
+            size_bytes: self.size_string,
         }
     }
-    true
+}
+
+/// Build a candidate from a directory entry, or `None` for a non-file, an
+/// internal index file, or an entry without a usable file-stem id.
+fn log_file_meta(entry: &fs::DirEntry) -> Option<LogFileMeta> {
+    let path = entry.path();
+    // Internal index files are metadata, never activity logs.
+    let is_index = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_summary_index_file_name);
+    if !path.is_file() || is_index {
+        return None;
+    }
+    let id = log_id_from_path(&path)?;
+    let name = path.file_name()?.to_str()?.to_string();
+    let is_clean = is_clean_log_file_name(&path);
+    let (modified, size_string) = log_metadata(&entry.metadata().ok());
+    Some(LogFileMeta {
+        path,
+        id,
+        name,
+        size: size_string.as_ref().map_or(0, |v| v.0),
+        modified,
+        size_string,
+        is_clean,
+    })
+}
+
+/// Filter configuration shared across one listing. Bundling the loaded index
+/// and the filter flag keeps the per-entry decision to a single argument.
+struct LogListingContext {
+    filter_sandbox_phantoms: bool,
+    summary_index: Option<LogSummaryIndex>,
+}
+
+impl LogListingContext {
+    fn new(dir: &Path, filter_sandbox_phantoms: bool) -> Self {
+        Self {
+            filter_sandbox_phantoms,
+            summary_index: filter_sandbox_phantoms.then(|| LogSummaryIndex::load(dir)),
+        }
+    }
+
+    fn includes(&self, meta: &LogFileMeta) -> bool {
+        if meta.size == 0 {
+            return false;
+        }
+        if !self.filter_sandbox_phantoms || !meta.is_clean {
+            return true;
+        }
+        match self.trusted_summary(meta) {
+            Some(summary) => !(summary.sandbox_only && summary.intent_without_outcome == 0),
+            // No trustworthy metadata (legacy log, failed save, corrupt index,
+            // or stale length): fall back to the original content-based filter
+            // rather than failing open and showing a sandbox phantom.
+            None => !is_sandbox_phantom_by_content(&meta.path),
+        }
+    }
+
+    /// A summary is only trusted if it exists and still matches the on-disk
+    /// length recorded when it was written.
+    fn trusted_summary(&self, meta: &LogFileMeta) -> Option<&LogSummary> {
+        let summary = self.summary_index.as_ref()?.get(&meta.id)?;
+        summary.matches_len(meta.size).then_some(summary)
+    }
+}
+
+/// Original content-based sandbox-phantom decision, used only when no trusted
+/// summary is available. An intent-without-outcome log is always reconciled and
+/// surfaced rather than hidden, because a post-delete journal failure may have
+/// left it outcome-less even though the deletion succeeded.
+fn is_sandbox_phantom_by_content(path: &Path) -> bool {
+    inspect_clean_log(path)
+        .is_some_and(|state| state.sandbox_only() && state.intent_without_outcome() == 0)
+}
+
+/// Newest first, then id ascending for stable ordering.
+fn sort_log_dtos(a: &LogMetadataDto, b: &LogMetadataDto) -> Ordering {
+    let ta = a.modified_unix_secs.as_ref().map_or(0, |v| v.0);
+    let tb = b.modified_unix_secs.as_ref().map_or(0, |v| v.0);
+    tb.cmp(&ta).then_with(|| a.id.cmp(&b.id))
 }
 
 /// Append a reconciliation note for intent-without-outcome records to the log view.
@@ -349,13 +427,15 @@ pub(crate) fn record_clean_log_summary(log_dir: &Path, log_id: &str) {
     let Some(state) = inspect_clean_log(&log_path) else {
         return;
     };
+    let recorded_len = fs::metadata(&log_path).map_or(0, |meta| meta.len());
     let summary = LogSummary::from_counts(
         state.intent_count,
         state.outcome_count,
         state.total_bytes,
         state.sandbox_only(),
         state.intent_without_outcome(),
-    );
+    )
+    .with_recorded_len(recorded_len);
     let mut index = LogSummaryIndex::load(log_dir);
     index.insert(log_id.to_string(), summary);
     index.remove_stale(&live_log_ids(log_dir));
@@ -376,9 +456,7 @@ fn live_log_ids(log_dir: &Path) -> HashSet<String> {
             if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 return None;
             }
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
+            log_id_from_path(&path)
         })
         .collect()
 }
@@ -396,6 +474,27 @@ fn log_metadata(meta: &Option<fs::Metadata>) -> (Option<U64String>, Option<U64St
     (modified, Some(U64String(meta.len())))
 }
 
+/// Open the logs directory for listing, or `None` when it is absent/unreadable.
+fn readable_log_dir(dir: &Path) -> Option<fs::ReadDir> {
+    if !dir.exists() {
+        return None;
+    }
+    fs::read_dir(dir).ok()
+}
+
+/// Turn directory entries into a sorted list without parsing any log content.
+fn build_log_listing(entries: fs::ReadDir, dir: &Path, filter: bool) -> Vec<LogMetadataDto> {
+    let context = LogListingContext::new(dir, filter);
+    let mut out: Vec<LogMetadataDto> = entries
+        .flatten()
+        .filter_map(|entry| log_file_meta(&entry))
+        .filter(|meta| context.includes(meta))
+        .map(LogFileMeta::into_dto)
+        .collect();
+    out.sort_by(sort_log_dtos);
+    out
+}
+
 fn list_logs_in_dir_impl(
     dir: Option<&Path>,
     filter_sandbox_phantoms: bool,
@@ -403,57 +502,10 @@ fn list_logs_in_dir_impl(
     let Some(dir) = dir else {
         return Ok(vec![]);
     };
-    if !dir.exists() {
+    let Some(entries) = readable_log_dir(dir) else {
         return Ok(vec![]);
-    }
-    let rd = match fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return Ok(vec![]),
     };
-    let summary_index = filter_sandbox_phantoms.then(|| LogSummaryIndex::load(dir));
-    let mut out = Vec::new();
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if !path.is_file() || is_summary_index_file(&path) {
-            continue;
-        }
-        let id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        if id.is_empty() {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let (modified, size) = log_metadata(&entry.metadata().ok());
-        let size_u64 = size.as_ref().map(|v| v.0).unwrap_or(0);
-        if !should_include_log_file(
-            &path,
-            size_u64,
-            &id,
-            filter_sandbox_phantoms,
-            summary_index.as_ref(),
-        ) {
-            continue;
-        }
-        out.push(LogMetadataDto {
-            id,
-            name,
-            modified_unix_secs: modified,
-            size_bytes: size,
-        });
-    }
-    out.sort_by(|a, b| {
-        let ta = a.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
-        let tb = b.modified_unix_secs.as_ref().map(|v| v.0).unwrap_or(0);
-        tb.cmp(&ta).then_with(|| a.id.cmp(&b.id))
-    });
-    Ok(out)
+    Ok(build_log_listing(entries, dir, filter_sandbox_phantoms))
 }
 
 /// `list_logs` in a specific directory (testable, does not filter sandbox-only clean logs).
@@ -1056,6 +1108,7 @@ mod tests {
             "{{\"record\":\"intent\",\"target_id\":\"t1\",\"path\":\"{escaped}\",\"size\":100}}\n\
              {{\"record\":\"outcome\",\"target_id\":\"t1\",\"path\":\"{escaped}\",\"bytes\":100,\"status\":\"deleted\"}}\n"
         );
+        let recorded_len = content.len() as u64;
         std::fs::write(logs.join(format!("{log_id}.jsonl")), content).expect("write log");
 
         record_clean_log_summary(&logs, log_id);
@@ -1067,6 +1120,10 @@ mod tests {
         assert_eq!(summary.total_bytes, 100);
         assert!(summary.sandbox_only);
         assert_eq!(summary.intent_without_outcome, 0);
+        assert!(
+            summary.matches_len(recorded_len),
+            "summary must be bound to the on-disk length"
+        );
     }
 
     /// A large log listing must be built from the summary index, not by parsing
@@ -1090,22 +1147,35 @@ mod tests {
                     "{{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"C:\\\\Temp\\\\f{line}.tmp\",\"bytes\":1,\"status\":\"deleted\"}}\n"
                 ));
             }
-            std::fs::write(logs.join(format!("{id}.jsonl")), content).expect("write log");
+            let path = logs.join(format!("{id}.jsonl"));
+            std::fs::write(&path, content).expect("write log");
+            let len = std::fs::metadata(&path).expect("metadata").len();
             let hidden = i % 2 == 0;
             if !hidden {
                 expected_ids.push(id.clone());
             }
-            index.insert(id, LogSummary::from_counts(1, 400, 400, hidden, 0));
+            index.insert(
+                id,
+                LogSummary::from_counts(1, 400, 400, hidden, 0).with_recorded_len(len),
+            );
         }
         index.save(&logs).expect("save index");
 
-        let start = std::time::Instant::now();
+        // Baseline: the old approach read and parsed every record of every log.
+        let baseline_start = std::time::Instant::now();
+        for i in 0..COUNT {
+            let path = logs.join(format!("clean-1700000000-1-{i}.jsonl"));
+            let _ = inspect_clean_log(&path);
+        }
+        let baseline = baseline_start.elapsed();
+
+        let listing_start = std::time::Instant::now();
         let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
-        let elapsed = start.elapsed();
+        let listing = listing_start.elapsed();
 
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "many-log listing took {elapsed:?}"
+            listing * 3 < baseline,
+            "metadata listing {listing:?} must be far faster than full parsing {baseline:?}"
         );
         assert_eq!(listed.len(), expected_ids.len(), "listed={listed:?}");
         for entry in &listed {
@@ -1135,7 +1205,7 @@ mod tests {
         let mut index = LogSummaryIndex::default();
         index.insert(
             log_id.to_string(),
-            LogSummary::from_counts(0, 50, 1225, true, 0),
+            LogSummary::from_counts(0, 50, 1225, true, 0).with_recorded_len(content.len() as u64),
         );
         index.save(&logs).expect("save index");
 
@@ -1149,6 +1219,68 @@ mod tests {
         assert_eq!(
             read.content, content,
             "full content must remain available on read"
+        );
+    }
+
+    /// Legacy logs (or logs whose summary save failed) have no index entry.
+    /// They must still get the original content-based sandbox filter rather
+    /// than failing open and exposing sandbox phantoms.
+    #[test]
+    fn logs_without_summary_fall_back_to_content_filter() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let sandbox = outer.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).expect("sandbox dir");
+        std::fs::write(sandbox.join(".sweeper_sandbox_sentinel"), "").expect("sentinel");
+        let logs = outer.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        let phantom_path = sandbox
+            .join("phantom.tmp")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let phantom = format!(
+            "{{\"record\":\"intent\",\"target_id\":\"t\",\"path\":\"{phantom_path}\"}}\n\
+             {{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"{phantom_path}\",\"bytes\":1,\"status\":\"deleted\"}}\n"
+        );
+        std::fs::write(logs.join("clean-phantom.jsonl"), phantom).expect("phantom log");
+
+        let normal = "{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"C:\\\\Temp\\\\real.tmp\",\"bytes\":1,\"status\":\"deleted\"}\n";
+        std::fs::write(logs.join("clean-real.jsonl"), normal).expect("normal log");
+
+        let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
+        let ids: Vec<&str> = listed.iter().map(|entry| entry.id.as_str()).collect();
+        assert!(
+            !ids.contains(&"clean-phantom"),
+            "sandbox phantom must stay hidden: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"clean-real"),
+            "normal legacy log must stay listed: {ids:?}"
+        );
+    }
+
+    /// A summary whose recorded length no longer matches the file is untrusted:
+    /// the listing must fall back to inspection instead of hiding a real log.
+    #[test]
+    fn stale_summary_length_falls_back_to_content_instead_of_hiding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        let log_id = "clean-1700000000-8-8";
+        let content = "{\"record\":\"outcome\",\"target_id\":\"t\",\"path\":\"C:\\\\Temp\\\\real.tmp\",\"bytes\":1,\"status\":\"deleted\"}\n";
+        std::fs::write(logs.join(format!("{log_id}.jsonl")), content).expect("write log");
+
+        let mut index = LogSummaryIndex::default();
+        index.insert(
+            log_id.to_string(),
+            LogSummary::from_counts(0, 1, 1, true, 0).with_recorded_len(u64::MAX),
+        );
+        index.save(&logs).expect("save index");
+
+        let listed = list_logs_in_dir_impl(Some(&logs), true).expect("list logs");
+        assert!(
+            listed.iter().any(|entry| entry.id == log_id),
+            "stale summary must not hide a real log: {listed:?}"
         );
     }
 
