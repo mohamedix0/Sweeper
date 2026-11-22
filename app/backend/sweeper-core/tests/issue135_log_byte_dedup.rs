@@ -16,6 +16,10 @@ use std::time::Duration;
 use sweeper_core::remover::{self, CleanOptions};
 use sweeper_testkit::Sandbox;
 
+// This shared module exposes helpers that other test binaries use; this test
+// only needs a subset, so suppress dead_code locally rather than weakening the
+// workspace lint settings or changing tests/common/mod.rs.
+#[allow(dead_code)]
 mod common;
 use common::{assert_sentinel_intact, canonical_str, now, write_file};
 
