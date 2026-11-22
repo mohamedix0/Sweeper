@@ -1202,6 +1202,24 @@ fn clean_directory_contents(
     Ok(state.deleted())
 }
 
+/// Journal a successful deletion for one entry.
+///
+/// Issue #135: only this entry's own bytes are journaled. For a Tier 3 /
+/// WholeCache root, child bytes are already recorded by the per-child outcomes,
+/// so repeating them here double-counts the log/summary path. The caller still
+/// returns the full total to `CleanReport`, whose accounting is unchanged.
+fn journal_deleted_outcome(
+    journal: &mut JournalWriter,
+    target_id: &str,
+    path_str: &str,
+    bytes: u64,
+) {
+    // The deletion already succeeded; a journal failure must not abort the batch.
+    journal.write_outcome_best_effort(&journal::outcome_record(
+        target_id, path_str, bytes, "deleted", "", None,
+    ));
+}
+
 fn delete_path_entry(
     item: &ValidatedItem,
     path_str: &str,
@@ -1399,21 +1417,8 @@ fn delete_path_entry_inner(
             let reported = base_bytes_deleted
                 .unwrap_or(0)
                 .saturating_add(bytes_accounted);
-            // The deletion already succeeded; a journal failure must not throw away
-            // this outcome or abort the remaining batch.
-            // Issue #135: journal only this entry's own bytes. For a Tier 3 /
-            // WholeCache root, `base_bytes_deleted` is already recorded by the
-            // per-child outcomes, so writing it here double-counts byte totals in
-            // the log/summary path. The returned `reported` still carries the full
-            // total so CleanReport accounting is unchanged.
-            journal.write_outcome_best_effort(&journal::outcome_record(
-                &item.id,
-                path_str,
-                bytes_accounted,
-                "deleted",
-                "",
-                None,
-            ));
+            // #135: journal own bytes only; `reported` keeps the full CleanReport total.
+            journal_deleted_outcome(journal, &item.id, path_str, bytes_accounted);
             Ok(ProcessOutcome::Deleted(reported))
         }
         Err(e) => {

@@ -86,7 +86,9 @@ function normalizedLogPath(raw: string): string {
 function isStrictDescendantPath(child: string, parent: string): boolean {
   const c = normalizedLogPath(child);
   const p = normalizedLogPath(parent);
-  if (!c || !p || c === p) return false;
+  if (!c) return false;
+  if (!p) return false;
+  if (c === p) return false;
   return c.startsWith(p + '\\');
 }
 

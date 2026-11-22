@@ -23,35 +23,35 @@ use sweeper_testkit::Sandbox;
 mod common;
 use common::{assert_sentinel_intact, canonical_str, now, write_file};
 
+/// Bytes from one journal line when it is a `deleted` outcome.
+fn deleted_bytes_in_line(line: &str) -> Option<u64> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if value.get("record").and_then(|r| r.as_str()) != Some("outcome") {
+        return None;
+    }
+    if value.get("status").and_then(|s| s.as_str()) != Some("deleted") {
+        return None;
+    }
+    Some(value.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0))
+}
+
 /// Bytes recorded by every `deleted` outcome in the journal for `journal_dir`.
 fn deleted_outcome_bytes(journal_dir: &Path) -> Vec<u64> {
     let log_dir = sweeper_core::journal::resolve_log_dir(journal_dir);
-    let mut bytes = Vec::new();
     let Ok(entries) = fs::read_dir(log_dir) else {
-        return bytes;
+        return Vec::new();
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(contents) = fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in contents.lines() {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            if value.get("record").and_then(|r| r.as_str()) != Some("outcome") {
-                continue;
-            }
-            if value.get("status").and_then(|s| s.as_str()) != Some("deleted") {
-                continue;
-            }
-            bytes.push(value.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0));
-        }
-    }
-    bytes
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .flat_map(|contents| {
+            contents
+                .lines()
+                .filter_map(deleted_bytes_in_line)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[test]

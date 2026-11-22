@@ -195,7 +195,13 @@ fn is_strict_descendant_path(child: &str, parent: &str) -> bool {
     }
     let child = normalize(child);
     let parent = normalize(parent);
-    if child.is_empty() || parent.is_empty() || child == parent {
+    if child.is_empty() {
+        return false;
+    }
+    if parent.is_empty() {
+        return false;
+    }
+    if child == parent {
         return false;
     }
     child.starts_with(&format!("{parent}\\"))
