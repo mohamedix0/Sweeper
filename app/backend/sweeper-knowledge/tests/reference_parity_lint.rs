@@ -1,6 +1,6 @@
 //! Build-time reference-parity checks for the Vivaldi/Opera leaf-cache targets and the
-//! Knowledge Base annotations that document the Explorer cache-DB and uv/Maven analyzer
-//! entries (issues #39 / #40 / #41).
+//! Knowledge Base annotations that document the Explorer cache-DB and the uv/Maven whole-cache
+//! clean targets (issues #39 / #40 / #41).
 //!
 //! Every check is folded into a single `assert_eq!`/`assert!` over an array or tuple of all
 //! conditions. This keeps each test well under the complexity/length thresholds and avoids any
@@ -154,7 +154,7 @@ fn explorer_icon_web_cache_leaves_are_documented_out_of_scope() {
 }
 
 #[test]
-fn uv_and_maven_analyzer_entries_document_safe_mechanism_rationale() {
+fn uv_and_maven_entries_document_whole_cache_clean_rationale() {
     let kb = builtin_knowledge_entries();
 
     let uv = kb
@@ -167,7 +167,7 @@ fn uv_and_maven_analyzer_entries_document_safe_mechanism_rationale() {
         uv_words.contains("whole cache"),
         uv_text.contains("uv cache clean"),
         uv_text.contains("per-file"),
-        uv_text.contains("not cleanable") || uv_text.contains("analyzer only"),
+        !uv_text.contains("analyzer only") && !uv_text.contains("not cleanable"),
     ];
     assert_eq!(uv_documented, [true, true, true, true], "{uv_text}");
 
@@ -180,7 +180,31 @@ fn uv_and_maven_analyzer_entries_document_safe_mechanism_rationale() {
     let maven_documented = [
         maven_text.contains("locally installed"),
         maven_words.contains("whole cache") || maven_text.contains("tool-driven"),
-        maven_text.contains("not cleanable") || maven_text.contains("analyzer only"),
+        !maven_text.contains("analyzer only") && !maven_text.contains("not cleanable"),
     ];
     assert_eq!(maven_documented, [true, true, true], "{maven_text}");
+}
+
+#[test]
+fn uv_and_maven_whole_cache_targets_are_allowlisted() {
+    let targets = embedded_targets();
+    let expected = [
+        ("uv-cache", r"uv\cache", KnownFolder::LocalAppData),
+        (
+            "maven-wrapper-dists",
+            r".m2\wrapper\dists",
+            KnownFolder::UserProfile,
+        ),
+    ];
+    for (id, subpath, anchor) in expected {
+        let t = targets
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("missing {id} whole-cache target"));
+        assert_eq!(
+            (t.relative_subpath.as_str(), t.known_folder, t.scope),
+            (subpath, anchor, Scope::WholeCache),
+            "{id}"
+        );
+    }
 }

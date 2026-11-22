@@ -3,7 +3,7 @@
 > Status: Active governance policy.
 > Parent plan: [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)
 > Domain glossary: [GLOSSARY.md](../GLOSSARY.md)
-> Architectural decisions: [ADR 0001](./adr/0001-deny-by-default-allowlist.md), [ADR 0002](./adr/0002-three-part-separation.md), [ADR 0003](./adr/0003-handle-based-removal.md)
+> Architectural decisions: [ADR 0001](./adr/0001-deny-by-default-allowlist.md), [ADR 0002](./adr/0002-three-part-separation.md), [ADR 0003](./adr/0003-handle-based-removal.md), [ADR 0004](./adr/0004-whole-cache-clean.md)
 
 ---
 

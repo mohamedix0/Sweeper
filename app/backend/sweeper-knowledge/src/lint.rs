@@ -3,7 +3,14 @@
 //! Enforces safety invariants required for `allowlist.toml` (deny-by-default, no overlap with
 //! protected paths, constrained wildcards, and no ambiguous path forms).
 
+// Explicit path so this resolves identically from lib.rs and from build.rs,
+// which compiles this file via `#[path = "src/lint.rs"]`.
+#[path = "lint/lint_scope.rs"]
+mod lint_scope;
+
 use std::collections::{HashMap, HashSet};
+
+use lint_scope::validate_tier_risk_and_scope;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -67,7 +74,7 @@ pub struct LintTarget {
     pub known_folder: String,
     /// Relative subpath under the known folder.
     pub relative_subpath: String,
-    /// Scope (contents-only invariant expected).
+    /// Scope (`contents` or `whole_cache`; both validated strictly).
     #[serde(default = "default_scope")]
     pub scope: String,
     /// Minimum age in hours.
@@ -148,61 +155,48 @@ fn terr(id: &str, msg: impl Into<String>) -> LintError {
 }
 
 fn validate_target(t: &LintTarget) -> Result<(), LintError> {
+    validate_target_identity(t)?;
+    validate_tier_risk_and_scope(t)?;
+    validate_known_folder(&t.id, &t.known_folder)?;
+    let segments = validate_relative_subpath(&t.id, &t.relative_subpath)?;
+    let audited_elevated = is_audited_elevation_target(&t.known_folder, &segments);
+    validate_elevation_policy(t, audited_elevated)?;
+    validate_target_protected_paths(&t.id, &t.known_folder, &segments, audited_elevated)?;
+    validate_browser_profile_leaf_rule(&t.id, &segments)?;
+    Ok(())
+}
+
+fn validate_target_identity(t: &LintTarget) -> Result<(), LintError> {
     if t.id.trim().is_empty() {
         return Err(terr("<empty>", "id must not be empty"));
     }
     if t.name.trim().is_empty() {
         return Err(terr(&t.id, "name must not be empty"));
     }
-    // Tier/risk/scope basic sanity (embedded allowlist is controlled, but linter must be strict)
-    match t.tier.as_str() {
-        "Tier1" | "Tier2" | "Tier3" => {}
-        _ => return Err(terr(&t.id, "tier must be Tier1, Tier2, or Tier3")),
-    }
-    match t.risk.as_str() {
-        "Safe" | "Caution" | "Unknown" | "Protected" => {}
-        _ => {
-            return Err(terr(
-                &t.id,
-                "risk must be Safe, Caution, Unknown, or Protected",
-            ))
-        }
-    }
-    if t.scope != "contents" {
-        return Err(terr(&t.id, "scope must be \"contents\""));
-    }
-    validate_known_folder(&t.id, &t.known_folder)?;
-    let segments = validate_relative_subpath(&t.id, &t.relative_subpath)?;
-    let audited_elevated = is_audited_elevation_target(&t.known_folder, &segments);
-    validate_elevation_policy(t, audited_elevated)?;
+    Ok(())
+}
 
-    // Reject direct targeting of Protected Container Roots
-    if is_protected_container_root_target(&t.known_folder, &segments) {
+/// All Protected Path / container-root checks for one target, kept together so
+/// the top-level validator stays a short sequence of validation steps.
+fn validate_target_protected_paths(
+    id: &str,
+    known_folder: &str,
+    segments: &[String],
+    audited_elevated: bool,
+) -> Result<(), LintError> {
+    if is_protected_container_root_target(known_folder, segments) {
         return Err(terr(
-            &t.id,
+            id,
             "target directly targets a Protected Container Root",
         ));
     }
-
-    // Reject overlap with any Subtree-Protected Path (ancestor, exact, or descendant)
-    if overlaps_subtree_protected(&t.known_folder, &segments) {
+    if overlaps_subtree_protected(known_folder, segments) {
         return Err(terr(
-            &t.id,
+            id,
             "target overlaps a Subtree-Protected Path (ancestor, exact, or descendant)",
         ));
     }
-
-    validate_not_protected_container_descendant(
-        &t.id,
-        &t.known_folder,
-        &segments,
-        audited_elevated,
-    )?;
-
-    // Browser profile roots must not be targeted directly without a leaf cache subfolder
-    validate_browser_profile_leaf_rule(&t.id, &segments)?;
-
-    Ok(())
+    validate_not_protected_container_descendant(id, known_folder, segments, audited_elevated)
 }
 
 fn validate_elevation_policy(t: &LintTarget, audited_elevated: bool) -> Result<(), LintError> {

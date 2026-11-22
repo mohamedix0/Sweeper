@@ -1,72 +1,108 @@
 use sweeper_knowledge::{
     builtin_knowledge_entries, builtin_protected_path_catalog, embedded_targets,
-    lint_allowlist_toml, KnowledgeEntry, KnownFolder, ProtectedPathKind, Risk, Scope, Tier,
+    lint_allowlist_toml, KnowledgeEntry, KnownFolder, ProtectedPathKind, Risk, Scope,
+    TargetDefinition, Tier,
 };
+
+const CORE_TARGET_IDS: &[&str] = &[
+    "user-temp",
+    "crash-dumps",
+    "wer-reports",
+    "inet-cache",
+    "npm-cache",
+    "gradle-caches",
+    "cargo-registry-cache",
+    "vscode-cache",
+    "vscode-cached-data",
+    "pip-cache",
+    "nuget-v3-cache",
+    "jetbrains-caches",
+];
+
+const BROWSER_CACHE_TARGET_IDS: &[&str] = &[
+    "chrome-cache-default",
+    "chrome-code-cache-default",
+    "chrome-gpu-cache-default",
+    "chrome-cache-profiles",
+    "chrome-code-cache-profiles",
+    "chrome-gpu-cache-profiles",
+    "edge-cache-default",
+    "edge-code-cache-default",
+    "edge-gpu-cache-default",
+    "edge-cache-profiles",
+    "edge-code-cache-profiles",
+    "edge-gpu-cache-profiles",
+];
+
+const AUDITED_ELEVATED_IDS: &[&str] = &[
+    "windows-temp",
+    "windows-update-download-cache",
+    "windows-prefetch",
+    "programdata-package-cache",
+    "windows-delivery-optimization-cache",
+    "programdata-wer-report-archive",
+    "programdata-wer-report-queue",
+    "windows-defender-scan-history",
+];
+
+const WHOLE_CACHE_IDS: &[&str] = &["uv-cache", "maven-wrapper-dists"];
+
+fn assert_targets_present(targets: &[TargetDefinition], ids: &[&str]) {
+    for id in ids {
+        assert!(targets.iter().any(|t| t.id == *id), "missing {id}");
+    }
+}
+
+fn assert_elevated_target_safety(t: &TargetDefinition) -> bool {
+    matches!(t.tier, Tier::Tier3)
+        && matches!(t.risk, Risk::Caution)
+        && t.requires_elevation
+        && matches!(t.scope, Scope::Contents)
+        && t.min_age_hours == 24
+}
+
+fn assert_whole_cache_target_safety(t: &TargetDefinition) -> bool {
+    matches!(t.tier, Tier::Tier2)
+        && matches!(t.risk, Risk::Caution)
+        && !t.requires_elevation
+        && matches!(t.scope, Scope::WholeCache)
+        && t.min_age_hours == 0
+}
+
+fn assert_standard_target_safety(t: &TargetDefinition) -> bool {
+    matches!(t.tier, Tier::Tier1 | Tier::Tier2)
+        && !t.requires_elevation
+        && matches!(t.scope, Scope::Contents)
+        && t.min_age_hours == 24
+}
+
+fn target_safety_is_correct(t: &TargetDefinition) -> bool {
+    if AUDITED_ELEVATED_IDS.contains(&t.id.as_str()) {
+        assert_elevated_target_safety(t)
+    } else if WHOLE_CACHE_IDS.contains(&t.id.as_str()) {
+        assert_whole_cache_target_safety(t)
+    } else {
+        assert_standard_target_safety(t)
+    }
+}
 
 #[test]
 fn embedded_allowlist_passes_lint_and_has_expected_targets() {
     let targets = embedded_targets();
-    assert!(targets.iter().any(|t| t.id == "user-temp"));
-    assert!(targets.iter().any(|t| t.id == "crash-dumps"));
-    assert!(targets.iter().any(|t| t.id == "wer-reports"));
-    assert!(targets.iter().any(|t| t.id == "inet-cache"));
-    assert!(targets.iter().any(|t| t.id == "npm-cache"));
-    assert!(targets.iter().any(|t| t.id == "gradle-caches"));
-    assert!(targets.iter().any(|t| t.id == "cargo-registry-cache"));
-    assert!(targets.iter().any(|t| t.id == "vscode-cache"));
-    assert!(targets.iter().any(|t| t.id == "vscode-cached-data"));
-    assert!(targets.iter().any(|t| t.id == "pip-cache"));
-    assert!(targets.iter().any(|t| t.id == "nuget-v3-cache"));
-    assert!(targets.iter().any(|t| t.id == "jetbrains-caches"));
-    for id in [
-        "chrome-cache-default",
-        "chrome-code-cache-default",
-        "chrome-gpu-cache-default",
-        "chrome-cache-profiles",
-        "chrome-code-cache-profiles",
-        "chrome-gpu-cache-profiles",
-        "edge-cache-default",
-        "edge-code-cache-default",
-        "edge-gpu-cache-default",
-        "edge-cache-profiles",
-        "edge-code-cache-profiles",
-        "edge-gpu-cache-profiles",
-    ] {
-        assert!(targets.iter().any(|t| t.id == id), "missing {id}");
-    }
-    let audited_elevated = [
-        "windows-temp",
-        "windows-update-download-cache",
-        "windows-prefetch",
-        "programdata-package-cache",
-        "windows-delivery-optimization-cache",
-        "programdata-wer-report-archive",
-        "programdata-wer-report-queue",
-        "windows-defender-scan-history",
+    assert_targets_present(&targets, CORE_TARGET_IDS);
+    assert_targets_present(&targets, BROWSER_CACHE_TARGET_IDS);
+    assert_targets_present(&targets, AUDITED_ELEVATED_IDS);
+    assert!(targets.iter().all(target_safety_is_correct));
+    let known_folders = [
+        (KnownFolder::UserProfile, "UserProfile"),
+        (KnownFolder::RoamingAppData, "RoamingAppData"),
     ];
-    for id in audited_elevated {
-        assert!(targets.iter().any(|t| t.id == id), "missing {id}");
+    for (folder, label) in known_folders {
+        assert!(
+            targets.iter().any(|t| t.known_folder == folder),
+            "missing target anchored at {label}"
+        );
     }
-    assert!(targets.iter().all(|t| {
-        if audited_elevated.contains(&t.id.as_str()) {
-            matches!(t.tier, Tier::Tier3)
-                && matches!(t.risk, Risk::Caution)
-                && t.requires_elevation
-                && matches!(t.scope, Scope::Contents)
-                && t.min_age_hours == 24
-        } else {
-            matches!(t.tier, Tier::Tier1 | Tier::Tier2)
-                && !t.requires_elevation
-                && matches!(t.scope, Scope::Contents)
-                && t.min_age_hours == 24
-        }
-    }));
-    assert!(targets
-        .iter()
-        .any(|t| t.known_folder == KnownFolder::UserProfile));
-    assert!(targets
-        .iter()
-        .any(|t| t.known_folder == KnownFolder::RoamingAppData));
 }
 
 fn assert_protected_catalog_present() {

@@ -1,18 +1,159 @@
 use super::*;
+use crate::remover::{self, CleanOptions, ValidatedItem};
+use crate::scanner::allowlist::{scan_resolved_roots, ResolvedRootsScanCtx};
 use sweeper_knowledge::{KnownFolder, Risk, Scope, Tier};
 
-fn sample_target(id: &str, rel: &str) -> TargetDefinition {
+/// Parameters that differ between test targets. Shared so every test target
+/// is assembled by exactly one builder and cannot drift in its fixed fields.
+struct TargetSpec<'a> {
+    id: &'a str,
+    name: &'a str,
+    tier: Tier,
+    risk: Risk,
+    known_folder: KnownFolder,
+    relative_subpath: &'a str,
+    scope: Scope,
+    min_age_hours: u32,
+}
+
+const WHOLE_CACHE_TEST_SPEC: TargetSpec<'static> = TargetSpec {
+    id: "uv-cache",
+    name: "uv Cache",
+    tier: Tier::Tier2,
+    risk: Risk::Caution,
+    known_folder: KnownFolder::LocalAppData,
+    relative_subpath: r"uv\cache",
+    scope: Scope::WholeCache,
+    min_age_hours: 0,
+};
+
+/// The single assembly point for test TargetDefinitions.
+fn build_target(spec: &TargetSpec<'_>) -> TargetDefinition {
     TargetDefinition {
-        id: id.to_string(),
-        name: id.to_string(),
+        id: spec.id.to_string(),
+        name: spec.name.to_string(),
+        tier: spec.tier,
+        risk: spec.risk,
+        known_folder: spec.known_folder,
+        relative_subpath: spec.relative_subpath.to_string(),
+        scope: spec.scope,
+        min_age_hours: spec.min_age_hours,
+        description: "test".to_string(),
+        requires_elevation: false,
+    }
+}
+
+fn sample_target(id: &str, rel: &str) -> TargetDefinition {
+    let spec = TargetSpec {
+        id,
+        name: id,
         tier: Tier::Tier1,
         risk: Risk::Safe,
         known_folder: KnownFolder::LocalAppData,
-        relative_subpath: rel.to_string(),
+        relative_subpath: rel,
         scope: Scope::Contents,
         min_age_hours: 24,
-        description: "test".to_string(),
-        requires_elevation: false,
+    };
+    build_target(&spec)
+}
+
+fn seed_node_modules_cache(sb: &sweeper_testkit::Sandbox) -> (std::path::PathBuf, CanonicalPath) {
+    let root = sb.create_dir("uv-cache").unwrap();
+    std::fs::create_dir_all(root.join("node_modules")).unwrap();
+    std::fs::write(root.join("node_modules").join("pkg.bin"), vec![b'x'; 4096]).unwrap();
+    std::fs::write(root.join("normal.bin"), vec![b'y'; 1024]).unwrap();
+    let canon = CanonicalPath::from_existing_path(&root.to_string_lossy())
+        .unwrap()
+        .into_canonical();
+    (root, canon)
+}
+
+fn whole_cache_test_target() -> TargetDefinition {
+    build_target(&WHOLE_CACHE_TEST_SPEC)
+}
+
+fn estimate_whole_cache(target: &TargetDefinition, canon: &CanonicalPath) -> u64 {
+    let roots = vec![(target.id.clone(), canon.clone())];
+    let mut progress =
+        ScanProgressRuntime::new(1, std::sync::Arc::new(AtomicBool::new(false)), None);
+    let mut ctx = ResolvedRootsScanCtx {
+        target,
+        roots: &roots,
+        min_age: Duration::from_secs(24 * 3600),
+        now: SystemTime::now(),
+        progress: &mut progress,
+    };
+    let mut out = empty_target_result(TargetResultMeta {
+        target_id: target.id.clone(),
+        target_name: target.name.clone(),
+        tier: target.tier,
+        risk: target.risk,
+    });
+    scan_resolved_roots(&mut ctx, &mut out).expect("whole-cache scan");
+    assert_eq!(out.items.len(), 1);
+    out.items[0].size
+}
+
+fn clean_whole_cache(
+    sb: &sweeper_testkit::Sandbox,
+    canon: &CanonicalPath,
+    estimate: u64,
+) -> remover::CleanReport {
+    let item =
+        ValidatedItem::from_whole_cache_root("wc-nm-1", "uv-cache", canon.as_str(), estimate)
+            .expect("whole-cache root must validate");
+    let journal = sb.create_dir("journal").unwrap();
+    remover::execute_clean(
+        vec![item],
+        CleanOptions {
+            preview_estimated_bytes: estimate,
+            min_age: Duration::from_secs(24 * 3600),
+            now: SystemTime::now(),
+            journal_base_dir: Some(journal),
+        },
+    )
+    .expect("whole-cache clean")
+}
+
+fn assert_estimate_and_clean(report: &remover::CleanReport, root: &std::path::Path, estimate: u64) {
+    assert!(
+        !report.aborted,
+        "120% breaker must not trip: {:?}",
+        report.abort_reason
+    );
+    assert!(!root.exists(), "whole cache root must be removed");
+    assert!(
+        report.bytes_freed >= estimate,
+        "deleted bytes must cover the estimate: {} < {}",
+        report.bytes_freed,
+        estimate
+    );
+}
+
+#[test]
+fn whole_cache_estimate_matches_deleted_bytes_with_node_modules() {
+    let sb = sweeper_testkit::Sandbox::new();
+    let (root, canon) = seed_node_modules_cache(&sb);
+    let estimated = estimate_whole_cache(&whole_cache_test_target(), &canon);
+    assert_eq!(
+        estimated,
+        4096 + 1024,
+        "node_modules bytes must be in the Preview estimate"
+    );
+    let canary =
+        sweeper_testkit::CanaryTree::seed_external("whole-cache-parity").expect("seed canary");
+
+    // The canary must be checked after a failure OR panic (plan §6.1), so run
+    // the deletion and its assertions inside catch_unwind and verify before
+    // resuming the panic. No Drop impl that can panic during unwinding.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let report = clean_whole_cache(&sb, &canon, estimated);
+        assert_estimate_and_clean(&report, &root, estimated);
+    }));
+    sb.assert_sentinel_present();
+    canary.verify().expect("canary must remain intact");
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
     }
 }
 
@@ -21,6 +162,57 @@ fn rejects_caller_supplied_target_shapes_via_lint() {
     let bad = vec![sample_target("bad", "Foo\\**\\Bar")];
     let err = scan_targets(bad, 24).unwrap_err().to_string();
     assert!(err.contains("**") || err.contains("glob"), "{err}");
+}
+
+#[test]
+fn whole_cache_scan_emits_single_root_item_with_all_files_age_eligible() {
+    let sb = sweeper_testkit::Sandbox::new();
+    let root = sb.create_dir("uv-cache").unwrap();
+    let nested = root.join("v1");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("a.bin"), b"aaa").unwrap();
+    std::fs::write(nested.join("b.bin"), b"bbbb").unwrap();
+    let canon = CanonicalPath::from_existing_path(&root.to_string_lossy())
+        .unwrap()
+        .into_canonical();
+
+    let target = TargetDefinition {
+        id: "uv-cache".to_string(),
+        name: "uv Cache".to_string(),
+        tier: Tier::Tier2,
+        risk: Risk::Caution,
+        known_folder: KnownFolder::LocalAppData,
+        relative_subpath: r"uv\cache".to_string(),
+        scope: Scope::WholeCache,
+        min_age_hours: 0,
+        description: "test".to_string(),
+        requires_elevation: false,
+    };
+    let roots = vec![(target.id.clone(), canon.clone())];
+    let mut progress =
+        ScanProgressRuntime::new(1, std::sync::Arc::new(AtomicBool::new(false)), None);
+    let mut ctx = ResolvedRootsScanCtx {
+        target: &target,
+        roots: &roots,
+        min_age: Duration::from_secs(24 * 3600),
+        now: SystemTime::now(),
+        progress: &mut progress,
+    };
+    let mut out = empty_target_result(TargetResultMeta {
+        target_id: target.id.clone(),
+        target_name: target.name.clone(),
+        tier: target.tier,
+        risk: target.risk,
+    });
+
+    scan_resolved_roots(&mut ctx, &mut out).expect("whole-cache scan");
+
+    assert_eq!(out.items.len(), 1, "whole cache must be a single item");
+    assert_eq!(out.items[0].path, canon.as_str());
+    assert!(out.items[0].age_eligible, "no per-file age filtering");
+    assert_eq!(out.items[0].size, 7);
+    assert_eq!(out.eligible_bytes, 7);
+    assert_eq!(out.eligible_count, 1);
 }
 
 fn assert_redirected_temp_guard_disabled(candidate: &str, expected_reason_fragment: &str) {
