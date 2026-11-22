@@ -33,8 +33,8 @@ export function SettingsCustomPathsCard(props: {
         <div className="settings-list-row settings-custom-optin-row">
           <div className="settings-inline-note muted settings-custom-optin-note">
             <label className="checkbox inline-plain-checkbox">
-              <input type="checkbox" aria-label="Allow cleanup of custom paths" checked={draft.allowDeleteUnknown} onChange={(e) => setDraft({ ...draft, allowDeleteUnknown: e.target.checked })} disabled={locked} />
-              <span>Allow cleanup of custom paths (requires DELETE confirmation)</span>
+              <input type="checkbox" aria-label="Allow deleting unknown folders" checked={draft.allowDeleteUnknown} onChange={(e) => setDraft({ ...draft, allowDeleteUnknown: e.target.checked })} disabled={locked} />
+              <span>Allow deleting unknown folders (also applies to non-custom Unknown folders; requires DELETE confirmation)</span>
             </label>
           </div>
         </div>
