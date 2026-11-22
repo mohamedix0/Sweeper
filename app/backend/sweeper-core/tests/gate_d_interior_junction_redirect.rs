@@ -14,7 +14,7 @@ use common::*;
 ///
 /// Preview confirms `root/sub/victim.txt`. Between enumeration and Clean, the
 /// ordinary directory `sub` is swapped for a junction to the sibling `root/keep`
-/// (the same authorized root, so containment still passes). `open_for_delete`
+/// (the same authorized root, so containment still passes). The cleaning open
 /// follows the *intermediate* junction because `FILE_FLAG_OPEN_REPARSE_POINT`
 /// protects only the final component, and `GetFinalPathNameByHandle` then reports
 /// `root/keep/victim.txt` with the junction erased from the chain. Files in
