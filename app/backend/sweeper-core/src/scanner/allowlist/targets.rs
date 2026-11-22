@@ -243,7 +243,11 @@ pub(in crate::scanner) fn scan_resolved_roots(
             next_item_seq: &mut next_item_seq,
             progress: ctx.progress,
         };
-        walk::scan_one_root_iterative(&mut req)?;
+        if ctx.target.scope == sweeper_knowledge::Scope::WholeCache {
+            walk::scan_one_root_whole_cache(&mut req)?;
+        } else {
+            walk::scan_one_root_iterative(&mut req)?;
+        }
     }
     Ok(())
 }

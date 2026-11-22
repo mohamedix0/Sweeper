@@ -47,6 +47,7 @@ fn embedded_allowlist_passes_lint_and_has_expected_targets() {
     for id in audited_elevated {
         assert!(targets.iter().any(|t| t.id == id), "missing {id}");
     }
+    let whole_cache_ids = ["uv-cache", "maven-wrapper-dists"];
     assert!(targets.iter().all(|t| {
         if audited_elevated.contains(&t.id.as_str()) {
             matches!(t.tier, Tier::Tier3)
@@ -54,6 +55,12 @@ fn embedded_allowlist_passes_lint_and_has_expected_targets() {
                 && t.requires_elevation
                 && matches!(t.scope, Scope::Contents)
                 && t.min_age_hours == 24
+        } else if whole_cache_ids.contains(&t.id.as_str()) {
+            matches!(t.tier, Tier::Tier2)
+                && matches!(t.risk, Risk::Caution)
+                && !t.requires_elevation
+                && matches!(t.scope, Scope::WholeCache)
+                && t.min_age_hours == 0
         } else {
             matches!(t.tier, Tier::Tier1 | Tier::Tier2)
                 && !t.requires_elevation

@@ -2,7 +2,7 @@
 
 > Status: Phases 0-6 are implemented on `main` with automated Gates A-G, mutation, and packaging checks green. Release is pending human-only verification Gates H.3-H.5 (see [RELEASE_READINESS.md](./RELEASE_READINESS.md)).
 > Domain terms are defined in [GLOSSARY.md](../GLOSSARY.md) (`Target`, `Allowlist`, `Protected Path`, `Custom Path`, `Knowledge Base`, `Risk`, `Safe`, `Caution`, `Unknown`, `Protected`, `Tier`, `Scan`, `Preview`, `Clean`, `Analyzer`, `Minimum Age`, `Skipped`, `Link Point`).
-> Architectural decisions: [ADR 0001](./adr/0001-deny-by-default-allowlist.md), [ADR 0002](./adr/0002-three-part-separation.md), [ADR 0003](./adr/0003-handle-based-removal.md).
+> Architectural decisions: [ADR 0001](./adr/0001-deny-by-default-allowlist.md), [ADR 0002](./adr/0002-three-part-separation.md), [ADR 0003](./adr/0003-handle-based-removal.md), [ADR 0004](./adr/0004-whole-cache-clean.md).
 > Orchestration & delegation policy: [DELEGATION.md](./DELEGATION.md).
 
 ---

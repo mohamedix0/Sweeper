@@ -798,6 +798,30 @@ requires_elevation = false
 description = "Bun install cache. Removing it frees space but may slow installs while packages are re-downloaded."
 
 [[targets]]
+id = "uv-cache"
+name = "uv Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "LocalAppData"
+relative_subpath = "uv\\cache"
+scope = "whole_cache"
+min_age_hours = 0
+requires_elevation = false
+description = "uv package download cache. Cleaned only as a whole cache (entire uv\\cache directory removed as one unit), never per-file and never by age; uv regenerates it on the next run."
+
+[[targets]]
+id = "maven-wrapper-dists"
+name = "Maven Wrapper Distributions Cache"
+tier = "Tier2"
+risk = "Caution"
+known_folder = "UserProfile"
+relative_subpath = ".m2\\wrapper\\dists"
+scope = "whole_cache"
+min_age_hours = 0
+requires_elevation = false
+description = "Maven Wrapper downloaded Maven distribution archives. Cleaned only as a whole cache (entire explicitly scoped directory removed as one unit); regenerated on the next wrapper run. Locally installed artifacts under .m2\\repository are never targeted."
+
+[[targets]]
 id = "windows-delivery-optimization-cache"
 name = "Windows Delivery Optimization Cache"
 tier = "Tier3"

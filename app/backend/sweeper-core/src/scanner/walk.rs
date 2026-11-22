@@ -71,6 +71,68 @@ pub(super) fn scan_one_root_iterative(req: &mut RootWalk<'_>) -> Result<(), Scan
     Ok(())
 }
 
+/// Scan an issue #41 whole-cache target: walk the tree only to measure it, then
+/// emit ONE item representing the entire cache root. No per-file age filtering
+/// is applied and no per-item selection is offered, so a Clean is all-or-nothing.
+pub(super) fn scan_one_root_whole_cache(req: &mut RootWalk<'_>) -> Result<(), ScanError> {
+    let mut staged = super::empty_target_result(super::TargetResultMeta {
+        target_id: req.target.id.clone(),
+        target_name: req.target.name.clone(),
+        tier: req.target.tier,
+        risk: req.target.risk,
+    });
+    {
+        let mut staged_walk = RootWalk {
+            target: req.target,
+            root: req.root,
+            min_age: req.min_age,
+            now: req.now,
+            out: &mut staged,
+            next_item_seq: req.next_item_seq,
+            progress: req.progress,
+        };
+        scan_one_root_iterative(&mut staged_walk)?;
+    }
+    let size = staged.total_bytes;
+    *req.next_item_seq += 1;
+    let item = ScanItem {
+        id: format!("{}::{}", req.target.id, *req.next_item_seq),
+        target_id: req.target.id.clone(),
+        path: req.root.as_str().to_string(),
+        file_identity: file_identity_for_path(Path::new(req.root.as_str())),
+        size,
+        mtime_unix_secs: mtime_unix_secs_for_path(Path::new(req.root.as_str())),
+        age_eligible: true,
+    };
+    fold_whole_cache_staged(req.out, staged, item);
+    Ok(())
+}
+
+/// Fold a staged per-file whole-cache measurement into the caller's result as
+/// one selectable root item. Skipped diagnostics are preserved for reporting.
+fn fold_whole_cache_staged(out: &mut TargetScanResult, staged: TargetScanResult, item: ScanItem) {
+    out.total_bytes = out.total_bytes.saturating_add(item.size);
+    out.file_count = out.file_count.saturating_add(staged.file_count);
+    out.eligible_bytes = out.eligible_bytes.saturating_add(item.size);
+    out.eligible_count = out.eligible_count.saturating_add(1);
+    out.skipped_count = out.skipped_count.saturating_add(staged.skipped_count);
+    for (reason, count) in staged.skipped_reasons {
+        let entry = out.skipped_reasons.entry(reason).or_insert(0);
+        *entry = entry.saturating_add(count);
+    }
+    out.skipped_diagnostics.extend(staged.skipped_diagnostics);
+    out.items.push(item);
+}
+
+/// Best-effort last-write time for a path, used only as display metadata for a
+/// whole-cache item (age is deliberately ignored for this scope).
+fn mtime_unix_secs_for_path(path: &Path) -> u64 {
+    sweeper_winfs::open_for_inspection(path)
+        .and_then(|h| sweeper_winfs::inspect_handle(&h))
+        .map(|i| super::allowlist::filetime_to_unix_secs(i.last_write_time))
+        .unwrap_or(0)
+}
+
 pub(super) fn scan_directory_in_walk(
     ctx: &mut ScanWalkCtx<'_>,
     dir: &Path,

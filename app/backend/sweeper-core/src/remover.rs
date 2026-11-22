@@ -60,6 +60,14 @@ pub enum ValidatedSource {
     },
     /// Tier 3 recycle-bin scope rooted at a user-accessible recycle-bin directory (contents cleaned, root kept).
     Tier3RecycleBin,
+    /// Issue #41 whole-cache scope: the entire, explicitly scoped, fully
+    /// regenerable cache directory is removed as one unit. No per-file Minimum
+    /// Age filtering and no per-item selection; the root is removed after its
+    /// contents. Never used for caches that can contain non-regenerable data.
+    WholeCache {
+        /// Owning target id (e.g. `uv-cache`, `maven-wrapper-dists`).
+        target_id: String,
+    },
 }
 
 /// A deletion candidate that has passed parse/validation pipeline construction.
@@ -285,6 +293,43 @@ impl ValidatedItem {
             source: ValidatedSource::Tier3ProjectDirectory {
                 target_id: logical_target_id,
             },
+            risk: Some(Risk::Caution),
+        })
+    }
+
+    /// Construct a validated whole-cache root item (issue #41).
+    ///
+    /// `path` is the entire cache directory and is also the `target_root`:
+    /// the remover cleans its contents and then removes the root itself. The
+    /// root must pass the strict Tier 3 root policy (protected paths, link
+    /// points, depth >= 3, must exist). Age filtering is disabled for this
+    /// source so the cache is never left partially cleared by Minimum Age.
+    pub fn from_whole_cache_root(
+        id: impl Into<String>,
+        target_id: impl Into<String>,
+        path: impl Into<String>,
+        size_bytes: u64,
+    ) -> Result<Self, String> {
+        let id = id.into();
+        let target_id = target_id.into();
+        let path = path.into();
+        let verdict = policy::validate_tier3_target_root(&path);
+        if !verdict.allowed {
+            return Err(format!("whole-cache root not allowed: {}", verdict.reason));
+        }
+        let canon = CanonicalPath::parse_lexical(&path)
+            .map_err(|e| format!("invalid whole-cache root: {e}"))?
+            .to_string();
+        Ok(Self {
+            id,
+            target_root: canon.clone(),
+            path: canon,
+            size_bytes,
+            mtime_unix_secs: None,
+            source: ValidatedSource::WholeCache {
+                target_id: target_id.clone(),
+            },
+            target_id,
             risk: Some(Risk::Caution),
         })
     }
@@ -600,6 +645,15 @@ fn apply_process_outcome(
     }
 }
 
+/// Whether the item's source removes the directory root after its contents
+/// are cleaned (Tier 3 stale project directories and issue #41 whole caches).
+fn source_removes_root_after_contents(source: &ValidatedSource) -> bool {
+    matches!(
+        source,
+        ValidatedSource::Tier3ProjectDirectory { .. } | ValidatedSource::WholeCache { .. }
+    )
+}
+
 /// Fold completed child bytes into a Tier 3 root outcome that did not delete
 /// the root itself. A successful `Deleted` already accounts for them; a
 /// `Skipped` or `Aborted` root must not drop the work done on its children.
@@ -720,8 +774,9 @@ fn process_item(
             let contents = clean_directory_contents(item, opts, journal, deleted_total, report)?;
             let outcome = contents.outcome;
             if let ProcessOutcome::Deleted(bytes) = outcome {
-                // For Tier 3 stale project directories, remove the now-cleaned directory root itself.
-                if matches!(item.source, ValidatedSource::Tier3ProjectDirectory { .. }) {
+                // Tier 3 stale project directories and issue #41 whole-cache
+                // targets remove the now-cleaned directory root itself.
+                if source_removes_root_after_contents(&item.source) {
                     if let Err(reason) = ensure_target_root_safe(&item.target_root) {
                         // The final root safety check aborted after the children
                         // were deleted; keep their bytes instead of reporting zero.
@@ -1373,7 +1428,8 @@ fn revalidate_handle(
         ValidatedSource::AllowlistedTarget { .. }
         | ValidatedSource::CustomPath
         | ValidatedSource::Tier3ProjectDirectory { .. }
-        | ValidatedSource::Tier3RecycleBin => {}
+        | ValidatedSource::Tier3RecycleBin
+        | ValidatedSource::WholeCache { .. } => {}
     }
 
     // 2) Protected Path exclusion (Container & Subtree via canonical handle identity).
@@ -1391,9 +1447,7 @@ fn revalidate_handle(
         return Err("aborted: handle escaped target root".to_string());
     }
     if final_canon.is_same_path(&target_root) {
-        if !(allow_delete_root
-            && matches!(item.source, ValidatedSource::Tier3ProjectDirectory { .. }))
-        {
+        if !(allow_delete_root && source_removes_root_after_contents(&item.source)) {
             // Must not delete the target/custom/recycle-bin root itself.
             return Err("Skipped: target root must not be deleted".to_string());
         }
@@ -1428,10 +1482,11 @@ fn revalidate_handle(
     // NTFS bumps directory LastWriteTime when we delete children inside it during contents clean;
     // allow skipping age checks only for directories we actually emptied in this run. TOCTOU:
     // if replaced by file/reparse, age checks must still run.
-    let skip_age_check = ignore_emptied_dir_age
-        && inspection_is_directory(inspection)
-        && inspection.reparse_tag == 0
-        && matches!(inspection.reparse, ReparseTagClass::NotReparse);
+    let skip_age_check = matches!(item.source, ValidatedSource::WholeCache { .. })
+        || (ignore_emptied_dir_age
+            && inspection_is_directory(inspection)
+            && inspection.reparse_tag == 0
+            && matches!(inspection.reparse, ReparseTagClass::NotReparse));
     if !skip_age_check {
         let mtime_secs = filetime_to_unix_secs(inspection.last_write_time);
         let mtime = UNIX_EPOCH + Duration::from_secs(mtime_secs);

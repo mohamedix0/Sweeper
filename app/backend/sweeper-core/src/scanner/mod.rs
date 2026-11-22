@@ -423,6 +423,14 @@ pub fn scan_with_settings_options_current_elevation_with_progress(
     )
 }
 
+/// Whether a target id is an issue #41 whole-cache Target, derived from the
+/// Allowlist so the bridge never hardcodes cache ids.
+pub fn is_whole_cache_target_id(target_id: &str) -> bool {
+    sweeper_knowledge::embedded_targets()
+        .iter()
+        .any(|t| t.id == target_id && t.scope == sweeper_knowledge::Scope::WholeCache)
+}
+
 pub(super) fn empty_target_result(meta: TargetResultMeta) -> TargetScanResult {
     TargetScanResult {
         target_id: meta.target_id,

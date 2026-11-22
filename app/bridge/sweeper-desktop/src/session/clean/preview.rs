@@ -6,6 +6,7 @@ use sweeper_contract::{
 };
 use sweeper_core::analyzer;
 use sweeper_core::remover::ValidatedItem;
+use sweeper_core::scanner::is_whole_cache_target_id;
 
 use super::super::mapping::sanitize_analyzer_build_msg;
 use super::super::support::{find_containing_root, hash_selection, SessionIdRef};
@@ -307,6 +308,18 @@ impl SessionStore {
         item: &StoredItem,
         target_root: String,
     ) -> Result<ValidatedItem, ContractError> {
+        if is_whole_cache_target_id(&item.target_id) {
+            // Issue #41: a whole-cache item represents the entire cache root.
+            return ValidatedItem::from_whole_cache_root(
+                item.dto.id.clone(),
+                item.target_id.clone(),
+                item.dto.path.clone(),
+                item.dto.size.get(),
+            )
+            .map_err(|_| ContractError::InvalidInput {
+                reason: "selected item failed validation".to_string(),
+            });
+        }
         if matches!(
             item.target_id.as_str(),
             "stale-rust-target" | "stale-node-modules"

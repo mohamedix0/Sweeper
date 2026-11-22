@@ -67,7 +67,7 @@ pub struct LintTarget {
     pub known_folder: String,
     /// Relative subpath under the known folder.
     pub relative_subpath: String,
-    /// Scope (contents-only invariant expected).
+    /// Scope (`contents` or `whole_cache`; both validated strictly).
     #[serde(default = "default_scope")]
     pub scope: String,
     /// Minimum age in hours.
@@ -168,8 +168,17 @@ fn validate_target(t: &LintTarget) -> Result<(), LintError> {
             ))
         }
     }
-    if t.scope != "contents" {
-        return Err(terr(&t.id, "scope must be \"contents\""));
+    match t.scope.as_str() {
+        "contents" | "whole_cache" => {}
+        other => return Err(terr(&t.id, format!("invalid scope `{other}`"))),
+    }
+    // Whole-cache targets are removed as one unit; per-file age-based deletion
+    // is prohibited (issue #41). No minimum age may apply to them.
+    if t.scope == "whole_cache" && t.min_age_hours != 0 {
+        return Err(terr(
+            &t.id,
+            "whole_cache scope forbids per-file age-based deletion (min_age_hours must be 0)",
+        ));
     }
     validate_known_folder(&t.id, &t.known_folder)?;
     let segments = validate_relative_subpath(&t.id, &t.relative_subpath)?;

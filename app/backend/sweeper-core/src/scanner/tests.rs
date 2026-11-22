@@ -1,4 +1,5 @@
 use super::*;
+use crate::scanner::allowlist::{scan_resolved_roots, ResolvedRootsScanCtx};
 use sweeper_knowledge::{KnownFolder, Risk, Scope, Tier};
 
 fn sample_target(id: &str, rel: &str) -> TargetDefinition {
@@ -21,6 +22,57 @@ fn rejects_caller_supplied_target_shapes_via_lint() {
     let bad = vec![sample_target("bad", "Foo\\**\\Bar")];
     let err = scan_targets(bad, 24).unwrap_err().to_string();
     assert!(err.contains("**") || err.contains("glob"), "{err}");
+}
+
+#[test]
+fn whole_cache_scan_emits_single_root_item_with_all_files_age_eligible() {
+    let sb = sweeper_testkit::Sandbox::new();
+    let root = sb.create_dir("uv-cache").unwrap();
+    let nested = root.join("v1");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("a.bin"), b"aaa").unwrap();
+    std::fs::write(nested.join("b.bin"), b"bbbb").unwrap();
+    let canon = CanonicalPath::from_existing_path(&root.to_string_lossy())
+        .unwrap()
+        .into_canonical();
+
+    let target = TargetDefinition {
+        id: "uv-cache".to_string(),
+        name: "uv Cache".to_string(),
+        tier: Tier::Tier2,
+        risk: Risk::Caution,
+        known_folder: KnownFolder::LocalAppData,
+        relative_subpath: r"uv\cache".to_string(),
+        scope: Scope::WholeCache,
+        min_age_hours: 0,
+        description: "test".to_string(),
+        requires_elevation: false,
+    };
+    let roots = vec![(target.id.clone(), canon.clone())];
+    let mut progress =
+        ScanProgressRuntime::new(1, std::sync::Arc::new(AtomicBool::new(false)), None);
+    let mut ctx = ResolvedRootsScanCtx {
+        target: &target,
+        roots: &roots,
+        min_age: Duration::from_secs(24 * 3600),
+        now: SystemTime::now(),
+        progress: &mut progress,
+    };
+    let mut out = empty_target_result(TargetResultMeta {
+        target_id: target.id.clone(),
+        target_name: target.name.clone(),
+        tier: target.tier,
+        risk: target.risk,
+    });
+
+    scan_resolved_roots(&mut ctx, &mut out).expect("whole-cache scan");
+
+    assert_eq!(out.items.len(), 1, "whole cache must be a single item");
+    assert_eq!(out.items[0].path, canon.as_str());
+    assert!(out.items[0].age_eligible, "no per-file age filtering");
+    assert_eq!(out.items[0].size, 7);
+    assert_eq!(out.eligible_bytes, 7);
+    assert_eq!(out.eligible_count, 1);
 }
 
 fn assert_redirected_temp_guard_disabled(candidate: &str, expected_reason_fragment: &str) {
