@@ -140,9 +140,12 @@ fn whole_cache_estimate_matches_deleted_bytes_with_node_modules() {
         4096 + 1024,
         "node_modules bytes must be in the Preview estimate"
     );
+    let canary =
+        sweeper_testkit::CanaryTree::seed_external("whole-cache-parity").expect("seed canary");
     let report = clean_whole_cache(&sb, &canon, estimated);
     assert_estimate_and_clean(&report, &root, estimated);
     sb.assert_sentinel_present();
+    canary.verify().expect("canary must remain intact");
 }
 
 #[test]
