@@ -126,7 +126,11 @@ jobs:
   mutation-gate:
     name: Mutation gate (cargo-mutants >= 95% policy/paths)
     runs-on: windows-latest
-    timeout-minutes: 45
+    # cargo-mutants rebuilds and tests the workspace per mutant. Runtime has
+    # grown to ~45-50 min on hosted runners; 45 min caused repeated hard
+    # timeouts ("operation was canceled") with the 95% score gate otherwise
+    # satisfiable. Allow headroom so the policy gate can actually conclude.
+    timeout-minutes: 90
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
     defaults:
