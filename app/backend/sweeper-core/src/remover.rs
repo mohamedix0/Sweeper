@@ -17,9 +17,11 @@ use crate::journal::{self, JournalError, JournalWriter};
 use crate::paths::CanonicalPath;
 use crate::policy;
 
+mod case_variant;
 mod clean_progress;
 mod remover_whole_cache;
 
+use case_variant::reject_case_distinct_sibling;
 use clean_progress::{emit_item_progress, CleanProgressThrottle, ItemProgress};
 use remover_whole_cache::{age_check_applies, whole_cache_partial_outcome};
 
@@ -1419,7 +1421,7 @@ fn delete_path_entry_inner(
 
 fn revalidate_handle(
     item: &ValidatedItem,
-    _requested_path: &str,
+    requested_path: &str,
     inspection: &sweeper_winfs::HandleInspection,
     opts: &CleanOptions,
     allow_delete_root: bool,
@@ -1430,6 +1432,8 @@ fn revalidate_handle(
         .map_err(|e| format!("Skipped: final path invalid: {e}"))?;
     let target_root = CanonicalPath::parse_lexical(&item.target_root)
         .map_err(|e| format!("Skipped: target root invalid: {e}"))?;
+
+    reject_confirmed_path_redirect(&final_canon, requested_path, &target_root)?;
 
     // 1) Authorized source (allowlisted target, validated custom path, or opt-in Tier 3 conditional target).
     match &item.source {
@@ -1504,6 +1508,39 @@ fn revalidate_handle(
         }
     }
 
+    Ok(())
+}
+
+/// Reject a confirmed path whose handle-authoritative resolution no longer agrees
+/// with it (D1 / ADR 0003).
+///
+/// `inspection.final_path` resolves every component of the path used for the
+/// open, while `FILE_FLAG_OPEN_REPARSE_POINT` protects only the final component.
+/// An interior junction can therefore be traversed during the open and removed
+/// before this check, so an ancestor-only re-check would miss it: the handle
+/// then targets an unselected sibling that is still inside the target root.
+/// Comparing the two canonical paths (case-insensitive) closes that window. The
+/// ancestor re-check is defence in depth for a junction inserted after the open.
+/// The final component is excluded from the ancestor check so an item that is
+/// itself a Link Point can still be unlinked.
+fn reject_confirmed_path_redirect(
+    final_canon: &CanonicalPath,
+    requested_path: &str,
+    target_root: &CanonicalPath,
+) -> Result<(), String> {
+    let requested_canon = CanonicalPath::parse_lexical(requested_path)
+        .map_err(|e| format!("Skipped: requested path invalid: {e}"))?;
+    if !final_canon.is_same_path(&requested_canon) {
+        return Err("aborted: escape via handle final path divergence from confirmed path (link point traversed under target root)".to_string());
+    }
+    reject_case_distinct_sibling(final_canon, &requested_canon)?;
+    if path_has_link_point_ancestor(&requested_canon, target_root, true)
+        .map_err(|e| format!("Skipped: requested-path ancestor check failed: {e}"))?
+    {
+        return Err(
+            "aborted: requested-path ancestor link point detected under target root".to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -1873,6 +1910,49 @@ pub fn validated_item_for_tests(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn handle_final_path_divergence_from_confirmed_path_aborts() {
+        // Residual D1 TOCTOU: the handle was opened while `sub` was a junction
+        // to `keep`; the junction was swapped back to an ordinary directory
+        // before revalidation. The ancestor re-check alone now sees no Link
+        // Point, but the handle still targets the unselected `keep/victim.txt`.
+        let target_root = r"C:\Temp\d1";
+        let item = validated_item_for_tests(
+            "d1-race",
+            "test-target",
+            target_root,
+            r"C:\Temp\d1\sub\victim.txt",
+            14,
+            Some(0),
+            ValidatedSource::CustomPath,
+        );
+        let inspection = sweeper_winfs::HandleInspection {
+            final_path: r"C:\Temp\d1\keep\victim.txt".to_string(),
+            identity: sweeper_winfs::FileIdentity {
+                volume_serial: 1,
+                file_index: 1,
+            },
+            attributes: 0x80, // FILE_ATTRIBUTE_NORMAL
+            size: 14,
+            reparse: ReparseTagClass::NotReparse,
+            reparse_tag: 0,
+            last_write_time: (0, 0),
+        };
+        let opts = CleanOptions {
+            preview_estimated_bytes: 1024 * 1024,
+            min_age: Duration::from_secs(0),
+            now: SystemTime::now(),
+            journal_base_dir: None,
+        };
+
+        let reason = revalidate_handle(&item, item.path(), &inspection, &opts, false, false)
+            .expect_err("divergent handle final path must abort revalidation");
+        assert!(
+            reason.contains("escape"),
+            "reason must classify as an abort: {reason}"
+        );
+    }
 
     #[test]
     fn ancestor_chain_cache_precomputes_levels_and_stays_bounded() {
