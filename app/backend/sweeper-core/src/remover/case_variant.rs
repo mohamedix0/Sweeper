@@ -69,9 +69,9 @@ where
         if requested_segments[index] == final_segments[index] {
             continue;
         }
+        let parent = case_variant_ancestor(requested_canon, index);
         check_case_variant_segment(
-            requested_canon,
-            index,
+            Path::new(&parent),
             requested_segments[index],
             final_segments[index],
             &mut identity_of,
@@ -83,8 +83,7 @@ where
 /// Both spellings must open AND resolve to the same identity; any failure is
 /// denied by default because a missing spelling is not proof of identity.
 fn check_case_variant_segment<F>(
-    requested_canon: &CanonicalPath,
-    index: usize,
+    parent: &Path,
     requested_name: &str,
     final_name: &str,
     identity_of: &mut F,
@@ -92,8 +91,6 @@ fn check_case_variant_segment<F>(
 where
     F: FnMut(&Path) -> Result<FileIdentity, String>,
 {
-    let parent = case_variant_ancestor(requested_canon, index);
-    let parent = Path::new(&parent);
     let requested_identity = identity_of(&parent.join(requested_name)).map_err(|e| {
         format!("aborted: escape via case-variant requested entry open failure: {e}")
     })?;
