@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use sweeper_core::journal::{self, WriteFailure};
 use sweeper_core::remover::{self, CleanOptions, CleanProgress};
 use sweeper_testkit::Sandbox;
 
@@ -72,5 +73,73 @@ fn clean_progress_callbacks_are_bounded_and_final_totals_stay_accurate() {
     assert_eq!(last.completed_items, FILE_COUNT);
     assert_eq!(last.total_items, FILE_COUNT);
     assert_eq!(last.bytes_freed_so_far, FILE_COUNT);
+    assert_sentinel_intact(&sb);
+}
+
+/// CodeRabbit follow-up: a fatal journal failure after a deletion already took
+/// place must still deliver one forced terminal snapshot, even when every item
+/// finished below both throttle thresholds (so the pending update was never
+/// emitted on its own).
+#[test]
+fn journal_failure_flushes_final_progress_snapshot() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("target").unwrap();
+    let journal_dir = sb.create_dir("journal").unwrap();
+
+    let a = target_root.join("a.txt");
+    let b = target_root.join("b.txt");
+    let c = target_root.join("c.txt");
+    for path in [&a, &b, &c] {
+        write_file(path, b"payload");
+        set_filetime(path, old_mtime_secs());
+    }
+    let items = vec![
+        make_item("item-a", &target_root, &a, 7),
+        make_item("item-b", &target_root, &b, 7),
+        make_item("item-c", &target_root, &c, 7),
+    ];
+
+    // A's outcome write fails and its repair fails too, poisoning the journal;
+    // B's intent write then fails and stops the batch with A already deleted.
+    journal::fail_next_best_effort_outcome(WriteFailure::AfterPrefix);
+    journal::fail_outcome_repair_once();
+
+    let mut callbacks: Vec<CleanProgress> = Vec::new();
+    let report = remover::execute_clean_with_progress(
+        items,
+        CleanOptions {
+            preview_estimated_bytes: 1024,
+            min_age: Duration::from_secs(24 * 3600),
+            now: now(),
+            journal_base_dir: Some(journal_dir),
+        },
+        |progress| callbacks.push(progress),
+    )
+    .unwrap();
+
+    assert!(
+        report.aborted,
+        "journal failure must abort: {:?}",
+        report.abort_reason
+    );
+    assert!(
+        !report.journal_errors.is_empty(),
+        "the journal failure must be surfaced"
+    );
+    assert_eq!(report.bytes_freed, 7, "A's deletion must be retained");
+
+    let last = callbacks.last().expect(
+        "a terminal progress snapshot must be emitted even when the journal failure short-circuits the run",
+    );
+    assert_eq!(last.status, "aborted");
+    assert_eq!(last.total_items, 3);
+    assert_eq!(
+        last.completed_items, 1,
+        "only A completed before B's intent write failed"
+    );
+    assert_eq!(
+        last.bytes_freed_so_far, report.bytes_freed,
+        "final progress must match the returned report"
+    );
     assert_sentinel_intact(&sb);
 }

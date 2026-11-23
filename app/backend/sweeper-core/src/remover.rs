@@ -462,12 +462,19 @@ where
                 &mut progress_throttle,
                 &mut on_progress,
             ) {
-                return Ok(stop_after_journal_failure(
-                    &mut journal,
-                    report,
-                    err,
-                    &items[index..],
-                ));
+                let report = stop_after_journal_failure(&mut journal, report, err, &items[index..]);
+                emit_item_progress(
+                    &mut progress_throttle,
+                    &mut on_progress,
+                    ItemProgress {
+                        item,
+                        completed,
+                        total_items,
+                        bytes_freed: report.bytes_freed,
+                        status: "aborted".to_string(),
+                    },
+                );
+                return Ok(report);
             }
             continue;
         }
@@ -479,12 +486,19 @@ where
                 // An intent-write failure stops further deletion, but the
                 // deletions already completed and all journal errors collected
                 // so far must still reach the caller in a partial report.
-                return Ok(stop_after_journal_failure(
-                    &mut journal,
-                    report,
-                    err,
-                    &items[index..],
-                ));
+                let report = stop_after_journal_failure(&mut journal, report, err, &items[index..]);
+                emit_item_progress(
+                    &mut progress_throttle,
+                    &mut on_progress,
+                    ItemProgress {
+                        item,
+                        completed,
+                        total_items,
+                        bytes_freed: report.bytes_freed,
+                        status: "aborted".to_string(),
+                    },
+                );
+                return Ok(report);
             }
         };
         let status = apply_process_outcome(item, outcome, &mut report);
