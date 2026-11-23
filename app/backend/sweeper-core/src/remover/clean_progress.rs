@@ -5,7 +5,8 @@
 
 use std::time::{Duration, Instant};
 
-use super::{CleanProgress, ValidatedItem};
+use super::{stop_after_journal_failure, CleanError, CleanProgress, CleanReport, ValidatedItem};
+use crate::journal::JournalWriter;
 
 const CLEAN_PROGRESS_ITEM_THRESHOLD: u64 = 64;
 const CLEAN_PROGRESS_TIME_THRESHOLD: Duration = Duration::from_millis(100);
@@ -96,4 +97,42 @@ pub(super) fn emit_item_progress<F>(
         },
         terminal,
     );
+}
+
+/// Context for finalizing a Clean stopped by a journal failure. Bundling the
+/// borrowed state keeps `stop_and_flush` within the four-argument limit.
+pub(super) struct FailureProgress<'a, F> {
+    pub(super) journal: &'a mut JournalWriter,
+    pub(super) throttle: &'a mut CleanProgressThrottle,
+    pub(super) on_progress: &'a mut F,
+    pub(super) item: &'a ValidatedItem,
+    pub(super) completed: u64,
+    pub(super) total_items: u64,
+}
+
+/// Finalize a Clean after a fatal journal failure and force its last progress
+/// snapshot past the throttle. The `aborted` status is a terminal update, so a
+/// deletion completed below both throttle thresholds still reaches the caller.
+pub(super) fn stop_and_flush<F>(
+    report: CleanReport,
+    err: CleanError,
+    remaining: &[ValidatedItem],
+    ctx: &mut FailureProgress<'_, F>,
+) -> CleanReport
+where
+    F: FnMut(CleanProgress),
+{
+    let report = stop_after_journal_failure(ctx.journal, report, err, remaining);
+    emit_item_progress(
+        ctx.throttle,
+        ctx.on_progress,
+        ItemProgress {
+            item: ctx.item,
+            completed: ctx.completed,
+            total_items: ctx.total_items,
+            bytes_freed: report.bytes_freed,
+            status: "aborted".to_string(),
+        },
+    );
+    report
 }

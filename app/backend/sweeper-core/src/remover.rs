@@ -22,7 +22,9 @@ mod clean_progress;
 mod remover_whole_cache;
 
 use case_variant::reject_case_distinct_sibling;
-use clean_progress::{emit_item_progress, CleanProgressThrottle, ItemProgress};
+use clean_progress::{
+    emit_item_progress, stop_and_flush, CleanProgressThrottle, FailureProgress, ItemProgress,
+};
 use remover_whole_cache::{age_check_applies, whole_cache_partial_outcome};
 
 /// Errors from clean/remover operations.
@@ -435,6 +437,9 @@ pub fn execute_clean(
 ///
 /// Safety-critical: revalidates on opened handles, journals intent before deletion and outcomes after,
 /// aborts on 120% overrun or target-root escape, and uses an abort-on-panic guard.
+// Keep the two failure-flush call sites compact so this method stays under the
+// large-method threshold; rustfmt would otherwise expand each context literal.
+#[rustfmt::skip]
 pub fn execute_clean_with_progress<F>(
     items: Vec<ValidatedItem>,
     opts: CleanOptions,
@@ -462,19 +467,10 @@ where
                 &mut progress_throttle,
                 &mut on_progress,
             ) {
-                let report = stop_after_journal_failure(&mut journal, report, err, &items[index..]);
-                emit_item_progress(
-                    &mut progress_throttle,
-                    &mut on_progress,
-                    ItemProgress {
-                        item,
-                        completed,
-                        total_items,
-                        bytes_freed: report.bytes_freed,
-                        status: "aborted".to_string(),
-                    },
-                );
-                return Ok(report);
+                return Ok(stop_and_flush(report, err, &items[index..], &mut FailureProgress {
+                    journal: &mut journal, throttle: &mut progress_throttle, on_progress: &mut on_progress,
+                    item, completed, total_items,
+                }));
             }
             continue;
         }
@@ -486,19 +482,10 @@ where
                 // An intent-write failure stops further deletion, but the
                 // deletions already completed and all journal errors collected
                 // so far must still reach the caller in a partial report.
-                let report = stop_after_journal_failure(&mut journal, report, err, &items[index..]);
-                emit_item_progress(
-                    &mut progress_throttle,
-                    &mut on_progress,
-                    ItemProgress {
-                        item,
-                        completed,
-                        total_items,
-                        bytes_freed: report.bytes_freed,
-                        status: "aborted".to_string(),
-                    },
-                );
-                return Ok(report);
+                return Ok(stop_and_flush(report, err, &items[index..], &mut FailureProgress {
+                    journal: &mut journal, throttle: &mut progress_throttle, on_progress: &mut on_progress,
+                    item, completed, total_items,
+                }));
             }
         };
         let status = apply_process_outcome(item, outcome, &mut report);
