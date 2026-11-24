@@ -1092,6 +1092,59 @@ pub fn knowledge_explanation(item_id: &str) -> Option<(String, String, Risk)> {
 mod tests {
     use super::segment_pattern_matches;
 
+    /// Regression for the owned-record assembly path (#133 incremental release):
+    /// consuming the map must preserve exact aggregate totals and the tree
+    /// shape, so releasing records during emission cannot change user-visible
+    /// sizes/counts.
+    #[test]
+    fn owned_records_build_tree_with_exact_totals() {
+        use std::collections::HashMap;
+
+        use super::{
+            build_annotation_context, build_tree, canonical_key, EligibilitySettings,
+            TreeBuildLimits,
+        };
+        use crate::analyzer::walker::DirRecord;
+
+        let root = "C:\\root";
+        let child = "C:\\root\\child";
+        let mut root_rec = DirRecord::new(root.to_string(), "root".to_string(), None);
+        root_rec.own_bytes = 10;
+        root_rec.own_file_count = 1;
+        root_rec.children_dirs.push(child.to_string());
+        let mut child_rec = DirRecord::new(
+            child.to_string(),
+            "child".to_string(),
+            Some(root.to_string()),
+        );
+        child_rec.own_bytes = 5;
+        child_rec.own_file_count = 2;
+
+        let mut records = HashMap::new();
+        records.insert(canonical_key(root), root_rec);
+        records.insert(canonical_key(child), child_rec);
+
+        let ctx = build_annotation_context();
+        let tree = build_tree(
+            records,
+            &canonical_key(root),
+            &ctx,
+            &EligibilitySettings::default(),
+            TreeBuildLimits {
+                max_children_per_dir: 8,
+                max_tree_depth: 4,
+            },
+        )
+        .expect("root record was inserted");
+        assert_eq!(tree.path, root);
+        assert_eq!(tree.size_bytes, 15);
+        assert_eq!(tree.item_count, 4);
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(tree.children[0].path, child);
+        assert_eq!(tree.children[0].size_bytes, 5);
+        assert_eq!(tree.children[0].item_count, 2);
+    }
+
     /// F6 regression: during `build_annotation_context`, a multi-byte directory
     /// name can satisfy the old byte-length guard while the slice offset falls
     /// mid-character. A verdict must be returned instead of a panic.
