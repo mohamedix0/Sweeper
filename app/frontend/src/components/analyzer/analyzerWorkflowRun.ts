@@ -56,14 +56,14 @@ function autoInspectId(root: AnalyzerNodeDto): string {
   return root.id;
 }
 
-/** Find a node in a freshly returned tree (the render-time map is stale here). */
-function analyzerNodeById(root: AnalyzerNodeDto, id: string): AnalyzerNodeDto | null {
-  if (root.id === id) return root;
+/** Known identity from a freshly returned tree (the render-time map is stale here). */
+function knownNodeById(root: AnalyzerNodeDto, id: string): ExplanationFallback | undefined {
+  if (root.id === id) return { title: root.name, risk: root.risk };
   for (const child of root.children ?? []) {
-    const hit = analyzerNodeById(child, id);
+    const hit = knownNodeById(child, id);
     if (hit) return hit;
   }
-  return null;
+  return undefined;
 }
 
 export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
@@ -103,11 +103,7 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
     // Use the fresh result's node for the known identity: the caller's
     // render-time `d.nodesById` is still empty on the first analysis (b1).
     const autoId = autoInspectId(res.root);
-    const autoNode = analyzerNodeById(res.root, autoId);
-    args.inspectNode({
-      id: autoId,
-      known: autoNode ? { title: autoNode.name, risk: autoNode.risk } : undefined,
-    });
+    args.inspectNode({ id: autoId, known: knownNodeById(res.root, autoId) });
   } catch (e) {
     if (args.isCurrent()) args.setError(formatContractError(e));
   } finally {
