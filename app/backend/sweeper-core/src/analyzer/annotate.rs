@@ -1106,8 +1106,8 @@ mod tests {
         };
         use crate::analyzer::walker::DirRecord;
 
-        let root = "C:\\root";
-        let child = "C:\\root\\child";
+        let root = "C:\\Temp\\root";
+        let child = "C:\\Temp\\root\\child";
         let mut root_rec = DirRecord::new(root.to_string(), "root".to_string(), None);
         root_rec.own_bytes = 10;
         root_rec.own_file_count = 1;
