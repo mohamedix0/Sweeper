@@ -113,8 +113,36 @@ async function runExplainFailureCase() {
   }
 }
 
+async function runAutoInspectFailureCase() {
+  const user = userEvent.setup();
+  const analyzerResult = {
+    sessionId: 'an-auto-explain-fail', rootPath: 'C:\\', totalBytes: '10', totalItems: '1', scannedDirs: '1', scannedFiles: '1', cancelled: false, warnings: [],
+    root: {
+      ...rootNode(),
+      children: [{ id: 'n1', name: 'report.txt', path: 'C:\\Temp\\report.txt', isDir: false, sizeBytes: '10', itemCount: '1', risk: 'Safe', description: 'report', reason: null, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true, children: [] }],
+    },
+  } as StartAnalyzerResult;
+  const explainItem = vi.fn(async (_itemId: any) => { throw new Error('explain_item failed'); });
+  const client = { startAnalyzer: async () => analyzerResult, explainItem } as unknown as SweeperClient;
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    renderView({ client });
+    await user.click(screen.getByRole('button', { name: 'Analyze' }));
+    const inspector = await screen.findByLabelText('Analyzer inspector');
+    await waitFor(() => expect(within(inspector).getByTestId('explanation-unavailable-notice')).toBeInTheDocument());
+    // No tree-row click: the first auto-inspect must use the fresh analysis
+    // result's node identity, not the stale render-time map (go-hunting b1).
+    expect(within(inspector).getByText('report.txt', { selector: '.inspector-headline-name' })).toBeInTheDocument();
+    expect(within(inspector).queryByText('n1', { selector: '.inspector-headline-name' })).not.toBeInTheDocument();
+    expect(explainItem).toHaveBeenCalledWith('n1');
+  } finally {
+    warn.mockRestore();
+  }
+}
+
 describe('AnalyzerView behavior', () => {
   it('AnalyzerView surfaces an explicit notice when the single-node explainItem rejects', async () => { await runExplainFailureCase(); });
+  it('AnalyzerView keeps the known node name on the first auto-inspect when explainItem rejects', async () => { await runAutoInspectFailureCase(); });
   it('renders analyzer long-path progress in bounded overflow-safe container (Bug 3a)', async () => { await runProgressCase(); });
   it('AnalyzerView escapes VHDX PowerShell path as single-quoted literal in render and copy', async () => { await runVhdxCase(); });
   it('AnalyzerView exposes Use Preset with a neutral root preset', async () => { await runPresetCase(); });

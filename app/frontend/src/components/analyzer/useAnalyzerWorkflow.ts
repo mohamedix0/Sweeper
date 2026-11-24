@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type MutableRefObject } from 'react';
 import type { CleanProgressEvent, ExecuteCleanResponse, Settings, SweeperClient } from '../../api/client';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
-import type { PreviewResult } from '../cleanShared';
+import type { ExplanationFallback, PreviewResult } from '../cleanShared';
 import { BROWSE_PATHS, analyzerStatusKey, dedupeAnalyzerNodesByCoverage, isNodeSelectable, type AnalyzerStatusFilter } from './analyzerHelpers';
 import { convergeStop } from './analyzerStop';
 import { runAnalyzerAction } from './analyzerWorkflowRun';
@@ -62,9 +62,12 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
   const { args, s, d, m, p, allowDeleteUnknown, safeSelectableNodes, stop } = input;
   function invalidatePreviewRequest() { p.rev.current += 1; p.active.current += 1; p.setPreviewLoading(false); }
   function clearPreviewState() { p.setPreview(null); p.setCleanSummary(null); p.setCleanProgress(null); }
-  function inspectNodeById(id: string) {
+  function inspectNodeById(id: string, known?: ExplanationFallback) {
     const node = d.nodesById.get(id);
-    void s.inspectNode({ itemId: id, known: node ? { title: node.name, risk: node.risk } : undefined });
+    void s.inspectNode({
+      itemId: id,
+      known: known ?? (node ? { title: node.name, risk: node.risk } : undefined),
+    });
   }
   function resetAnalyzerSession(msg?: string) {
     invalidatePreviewRequest();
@@ -75,7 +78,7 @@ function createAnalyzerActions(input: { args: WfArgs; s: SessionModel; d: Derive
   async function runAnalyzer(run?: { path?: string }) {
     stop.stopRequested.current = false;
     const token = ++stop.runToken.current;
-    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, setRunningSessionId: s.setRunningSessionId, inspectNode: ({ id }) => inspectNodeById(id), setError: m.setError, setInfo: m.setInfo, isCurrent: () => stop.runToken.current === token });
+    await runAnalyzerAction({ client: args.client, pathOverride: run?.path, rootPath: s.rootPath, setRootPath: s.setRootPath, invalidatePreviewRequest, resetInspection: s.resetInspection, clearRunState: () => { m.setError(null); m.setInfo(null); clearPreviewState(); }, setSelectedIds: s.setSelectedIds, setResult: s.setResult, setExpanded: s.setExpanded, setShowAllAnalyzerNodes: s.setShowAllAnalyzerNodes, setAnalyzing: s.setAnalyzing, setProgress: s.setProgress, setSessionId: s.setSessionId, setStartedAt: s.setStartedAt, setAnalyzedPath: s.setAnalyzedPath, setRunningSessionId: s.setRunningSessionId, inspectNode: ({ id, known }) => inspectNodeById(id, known), setError: m.setError, setInfo: m.setInfo, isCurrent: () => stop.runToken.current === token });
   }
   async function stopAnalyzer() {
     // Stop is a one-way, one-shot action: the first press claims the in-flight
