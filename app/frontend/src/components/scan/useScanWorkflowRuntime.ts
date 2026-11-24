@@ -84,13 +84,22 @@ export function useReset(state: ScanState, invalidate: () => void) {
   }, [invalidate, setInfo, state]);
 }
 
+function knownScanItem(results: ScanResults | null, itemId: string) {
+  if (!results) return undefined;
+  for (const target of results.targets) {
+    const item = target.items.find((candidate) => candidate.id === itemId);
+    if (item) return { title: item.path, risk: target.risk };
+  }
+  return undefined;
+}
+
 export function useInspect(client: SweeperClient, state: ScanState) {
-  const { inspectReqIdRef, setInspected } = state;
+  const { inspectReqIdRef, setInspected, results } = state;
   return useCallback(async (itemId: string) => {
     const reqId = inspectReqIdRef.current + 1;
     inspectReqIdRef.current = reqId;
-    await inspectById({ client, itemId, reqId, ref: inspectReqIdRef, setInspected: setInspected as never });
-  }, [client, inspectReqIdRef, setInspected]);
+    await inspectById({ client, itemId, reqId, ref: inspectReqIdRef, setInspected: setInspected as never, known: knownScanItem(results, itemId) });
+  }, [client, inspectReqIdRef, setInspected, results]);
 }
 
 export function prepareScanState(state: ScanState, invalidate: () => void) {

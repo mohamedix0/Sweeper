@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ScanAndPreviewView } from './components/ScanAndPreviewView';
 import type { ScanResults, Settings, SweeperClient } from './api/client';
 
@@ -170,7 +170,29 @@ async function runGroupBadgeAndIndeterminateCase() {
   expect(within(within(customGroup).getByLabelText('Inspect Custom Path (Unknown)')).getByLabelText('Status Skipped')).toHaveTextContent(/Skipped · Unverified/);
 }
 
+async function runExplainFailureCase() {
+  const user = userEvent.setup();
+  const scanResults = threeItemResults({ sessionId: 'scan-explain-fail' });
+  const explainItem = vi.fn(async (_itemId: any) => { throw new Error('explain_item failed'); });
+  const client = { startScan: async () => ({ sessionId: 'scan-explain-fail' }), getScanResults: async () => scanResults, explainItem } as unknown as SweeperClient;
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    renderView({ client });
+    await user.click(screen.getByRole('button', { name: 'Start Scan' }));
+    await screen.findByRole('heading', { name: 'Inspector' });
+    const inspector = screen.getByLabelText('Item inspector');
+    // Known identity stays visible; the failed explanation is no longer silent.
+    await waitFor(() => expect(within(inspector).getByText('a.tmp', { selector: '.inspector-headline-name' })).toBeInTheDocument());
+    expect(within(inspector).getByText(/Explanation unavailable/)).toBeInTheDocument();
+    expect(within(inspector).getByTestId('explanation-unavailable-notice')).toBeInTheDocument();
+    expect(explainItem).toHaveBeenCalledWith('a');
+  } finally {
+    warn.mockRestore();
+  }
+}
+
 describe('ScanAndPreviewView interaction', () => {
+  it('surfaces an explicit notice when the single-item explainItem rejects', async () => { await runExplainFailureCase(); });
   it('ScanAndPreviewView ignores stale explain responses and invalidates in-flight explain on scan reset', async () => { await runStaleExplainCase(); });
   it('ScanAndPreviewView does not hijack keydown from nested row controls and shows no hard-coded 24h at min age 0', async () => { await runKeydownCase(); });
   it('ScanAndPreviewView completes scan immediately while auto-inspect explainItem is pending and ignores stale auto-inspect after focus change', async () => { await runAutoInspectCase(); });
