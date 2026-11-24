@@ -166,14 +166,32 @@ function applyDeferredFeedback(options: {
   settings: Settings;
   refs: ReturnType<typeof useControllerRefs>;
   setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  setAcknowledged: React.Dispatch<React.SetStateAction<Settings | null>>;
 }): void {
   options.setDraft(reconcileDeferredFeedback({
     settings: options.settings,
     lastSubmitted: options.refs.lastSubmittedRef.current,
     draft: options.refs.draftRef.current,
   }));
+  acknowledgeMissingBaseline(options);
   options.refs.lastAppliedParentRef.current = options.settings;
   options.refs.deferredFeedbackRef.current = false;
+}
+
+// A controller can mount before the parent's boot load resolves. Its self-load
+// is then cancelled by the parent adopting its value, so `acknowledged` is
+// never populated (#136) and a draft equal to the parent value looks dirty
+// forever. Seed it from the parent value only while it is still missing: a
+// real save acknowledgement or a completed self-load stays authoritative, so
+// a genuine post-submit edit is not mistaken for saved (#92).
+function acknowledgeMissingBaseline(options: {
+  settings: Settings;
+  refs: ReturnType<typeof useControllerRefs>;
+  setAcknowledged: React.Dispatch<React.SetStateAction<Settings | null>>;
+}): void {
+  if (options.refs.acknowledgedRef.current) return;
+  options.refs.acknowledgedRef.current = options.settings;
+  options.setAcknowledged(options.settings);
 }
 
 // Effect body: mirror the draft into the ref bundle so save handlers and the
@@ -192,9 +210,11 @@ function adoptParentFeedback(options: {
   settings: Settings;
   refs: ReturnType<typeof useControllerRefs>;
   setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  setAcknowledged: React.Dispatch<React.SetStateAction<Settings | null>>;
   drained: boolean;
 }): void {
   if (options.drained) return;
+  acknowledgeMissingBaseline(options);
   options.refs.lastAppliedParentRef.current = options.settings;
   options.refs.deferredFeedbackRef.current = false;
   options.setDraft(options.settings);
@@ -208,9 +228,10 @@ function syncParentFeedback(options: {
   refs: ReturnType<typeof useControllerRefs>;
   queueVersion: number;
   setDraft: React.Dispatch<React.SetStateAction<Settings | null>>;
+  setAcknowledged: React.Dispatch<React.SetStateAction<Settings | null>>;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
 }): void {
-  const { settings, refs, queueVersion, setDraft, setLoading } = options;
+  const { settings, refs, queueVersion, setDraft, setAcknowledged, setLoading } = options;
   // A changed queue version means the save queue just became empty (on success
   // OR failure). Record it before the early returns so a drain that coincides
   // with a null `settings` is not mistaken for a later drain.
@@ -227,10 +248,10 @@ function syncParentFeedback(options: {
     return;
   }
   if (shouldReplayDeferredFeedback({ drained, hasDeferredFeedback: refs.deferredFeedbackRef.current })) {
-    applyDeferredFeedback({ settings, refs, setDraft });
+    applyDeferredFeedback({ settings, refs, setDraft, setAcknowledged });
     return;
   }
-  adoptParentFeedback({ settings, refs, setDraft, drained });
+  adoptParentFeedback({ settings, refs, setDraft, setAcknowledged, drained });
 }
 
 // Effect body: load settings from the client on mount when the parent has not
@@ -266,8 +287,8 @@ function useSettingsSync(args: ControllerArgs, ui: UiState, refs: ReturnType<typ
   const { draft, setDraft, setAcknowledged, setLoading, setError } = ui;
   useEffect(() => mirrorDraftIntoRef({ refs, draft }), [refs, draft]);
   useEffect(
-    () => syncParentFeedback({ settings, refs, queueVersion, setDraft, setLoading }),
-    [setDraft, setLoading, settings, queueVersion, refs],
+    () => syncParentFeedback({ settings, refs, queueVersion, setDraft, setAcknowledged, setLoading }),
+    [setDraft, setAcknowledged, setLoading, settings, queueVersion, refs],
   );
   useEffect(() => {
     if (settings) return;
