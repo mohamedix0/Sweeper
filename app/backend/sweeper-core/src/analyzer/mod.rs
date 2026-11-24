@@ -229,7 +229,7 @@ pub fn analyze_validated_root(
     let mut tree = assemble_analyzer_result(
         &root,
         AssemblyInput {
-            records: &walk.records,
+            records: walk.records,
             ctx: &ctx,
             settings: &settings,
             max_children_per_dir,
@@ -365,7 +365,8 @@ fn spawn_and_join_walkers(state: &Arc<walker::WalkState>, exec: WalkExec) {
 }
 
 struct AssemblyInput<'a> {
-    records: &'a HashMap<String, walker::DirRecord>,
+    // Owned so assembly can release each directory's record once emitted.
+    records: HashMap<String, walker::DirRecord>,
     ctx: &'a annotate::AnnotationContext,
     settings: &'a annotate::EligibilitySettings,
     max_children_per_dir: usize,

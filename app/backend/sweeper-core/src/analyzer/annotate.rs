@@ -307,8 +307,12 @@ fn push_build_children(
     }
 }
 
+/// Builds the tree from an owned record map so each directory's source record
+/// can be released as soon as its node is emitted. Aggregate totals are
+/// computed up front from the complete map, so incremental release does not
+/// change size/count values or the truncation warning.
 pub(super) fn build_tree(
-    records: &HashMap<String, DirRecord>,
+    mut records: HashMap<String, DirRecord>,
     root_key: &str,
     ctx: &AnnotationContext,
     settings: &EligibilitySettings,
@@ -317,7 +321,7 @@ pub(super) fn build_tree(
     if !records.contains_key(root_key) {
         return None;
     }
-    let totals = compute_directory_totals(records, root_key);
+    let totals = compute_directory_totals(&records, root_key);
     let mut built: HashMap<String, AnalyzerNode> = HashMap::new();
     let mut stack: Vec<(String, bool, usize)> = vec![(root_key.to_string(), false, 0)];
     let mut visited: HashSet<String> = HashSet::new();
@@ -326,14 +330,16 @@ pub(super) fn build_tree(
 
     while let Some((key, expanded, depth)) = stack.pop() {
         if expanded {
-            let rec = records.get(&key)?;
+            // Remove the record as its node is emitted so retained file
+            // metadata for completed directories is released incrementally.
+            let rec = records.remove(&key)?;
             let (size_bytes, item_count) = totals.get(&key).copied().unwrap_or((0, 0));
             let children = if depth < max_depth {
-                collect_directory_children(rec, &mut built, ctx, settings, max_children)
+                collect_directory_children(&rec, &mut built, ctx, settings, max_children)
             } else {
                 Vec::new()
             };
-            let node = build_directory_node(rec, size_bytes, item_count, children, ctx, settings);
+            let node = build_directory_node(&rec, size_bytes, item_count, children, ctx, settings);
             built.insert(key, node);
             continue;
         }
@@ -342,7 +348,7 @@ pub(super) fn build_tree(
         }
         stack.push((key.clone(), true, depth));
         if depth < max_depth {
-            push_build_children(&key, records, &built, &mut stack, depth);
+            push_build_children(&key, &records, &built, &mut stack, depth);
         }
     }
     built.remove(root_key)
