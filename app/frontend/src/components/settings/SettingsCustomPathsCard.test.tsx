@@ -40,6 +40,8 @@ describe('SettingsCustomPathsCard safety-setting label (#149)', () => {
     const checkbox = screen.getByLabelText('Allow deleting unknown folders');
     expect(checkbox).toBeInTheDocument();
     expect(checkbox).toHaveAttribute('type', 'checkbox');
+    // The scope clarification is the checkbox's accessible description.
+    expect(checkbox).toHaveAttribute('aria-describedby', 'allow-delete-unknown-scope-note');
 
     // Visible copy matches, including the note that the same field also gates
     // non-custom Unknown folders.
