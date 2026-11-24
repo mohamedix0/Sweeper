@@ -29,8 +29,15 @@ use super::log_ancestors::{
 use super::shared::lock_state_error;
 
 /// `get_settings` implementation.
+///
+/// The store's load/parse warnings are attached here — the command is the only
+/// place that owns the store lock when the response is built — so sanitization
+/// diagnostics reach the production UI rather than being visible only to tests
+/// (#146). The store DTO itself stays pure settings data.
 pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, ContractError> {
-    let settings = state.settings.lock().map_err(|_| lock_state_error())?.get();
+    let store = state.settings.lock().map_err(|_| lock_state_error())?;
+    let mut settings = store.get();
+    settings.warnings = store.warnings().to_vec();
     Ok(settings)
 }
 
@@ -42,7 +49,9 @@ pub fn get_settings<C: Clock>(state: &AppState<C>) -> Result<SettingsDto, Contra
 /// invalidates Scan sessions, an analyzer-affecting change (for example
 /// `allow_delete_unknown`) invalidates Analyzer sessions, and a no-op
 /// invalidates neither. The persist-first, error-propagating behaviour of
-/// `SettingsStore::update` is reused unchanged.
+/// `SettingsStore::update` is reused unchanged. The returned DTO carries the
+/// store's current sanitization warnings, so a reset is visible to the UI (#146),
+/// while the store's own DTO stays pure settings data.
 pub fn update_settings<C: Clock>(
     state: &AppState<C>,
     settings: SettingsDto,
@@ -50,7 +59,7 @@ pub fn update_settings<C: Clock>(
     let mut store = state.settings.lock().map_err(|_| lock_state_error())?;
     let prev_scan_gen = store.generation();
     let prev_analyzer_gen = store.analyzer_generation();
-    let updated = store.update(settings).map_err(|_| {
+    let mut updated = store.update(settings).map_err(|_| {
         // The persistence error can embed the absolute settings path and raw OS
         // error text. `Internal` is a sanitized, human-safe contract variant, so
         // only a fixed, path-free category crosses the IPC boundary. The failure
@@ -60,6 +69,7 @@ pub fn update_settings<C: Clock>(
             reason: "failed to persist settings".into(),
         }
     })?;
+    updated.warnings = store.warnings().to_vec();
     let scan_changed = store.generation() != prev_scan_gen;
     let analyzer_changed = store.analyzer_generation() != prev_analyzer_gen;
 
