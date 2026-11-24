@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import { normalizeDisplayPath } from '../../utils/format';
-import { CleanSummaryBlock, InspectorMetaGrid, InspectorTitleRow, PathActions, PathWell, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, copyText, type ExplainState, type PreviewResult } from '../cleanShared';
+import { CleanSummaryBlock, ExplanationUnavailableNotice, InspectorMetaGrid, InspectorTitleRow, PathActions, PathWell, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, copyText, type ExplainState, type PreviewResult } from '../cleanShared';
 import { deriveCalloutItemsFromSelection, type PreviewRiskCalloutItem, type PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 import { isCustomPathTargetId } from '../scan/scanHelpers';
 import { CloudIcon, DriveIcon, FileIcon, FolderIcon, HardDriveIcon, LinkIcon, ShieldIcon } from '../Icons';
@@ -120,6 +120,7 @@ function InspectorBody(props: AnalyzerInspectorProps & { node: AnalyzerNodeDto; 
   return (
     <>
       <InspectorTitleRow icon={leadingInspectorIcon(node)} title={inspectedTitle(props)} subtitle={nodeSubtitle(node)} badge={badgeFor(props.pill, node)} />
+      {props.inspected?.failed ? <ExplanationUnavailableNotice /> : null}
       <InspectorMetaGrid size={node.sizeBytes} extraLabel="Items" extraValue={<span className="num">{node.itemCount}</span>} eligibility={eligibilityText({ node, selectable: props.selectable, status: props.status })} />
       <Guidance show={showGuidance} node={node} selectable={props.selectable} allowDeleteUnknown={props.allowDeleteUnknown} />
       <VhdxBlock show={showVhdx} path={node.path} copied={props.copiedVhdxCmd} onCopy={props.copyVhdxCommand} />

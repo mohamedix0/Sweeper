@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { AnalyzerView } from './components/AnalyzerView';
@@ -86,7 +86,42 @@ async function runSmartQuoteCase() {
   await waitFor(() => expect(screen.getByText(/Optimize-VHD -Path/).closest('code')?.textContent).toBe(expectedCmd));
 }
 
+async function runExplainFailureCase(clickRow: boolean) {
+  const user = userEvent.setup();
+  const analyzerResult = {
+    sessionId: 'an-explain-fail', rootPath: 'C:\\', totalBytes: '10', totalItems: '1', scannedDirs: '1', scannedFiles: '1', cancelled: false, warnings: [],
+    root: {
+      ...rootNode(),
+      children: [{ id: 'n1', name: 'report.txt', path: 'C:\\Temp\\report.txt', isDir: false, sizeBytes: '10', itemCount: '1', risk: 'Safe', description: 'report', reason: null, tier: null, targetId: null, isLinkPoint: false, isCloudPlaceholder: false, displayOnly: false, selectable: true, children: [] }],
+    },
+  } as StartAnalyzerResult;
+  const explainItem = vi.fn(async (_itemId: any) => { throw new Error('explain_item failed'); });
+  const client = { startAnalyzer: async () => analyzerResult, explainItem } as unknown as SweeperClient;
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    renderView({ client });
+    await user.click(screen.getByRole('button', { name: 'Analyze' }));
+    await screen.findByRole('heading', { name: 'Analyzer Tree' });
+    if (clickRow) {
+      const row = (await screen.findAllByText('report.txt'))[0].closest('[role="treeitem"]') as HTMLElement;
+      await user.click(row);
+    }
+    const inspector = await screen.findByLabelText('Analyzer inspector');
+    await waitFor(() => expect(within(inspector).getByTestId('explanation-unavailable-notice')).toBeInTheDocument());
+    expect(within(inspector).getByText(/Explanation unavailable/)).toBeInTheDocument();
+    // With or without the row click, the headline must use the node's real
+    // name - never the raw id from failedExplanation (go-hunting b1).
+    expect(within(inspector).getByText('report.txt', { selector: '.inspector-headline-name' })).toBeInTheDocument();
+    expect(within(inspector).queryByText('n1', { selector: '.inspector-headline-name' })).not.toBeInTheDocument();
+    expect(explainItem).toHaveBeenCalledWith('n1');
+  } finally {
+    warn.mockRestore();
+  }
+}
+
 describe('AnalyzerView behavior', () => {
+  it('AnalyzerView surfaces an explicit notice when the single-node explainItem rejects', async () => { await runExplainFailureCase(true); });
+  it('AnalyzerView keeps the known node name on the first auto-inspect when explainItem rejects', async () => { await runExplainFailureCase(false); });
   it('renders analyzer long-path progress in bounded overflow-safe container (Bug 3a)', async () => { await runProgressCase(); });
   it('AnalyzerView escapes VHDX PowerShell path as single-quoted literal in render and copy', async () => { await runVhdxCase(); });
   it('AnalyzerView exposes Use Preset with a neutral root preset', async () => { await runPresetCase(); });

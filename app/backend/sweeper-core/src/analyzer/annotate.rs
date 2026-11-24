@@ -307,8 +307,12 @@ fn push_build_children(
     }
 }
 
+/// Builds the tree from an owned record map so each directory's source record
+/// can be released as soon as its node is emitted. Aggregate totals are
+/// computed up front from the complete map, so incremental release does not
+/// change size/count values or the truncation warning.
 pub(super) fn build_tree(
-    records: &HashMap<String, DirRecord>,
+    mut records: HashMap<String, DirRecord>,
     root_key: &str,
     ctx: &AnnotationContext,
     settings: &EligibilitySettings,
@@ -317,7 +321,7 @@ pub(super) fn build_tree(
     if !records.contains_key(root_key) {
         return None;
     }
-    let totals = compute_directory_totals(records, root_key);
+    let totals = compute_directory_totals(&records, root_key);
     let mut built: HashMap<String, AnalyzerNode> = HashMap::new();
     let mut stack: Vec<(String, bool, usize)> = vec![(root_key.to_string(), false, 0)];
     let mut visited: HashSet<String> = HashSet::new();
@@ -326,14 +330,16 @@ pub(super) fn build_tree(
 
     while let Some((key, expanded, depth)) = stack.pop() {
         if expanded {
-            let rec = records.get(&key)?;
+            // Remove the record as its node is emitted so retained file
+            // metadata for completed directories is released incrementally.
+            let rec = records.remove(&key)?;
             let (size_bytes, item_count) = totals.get(&key).copied().unwrap_or((0, 0));
             let children = if depth < max_depth {
-                collect_directory_children(rec, &mut built, ctx, settings, max_children)
+                collect_directory_children(&rec, &mut built, ctx, settings, max_children)
             } else {
                 Vec::new()
             };
-            let node = build_directory_node(rec, size_bytes, item_count, children, ctx, settings);
+            let node = build_directory_node(&rec, size_bytes, item_count, children, ctx, settings);
             built.insert(key, node);
             continue;
         }
@@ -342,7 +348,7 @@ pub(super) fn build_tree(
         }
         stack.push((key.clone(), true, depth));
         if depth < max_depth {
-            push_build_children(&key, records, &built, &mut stack, depth);
+            push_build_children(&key, &records, &built, &mut stack, depth);
         }
     }
     built.remove(root_key)
@@ -1085,6 +1091,59 @@ pub fn knowledge_explanation(item_id: &str) -> Option<(String, String, Risk)> {
 #[cfg(test)]
 mod tests {
     use super::segment_pattern_matches;
+
+    /// Regression for the owned-record assembly path (#133 incremental release):
+    /// consuming the map must preserve exact aggregate totals and the tree
+    /// shape, so releasing records during emission cannot change user-visible
+    /// sizes/counts.
+    #[test]
+    fn owned_records_build_tree_with_exact_totals() {
+        use std::collections::HashMap;
+
+        use super::{
+            build_annotation_context, build_tree, canonical_key, EligibilitySettings,
+            TreeBuildLimits,
+        };
+        use crate::analyzer::walker::DirRecord;
+
+        let root = "C:\\Temp\\root";
+        let child = "C:\\Temp\\root\\child";
+        let mut root_rec = DirRecord::new(root.to_string(), "root".to_string(), None);
+        root_rec.own_bytes = 10;
+        root_rec.own_file_count = 1;
+        root_rec.children_dirs.push(child.to_string());
+        let mut child_rec = DirRecord::new(
+            child.to_string(),
+            "child".to_string(),
+            Some(root.to_string()),
+        );
+        child_rec.own_bytes = 5;
+        child_rec.own_file_count = 2;
+
+        let mut records = HashMap::new();
+        records.insert(canonical_key(root), root_rec);
+        records.insert(canonical_key(child), child_rec);
+
+        let ctx = build_annotation_context();
+        let tree = build_tree(
+            records,
+            &canonical_key(root),
+            &ctx,
+            &EligibilitySettings::default(),
+            TreeBuildLimits {
+                max_children_per_dir: 8,
+                max_tree_depth: 4,
+            },
+        )
+        .expect("root record was inserted");
+        assert_eq!(tree.path, root);
+        assert_eq!(tree.size_bytes, 15);
+        assert_eq!(tree.item_count, 4);
+        assert_eq!(tree.children.len(), 1);
+        assert_eq!(tree.children[0].path, child);
+        assert_eq!(tree.children[0].size_bytes, 5);
+        assert_eq!(tree.children[0].item_count, 2);
+    }
 
     /// F6 regression: during `build_annotation_context`, a multi-byte directory
     /// name can satisfy the old byte-length guard while the slice offset falls

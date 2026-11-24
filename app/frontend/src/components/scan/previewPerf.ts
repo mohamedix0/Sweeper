@@ -3,8 +3,9 @@ import type { PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 import { calloutCopyFor } from '../previewRiskCalloutStrings';
 import { isCustomPathTargetId } from './scanHelpers';
 
-/** Shared fallback copy when the Knowledge Base explanation cannot be shown. */
-export const EXPLANATION_UNAVAILABLE = 'Explanation unavailable for this item — showing its known identity and risk only.';
+/** Single source of truth lives in cleanSharedCore so the inspector can reuse it. */
+export { EXPLANATION_UNAVAILABLE } from '../cleanSharedCore';
+import { EXPLANATION_UNAVAILABLE } from '../cleanSharedCore';
 
 /** Selections at or below this size remain explicit; only large ones are compacted. */
 export const COMPACT_SELECTION_THRESHOLD = 128;
