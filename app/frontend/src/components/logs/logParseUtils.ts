@@ -100,31 +100,23 @@ function bytesToBig(raw: unknown): bigint {
   try { return BigInt(text); } catch { return 0n; }
 }
 
-function isAggregateRoot(
-  root: Record<string, unknown>,
-  path: string,
-  index: Map<string, bigint> | undefined,
-): boolean {
-  if (!path) return false;
-  if (!index) return false;
-  const descendantBytes = index.get(path) ?? 0n;
-  if (descendantBytes === 0n) return false;
-  return bytesToBig(root.bytes ?? root.size ?? 0) >= descendantBytes;
-}
-
 /**
  * Issue #135: a Tier 3 / WholeCache root writes one `deleted` outcome per child
  * plus a root outcome whose `bytes` repeats the sum of those children. Summing
  * every `deleted` outcome double-counts reclaimed bytes.
  *
- * Return the original outcome references that are such aggregate roots so
- * callers can omit them from byte totals while keeping them for audit rows and
- * counts. Paths are normalized once and descendant bytes are indexed per target
- * ancestor, so classification is a single lookup per outcome (no O(n^2) scan).
+ * Return each deleted outcome's own byte contribution: for a root, its bytes
+ * minus the bytes of journaled descendants (mirroring the bridge's
+ * `root_contribution`, `bytes.saturating_sub(descendants)`). When every child
+ * was journaled the root contributes zero; when a child write failed, only the
+ * missing bytes are recovered instead of discarding the whole root. Ordinary
+ * outcomes contribute their own bytes unchanged. Paths are normalized once and
+ * descendant bytes are indexed per target ancestor, so this is one lookup per
+ * outcome with no O(n^2) scan.
  */
 export function aggregateDeletedOutcomes(
   outcomes: Record<string, unknown>[],
-): Set<Record<string, unknown>> {
+): Map<Record<string, unknown>, bigint> {
   const deleted = outcomes.filter((o) => String(o.status ?? '').toLowerCase() === 'deleted');
   const byTarget = new Map<string, Map<string, bigint>>();
   const normalizedPaths = new Map<Record<string, unknown>, string>();
@@ -144,13 +136,20 @@ export function aggregateDeletedOutcomes(
     }
   }
 
-  const aggregates = new Set<Record<string, unknown>>();
-  for (const root of deleted) {
-    const path = normalizedPaths.get(root) ?? '';
-    const target = String(root.target_id ?? '');
-    if (isAggregateRoot(root, path, byTarget.get(target))) aggregates.add(root);
+  const contributions = new Map<Record<string, unknown>, bigint>();
+  for (const outcome of deleted) {
+    const bytes = bytesToBig(outcome.bytes ?? outcome.size ?? 0);
+    const path = normalizedPaths.get(outcome) ?? '';
+    const target = String(outcome.target_id ?? '');
+    const descendantBytes = path ? byTarget.get(target)?.get(path) ?? 0n : 0n;
+    // A root with no journaled descendants is an ordinary deletion. When
+    // descendants exist, keep only the part of its bytes they do not cover.
+    const contribution = descendantBytes === 0n
+      ? bytes
+      : bytes > descendantBytes ? bytes - descendantBytes : 0n;
+    contributions.set(outcome, contribution);
   }
-  return aggregates;
+  return contributions;
 }
 
 export function outcomeAndIntent(objs: Record<string, unknown>[]) {

@@ -14,17 +14,16 @@ function cleanTitle(args: { freed: string | null; count: number }): string {
 }
 function summarizeClean(objs: Record<string, unknown>[], base: BaseSummary): LogSummary {
   const outcomes = cleanOutcomeRecords(objs);
-  const aggregates = aggregateDeletedOutcomes(outcomes);
+  const contributions = aggregateDeletedOutcomes(outcomes);
   let freedNum = 0n;
   let deletedCount = 0;
   for (const o of outcomes) {
     const status = String(o.status ?? '').toLowerCase();
     if (status !== 'deleted') continue;
     deletedCount += 1;
-    // Issue #135: skip the repeating root outcome when summing bytes.
-    if (aggregates.has(o)) continue;
-    const b = bytesToString(o.bytes ?? o.size ?? 0) ?? '0';
-    try { freedNum += BigInt(b); } catch { /* ignore */ }
+    // Issue #135: add only this outcome's own byte contribution (a root's
+    // bytes already represented by journaled children contribute zero).
+    freedNum += contributions.get(o) ?? 0n;
   }
   const freed = deletedCount > 0 || freedNum > 0n ? formatBytesString(freedNum.toString()) : null;
   return { title: cleanTitle({ freed, count: deletedCount }), subtitle: 'Completed', ...base, kind: 'clean' };

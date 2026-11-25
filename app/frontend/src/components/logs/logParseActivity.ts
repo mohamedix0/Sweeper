@@ -1,5 +1,5 @@
 import type { ActivitySummary, AuditRow, Flags } from './logParseTypes';
-import { aggregateDeletedOutcomes, bytesToString, cleanOutcomeRecords, countFrom, detectCleanScan, formatMaybeBytes, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
+import { aggregateDeletedOutcomes, cleanOutcomeRecords, countFrom, detectCleanScan, formatMaybeBytes, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
 import { parseAuditRows } from './logParseRows';
 import { pluralize } from '../../utils/format';
 
@@ -16,7 +16,7 @@ function countSkippedCategories(skippedFileRows: AuditRow[]): number {
 
 function cleanActivity(objs: Record<string, unknown>[]): ActivitySummary {
   const outcomes = cleanOutcomeRecords(objs);
-  const aggregates = aggregateDeletedOutcomes(outcomes);
+  const contributions = aggregateDeletedOutcomes(outcomes);
   let freed = 0n;
   let deletedCount = 0;
   let skippedCount = 0;
@@ -28,11 +28,9 @@ function cleanActivity(objs: Record<string, unknown>[]): ActivitySummary {
     if (status === 'deleted') {
       deletedCount += 1;
       if (target) cleanedCats.add(target);
-      // Issue #135: skip the repeating root outcome when summing bytes.
-      if (!aggregates.has(o)) {
-        const b = bytesToString(o.bytes ?? o.size ?? 0) ?? '0';
-        try { freed += BigInt(b); } catch { /* ignore */ }
-      }
+      // Issue #135: add only this outcome's own byte contribution (a root's
+      // bytes already represented by journaled children contribute zero).
+      freed += contributions.get(o) ?? 0n;
     } else if (status === 'skipped' || status === 'aborted') {
       skippedCount += 1;
       if (target) skippedCats.add(target);
