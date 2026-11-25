@@ -68,7 +68,7 @@ async explainItem(args: { itemId: string }) : Promise<Result<{ itemId: string; t
     else return { status: "error", error: e  as any };
 }
 },
-async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, ContractError>> {
+async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number; warnings?: string[] }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_settings") };
 } catch (e) {
@@ -76,7 +76,7 @@ async getSettings() : Promise<Result<{ enableTier1: boolean; enableTier2: boolea
     else return { status: "error", error: e  as any };
 }
 },
-async updateSettings(args: { settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number } }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number }, ContractError>> {
+async updateSettings(args: { settings: { enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number; warnings?: string[] } }) : Promise<Result<{ enableTier1: boolean; enableTier2: boolean; enableTier3: boolean; enableElevationTargets?: boolean; minAgeHours: number; allowDeleteUnknown: boolean; customPaths: string[]; staleProjectDays: number; warnings?: string[] }, ContractError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_settings", args) };
 } catch (e) {

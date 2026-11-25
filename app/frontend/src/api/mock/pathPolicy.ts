@@ -5,8 +5,11 @@
  * synthetic, clearly fictional path segments (never real user data):
  *   - a segment named `missing`  => path does not exist (no fallback to parent)
  *   - a segment named `linkpoint` => path is a Link Point (never followed)
- * Every other rule maps 1:1 to `sweeper-core::policy::validate_custom_path`
- * and `is_protected_for_selection`. Keep this file in sync with those rules.
+ * Every lexical rule maps 1:1 to `sweeper-core::paths::lexical_parse` (via
+ * `validate_custom_path`/`validate_custom_path_lexical`) and to
+ * `sweeper-core::policy::is_protected_for_selection`, including the reserved
+ * DOS device names, disallowed Unicode, and the 32,767-byte / 255-byte-per-
+ * segment length caps. Keep this file in sync with those rules.
  *
  * Policy comparisons are expressed over `PathSegment` domain values rather than
  * raw strings: a segment owns its ASCII case-insensitive identity, so no helper
@@ -85,9 +88,53 @@ function hasInvalidRawSyntax({ replaced, rest }: RawPath): boolean {
   return replaced.indexOf(':', 2) !== -1;
 }
 
-/** Backend `validate_segment` rejects '.', '..', trailing dots and spaces. */
+/** UTF-8 byte length, mirroring Rust `str::len()` used by the backend length caps. */
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * Backend `check_disallowed_unicode`: NUL/control characters (Unicode Cc),
+ * bidi overrides/isolates and fullwidth separator tricks are all rejected.
+ * The ranges mirror `sweeper-core::paths::check_disallowed_unicode` exactly.
+ */
+const DISALLOWED_UNICODE = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF\uFF0F\uFF3C\uFF1A\uFF0E]/u;
+
+/** Backend `is_reserved_dos_name` base names. */
+const RESERVED_DOS_NAMES: ReadonlySet<string> = new Set([
+  'CON', 'PRN', 'AUX', 'NUL',
+  'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+  'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+]);
+
+/** Superscript digits normalized to ASCII by backend `is_reserved_dos_name_unicode_variant`. */
+const SUPERSCRIPT_DIGITS: Readonly<Record<string, string>> = {
+  '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+};
+
+/**
+ * Backend `validate_segment` reserved-DOS-name check: uppercase base name before
+ * the optional extension, with superscript digit variants normalized to ASCII.
+ */
+function isReservedDosSegment(segment: PathSegment): boolean {
+  const base = segment.upper.split('.')[0];
+  const normalized = base.replace(/[¹²³⁴⁵⁶⁷⁸⁹]/g, (c) => SUPERSCRIPT_DIGITS[c]);
+  return RESERVED_DOS_NAMES.has(normalized);
+}
+
+/**
+ * Backend `validate_segment` plus the per-segment length cap from `lexical_parse`:
+ * '.', '..', trailing dots/spaces, over-long segments and reserved DOS names.
+ */
 function hasInvalidSegment(segments: readonly PathSegment[]): boolean {
-  return segments.some((s) => s.text === '.' || s.text === '..' || /[. ]$/.test(s.text));
+  return segments.some(
+    (s) =>
+      s.text === '.' ||
+      s.text === '..' ||
+      /[. ]$/.test(s.text) ||
+      utf8ByteLength(s.text) > 255 ||
+      isReservedDosSegment(s),
+  );
 }
 
 /**
@@ -98,6 +145,10 @@ function hasInvalidSegment(segments: readonly PathSegment[]): boolean {
  * protected container roots and the drive root stay valid here.
  */
 export function parseMockPath(input: string): ParsedMockPath | null {
+  // Backend `lexical_parse` rejects over-long inputs and disallowed Unicode
+  // before any structural/normalization work.
+  if (utf8ByteLength(input) > 32_767) return null;
+  if (DISALLOWED_UNICODE.test(input)) return null;
   if (!/^[A-Za-z]:[\\/]/.test(input)) return null;
   // Normalize separators once, then validate the raw structure. Empty or
   // malformed components are never filtered/trimmed into a valid-looking path.

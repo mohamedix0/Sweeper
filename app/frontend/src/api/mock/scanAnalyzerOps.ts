@@ -125,9 +125,16 @@ export function buildScanAnalyzerApi(ctx: MockCtx) {
       ctx.state.scanSeq += 1;
       const sessionId = 'mock-session-' + String(ctx.state.scanSeq);
       const { targets, itemsById } = makeScanResults({ settingsState: ctx.mutable.settingsState, tiers });
-      const session: ScanSessionState = { id: sessionId, createdAtMs: ctx.state.nowMs, minAgeHours: ctx.mutable.settingsState.minAgeHours, targets, itemsById, settingsGeneration: ctx.state.settingsGeneration, cancelled: false };
+      const session: ScanSessionState = { id: sessionId, createdAtMs: ctx.state.nowMs, minAgeHours: ctx.mutable.settingsState.minAgeHours, targets, itemsById, settingsGeneration: ctx.state.settingsGeneration, cancelled: false, running: true };
       ctx.sessions.set(sessionId, session);
-      const outcome = await emitScanProgress({ ctx, session, targets: targets as ScanTarget[], onProgress });
+      let outcome: ScanProgressOutcome;
+      try {
+        outcome = await emitScanProgress({ ctx, session, targets: targets as ScanTarget[], onProgress });
+      } finally {
+        // Only the worker's terminal path retires the active registration (#95),
+        // even when cancellation is cooperative or the session went stale.
+        session.running = false;
+      }
       // A reset may have removed this session or replaced it under the reused
       // id while progress was delayed; a stale scan must not report anything.
       if (isStale(ctx, session)) return { sessionId };

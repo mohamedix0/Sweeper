@@ -1,6 +1,7 @@
 import type { AnalyzerNodeDto, CleanProgressEvent, RiskDto } from '../client';
 import { dedupeAnalyzerNodes, err, isUnknownBlocked, toSkippedReasons } from './helpers';
 import { validateSession } from './scanAnalyzerOps';
+import { rejectCleanWhileScanRunning } from './scanGate';
 import type { AnalyzerSessionState, MockCtx, PreviewState, ScanSessionState } from './types';
 import type { ScanItemInfo } from './data';
 
@@ -163,6 +164,7 @@ function abortedClean(reason: string) {
 }
 
 function executeClean(input: { ctx: MockCtx; previewToken: string; onProgress?: (event: CleanProgressEvent) => void }) {
+  rejectCleanWhileScanRunning(input.ctx);
   const preview = validatePreviewToken({ ctx: input.ctx, previewToken: input.previewToken });
   validatePreviewSession({ ctx: input.ctx, preview });
   assertPreviewGeneration({ ctx: input.ctx, preview });

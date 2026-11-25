@@ -1,5 +1,6 @@
 import type { ScanResults, SweeperClient } from '../../api/client';
 import type { TargetScanResultDto } from '../../contract/bindings';
+import { failedExplanation, type ExplanationFallback } from '../cleanShared';
 import { isSelectableScanItem, visibleBaseTargets } from './scanHelpers';
 
 function maybeAddSafeItem(args: { item: TargetScanResultDto['items'][number]; target: TargetScanResultDto; allowDeleteUnknown: boolean; auto: Set<string> }) {
@@ -95,9 +96,14 @@ function applyInspectResult(args: { reqId: number; ref: { current: number }; set
   if (args.ref.current === args.reqId) args.setInspected(args.result);
 }
 
-export async function inspectById(args: { client: SweeperClient; itemId: string; reqId: number; ref: { current: number }; setInspected: (v: unknown) => void }) {
+export async function inspectById(args: { client: SweeperClient; itemId: string; reqId: number; ref: { current: number }; setInspected: (v: unknown) => void; known?: ExplanationFallback }) {
   try {
     const result = await args.client.explainItem(args.itemId);
     applyInspectResult({ reqId: args.reqId, ref: args.ref, setInspected: args.setInspected, result });
-  } catch { /* ignore */ }
+  } catch (error) {
+    // Never leave the inspector empty on a failed explain: keep the known
+    // identity/Risk visible and let the panel surface the explicit notice.
+    console.warn(`Sweeper: explanation unavailable for scan item ${args.itemId}.`, error);
+    applyInspectResult({ reqId: args.reqId, ref: args.ref, setInspected: args.setInspected, result: failedExplanation({ itemId: args.itemId, known: args.known }) });
+  }
 }

@@ -31,6 +31,23 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   box-shadow: var(--focus-ring);
 }
 
+/* Issue #139: forced-colors (Windows High Contrast) suppresses box-shadow, while
+   the rule above removes the UA outline, leaving keyboard focus invisible.
+   Restore a system-color outline on every focus indicator. `!important` is
+   required because later per-component rules set `outline: none`. */
+@media (forced-colors: active) {
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible,
+  .scan-group-row:focus-visible,
+  .scan-item-row:focus-visible,
+  .analyzer-row:focus-visible,
+  .preview-risk-callout:focus-visible,
+  .tier-toggle input:focus-visible + .tier-switch,
+  .scan-scope-config-chip:focus-within {
+    outline: 2px solid Highlight !important;
+    box-shadow: none;
+  }
+}
+
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .mono { font-family: var(--font-mono); font-size: var(--text-xs); word-break: break-all; }
 .num, .item-size { font-variant-numeric: tabular-nums; }
@@ -44,6 +61,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 
 /* Shell */
 .app-shell { min-height: 100vh; height: 100vh; display: grid; grid-template-columns: 216px minmax(0, 1fr); background: var(--bg-workspace); }
+/* Shell-level notices are direct grid children; span both columns so they never
+   steal the 216px sidebar track and squeeze the main UI (#147). */
+.boot-settings-notice { grid-column: 1 / -1; align-self: start; }
+.close-error-notice { grid-column: 1 / -1; align-self: start; }
 .sidebar { width: 216px; background: var(--bg-sidebar); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; justify-content: space-between; min-width: 0; }
 .sidebar-top { padding: 14px 10px 10px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
 .sidebar-footer { padding: 10px 12px; border-top: 1px solid var(--border-divider); }
@@ -115,6 +136,7 @@ input[type="checkbox"] { accent-color: var(--accent-primary); }
 .notice.warn { background: var(--risk-caution-bg); border-color: var(--risk-caution-border); color: var(--risk-caution-text); }
 .notice.error { background: var(--color-danger-bg); border-color: var(--color-danger-border); color: var(--color-danger-text); }
 .notice.info { background: var(--color-info-bg); border-color: var(--color-info-border); color: var(--color-info-text); }
+.notice-dismiss { margin-left: 10px; padding: 1px 8px; font: inherit; font-size: var(--text-sm); color: inherit; background: transparent; border: 1px solid currentColor; border-radius: var(--radius-sm); cursor: pointer; }
 .badge { display: inline-flex; align-items: center; justify-content: center; padding: 2px 9px; border-radius: var(--radius-pill); font-size: 11px; font-weight: 600; line-height: 1.45; border: 1px solid var(--border-strong); background: var(--bg-inset); color: var(--text-secondary); white-space: nowrap; }
 .risk-Safe { background: var(--risk-safe-bg); color: var(--risk-safe-text); border-color: var(--risk-safe-border); }
 .risk-Caution { background: var(--risk-caution-bg); color: var(--risk-caution-text); border-color: var(--risk-caution-border); }
