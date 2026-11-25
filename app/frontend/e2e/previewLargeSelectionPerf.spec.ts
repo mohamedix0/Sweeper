@@ -55,15 +55,20 @@ async function installGapSampler(page: Page, config: SamplerConfig): Promise<voi
       __gapSamples: number[];
       __lastFrame: number;
       __warmupRemaining: number;
+      // Monotonic count of recorded samples: the bounded buffer length stops
+      // growing once full, so it cannot signal "a new frame arrived" (#145).
+      __sampleCount: number;
       __resetGaps: () => void;
       __perf: Record<string, number | boolean>;
     };
     g.__gapSamples = [];
     g.__lastFrame = 0;
     g.__warmupRemaining = cfg.warmupFrames;
+    g.__sampleCount = 0;
     g.__perf = {};
     g.__resetGaps = () => {
       g.__gapSamples = [];
+      g.__sampleCount = 0;
       // 0 means "no baseline yet": the first frame after a reset spans the
       // click/effect scheduling, not a renderer stall, so it is not sampled.
       g.__lastFrame = 0;
@@ -103,6 +108,7 @@ async function installGapSampler(page: Page, config: SamplerConfig): Promise<voi
         return;
       }
       g.__gapSamples.push(now - g.__lastFrame);
+      g.__sampleCount += 1;
       if (g.__gapSamples.length > cfg.windowFrames) g.__gapSamples.shift();
     };
     const tick = (now: number) => {
@@ -225,13 +231,15 @@ async function measureOnce(page: Page, attempt: number): Promise<{ metrics: Metr
   await review.click();
 
   const cta = page.getByRole('button', { name: /Delete .* permanently/ });
-  const framesBeforeEnable = await page.evaluate(() => (globalThis as unknown as { __gapSamples: number[] }).__gapSamples.length);
+  const framesBeforeEnable = await page.evaluate(() => (globalThis as unknown as { __sampleCount: number }).__sampleCount);
   await expect(cta).toBeEnabled({ timeout: CTA_BOUND_MS });
-  // The final render that enables the CTA can itself occupy a frame interval;
-  // wait for the sampler to record a frame after enable before measuring.
+  // The final render that enables the CTA can itself occupy a frame interval.
+  // Wait for a full MIN_SAMPLES of post-enable frames so the gap summary is
+  // statistically meaningful. Use the monotonic counter: the bounded buffer
+  // length plateaus once full and can never advance the wait (#145).
   await page.waitForFunction(
-    (before) => (globalThis as unknown as { __gapSamples: number[] }).__gapSamples.length > before,
-    framesBeforeEnable,
+    ({ before, min }) => (globalThis as unknown as { __sampleCount: number }).__sampleCount >= before + min,
+    { before: framesBeforeEnable, min: MIN_SAMPLES },
   );
   const elapsedMs = Date.now() - started;
 
