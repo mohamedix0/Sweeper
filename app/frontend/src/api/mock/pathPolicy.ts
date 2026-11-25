@@ -18,6 +18,8 @@
  * `K` -> `k`), so the folded identities here are ASCII-only too.
  */
 
+import { hasSyntheticProtectedDescendant } from './pathPolicy.protectedDescendant';
+
 /** Synthetic segment: the path does not exist on disk in the mock. */
 export const MISSING_SEGMENT = 'missing';
 /** Synthetic segment: the path is a Link Point in the mock. */
@@ -232,6 +234,9 @@ export function evaluateCustomPath(input: string): CustomPathVerdict {
   }
   if (hasSegment(segments, MISSING_VALUE)) {
     return { path: normalized, allowed: false, reason: 'Path does not exist (no fallback to parent).' };
+  }
+  if (hasSyntheticProtectedDescendant(segments.map((s) => s.folded))) {
+    return { path: normalized, allowed: false, reason: 'Protected Path: subtree contains a subtree-protected descendant.' };
   }
   return { path: normalized, allowed: true, reason: 'ok' };
 }
