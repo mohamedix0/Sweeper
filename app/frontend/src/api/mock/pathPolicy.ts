@@ -139,8 +139,14 @@ function hasInvalidSegment(segments: readonly PathSegment[]): boolean {
   );
 }
 
-/** Parse a Windows path into drive prefix + segments, or null for invalid syntax. */
-function parseMockPath(input: string): ParsedMockPath | null {
+/**
+ * Parse a Windows path into drive prefix + segments, or null for invalid syntax.
+ *
+ * Exported so Analyzer roots can reuse this exact lexical validation (backend
+ * `validate_analyzer_root` parity) without applying Custom Path Policy rules:
+ * protected container roots and the drive root stay valid here.
+ */
+export function parseMockPath(input: string): ParsedMockPath | null {
   // Backend `lexical_parse` rejects over-long inputs and disallowed Unicode
   // before any structural/normalization work.
   if (utf8ByteLength(input) > 32_767) return null;
