@@ -1,6 +1,6 @@
 import type { ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
 import type { ExecuteCleanResponse } from '../../api/client';
-import { CleanSummaryBlock, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, type ExplainState, type PreviewResult } from '../cleanShared';
+import { CleanSummaryBlock, ExplanationUnavailableNotice, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, type ExplainState, type PreviewResult } from '../cleanShared';
 import { deriveCalloutItemsFromSelection, type PreviewRiskCalloutItem, type PreviewRiskCalloutSource } from '../PreviewRiskCallouts';
 import { isCustomPathTargetId } from './scanHelpers';
 import { ScanGroupInspector } from './ScanGroupInspector';
@@ -59,7 +59,12 @@ function showItem(props: PanelProps): boolean {
 
 function InspectorBody(props: PanelProps) {
   if (showGroup(props)) return <ScanGroupInspector target={props.focusedGroup!} allowDeleteUnknown={props.allowDeleteUnknown} minAgeHours={props.minAgeHours} selectedIds={props.selectedIds} onOpenSettings={props.onOpenSettings} />;
-  if (showItem(props)) return <ScanItemInspector target={props.inspectedCtx!.target} item={props.inspectedCtx!.item} inspected={props.inspected} allowDeleteUnknown={props.allowDeleteUnknown} minAgeHours={props.minAgeHours} onOpenSettings={props.onOpenSettings} />;
+  if (showItem(props)) return (
+    <>
+      <ScanItemInspector target={props.inspectedCtx!.target} item={props.inspectedCtx!.item} inspected={props.inspected} allowDeleteUnknown={props.allowDeleteUnknown} minAgeHours={props.minAgeHours} onOpenSettings={props.onOpenSettings} />
+      {props.inspected?.failed ? <ExplanationUnavailableNotice /> : null}
+    </>
+  );
   return <p className="inspector-empty">Select an item to see its purpose, risk, full path, and eligibility.</p>;
 }
 

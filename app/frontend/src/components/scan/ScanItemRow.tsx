@@ -42,7 +42,7 @@ function statusAria(args: { kind: string; label: string }): string {
 function Subpath(props: { nestedRel?: string; name: string }) {
   if (!props.nestedRel) return null;
   if (props.nestedRel === props.name) return null;
-  return <span className="scan-subpath-inline mono" title={props.nestedRel}>{middleTruncatePath({ path: props.nestedRel, maxLen: 64 })}</span>;
+  return <span className="scan-subpath-inline mono" title={props.nestedRel}><bdi>{middleTruncatePath({ path: props.nestedRel, maxLen: 64 })}</bdi></span>;
 }
 
 function ProtectedSlot(props: { path: string; selected: boolean }) {
@@ -81,7 +81,7 @@ export function ScanItemRow(props: ItemRowProps) {
         <span className="row-indent" aria-hidden="true" />
         <span className="scan-select-slot" onClick={(e) => e.stopPropagation()}><ItemSelect path={fullPath} selectable={selectable} protectedTarget={protectedTarget} selected={props.selected} cleaning={props.cleaning} onToggle={props.onToggle} /></span>
         <FileIcon className="row-icon" aria-hidden="true" />
-        <div className="scan-main-text"><div className="scan-title-line"><span className="item-name" title={fullPath}>{middleTruncatePath({ path: name, maxLen: 64 })}</span><Subpath nestedRel={nestedRel} name={name} /></div></div>
+        <div className="scan-main-text"><div className="scan-title-line"><span className="item-name" title={fullPath}><bdi>{middleTruncatePath({ path: name, maxLen: 64 })}</bdi></span><Subpath nestedRel={nestedRel} name={name} /></div></div>
       </div>
       <div className="scan-col-items muted" />
       <div className="scan-col-size num">{formatBytes({ bytes: props.item.size })}</div>

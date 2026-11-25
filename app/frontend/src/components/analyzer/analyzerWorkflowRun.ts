@@ -1,6 +1,6 @@
 import { formatContractError, type CleanProgressEvent, type ExecuteCleanResponse, type SweeperClient } from '../../api/client';
 import type { AnalyzerNodeDto, ContractError } from '../../contract/bindings';
-import type { PreviewResult } from '../cleanShared';
+import type { ExplanationFallback, PreviewResult } from '../cleanShared';
 import { convergeStop } from './analyzerStop';
 
 type RunAnalyzerArgs = {
@@ -21,7 +21,7 @@ type RunAnalyzerArgs = {
   setStartedAt: (v: number | null) => void;
   setAnalyzedPath: (v: string | null) => void;
   setRunningSessionId: (v: string | null) => void;
-  inspectNode: (input: { id: string }) => void;
+  inspectNode: (input: { id: string; known?: ExplanationFallback }) => void;
   setError: (v: string | null) => void;
   setInfo: (v: string | null) => void;
   isCurrent: () => boolean;
@@ -54,6 +54,16 @@ function autoInspectId(root: AnalyzerNodeDto): string {
   const first = sorted[0];
   if (first) return first.id;
   return root.id;
+}
+
+/** Known identity from a freshly returned tree (the render-time map is stale here). */
+function knownNodeById(root: AnalyzerNodeDto, id: string): ExplanationFallback | undefined {
+  if (root.id === id) return { title: root.name, risk: root.risk };
+  for (const child of root.children ?? []) {
+    const hit = knownNodeById(child, id);
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
@@ -90,7 +100,10 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
     args.setStartedAt(Date.now());
     args.setExpanded(new Set());
     args.setAnalyzedPath(res.rootPath || targetPath);
-    args.inspectNode({ id: autoInspectId(res.root) });
+    // Use the fresh result's node for the known identity: the caller's
+    // render-time `d.nodesById` is still empty on the first analysis (b1).
+    const autoId = autoInspectId(res.root);
+    args.inspectNode({ id: autoId, known: knownNodeById(res.root, autoId) });
   } catch (e) {
     if (args.isCurrent()) args.setError(formatContractError(e));
   } finally {

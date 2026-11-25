@@ -150,6 +150,9 @@ fn to_dto(settings: &SweeperSettings) -> SettingsDto {
         allow_delete_unknown: settings.allow_delete_unknown,
         custom_paths: settings.custom_paths.clone(),
         stale_project_days: settings.stale_project_days,
+        // Diagnostics are attached by the command layer, which is the only
+        // place that owns the store lock when the response is built (#146).
+        warnings: Vec::new(),
     }
 }
 

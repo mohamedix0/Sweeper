@@ -135,7 +135,7 @@ export function ScanGroupRow(props: GroupRowProps) {
         <FolderIcon className="row-icon" aria-hidden="true" />
         <div className="scan-main-text scan-group-main-text">
           <div className="scan-title-line scan-title-line-with-action"><span className="target-name-btn scan-group-title" id={`target-${props.target.targetId}-name`}>{display.title}</span><TitleExtras display={display} targetName={props.target.targetName} /></div>
-          <div className="scan-subpath scan-group-subpath" title={rootPath}><span className="mono scan-group-path-text">{rootPathText(rootPath)}</span></div>
+          <div className="scan-subpath scan-group-subpath" title={rootPath}><span className="mono scan-group-path-text"><bdi>{rootPathText(rootPath)}</bdi></span></div>
         </div>
       </div>
       <div className="scan-col-items muted num">{`${selectedInTarget} of ${props.target.items.length} selected`}</div>

@@ -31,6 +31,23 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   box-shadow: var(--focus-ring);
 }
 
+/* Issue #139: forced-colors (Windows High Contrast) suppresses box-shadow, while
+   the rule above removes the UA outline, leaving keyboard focus invisible.
+   Restore a system-color outline on every focus indicator. `!important` is
+   required because later per-component rules set `outline: none`. */
+@media (forced-colors: active) {
+  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible,
+  .scan-group-row:focus-visible,
+  .scan-item-row:focus-visible,
+  .analyzer-row:focus-visible,
+  .preview-risk-callout:focus-visible,
+  .tier-toggle input:focus-visible + .tier-switch,
+  .scan-scope-config-chip:focus-within {
+    outline: 2px solid Highlight !important;
+    box-shadow: none;
+  }
+}
+
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .mono { font-family: var(--font-mono); font-size: var(--text-xs); word-break: break-all; }
 .num, .item-size { font-variant-numeric: tabular-nums; }
