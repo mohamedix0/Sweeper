@@ -54,6 +54,22 @@ function RelaunchErrorNotice(props: { message: string | null }) {
   return <div className="notice error" role="alert">{props.message}</div>;
 }
 
+// A failed boot settings load leaves the shell showing fail-closed defaults.
+// Surface that on the shell itself so the user knows the values are fallbacks
+// without having to open Settings (where the controller retries and already
+// reports its own error). The banner is dismissible and clears once any
+// successful load delivers real settings through `onSaved` (#147).
+function BootSettingsErrorNotice(props: { message: string | null; onDismiss: () => void }) {
+  // A rejection with an empty detail still failed: show the fallback warning.
+  if (props.message === null) return null;
+  return (
+    <div className="notice error boot-settings-notice" role="alert" aria-label="Settings load error">
+      Settings could not be loaded on startup. Shown values are fallbacks. {props.message}
+      <button type="button" className="notice-dismiss" onClick={props.onDismiss} aria-label="Dismiss">Dismiss</button>
+    </div>
+  );
+}
+
 function ElevationNotices(props: { elevationError: string | null; relaunchError: string | null }) {
   return (
     <>
@@ -194,16 +210,41 @@ function elevationAria(args: { elevated: boolean }): string {
 function useSettingsState(client: ReturnType<typeof createClient>) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsVersion, setSettingsVersion] = useState(0);
+  const [bootLoadError, setBootLoadError] = useState<string | null>(null);
+  const [bootErrorDismissed, setBootErrorDismissed] = useState(false);
+  // A late boot rejection must not re-show the banner once real settings have
+  // already arrived (the Settings controller's retry delivers them via onSaved).
+  const settingsDelivered = useRef(false);
   useEffect(() => {
     let c = false;
-    client.getSettings().then((s) => { if (!c) setSettings(s); }).catch(() => {});
+    client.getSettings().then((s) => {
+      if (!c) {
+        settingsDelivered.current = true;
+        setSettings(s);
+        setBootLoadError(null);
+      }
+    }).catch((e) => {
+      if (!c && !settingsDelivered.current) setBootLoadError(formatContractError(e));
+    });
     return () => { c = true; };
   }, [client]);
   const handleSaved = (next: Settings) => {
+    settingsDelivered.current = true;
     setSettings(next);
     setSettingsVersion((v) => v + 1);
+    // Real settings have arrived (boot retry or a save), so the "fallbacks"
+    // warning is no longer accurate.
+    setBootLoadError(null);
+    setBootErrorDismissed(false);
   };
-  return { settings, settingsVersion, handleSaved };
+  const dismissBootLoadError = () => setBootErrorDismissed(true);
+  return {
+    settings,
+    settingsVersion,
+    handleSaved,
+    bootLoadError: bootErrorDismissed ? null : bootLoadError,
+    dismissBootLoadError,
+  };
 }
 
 function useRelaunch(client: ReturnType<typeof createClient>) {
@@ -368,12 +409,13 @@ export function App({ closeBridge }: { closeBridge?: CloseBridge } = {}) {
   });
   const { theme, setTheme } = usePersistentTheme();
   const { elevation, elevationError } = useElevationState(client);
-  const { settings, settingsVersion, handleSaved } = useSettingsState(client);
+  const { settings, settingsVersion, handleSaved, bootLoadError, dismissBootLoadError } = useSettingsState(client);
   return (
     <div className="app-shell">
       {close.error && !close.promptOpen && (
-        <p className="notice error" role="alert">{close.error}</p>
+        <p className="notice error close-error-notice" role="alert">{close.error}</p>
       )}
+      <BootSettingsErrorNotice message={bootLoadError} onDismiss={dismissBootLoadError} />
       <AppSidebar
         view={nav.view}
         onSwitchView={nav.switchView}
