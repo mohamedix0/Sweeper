@@ -131,12 +131,12 @@ impl WalkState {
         }
     }
     pub(super) fn enqueue_initial(&self, dir_path: String) {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         work.queue.push_back(dir_path);
         self.condvar.notify_all();
     }
     fn wait_for_work(&self, cancel: &AtomicBool) -> Option<String> {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if cancel.load(AtomicOrdering::Relaxed) {
                 self.condvar.notify_all();
@@ -151,11 +151,11 @@ impl WalkState {
                 self.condvar.notify_all();
                 return None;
             }
-            work = self.condvar.wait(work).unwrap();
+            work = self.condvar.wait(work).unwrap_or_else(|e| e.into_inner());
         }
     }
     fn finish_work(&self) {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         work.active = work.active.saturating_sub(1);
         if work.active == 0 && work.queue.is_empty() {
             work.done = true;
@@ -248,7 +248,9 @@ impl WalkState {
 
     fn enqueue_children(&self, traverse_children: Vec<String>) {
         if !traverse_children.is_empty() {
-            let mut work = self.work.lock().unwrap();
+            // Recover from a poisoned work mutex so a panicking peer worker
+            // cannot prevent the remaining children from being enqueued (#134).
+            let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
             work.queue.extend(traverse_children);
             self.condvar.notify_all();
         }
@@ -265,7 +267,7 @@ impl WalkState {
         let mut traverse_children = Vec::new();
         let mut did_truncate = false;
         {
-            let mut records = self.records.lock().unwrap();
+            let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
             let dir_key = annotate::canonical_key(dir_path);
             records.entry(dir_key.clone()).or_insert_with(|| {
                 DirRecord::new(dir_path.to_string(), annotate::display_name(dir_path), None)
@@ -299,6 +301,8 @@ impl WalkState {
                 byte_count,
             );
         }
+        // Preserve the C3 truncation signal from main while #169's
+        // poison-safe enqueue now lives in `enqueue_children` below.
         if did_truncate {
             self.truncated.store(true, AtomicOrdering::Relaxed);
         }
@@ -308,13 +312,24 @@ impl WalkState {
             .fetch_add(file_count, AtomicOrdering::Relaxed);
         self.scanned_bytes
             .fetch_add(byte_count, AtomicOrdering::Relaxed);
-        *self.current_path.lock().unwrap() = Some(dir_path.to_string());
+        *self.current_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir_path.to_string());
+    }
+    /// Records a walk failure so it surfaces as a typed `AnalyzerError::Walk`
+    /// rather than being silently discarded. The first error wins.
+    pub(super) fn record_error(&self, message: String) {
+        let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
+        if error.is_none() {
+            *error = Some(message);
+        }
     }
     pub(super) fn had_error(&self) -> bool {
-        self.error.lock().unwrap().is_some()
+        self.error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
     pub(super) fn take_error(&self) -> Option<String> {
-        self.error.lock().unwrap().take()
+        self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
     pub(super) fn was_truncated(&self) -> bool {
         self.truncated.load(AtomicOrdering::Relaxed)
@@ -322,7 +337,7 @@ impl WalkState {
     pub(super) fn into_records(self: Arc<Self>) -> HashMap<String, DirRecord> {
         match Arc::try_unwrap(self) {
             Ok(s) => s.records.into_inner().unwrap_or_default(),
-            Err(s) => s.records.lock().unwrap().clone(),
+            Err(s) => s.records.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }
     }
 }
@@ -362,7 +377,7 @@ impl ProgressState {
         let Some(cb) = &self.cb else {
             return;
         };
-        let mut last = self.last_emit.lock().unwrap();
+        let mut last = self.last_emit.lock().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() >= self.interval {
             *last = Instant::now();
             let snap = self.snapshot(state);
@@ -380,8 +395,24 @@ impl ProgressState {
             scanned_dirs: state.scanned_dirs.load(AtomicOrdering::Relaxed),
             scanned_files: state.scanned_files.load(AtomicOrdering::Relaxed),
             scanned_bytes: state.scanned_bytes.load(AtomicOrdering::Relaxed),
-            current_path: state.current_path.lock().unwrap().clone(),
+            current_path: state
+                .current_path
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
+    }
+}
+
+/// Releases a worker's reserved work slot when the loop exits, including via
+/// panic unwinding. Without this guard a panicking worker leaves `active > 0`
+/// forever, so peer workers blocked in `Condvar::wait` never observe `done`
+/// and the join loop in `spawn_and_join_walkers` deadlocks (issue #134).
+struct ActiveGuard<'a>(&'a WalkState);
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish_work();
     }
 }
 
@@ -398,6 +429,9 @@ pub(super) fn worker_loop(
         let Some(dir_path) = state.wait_for_work(&cancel) else {
             return;
         };
+        // Registered immediately after the slot is reserved so any panic in
+        // the scan/commit/progress path still releases the slot and wakes peers.
+        let _active_guard = ActiveGuard(state.as_ref());
         match scan_directory(&dir_path, &cancel, state.max_files_per_dir) {
             Ok(out) => {
                 state.commit_directory_scan(
@@ -414,11 +448,11 @@ pub(super) fn worker_loop(
                 progress.maybe_emit(&state);
             }
         }
-        state.finish_work();
         if cancel.load(AtomicOrdering::Relaxed) {
             state.condvar.notify_all();
             return;
         }
+        // `_active_guard` is dropped here, releasing the work slot.
     }
 }
 
