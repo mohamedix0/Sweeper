@@ -1,5 +1,5 @@
 import type { BaseSummary, LogMeta, LogSummary } from './logParseTypes';
-import { baseSummary, bytesToString, cleanOutcomeRecords, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
+import { aggregateDeletedOutcomes, baseSummary, bytesToString, cleanOutcomeRecords, isScanSummaryRecord, parseLogObjects } from './logParseUtils';
 import { formatBytes, pluralize } from '../../utils/format';
 
 function formatBytesString(value: string): string { return formatBytes({ bytes: value }); }
@@ -14,14 +14,16 @@ function cleanTitle(args: { freed: string | null; count: number }): string {
 }
 function summarizeClean(objs: Record<string, unknown>[], base: BaseSummary): LogSummary {
   const outcomes = cleanOutcomeRecords(objs);
+  const contributions = aggregateDeletedOutcomes(outcomes);
   let freedNum = 0n;
   let deletedCount = 0;
   for (const o of outcomes) {
     const status = String(o.status ?? '').toLowerCase();
     if (status !== 'deleted') continue;
     deletedCount += 1;
-    const b = bytesToString(o.bytes ?? o.size ?? 0) ?? '0';
-    try { freedNum += BigInt(b); } catch { /* ignore */ }
+    // Issue #135: add only this outcome's own byte contribution (a root's
+    // bytes already represented by journaled children contribute zero).
+    freedNum += contributions.get(o) ?? 0n;
   }
   const freed = deletedCount > 0 || freedNum > 0n ? formatBytesString(freedNum.toString()) : null;
   return { title: cleanTitle({ freed, count: deletedCount }), subtitle: 'Completed', ...base, kind: 'clean' };

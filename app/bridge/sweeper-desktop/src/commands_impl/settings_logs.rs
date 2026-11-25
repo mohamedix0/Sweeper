@@ -146,6 +146,11 @@ struct CleanLogScanState {
     /// each outcome satisfy at most one intent when `item_ids` repeats an ID
     /// and the journal therefore holds duplicate intents for the same key.
     outcomes: HashMap<(String, String), usize>,
+    /// (target_id, normalized strict-ancestor path) -> sum of bytes of the
+    /// deleted descendants seen so far (issue #135). Updated incrementally so
+    /// each aggregate root is classified with one lookup. Children are
+    /// journaled before the root that removes them.
+    descendant_bytes: HashMap<(String, String), u64>,
 }
 
 impl CleanLogScanState {
@@ -191,6 +196,58 @@ fn note_path_hint(state: &mut CleanLogScanState, path: &str) {
     }
 }
 
+/// Normalize a log path for byte-index keys (both separators, case-insensitive).
+fn normalize_log_path(path: &str) -> String {
+    path.replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+/// Every strict ancestor of a normalized path, from the drive prefix outward.
+/// A separator boundary is implied by joining path components.
+fn strict_ancestor_keys(normalized: &str) -> Vec<String> {
+    let parts: Vec<&str> = normalized.split('\\').collect();
+    let mut keys = Vec::with_capacity(parts.len().saturating_sub(1));
+    for count in 1..parts.len() {
+        keys.push(parts[..count].join("\\"));
+    }
+    keys
+}
+
+/// Bytes of a root outcome not already represented by journaled descendants
+/// (issue #135). A complete child set contributes zero; a missing child's
+/// bytes are recovered instead of dropping the whole root record.
+fn root_contribution(bytes: u64, descendants: u64) -> u64 {
+    if descendants == 0 {
+        return bytes;
+    }
+    if bytes < descendants {
+        return bytes;
+    }
+    bytes.saturating_sub(descendants)
+}
+
+/// Account for one `deleted` outcome in the summary byte total and index its
+/// bytes under every strict ancestor for later root classification (issue #135).
+fn account_deleted_outcome(state: &mut CleanLogScanState, target_id: &str, path: &str, bytes: u64) {
+    let normalized = normalize_log_path(path);
+    let descendants = state
+        .descendant_bytes
+        .get(&(target_id.to_string(), normalized.clone()))
+        .copied()
+        .unwrap_or(0);
+    state.total_bytes = state
+        .total_bytes
+        .saturating_add(root_contribution(bytes, descendants));
+    for ancestor in strict_ancestor_keys(&normalized) {
+        let entry = state
+            .descendant_bytes
+            .entry((target_id.to_string(), ancestor))
+            .or_insert(0);
+        *entry = entry.saturating_add(bytes);
+    }
+}
+
 fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Value) {
     let kind = json_record_kind(value);
     let target_id = value
@@ -209,7 +266,16 @@ fn inspect_clean_log_value(state: &mut CleanLogScanState, value: &serde_json::Va
             state.saw_outcome = true;
             state.outcome_count = state.outcome_count.saturating_add(1);
             let bytes = value.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-            state.total_bytes = state.total_bytes.saturating_add(bytes);
+            let status = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if status == "deleted" {
+                account_deleted_outcome(state, &target_id, &path, bytes);
+            } else {
+                state.total_bytes = state.total_bytes.saturating_add(bytes);
+            }
             let count = state.outcomes.entry((target_id, path)).or_insert(0);
             *count = count.saturating_add(1);
         }
@@ -1006,8 +1072,8 @@ fn read_log_in_dir_with_hooks<F: FnOnce(), G: FnOnce()>(
 #[cfg(test)]
 mod tests {
     use super::{
-        inspect_clean_log, list_logs_in_dir_impl, read_bounded_log_content, read_log_in_dir,
-        record_clean_log_summary, MAX_LOG_READ_BYTES,
+        accumulate_clean_log_state, inspect_clean_log, list_logs_in_dir_impl,
+        read_bounded_log_content, read_log_in_dir, record_clean_log_summary, MAX_LOG_READ_BYTES,
     };
     use std::io::Read;
     use sweeper_contract::ContractError;
@@ -2198,6 +2264,37 @@ mod tests {
             read.content.contains('\u{FFFD}'),
             "malformed terminated record must be preserved lossily: {}",
             read.content
+        );
+    }
+
+    /// Issue #135: a WholeCache/Tier 3 root repeats its children's bytes in a
+    /// root `deleted` outcome. The summary index must sum child bytes once.
+    #[test]
+    fn issue135_summary_bytes_do_not_double_count_root_outcome() {
+        let content = "\
+{\"record\":\"intent\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\",\"size\":1024}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\\\\a.bin\",\"bytes\":512,\"status\":\"deleted\"}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\\\\b.bin\",\"bytes\":512,\"status\":\"deleted\"}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\",\"bytes\":1024,\"status\":\"deleted\"}\n";
+        let state = accumulate_clean_log_state(content);
+        assert_eq!(
+            state.total_bytes, 1024,
+            "root outcome must not repeat the children's 1024 bytes"
+        );
+    }
+
+    /// Issue #135: a failed best-effort child journal write can leave only one
+    /// of two 512-byte children in the log while the root still records 1024.
+    /// The root must contribute the 512 bytes that are missing from the log.
+    #[test]
+    fn issue135_partial_child_journal_keeps_unrecorded_root_bytes() {
+        let content = "\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\\\\a.bin\",\"bytes\":512,\"status\":\"deleted\"}\n\
+{\"record\":\"outcome\",\"target_id\":\"wc-1\",\"path\":\"C:\\\\cache\",\"bytes\":1024,\"status\":\"deleted\"}\n";
+        let state = accumulate_clean_log_state(content);
+        assert_eq!(
+            state.total_bytes, 1024,
+            "root must add the unrecorded 512 bytes, not be skipped entirely"
         );
     }
 }

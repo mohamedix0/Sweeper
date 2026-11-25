@@ -78,6 +78,80 @@ export function cleanOutcomeRecords(objs: Record<string, unknown>[]): Record<str
   return objs.filter((o) => isJournalPerItemOutcome(o));
 }
 
+/** Normalize a log path for byte-index keys (both separators, case-insensitive). */
+function normalizeLogPath(raw: string): string {
+  return raw.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+/** Every strict ancestor of a normalized path (separator boundary, no self). */
+function strictAncestorKeys(normalized: string): string[] {
+  if (!normalized) return [];
+  const parts = normalized.split('\\');
+  const keys: string[] = [];
+  for (let count = 1; count < parts.length; count += 1) {
+    keys.push(parts.slice(0, count).join('\\'));
+  }
+  return keys;
+}
+
+function bytesToBig(raw: unknown): bigint {
+  const text = bytesToString(raw);
+  if (text == null) return 0n;
+  try { return BigInt(text); } catch { return 0n; }
+}
+
+/**
+ * Issue #135: a Tier 3 / WholeCache root writes one `deleted` outcome per child
+ * plus a root outcome whose `bytes` repeats the sum of those children. Summing
+ * every `deleted` outcome double-counts reclaimed bytes.
+ *
+ * Return each deleted outcome's own byte contribution: for a root, its bytes
+ * minus the bytes of journaled descendants (mirroring the bridge's
+ * `root_contribution`, `bytes.saturating_sub(descendants)`). When every child
+ * was journaled the root contributes zero; when a child write failed, only the
+ * missing bytes are recovered instead of discarding the whole root. Ordinary
+ * outcomes contribute their own bytes unchanged. Paths are normalized once and
+ * descendant bytes are indexed per target ancestor, so this is one lookup per
+ * outcome with no O(n^2) scan.
+ */
+export function aggregateDeletedOutcomes(
+  outcomes: Record<string, unknown>[],
+): Map<Record<string, unknown>, bigint> {
+  const deleted = outcomes.filter((o) => String(o.status ?? '').toLowerCase() === 'deleted');
+  const byTarget = new Map<string, Map<string, bigint>>();
+  const normalizedPaths = new Map<Record<string, unknown>, string>();
+
+  for (const outcome of deleted) {
+    const target = String(outcome.target_id ?? '');
+    const normalized = normalizeLogPath(String(outcome.path ?? ''));
+    normalizedPaths.set(outcome, normalized);
+    let index = byTarget.get(target);
+    if (!index) {
+      index = new Map<string, bigint>();
+      byTarget.set(target, index);
+    }
+    const bytes = bytesToBig(outcome.bytes ?? outcome.size ?? 0);
+    for (const ancestor of strictAncestorKeys(normalized)) {
+      index.set(ancestor, (index.get(ancestor) ?? 0n) + bytes);
+    }
+  }
+
+  const contributions = new Map<Record<string, unknown>, bigint>();
+  for (const outcome of deleted) {
+    const bytes = bytesToBig(outcome.bytes ?? outcome.size ?? 0);
+    const path = normalizedPaths.get(outcome) ?? '';
+    const target = String(outcome.target_id ?? '');
+    const descendantBytes = path ? byTarget.get(target)?.get(path) ?? 0n : 0n;
+    // A root with no journaled descendants is an ordinary deletion. When
+    // descendants exist, keep only the part of its bytes they do not cover.
+    const contribution = descendantBytes === 0n
+      ? bytes
+      : bytes > descendantBytes ? bytes - descendantBytes : 0n;
+    contributions.set(outcome, contribution);
+  }
+  return contributions;
+}
+
 export function outcomeAndIntent(objs: Record<string, unknown>[]) {
   const outcomes = objs.filter((o) => String(o.record ?? '') === 'outcome');
   const summary = [...outcomes].reverse().find((o) => isScanSummaryRecord(o) || o.bytesFreed != null || o.deletedCount != null || o.total_reclaimable_bytes != null || o.totalBytes != null) ?? null;
