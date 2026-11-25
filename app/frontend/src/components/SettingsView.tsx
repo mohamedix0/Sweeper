@@ -43,6 +43,7 @@ export function SettingsView({
   // host waits for in-flight Cleans (#93). The Elevate lock clears on success
   // or failure; the close lock is terminal.
   const inputsDisabled = c.relaunching || !!relaunching || !!closePending;
+  const sanitizationWarnings = settings?.warnings ?? [];
   // Publish the controller's dirty state to the app shell so it can guard
   // navigation away from this view. The effect is deliberately unconditional
   // (it runs before the loading early return) and the callback is stable.
@@ -68,6 +69,12 @@ export function SettingsView({
         </div>
       </header>
       {elevationError && <div className="notice error" role="alert">Elevation status unavailable: {elevationError}</div>}
+      {sanitizationWarnings.length > 0 && (
+        <div className="notice warn" role="status" aria-label="Settings warnings">
+          <div>Some settings were reset to safe values while loading:</div>
+          <ul>{sanitizationWarnings.map((warning, i) => <li key={`${i}-${warning}`}>{warning}</li>)}</ul>
+        </div>
+      )}
       {c.error && <div className="notice error" role="alert">{c.error}</div>}
       {c.info && <div className="notice info" role="status">{c.info}</div>}
       {c.relaunchInfo && <div className="notice info" role="status">{c.relaunchInfo}</div>}

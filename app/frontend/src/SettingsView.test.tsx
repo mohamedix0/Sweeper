@@ -112,6 +112,77 @@ describe('Sweeper frontend', () => {
     expect((screen.getByLabelText('Minimum file age') as HTMLInputElement).value).toBe('12');
   });
 
+  it('does not leave a false-dirty draft when parent settings arrive before the self-load resolves (#136)', async () => {
+    const parentValue = baseSettings();
+    const selfLoad = deferred<Settings>();
+    const client: SweeperClient = { ...mockController, getSettings: vi.fn(() => selfLoad.promise) };
+
+    function Harness() {
+      const [settings, setSettings] = useState<Settings | null>(null);
+      const { draft, isDirty } = useSettingsController({ client, settings, onSaved: () => {} });
+      return (
+        <>
+          <output data-testid="draft-min-age">{draft?.minAgeHours ?? 'none'}</output>
+          <output data-testid="dirty">{String(isDirty)}</output>
+          <button onClick={() => setSettings(parentValue)}>parent-load</button>
+        </>
+      );
+    }
+
+    const user = userEvent.setup();
+    render(<Harness />);
+    expect(screen.getByTestId('draft-min-age')).toHaveTextContent('none');
+
+    // The parent's boot load commits while the controller's self-load is still
+    // pending. Adopting the parent value must also acknowledge it, otherwise
+    // draft = s / acknowledged = null leaves the draft dirty forever (#136).
+    await user.click(screen.getByRole('button', { name: 'parent-load' }));
+    expect(screen.getByTestId('draft-min-age')).toHaveTextContent('24');
+
+    // The cancelled self-load resolving later must not revive a stale draft.
+    selfLoad.resolve({ ...parentValue, minAgeHours: 12 });
+    await waitFor(() => expect(screen.getByTestId('draft-min-age')).toHaveTextContent('24'));
+    expect(screen.getByTestId('dirty')).toHaveTextContent('false');
+  });
+
+  it('does not show the unsaved-settings dialog after the boot load beats the controller self-load (#136)', async () => {
+    const parentValue = baseSettings();
+    const parentLoad = deferred<Settings>();
+    const selfLoad = deferred<Settings>();
+    let calls = 0;
+    const getSettings = vi.fn(() => {
+      calls += 1;
+      if (calls === 1) return parentLoad.promise;
+      if (calls === 2) return selfLoad.promise;
+      return Promise.resolve(parentValue);
+    });
+    const originalGetSettings = mockController.getSettings;
+    (mockController as SweeperClient).getSettings = getSettings;
+    try {
+      const user = userEvent.setup();
+      const view = render(<App />);
+
+      await user.click(screen.getByRole('button', { name: 'Settings' }));
+      await screen.findByText('Loading settings…');
+
+      // App's boot load lands first while the controller's self-load is still
+      // pending, exercising the adoption path that used to skip acknowledgement.
+      await act(async () => { parentLoad.resolve(parentValue); });
+      await screen.findByLabelText('Minimum file age');
+
+      // The cancelled self-load lands later with a different value; it must not
+      // turn the adopted, clean draft dirty.
+      await act(async () => { selfLoad.resolve({ ...parentValue, minAgeHours: 12 }); });
+
+      await user.click(screen.getByRole('button', { name: 'Scan & Clean' }));
+      expect(screen.queryByText('Unsaved settings changes')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /keep editing/i })).not.toBeInTheDocument();
+      view.unmount();
+    } finally {
+      (mockController as SweeperClient).getSettings = originalGetSettings;
+    }
+  });
+
   it('preserves unrelated draft edits while custom path validation is pending', async () => {
     const user = userEvent.setup();
     type ValidateResult = Awaited<ReturnType<SweeperClient['validateCustomPath']>>;

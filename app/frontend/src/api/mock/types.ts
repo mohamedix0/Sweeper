@@ -10,6 +10,8 @@ export type ScanSessionState = {
   settingsGeneration: number;
   /** Set by cancelScan / the host-close hook; stops further progress emission. */
   cancelled: boolean;
+  /** True until the scan worker reaches a terminal outcome (completed/cancelled/stale). Mirrors the backend `active_scans` registration. */
+  running: boolean;
 };
 
 export type AnalyzerSessionState = {

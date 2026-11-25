@@ -410,6 +410,13 @@ pub struct SettingsDto {
     pub custom_paths: Vec<String>,
     /// Project staleness threshold in days for Tier 3 stale Rust `target/` and `node_modules` discovery.
     pub stale_project_days: u32,
+    /// Non-fatal sanitization warnings from the last load/parse (#146).
+    ///
+    /// Diagnostic only: this field is never trusted as input and is regenerated
+    /// by the store on every load/update. `serde(default)` keeps older clients
+    /// and persisted payloads compatible.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 impl Default for SettingsDto {
@@ -423,6 +430,7 @@ impl Default for SettingsDto {
             allow_delete_unknown: false,
             custom_paths: Vec::new(),
             stale_project_days: 30,
+            warnings: Vec::new(),
         }
     }
 }
