@@ -1,6 +1,6 @@
 import type { AnalyzerProgressEvent, ScanProgressEvent, TierDto } from '../client';
 import { err } from './helpers';
-import { parseMockPath } from './pathPolicy';
+import { LINK_POINT_SEGMENT, MISSING_SEGMENT, parseMockPath } from './pathPolicy';
 import { buildAnalyzerTree, indexAnalyzerNodes, makeScanResults } from './data';
 import type { AnalyzerSessionState, MockCtx, ScanSessionState } from './types';
 
@@ -161,6 +161,17 @@ export function buildScanAnalyzerApi(ctx: MockCtx) {
       const trimmed = root ? root.trim() : '';
       const parsed = parseMockPath(trimmed || 'C:\\');
       if (!parsed) err({ code: 'invalidInput', reason: 'invalid analyzer root: path must be an absolute drive path without traversal segments.' });
+      // Existence / Link Point checks use the mock's synthetic segment markers,
+      // mirroring backend validate_analyzer_root (NotFound / InvalidRoot). This
+      // is not a Custom Path Policy rule, so lexical-only validation still
+      // accepts protected container roots. Reject before progress or a session.
+      const foldedSegments = parsed.segments.map((s) => s.folded);
+      if (foldedSegments.includes(MISSING_SEGMENT)) {
+        err({ code: 'invalidInput', reason: 'invalid analyzer root: path does not exist.' });
+      }
+      if (foldedSegments.includes(LINK_POINT_SEGMENT)) {
+        err({ code: 'invalidInput', reason: 'invalid analyzer root: path is a Link Point and cannot be analyzed.' });
+      }
       const rootPath = parsed.normalized;
       ctx.state.analyzerSeq += 1;
       const sessionId = 'mock-analyzer-' + String(ctx.state.analyzerSeq);

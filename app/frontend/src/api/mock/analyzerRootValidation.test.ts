@@ -31,6 +31,26 @@ describe('mock startAnalyzer root validation', () => {
     });
   }
 
+  it('rejects a missing analyzer root before emitting progress', async () => {
+    const client = createMockController();
+    const events: AnalyzerProgressEvent[] = [];
+    await expect(client.startAnalyzer('C:\\missing', (e) => events.push(e))).rejects.toMatchObject({
+      code: 'invalidInput',
+      details: { reason: expect.stringContaining('does not exist') },
+    });
+    expect(events).toEqual([]);
+  });
+
+  it('rejects a link-point analyzer root before emitting progress', async () => {
+    const client = createMockController();
+    const events: AnalyzerProgressEvent[] = [];
+    await expect(client.startAnalyzer('C:\\linkpoint', (e) => events.push(e))).rejects.toMatchObject({
+      code: 'invalidInput',
+      details: { reason: expect.stringContaining('Link Point') },
+    });
+    expect(events).toEqual([]);
+  });
+
   it('defaults null, empty and whitespace roots to C:\\', async () => {
     for (const root of [null, '', '   ']) {
       const client = createMockController();
