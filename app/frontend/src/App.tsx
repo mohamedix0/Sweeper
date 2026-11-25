@@ -60,7 +60,8 @@ function RelaunchErrorNotice(props: { message: string | null }) {
 // reports its own error). The banner is dismissible and clears once any
 // successful load delivers real settings through `onSaved` (#147).
 function BootSettingsErrorNotice(props: { message: string | null; onDismiss: () => void }) {
-  if (!props.message) return null;
+  // A rejection with an empty detail still failed: show the fallback warning.
+  if (props.message === null) return null;
   return (
     <div className="notice error boot-settings-notice" role="alert" aria-label="Settings load error">
       Settings could not be loaded on startup. Shown values are fallbacks. {props.message}

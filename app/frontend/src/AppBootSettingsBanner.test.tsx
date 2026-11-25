@@ -38,6 +38,15 @@ describe('App boot settings-load error banner', () => {
     });
   });
 
+  it('still shows the fallback banner when the boot error detail is empty', async () => {
+    vi.spyOn(mockController, 'getSettings').mockRejectedValue(new Error(''));
+
+    render(<App />);
+
+    const banner = await screen.findByRole('alert', { name: 'Settings load error' });
+    expect(banner).toHaveTextContent(/fallback/i);
+  });
+
   it('lets the user dismiss the boot-load error banner', async () => {
     const user = userEvent.setup();
     vi.spyOn(mockController, 'getSettings').mockRejectedValue(new Error('settings service unavailable'));
