@@ -34,7 +34,7 @@ describe('mock startAnalyzer root validation', () => {
   it('rejects a missing analyzer root before emitting progress', async () => {
     const client = createMockController();
     const events: AnalyzerProgressEvent[] = [];
-    await expect(client.startAnalyzer('C:\\missing', (e) => events.push(e))).rejects.toMatchObject({
+    await expect(client.startAnalyzer('C:\\Temp\\missing', (e) => events.push(e))).rejects.toMatchObject({
       code: 'invalidInput',
       details: { reason: expect.stringContaining('does not exist') },
     });
@@ -44,7 +44,7 @@ describe('mock startAnalyzer root validation', () => {
   it('rejects a link-point analyzer root before emitting progress', async () => {
     const client = createMockController();
     const events: AnalyzerProgressEvent[] = [];
-    await expect(client.startAnalyzer('C:\\linkpoint', (e) => events.push(e))).rejects.toMatchObject({
+    await expect(client.startAnalyzer('C:\\Temp\\linkpoint', (e) => events.push(e))).rejects.toMatchObject({
       code: 'invalidInput',
       details: { reason: expect.stringContaining('Link Point') },
     });
