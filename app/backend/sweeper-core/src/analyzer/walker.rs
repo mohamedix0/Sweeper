@@ -69,6 +69,12 @@ pub(super) struct WalkState {
     scanned_bytes: AtomicU64,
     current_path: Mutex<Option<String>>,
     max_files_per_dir: usize,
+    /// Hard bound on the number of directory records retained for the whole walk.
+    max_dir_records: usize,
+    /// Hard bound on child-directory paths retained per directory record.
+    max_child_dirs: usize,
+    /// Set when either bound forces the walk to stop retaining/enqueuing directories.
+    truncated: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -98,7 +104,12 @@ struct ScanDirOutput {
 }
 
 impl WalkState {
-    pub(super) fn new(root_path: String, max_files_per_dir: usize) -> Self {
+    pub(super) fn new(
+        root_path: String,
+        max_files_per_dir: usize,
+        max_dir_records: usize,
+        max_child_dirs: usize,
+    ) -> Self {
         let mut records = HashMap::new();
         let root_key = annotate::canonical_key(&root_path);
         let root_name = annotate::display_name(&root_path);
@@ -113,15 +124,19 @@ impl WalkState {
             scanned_bytes: AtomicU64::new(0),
             current_path: Mutex::new(None),
             max_files_per_dir: max_files_per_dir.max(1),
+            // The root record is inserted above, so both bounds are at least 1.
+            max_dir_records: max_dir_records.max(1),
+            max_child_dirs: max_child_dirs.max(1),
+            truncated: AtomicBool::new(false),
         }
     }
     pub(super) fn enqueue_initial(&self, dir_path: String) {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         work.queue.push_back(dir_path);
         self.condvar.notify_all();
     }
     fn wait_for_work(&self, cancel: &AtomicBool) -> Option<String> {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if cancel.load(AtomicOrdering::Relaxed) {
                 self.condvar.notify_all();
@@ -136,17 +151,111 @@ impl WalkState {
                 self.condvar.notify_all();
                 return None;
             }
-            work = self.condvar.wait(work).unwrap();
+            work = self.condvar.wait(work).unwrap_or_else(|e| e.into_inner());
         }
     }
     fn finish_work(&self) {
-        let mut work = self.work.lock().unwrap();
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
         work.active = work.active.saturating_sub(1);
         if work.active == 0 && work.queue.is_empty() {
             work.done = true;
         }
         self.condvar.notify_all();
     }
+    /// Dedup keys already linked to this parent, plus the number of them.
+    fn existing_children(
+        records: &HashMap<String, DirRecord>,
+        dir_key: &str,
+    ) -> (HashSet<String>, usize) {
+        let mut seen = HashSet::new();
+        let mut retained = 0usize;
+        if let Some(parent) = records.get(dir_key) {
+            for c in &parent.children_dirs {
+                seen.insert(annotate::canonical_key(c));
+            }
+            retained = parent.children_dirs.len();
+        }
+        (seen, retained)
+    }
+
+    /// True when retaining this child would exceed the whole-walk record bound.
+    fn dir_cap_reached(&self, records: &HashMap<String, DirRecord>, ck: &str) -> bool {
+        !records.contains_key(ck) && records.len() >= self.max_dir_records
+    }
+
+    /// True when retaining another child would exceed this directory's child bound.
+    fn child_cap_reached(&self, retained: usize, pending: usize) -> bool {
+        retained + pending >= self.max_child_dirs
+    }
+
+    /// Insert/link one retained child and apply its traversal or special-marker semantics.
+    fn retain_child(
+        records: &mut HashMap<String, DirRecord>,
+        child: ChildDirEntry,
+        ck: String,
+        dir_path: &str,
+        traverse_children: &mut Vec<String>,
+    ) {
+        let path = child.path.clone();
+        records.entry(ck.clone()).or_insert_with(|| {
+            DirRecord::new(
+                path.clone(),
+                annotate::display_name(&path),
+                Some(dir_path.to_string()),
+            )
+        });
+        if let Some(r) = records.get_mut(&ck) {
+            if r.parent.is_none() {
+                r.parent = Some(dir_path.to_string());
+            }
+            if r.name.is_empty() {
+                r.name = annotate::display_name(&path);
+            }
+            match child.kind {
+                ChildDirKind::Traverse => traverse_children.push(child.path),
+                ChildDirKind::Special(marker) => {
+                    r.own_file_count = 0;
+                    r.own_bytes = 0;
+                    r.files = vec![marker];
+                    r.children_dirs.clear();
+                    r.scanned = true;
+                }
+            }
+        }
+    }
+
+    /// Store the scan results on the directory record itself.
+    fn finalize_parent(
+        records: &mut HashMap<String, DirRecord>,
+        dir_key: &str,
+        dir_path: &str,
+        new_children: Vec<String>,
+        files: Vec<FileInfo>,
+        file_count: u64,
+        byte_count: u64,
+    ) {
+        if let Some(rec) = records.get_mut(dir_key) {
+            rec.children_dirs.extend(new_children);
+            rec.files = files;
+            rec.own_file_count = file_count;
+            rec.own_bytes = byte_count;
+            rec.scanned = true;
+            if rec.name.is_empty() {
+                rec.name = annotate::display_name(dir_path);
+            }
+        }
+    }
+
+    fn enqueue_children(&self, traverse_children: Vec<String>) {
+        if !traverse_children.is_empty() {
+            // Recover from a poisoned work mutex so a panicking peer worker
+            // cannot prevent the remaining children from being enqueued (#134).
+            let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
+            work.queue.extend(traverse_children);
+            self.condvar.notify_all();
+        }
+    }
+
     fn commit_directory_scan(
         &self,
         dir_path: &str,
@@ -156,85 +265,79 @@ impl WalkState {
         byte_count: u64,
     ) {
         let mut traverse_children = Vec::new();
+        let mut did_truncate = false;
         {
-            let mut records = self.records.lock().unwrap();
+            let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
             let dir_key = annotate::canonical_key(dir_path);
             records.entry(dir_key.clone()).or_insert_with(|| {
                 DirRecord::new(dir_path.to_string(), annotate::display_name(dir_path), None)
             });
-            let mut seen: HashSet<String> = HashSet::new();
-            if let Some(parent) = records.get(&dir_key) {
-                for c in &parent.children_dirs {
-                    seen.insert(annotate::canonical_key(c));
-                }
-            }
+            let (mut seen, retained_children) = Self::existing_children(&records, &dir_key);
             let mut new_children: Vec<String> = Vec::new();
             for child in child_dirs {
                 let ck = annotate::canonical_key(&child.path);
-                if seen.insert(ck.clone()) {
-                    new_children.push(child.path.clone());
+                if !seen.insert(ck.clone()) {
+                    continue;
                 }
-                records.entry(ck.clone()).or_insert_with(|| {
-                    DirRecord::new(
-                        child.path.clone(),
-                        annotate::display_name(&child.path),
-                        Some(dir_path.to_string()),
-                    )
-                });
-                if let Some(r) = records.get_mut(&ck) {
-                    if r.parent.is_none() {
-                        r.parent = Some(dir_path.to_string());
-                    }
-                    if r.name.is_empty() {
-                        r.name = annotate::display_name(&child.path);
-                    }
-                    match child.kind {
-                        ChildDirKind::Traverse => traverse_children.push(child.path),
-                        ChildDirKind::Special(marker) => {
-                            r.own_file_count = 0;
-                            r.own_bytes = 0;
-                            r.files = vec![marker];
-                            r.children_dirs.clear();
-                            r.scanned = true;
-                        }
-                    }
+                // Bound retention *during* traversal: a skipped child gets no record,
+                // no parent link and no queue entry, so the walk terminates early
+                // instead of retaining one record per directory on the whole drive.
+                if self.dir_cap_reached(&records, &ck)
+                    || self.child_cap_reached(retained_children, new_children.len())
+                {
+                    did_truncate = true;
+                    continue;
                 }
+                new_children.push(child.path.clone());
+                Self::retain_child(&mut records, child, ck, dir_path, &mut traverse_children);
             }
-            if let Some(rec) = records.get_mut(&dir_key) {
-                rec.children_dirs.extend(new_children);
-                rec.files = files;
-                rec.own_file_count = file_count;
-                rec.own_bytes = byte_count;
-                rec.scanned = true;
-                if rec.name.is_empty() {
-                    rec.name = annotate::display_name(dir_path);
-                }
-            }
+            Self::finalize_parent(
+                &mut records,
+                &dir_key,
+                dir_path,
+                new_children,
+                files,
+                file_count,
+                byte_count,
+            );
         }
-        if !traverse_children.is_empty() {
-            let mut work = self.work.lock().unwrap();
-            for c in traverse_children {
-                work.queue.push_back(c);
-            }
-            self.condvar.notify_all();
+        // Preserve the C3 truncation signal from main while #169's
+        // poison-safe enqueue now lives in `enqueue_children` below.
+        if did_truncate {
+            self.truncated.store(true, AtomicOrdering::Relaxed);
         }
+        self.enqueue_children(traverse_children);
         self.scanned_dirs.fetch_add(1, AtomicOrdering::Relaxed);
         self.scanned_files
             .fetch_add(file_count, AtomicOrdering::Relaxed);
         self.scanned_bytes
             .fetch_add(byte_count, AtomicOrdering::Relaxed);
-        *self.current_path.lock().unwrap() = Some(dir_path.to_string());
+        *self.current_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir_path.to_string());
+    }
+    /// Records a walk failure so it surfaces as a typed `AnalyzerError::Walk`
+    /// rather than being silently discarded. The first error wins.
+    pub(super) fn record_error(&self, message: String) {
+        let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
+        if error.is_none() {
+            *error = Some(message);
+        }
     }
     pub(super) fn had_error(&self) -> bool {
-        self.error.lock().unwrap().is_some()
+        self.error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
     pub(super) fn take_error(&self) -> Option<String> {
-        self.error.lock().unwrap().take()
+        self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+    pub(super) fn was_truncated(&self) -> bool {
+        self.truncated.load(AtomicOrdering::Relaxed)
     }
     pub(super) fn into_records(self: Arc<Self>) -> HashMap<String, DirRecord> {
         match Arc::try_unwrap(self) {
             Ok(s) => s.records.into_inner().unwrap_or_default(),
-            Err(s) => s.records.lock().unwrap().clone(),
+            Err(s) => s.records.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }
     }
 }
@@ -274,7 +377,7 @@ impl ProgressState {
         let Some(cb) = &self.cb else {
             return;
         };
-        let mut last = self.last_emit.lock().unwrap();
+        let mut last = self.last_emit.lock().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() >= self.interval {
             *last = Instant::now();
             let snap = self.snapshot(state);
@@ -292,8 +395,24 @@ impl ProgressState {
             scanned_dirs: state.scanned_dirs.load(AtomicOrdering::Relaxed),
             scanned_files: state.scanned_files.load(AtomicOrdering::Relaxed),
             scanned_bytes: state.scanned_bytes.load(AtomicOrdering::Relaxed),
-            current_path: state.current_path.lock().unwrap().clone(),
+            current_path: state
+                .current_path
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
+    }
+}
+
+/// Releases a worker's reserved work slot when the loop exits, including via
+/// panic unwinding. Without this guard a panicking worker leaves `active > 0`
+/// forever, so peer workers blocked in `Condvar::wait` never observe `done`
+/// and the join loop in `spawn_and_join_walkers` deadlocks (issue #134).
+struct ActiveGuard<'a>(&'a WalkState);
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish_work();
     }
 }
 
@@ -310,6 +429,9 @@ pub(super) fn worker_loop(
         let Some(dir_path) = state.wait_for_work(&cancel) else {
             return;
         };
+        // Registered immediately after the slot is reserved so any panic in
+        // the scan/commit/progress path still releases the slot and wakes peers.
+        let _active_guard = ActiveGuard(state.as_ref());
         match scan_directory(&dir_path, &cancel, state.max_files_per_dir) {
             Ok(out) => {
                 state.commit_directory_scan(
@@ -326,11 +448,11 @@ pub(super) fn worker_loop(
                 progress.maybe_emit(&state);
             }
         }
-        state.finish_work();
         if cancel.load(AtomicOrdering::Relaxed) {
             state.condvar.notify_all();
             return;
         }
+        // `_active_guard` is dropped here, releasing the work slot.
     }
 }
 

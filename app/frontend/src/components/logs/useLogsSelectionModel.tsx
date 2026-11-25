@@ -68,7 +68,6 @@ function useLogData(client: SweeperClient) {
   const [selected, setSelected] = useState<SelectedLog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef<LogRequest>({ seq: 0, id: '' });
-  const refresh = useCallback(() => refreshLogs({ client, cancelled: () => false, setLogs, setContentById, setError }), [client]);
   const clearSelected = useCallback(() => {
     requestRef.current = { seq: requestRef.current.seq + 1, id: '' };
     setSelected(null);
@@ -76,7 +75,7 @@ function useLogData(client: SweeperClient) {
   const openLog = useCallback(async (id: string) => {
     await readOwnedLog({ client, id, requestRef, setError, setSelected, setContentById });
   }, [client]);
-  return { logs, contentById, selected, error, setError, setLogs, setContentById, setSelected, clearSelected, requestRef, refresh, openLog };
+  return { logs, contentById, selected, error, setError, setLogs, setContentById, setSelected, clearSelected, requestRef, openLog };
 }
 
 function canAutoOpen(args: { focusLogId?: string | null; selected: SelectedLog | null; next: LogMeta[]; suppress: boolean }) {

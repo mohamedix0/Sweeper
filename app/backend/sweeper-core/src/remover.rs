@@ -17,8 +17,14 @@ use crate::journal::{self, JournalError, JournalWriter};
 use crate::paths::CanonicalPath;
 use crate::policy;
 
+mod case_variant;
+mod clean_progress;
 mod remover_whole_cache;
 
+use case_variant::reject_case_distinct_sibling;
+use clean_progress::{
+    emit_item_progress, stop_and_flush, CleanProgressThrottle, FailureProgress, ItemProgress,
+};
 use remover_whole_cache::{age_check_applies, whole_cache_partial_outcome};
 
 /// Errors from clean/remover operations.
@@ -431,6 +437,9 @@ pub fn execute_clean(
 ///
 /// Safety-critical: revalidates on opened handles, journals intent before deletion and outcomes after,
 /// aborts on 120% overrun or target-root escape, and uses an abort-on-panic guard.
+// Keep the two failure-flush call sites compact so this method stays under the
+// large-method threshold; rustfmt would otherwise expand each context literal.
+#[rustfmt::skip]
 pub fn execute_clean_with_progress<F>(
     items: Vec<ValidatedItem>,
     opts: CleanOptions,
@@ -445,6 +454,7 @@ where
     let mut report = new_clean_report(items.len());
     let mut deleted_total: u64 = 0;
     let mut completed: u64 = 0;
+    let mut progress_throttle = CleanProgressThrottle::new();
 
     for (index, item) in items.iter().enumerate() {
         if report.aborted {
@@ -454,14 +464,13 @@ where
                 item,
                 &mut completed,
                 total_items,
+                &mut progress_throttle,
                 &mut on_progress,
             ) {
-                return Ok(stop_after_journal_failure(
-                    &mut journal,
-                    report,
-                    err,
-                    &items[index..],
-                ));
+                return Ok(stop_and_flush(report, err, &items[index..], &mut FailureProgress {
+                    journal: &mut journal, throttle: &mut progress_throttle, on_progress: &mut on_progress,
+                    item, completed, total_items,
+                }));
             }
             continue;
         }
@@ -473,23 +482,24 @@ where
                 // An intent-write failure stops further deletion, but the
                 // deletions already completed and all journal errors collected
                 // so far must still reach the caller in a partial report.
-                return Ok(stop_after_journal_failure(
-                    &mut journal,
-                    report,
-                    err,
-                    &items[index..],
-                ));
+                return Ok(stop_and_flush(report, err, &items[index..], &mut FailureProgress {
+                    journal: &mut journal, throttle: &mut progress_throttle, on_progress: &mut on_progress,
+                    item, completed, total_items,
+                }));
             }
         };
         let status = apply_process_outcome(item, outcome, &mut report);
         completed = completed.saturating_add(1);
         emit_item_progress(
+            &mut progress_throttle,
             &mut on_progress,
-            item,
-            completed,
-            total_items,
-            report.bytes_freed,
-            status,
+            ItemProgress {
+                item,
+                completed,
+                total_items,
+                bytes_freed: report.bytes_freed,
+                status,
+            },
         );
     }
 
@@ -548,11 +558,16 @@ fn stop_after_journal_failure(
 /// per-item accounting of the circuit-breaker path. Items that already carry a
 /// partial Deleted result are left untouched.
 fn record_missing_statuses(report: &mut CleanReport, items: &[ValidatedItem], reason: &str) {
+    // Membership is O(1) via a set built once from the rows already recorded;
+    // the old per-item linear scan over the growing `report.items` was O(n^2).
+    // Insert-while-iterating also mirrors the old behaviour for duplicate ids.
+    let mut recorded: HashSet<&str> = report.items.iter().map(|row| row.id.as_str()).collect();
+    let mut additions = Vec::with_capacity(items.len());
     for item in items {
-        if report.items.iter().any(|row| row.id == item.id) {
+        if !recorded.insert(item.id.as_str()) {
             continue;
         }
-        report.items.push(ItemCleanResult {
+        additions.push(ItemCleanResult {
             id: item.id.clone(),
             path: item.path.clone(),
             status: "Skipped".to_string(),
@@ -561,6 +576,7 @@ fn record_missing_statuses(report: &mut CleanReport, items: &[ValidatedItem], re
         });
         report.skipped_count += 1;
     }
+    report.items.extend(additions);
 }
 
 /// Build a fresh, empty report for a Clean run of `item_count` items.
@@ -576,13 +592,15 @@ fn new_clean_report(item_count: usize) -> CleanReport {
 }
 
 /// Record the skip of an item not processed because the batch already aborted,
-/// then emit its progress update.
+/// then emit its (throttled) progress update.
+#[allow(clippy::too_many_arguments)]
 fn record_post_abort_skip<F>(
     journal: &mut JournalWriter,
     report: &mut CleanReport,
     item: &ValidatedItem,
     completed: &mut u64,
     total_items: u64,
+    throttle: &mut CleanProgressThrottle,
     on_progress: &mut F,
 ) -> Result<(), CleanError>
 where
@@ -594,13 +612,17 @@ where
         .unwrap_or_else(|| "aborted".to_string());
     record_skip(journal, report, item, &reason)?;
     *completed = completed.saturating_add(1);
-    on_progress(CleanProgress {
-        target_id: item.target_id.clone(),
-        completed_items: *completed,
-        total_items,
-        bytes_freed_so_far: report.bytes_freed,
-        status: "Skipped".to_string(),
-    });
+    emit_item_progress(
+        throttle,
+        on_progress,
+        ItemProgress {
+            item,
+            completed: *completed,
+            total_items,
+            bytes_freed: report.bytes_freed,
+            status: "Skipped".to_string(),
+        },
+    );
     Ok(())
 }
 
@@ -674,26 +696,6 @@ fn root_outcome_with_child_bytes(outcome: ProcessOutcome, child_bytes: u64) -> P
             ProcessOutcome::Aborted(reason, carried.saturating_add(child_bytes))
         }
     }
-}
-
-/// Emit a progress update for a single processed item.
-fn emit_item_progress<F>(
-    on_progress: &mut F,
-    item: &ValidatedItem,
-    completed: u64,
-    total_items: u64,
-    bytes_freed: u64,
-    status: String,
-) where
-    F: FnMut(CleanProgress),
-{
-    on_progress(CleanProgress {
-        target_id: item.target_id.clone(),
-        completed_items: completed,
-        total_items,
-        bytes_freed_so_far: bytes_freed,
-        status,
-    });
 }
 
 enum ProcessOutcome {
@@ -1441,7 +1443,7 @@ fn delete_path_entry_inner(
 
 fn revalidate_handle(
     item: &ValidatedItem,
-    _requested_path: &str,
+    requested_path: &str,
     inspection: &sweeper_winfs::HandleInspection,
     opts: &CleanOptions,
     allow_delete_root: bool,
@@ -1452,6 +1454,8 @@ fn revalidate_handle(
         .map_err(|e| format!("Skipped: final path invalid: {e}"))?;
     let target_root = CanonicalPath::parse_lexical(&item.target_root)
         .map_err(|e| format!("Skipped: target root invalid: {e}"))?;
+
+    reject_confirmed_path_redirect(&final_canon, requested_path, &target_root)?;
 
     // 1) Authorized source (allowlisted target, validated custom path, or opt-in Tier 3 conditional target).
     match &item.source {
@@ -1526,6 +1530,39 @@ fn revalidate_handle(
         }
     }
 
+    Ok(())
+}
+
+/// Reject a confirmed path whose handle-authoritative resolution no longer agrees
+/// with it (D1 / ADR 0003).
+///
+/// `inspection.final_path` resolves every component of the path used for the
+/// open, while `FILE_FLAG_OPEN_REPARSE_POINT` protects only the final component.
+/// An interior junction can therefore be traversed during the open and removed
+/// before this check, so an ancestor-only re-check would miss it: the handle
+/// then targets an unselected sibling that is still inside the target root.
+/// Comparing the two canonical paths (case-insensitive) closes that window. The
+/// ancestor re-check is defence in depth for a junction inserted after the open.
+/// The final component is excluded from the ancestor check so an item that is
+/// itself a Link Point can still be unlinked.
+fn reject_confirmed_path_redirect(
+    final_canon: &CanonicalPath,
+    requested_path: &str,
+    target_root: &CanonicalPath,
+) -> Result<(), String> {
+    let requested_canon = CanonicalPath::parse_lexical(requested_path)
+        .map_err(|e| format!("Skipped: requested path invalid: {e}"))?;
+    if !final_canon.is_same_path(&requested_canon) {
+        return Err("aborted: escape via handle final path divergence from confirmed path (link point traversed under target root)".to_string());
+    }
+    reject_case_distinct_sibling(final_canon, &requested_canon)?;
+    if path_has_link_point_ancestor(&requested_canon, target_root, true)
+        .map_err(|e| format!("Skipped: requested-path ancestor check failed: {e}"))?
+    {
+        return Err(
+            "aborted: requested-path ancestor link point detected under target root".to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -1895,6 +1932,49 @@ pub fn validated_item_for_tests(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn handle_final_path_divergence_from_confirmed_path_aborts() {
+        // Residual D1 TOCTOU: the handle was opened while `sub` was a junction
+        // to `keep`; the junction was swapped back to an ordinary directory
+        // before revalidation. The ancestor re-check alone now sees no Link
+        // Point, but the handle still targets the unselected `keep/victim.txt`.
+        let target_root = r"C:\Temp\d1";
+        let item = validated_item_for_tests(
+            "d1-race",
+            "test-target",
+            target_root,
+            r"C:\Temp\d1\sub\victim.txt",
+            14,
+            Some(0),
+            ValidatedSource::CustomPath,
+        );
+        let inspection = sweeper_winfs::HandleInspection {
+            final_path: r"C:\Temp\d1\keep\victim.txt".to_string(),
+            identity: sweeper_winfs::FileIdentity {
+                volume_serial: 1,
+                file_index: 1,
+            },
+            attributes: 0x80, // FILE_ATTRIBUTE_NORMAL
+            size: 14,
+            reparse: ReparseTagClass::NotReparse,
+            reparse_tag: 0,
+            last_write_time: (0, 0),
+        };
+        let opts = CleanOptions {
+            preview_estimated_bytes: 1024 * 1024,
+            min_age: Duration::from_secs(0),
+            now: SystemTime::now(),
+            journal_base_dir: None,
+        };
+
+        let reason = revalidate_handle(&item, item.path(), &inspection, &opts, false, false)
+            .expect_err("divergent handle final path must abort revalidation");
+        assert!(
+            reason.contains("escape"),
+            "reason must classify as an abort: {reason}"
+        );
+    }
 
     #[test]
     fn ancestor_chain_cache_precomputes_levels_and_stays_bounded() {

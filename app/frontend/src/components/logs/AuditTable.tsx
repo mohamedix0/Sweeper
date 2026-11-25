@@ -26,7 +26,7 @@ function AuditRowView(props: { row: AuditRow; indented: boolean }) {
   return (
     <tr className={auditRowClass({ row, indented })}>
       <td className="audit-category"><div className={categoryClass}><span className="audit-category-main">{row.category}</span>{row.sublabel ? <span className="audit-kind muted">{row.sublabel}</span> : null}</div></td>
-      <td className="audit-location mono" title={row.location}>{String(row.location || '')}</td>
+      <td className="audit-location mono" title={row.location}><bdi>{String(row.location || '')}</bdi></td>
       <td className="audit-size num">{row.size}</td>
       <td className="audit-outcome"><span className={outcomeBadgeClass({ row })}>{row.outcome}</span></td>
     </tr>

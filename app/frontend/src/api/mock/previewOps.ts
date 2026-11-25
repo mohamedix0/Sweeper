@@ -2,6 +2,7 @@ import type { AnalyzerNodeDto, PreviewCleanResult } from '../client';
 import { expandPreviewSelectionIds } from '../../components/scan/previewPerf';
 import { analyzerBreakdown, dedupeAnalyzerNodes, err, isUnknownBlocked, scanBreakdown, sumNodeBytes } from './helpers';
 import { getValidSessionState } from './scanAnalyzerOps';
+import { rejectCleanWhileScanRunning } from './scanGate';
 import type { AnalyzerSessionState, MockCtx, ScanSessionState } from './types';
 import type { ScanItemInfo } from './data';
 
@@ -182,6 +183,7 @@ function issuePreview(input: { ctx: MockCtx; build: PreviewBuild }): PreviewClea
 export function buildPreviewApi(ctx: MockCtx) {
   return {
     async previewClean(sessionId: string, itemIds: string[], confirmations?: { typedConfirmation: string | null } | null) {
+      rejectCleanWhileScanRunning(ctx);
       return issuePreview({ ctx, build: buildPreview({ ctx, sessionId, itemIds, confirmations: confirmations ?? null }) });
     },
   };

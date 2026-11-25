@@ -1,5 +1,6 @@
 import type { AnalyzerProgressEvent, ScanProgressEvent, TierDto } from '../client';
 import { err } from './helpers';
+import { LINK_POINT_SEGMENT, MISSING_SEGMENT, parseMockPath } from './pathPolicy';
 import { buildAnalyzerTree, indexAnalyzerNodes, makeScanResults } from './data';
 import type { AnalyzerSessionState, MockCtx, ScanSessionState } from './types';
 
@@ -124,9 +125,16 @@ export function buildScanAnalyzerApi(ctx: MockCtx) {
       ctx.state.scanSeq += 1;
       const sessionId = 'mock-session-' + String(ctx.state.scanSeq);
       const { targets, itemsById } = makeScanResults({ settingsState: ctx.mutable.settingsState, tiers });
-      const session: ScanSessionState = { id: sessionId, createdAtMs: ctx.state.nowMs, minAgeHours: ctx.mutable.settingsState.minAgeHours, targets, itemsById, settingsGeneration: ctx.state.settingsGeneration, cancelled: false };
+      const session: ScanSessionState = { id: sessionId, createdAtMs: ctx.state.nowMs, minAgeHours: ctx.mutable.settingsState.minAgeHours, targets, itemsById, settingsGeneration: ctx.state.settingsGeneration, cancelled: false, running: true };
       ctx.sessions.set(sessionId, session);
-      const outcome = await emitScanProgress({ ctx, session, targets: targets as ScanTarget[], onProgress });
+      let outcome: ScanProgressOutcome;
+      try {
+        outcome = await emitScanProgress({ ctx, session, targets: targets as ScanTarget[], onProgress });
+      } finally {
+        // Only the worker's terminal path retires the active registration (#95),
+        // even when cancellation is cooperative or the session went stale.
+        session.running = false;
+      }
       // A reset may have removed this session or replaced it under the reused
       // id while progress was delayed; a stale scan must not report anything.
       if (isStale(ctx, session)) return { sessionId };
@@ -147,10 +155,26 @@ export function buildScanAnalyzerApi(ctx: MockCtx) {
       for (const session of ctx.sessions.values()) session.cancelled = true;
     },
     async startAnalyzer(root: string | null | undefined, onProgress?: (p: AnalyzerProgressEvent) => void) {
+      // Mirror backend `validate_analyzer_root`: null/empty/whitespace defaults
+      // to C:\, while relative / UNC / `..` / device-prefix roots are rejected.
+      // Protected container roots stay valid (lexical-only, no Custom Path Policy).
+      const trimmed = root ? root.trim() : '';
+      const parsed = parseMockPath(trimmed || 'C:\\');
+      if (!parsed) err({ code: 'invalidInput', reason: 'invalid analyzer root: path must be an absolute drive path without traversal segments.' });
+      // Existence / Link Point checks use the mock's synthetic segment markers,
+      // mirroring backend validate_analyzer_root (NotFound / InvalidRoot). This
+      // is not a Custom Path Policy rule, so lexical-only validation still
+      // accepts protected container roots. Reject before progress or a session.
+      const foldedSegments = parsed.segments.map((s) => s.folded);
+      if (foldedSegments.includes(MISSING_SEGMENT)) {
+        err({ code: 'invalidInput', reason: 'invalid analyzer root: path does not exist.' });
+      }
+      if (foldedSegments.includes(LINK_POINT_SEGMENT)) {
+        err({ code: 'invalidInput', reason: 'invalid analyzer root: path is a Link Point and cannot be analyzed.' });
+      }
+      const rootPath = parsed.normalized;
       ctx.state.analyzerSeq += 1;
       const sessionId = 'mock-analyzer-' + String(ctx.state.analyzerSeq);
-      const trimmed = root ? root.trim() : '';
-      const rootPath = trimmed || 'C:\\';
       onProgress?.({ sessionId, scannedDirs: '1', scannedFiles: '0', scannedBytes: '0', currentPath: rootPath });
       const tree = buildAnalyzerTree({ rootPath, allowUnknown: ctx.mutable.settingsState.allowDeleteUnknown });
       const nodesById = indexAnalyzerNodes(tree);
