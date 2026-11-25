@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import {
   MAX_MAIN_THREAD_GAP_MS,
   MIN_SAMPLES,
+  SPIKE_BAND_MS,
   WARMUP_FRAMES,
   WINDOW_FRAMES,
   summarizeGaps,
@@ -40,6 +41,8 @@ type Metrics = {
   previewIds: number;
   payloadIdsMatch: boolean;
   gaps: number[];
+  /** Largest 80-150 ms gap seen anywhere in Preview, even if the window advanced. */
+  maxMidBandGapMs: number;
   determinateProgressSeen: boolean;
 };
 
@@ -47,6 +50,8 @@ type SamplerConfig = {
   expectedMax: number;
   warmupFrames: number;
   windowFrames: number;
+  gapBoundMs: number;
+  spikeBandMs: number;
 };
 
 async function installGapSampler(page: Page, config: SamplerConfig): Promise<void> {
@@ -58,6 +63,9 @@ async function installGapSampler(page: Page, config: SamplerConfig): Promise<voi
       // Monotonic count of recorded samples: the bounded buffer length stops
       // growing once full, so it cannot signal "a new frame arrived" (#145).
       __sampleCount: number;
+      // Evidence of real 80-150 ms stalls must survive the bounded window's
+      // shift; a lone scheduling spike >= spikeBandMs is still excluded.
+      __maxMidBandGap: number;
       __resetGaps: () => void;
       __perf: Record<string, number | boolean>;
     };
@@ -65,10 +73,12 @@ async function installGapSampler(page: Page, config: SamplerConfig): Promise<voi
     g.__lastFrame = 0;
     g.__warmupRemaining = cfg.warmupFrames;
     g.__sampleCount = 0;
+    g.__maxMidBandGap = 0;
     g.__perf = {};
     g.__resetGaps = () => {
       g.__gapSamples = [];
       g.__sampleCount = 0;
+      g.__maxMidBandGap = 0;
       // 0 means "no baseline yet": the first frame after a reset spans the
       // click/effect scheduling, not a renderer stall, so it is not sampled.
       g.__lastFrame = 0;
@@ -107,7 +117,12 @@ async function installGapSampler(page: Page, config: SamplerConfig): Promise<voi
         g.__warmupRemaining -= 1;
         return;
       }
-      g.__gapSamples.push(now - g.__lastFrame);
+      const gap = now - g.__lastFrame;
+      // Preserve stall evidence before the bounded window can shift it away.
+      if (gap >= cfg.gapBoundMs && gap < cfg.spikeBandMs) {
+        g.__maxMidBandGap = Math.max(g.__maxMidBandGap, gap);
+      }
+      g.__gapSamples.push(gap);
       g.__sampleCount += 1;
       if (g.__gapSamples.length > cfg.windowFrames) g.__gapSamples.shift();
     };
@@ -195,7 +210,7 @@ async function installLargeSelectionMock(page: Page, count: number): Promise<voi
 
 async function readMetrics(page: Page): Promise<Metrics> {
   return page.evaluate(() => {
-    const g = globalThis as unknown as { __gapSamples: number[] };
+    const g = globalThis as unknown as { __gapSamples: number[]; __maxMidBandGap: number };
     const p = (window as unknown as { __perf: Record<string, number | boolean> }).__perf;
     if (g.__gapSamples.length === 0) throw new Error('animation-frame sampler recorded no frames');
     return {
@@ -204,6 +219,7 @@ async function readMetrics(page: Page): Promise<Metrics> {
       previewIds: Number(p.previewIds),
       payloadIdsMatch: Boolean(p.payloadIdsMatch),
       gaps: g.__gapSamples.slice(),
+      maxMidBandGapMs: g.__maxMidBandGap,
       determinateProgressSeen: Boolean(p.determinateProgressSeen),
     };
   });
@@ -231,8 +247,10 @@ async function measureOnce(page: Page, attempt: number): Promise<{ metrics: Metr
   await review.click();
 
   const cta = page.getByRole('button', { name: /Delete .* permanently/ });
-  const framesBeforeEnable = await page.evaluate(() => (globalThis as unknown as { __sampleCount: number }).__sampleCount);
   await expect(cta).toBeEnabled({ timeout: CTA_BOUND_MS });
+  // Baseline must be read AFTER enable: samples recorded during preparation
+  // must not count toward the post-enable window (#145 follow-up).
+  const framesBeforeEnable = await page.evaluate(() => (globalThis as unknown as { __sampleCount: number }).__sampleCount);
   // The final render that enables the CTA can itself occupy a frame interval.
   // Wait for a full MIN_SAMPLES of post-enable frames so the gap summary is
   // statistically meaningful. Use the monotonic counter: the bounded buffer
@@ -252,12 +270,17 @@ test.describe('Sweeper Preview responsiveness at large selections (mock sandbox)
       expectedMax: ITEM_COUNT,
       warmupFrames: WARMUP_FRAMES,
       windowFrames: WINDOW_FRAMES,
+      gapBoundMs: MAX_MAIN_THREAD_GAP_MS,
+      spikeBandMs: SPIKE_BAND_MS,
     });
 
     let last: GapSummary | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const { metrics, elapsedMs } = await measureOnce(page, attempt);
       const summary = summarizeGaps(metrics.gaps);
+      // A real 80-150 ms stall seen anywhere in Preview must still fail the
+      // guard even if the bounded window shifted it out before readMetrics.
+      summary.effectiveGapMs = Math.max(summary.effectiveGapMs, metrics.maxMidBandGapMs);
 
       // Deterministic invariants: a failure here is a real regression, not contention.
       expect(metrics.explainCalls, 'explainItem IPC must be bounded').toBeLessThanOrEqual(EXPLAIN_CALL_BOUND);
