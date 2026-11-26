@@ -245,7 +245,7 @@ describe('window-close handshake (#93)', () => {
     expect(screen.getByTestId('close-pending')).toHaveTextContent('false');
   });
 
-  it('Retry re-delivers the same request id and decision after a failed clean close', async () => {
+  it('Retry re-delivers the same request id and decision and clears the close error notice', async () => {
     const user = userEvent.setup();
     const bridge = fakeBridge();
     const tracked = failFirstDelivery(bridge);
@@ -257,6 +257,7 @@ describe('window-close handshake (#93)', () => {
 
     await waitFor(() => expect(bridge.decisions).toEqual([true, true]));
     expect(bridge.decisionIds).toEqual(['R1', 'R1']);
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
   it('a clean close with a failed delivery shows an error without reopening the dialog', async () => {
@@ -271,20 +272,6 @@ describe('window-close handshake (#93)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(screen.getByTestId('prompt')).toHaveTextContent('false');
-  });
-
-  it('a successful Retry clears the close error notice', async () => {
-    const user = userEvent.setup();
-    const bridge = fakeBridge();
-    const tracked = failFirstDelivery(bridge);
-    render(<Harness deps={depsOf(tracked, false, async () => true)} />);
-    act(() => bridge.requestHostClose('R2'));
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
-    await user.click(screen.getByRole('button', { name: 'Retry' }));
-
-    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
-    expect(bridge.decisionIds).toEqual(['R2', 'R2']);
   });
 
   it('Retry reopens the decision when the draft became dirty after a failed clean close', async () => {

@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,13 +19,20 @@ use crate::policy;
 
 mod case_variant;
 mod clean_progress;
+mod prechecks;
 mod remover_whole_cache;
+mod revalidation;
 
-use case_variant::reject_case_distinct_sibling;
 use clean_progress::{
     emit_item_progress, stop_and_flush, CleanProgressThrottle, FailureProgress, ItemProgress,
 };
-use remover_whole_cache::{age_check_applies, whole_cache_partial_outcome};
+use prechecks::{
+    check_circuit_breaker, finish_delete_failure, finish_delete_success,
+    handle_revalidation_failure, handle_root_contents, is_protected_root, is_skippable_reparse,
+    open_delete_handle, perform_delete, precheck_delete, precheck_process_item, write_skip,
+    OpenResult,
+};
+use revalidation::{ensure_target_root_safe, revalidate_handle, revalidate_root_identity};
 
 /// Errors from clean/remover operations.
 #[derive(Debug, Error)]
@@ -197,10 +204,7 @@ impl ValidatedItem {
                 "item path must be inside target root (and not the root itself)".to_string(),
             );
         }
-        if policy::is_subtree_protected(&item)
-            || policy::is_ancestor_of_subtree_protected(&item)
-            || policy::is_protected_container_root(&item)
-        {
+        if is_protected_root(&item) {
             return Err("item path is protected".to_string());
         }
 
@@ -253,10 +257,7 @@ impl ValidatedItem {
         if canon.segment_count() < 3 {
             return Err(format!("{label} depth < 3"));
         }
-        if policy::is_subtree_protected(&canon)
-            || policy::is_ancestor_of_subtree_protected(&canon)
-            || policy::is_protected_container_root(&canon)
-        {
+        if is_protected_root(&canon) {
             return Err(format!("{label} is protected"));
         }
         Ok(canon)
@@ -790,146 +791,19 @@ fn process_item(
     report: &mut CleanReport,
 ) -> Result<ProcessOutcome, CleanError> {
     let mut ctx = CleanTraversalCtx::new(opts, journal, deleted_total, report);
-    // Missing target root/custom path: zero deletions, parent untouched.
-    let target_root_path = Path::new(&item.target_root);
-    if !target_root_path.exists() {
-        ctx.journal.write_intent(&journal::intent_record(
-            &item.id,
-            &item.path,
-            item.size_bytes,
-            None,
-        ))?;
-        let reason = "Skipped: missing target root (zero deletions; parent untouched)".to_string();
-        ctx.journal.write_outcome(&journal::outcome_record(
-            &item.id, &item.path, 0, "Skipped", &reason, None,
-        ))?;
-        return Ok(ProcessOutcome::skipped(reason));
-    }
-    // Revalidate target root/ancestors are not link points at moment of deletion.
-    if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-        ctx.journal.write_intent(&journal::intent_record(
-            &item.id,
-            &item.path,
-            item.size_bytes,
-            None,
-        ))?;
-        ctx.journal.write_outcome(&journal::outcome_record(
-            &item.id, &item.path, 0, "Skipped", &reason, None,
-        ))?;
-        if reason.contains("escape")
-            || reason.contains("swapped to a junction")
-            || (reason.contains("link point") && reason.contains("target root"))
-        {
-            // Target root compromised -> abort entire clean for safety.
-            return Ok(ProcessOutcome::aborted(reason));
-        }
-        return Ok(ProcessOutcome::skipped(reason));
+    if let Some(outcome) = precheck_process_item(item, &mut ctx)? {
+        return Ok(outcome);
     }
 
     let item_path = Path::new(&item.path);
-    if !item_path.exists() {
-        ctx.journal.write_intent(&journal::intent_record(
-            &item.id,
-            &item.path,
-            item.size_bytes,
-            None,
-        ))?;
-        let reason = "Skipped: missing path".to_string();
-        ctx.journal.write_outcome(&journal::outcome_record(
-            &item.id, &item.path, 0, "Skipped", &reason, None,
-        ))?;
-        return Ok(ProcessOutcome::skipped(reason));
+    if !paths_equal_str(&item.path, &item.target_root) {
+        return delete_path_entry(item, &item.path, &mut ctx);
     }
-
-    // Determine if item is the target root itself.
-    let is_root_itself = paths_equal_str(&item.path, &item.target_root);
-    if is_root_itself {
-        if item_path.is_dir() {
-            // Fail closed if the root was swapped since preview (see revalidate_root_identity).
-            if let Err(reason) = revalidate_root_identity(item) {
-                ctx.journal.write_intent(&journal::intent_record(
-                    &item.id,
-                    &item.path,
-                    item.size_bytes,
-                    None,
-                ))?;
-                ctx.journal.write_outcome(&journal::outcome_record(
-                    &item.id, &item.path, 0, "Skipped", &reason, None,
-                ))?;
-                return Ok(ProcessOutcome::skipped(reason));
-            }
-            let contents = clean_directory_contents(item, &mut ctx)?;
-            let outcome = contents.outcome;
-            if let ProcessOutcome::Deleted(bytes) = outcome {
-                // Tier 3 stale project directories and issue #41 whole-cache
-                // targets remove the now-cleaned directory root itself.
-                if source_removes_root_after_contents(&item.source) {
-                    if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-                        // The final root safety check aborted after the children
-                        // were deleted; keep their bytes instead of reporting zero.
-                        return Ok(ProcessOutcome::Aborted(reason, bytes));
-                    }
-                    let root_empty = sweeper_winfs::read_dir_entries(item_path)
-                        .map(|v| v.is_empty())
-                        .unwrap_or(false);
-                    if root_empty {
-                        let result = delete_path_entry_allowing_root(
-                            item,
-                            &item.path,
-                            &mut ctx,
-                            Some(bytes),
-                            contents.root_mutated,
-                        );
-                        return match result {
-                            // Root was not deleted (Skipped/Aborted): carry the
-                            // completed child bytes instead of dropping them.
-                            Ok(root_outcome) => {
-                                Ok(root_outcome_with_child_bytes(root_outcome, bytes))
-                            }
-                            Err(err) => {
-                                // Child deletions already completed even though the
-                                // final root-removal intent could not be journaled.
-                                // An already-empty root did no work, so only report a
-                                // partial deletion when an entry was actually deleted.
-                                if contents.deleted_any {
-                                    apply_process_outcome(
-                                        item,
-                                        ProcessOutcome::Deleted(bytes),
-                                        &mut *ctx.report,
-                                    );
-                                }
-                                Err(err)
-                            }
-                        };
-                    }
-                    // A whole-cache is all-or-nothing. Leftover entries (for
-                    // example a locked file) mean it was NOT fully cleaned, so
-                    // report Skipped while still accounting for bytes already
-                    // deleted. Tier 3 project directories keep their existing
-                    // Deleted outcome.
-                    if matches!(item.source, ValidatedSource::WholeCache { .. }) {
-                        return Ok(whole_cache_partial_outcome(bytes));
-                    }
-                    return Ok(ProcessOutcome::Deleted(bytes));
-                }
-            }
-            return Ok(outcome);
-        }
+    if !item_path.is_dir() {
         // Do not delete root file unexpectedly.
-        ctx.journal.write_intent(&journal::intent_record(
-            &item.id,
-            &item.path,
-            item.size_bytes,
-            None,
-        ))?;
-        let reason = "Skipped: target root item".to_string();
-        ctx.journal.write_outcome(&journal::outcome_record(
-            &item.id, &item.path, 0, "Skipped", &reason, None,
-        ))?;
-        return Ok(ProcessOutcome::skipped(reason));
+        return write_skip(item, &item.path, "Skipped: target root item", &mut ctx);
     }
-
-    delete_path_entry(item, &item.path, &mut ctx)
+    handle_root_contents(item, item_path, &mut ctx)
 }
 
 struct CleanContentsResult {
@@ -1329,7 +1203,6 @@ fn delete_path_entry_inner(
     path_str: &str,
     ctx: &mut CleanTraversalCtx<'_>,
 ) -> Result<ProcessOutcome, CleanError> {
-    let path = Path::new(path_str);
     // Intent before each deletion batch/item.
     ctx.journal.write_intent(&journal::intent_record(
         &item.id,
@@ -1338,57 +1211,13 @@ fn delete_path_entry_inner(
         None,
     ))?;
 
-    if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-        ctx.journal.write_outcome(&journal::outcome_record(
-            &item.id, path_str, 0, "Skipped", &reason, None,
-        ))?;
-        return Ok(if reason.contains("escape") || reason.contains("swapped") {
-            ProcessOutcome::aborted(reason)
-        } else {
-            ProcessOutcome::skipped(reason)
-        });
+    if let Some(outcome) = precheck_delete(item, path_str, ctx)? {
+        return Ok(outcome);
     }
 
-    // Per-deletion identity recheck: a root swapped for a different real
-    // directory between traversal batches still passes the link-point check,
-    // so re-bind identity immediately before each unlink and abort the batch.
-    if let Err(reason) = revalidate_root_identity(item) {
-        ctx.journal.write_outcome(&journal::outcome_record(
-            &item.id, path_str, 0, "Skipped", &reason, None,
-        ))?;
-        return Ok(ProcessOutcome::aborted(reason));
-    }
-
-    let handle = match open_for_delete(path) {
-        Ok(h) => h,
-        Err(e) => {
-            let reason = if let WinfsError::Win32 { code, .. } = e {
-                if sweeper_winfs::is_not_found(code) {
-                    "Skipped: missing path".to_string()
-                } else if sweeper_winfs::is_lock_like_error(code) {
-                    "Skipped: locked".to_string()
-                } else {
-                    format!("Skipped: cannot open for delete (os error {code})")
-                }
-            } else {
-                format!("Skipped: cannot open for delete: {e}")
-            };
-            ctx.journal.write_outcome(&journal::outcome_record(
-                &item.id, path_str, 0, "Skipped", &reason, None,
-            ))?;
-            return Ok(ProcessOutcome::skipped(reason));
-        }
-    };
-
-    let inspection = match sweeper_winfs::inspect_handle(&handle) {
-        Ok(i) => i,
-        Err(e) => {
-            let reason = format!("Skipped: handle inspection failed: {e}");
-            ctx.journal.write_outcome(&journal::outcome_record(
-                &item.id, path_str, 0, "Skipped", &reason, None,
-            ))?;
-            return Ok(ProcessOutcome::skipped(reason));
-        }
+    let (handle, inspection) = match open_delete_handle(item, path_str, ctx)? {
+        OpenResult::Ready(handle, inspection) => (handle, inspection),
+        OpenResult::Done(outcome) => return Ok(outcome),
     };
 
     // Moment-of-deletion re-validation on opened handle.
@@ -1400,15 +1229,7 @@ fn delete_path_entry_inner(
         ctx.flags.allow_delete_root,
         ctx.flags.ignore_emptied_dir_age,
     ) {
-        ctx.journal.write_outcome(&journal::outcome_record(
-            &item.id, path_str, 0, "Skipped", &reason, None,
-        ))?;
-        if reason.contains("escape")
-            || (reason.contains("target root") && reason.contains("link point"))
-        {
-            return Ok(ProcessOutcome::aborted(reason));
-        }
-        return Ok(ProcessOutcome::skipped(reason));
+        return handle_revalidation_failure(item, path_str, reason, ctx);
     }
 
     // Track actual deleted bytes for circuit breaker based on handle-observed file size (or item estimate).
@@ -1417,276 +1238,22 @@ fn delete_path_entry_inner(
         Ok(None) => item.size_bytes,
         Err(_) => item.size_bytes,
     };
-    if would_exceed_circuit_breaker(
-        ctx.opts.preview_estimated_bytes,
-        *ctx.deleted_total,
-        bytes_accounted,
-    ) {
-        let reason = "aborted: 120% circuit breaker exceeded".to_string();
-        if let Err(err) = ctx.journal.write_outcome(&journal::outcome_record(
+    if let Some(outcome) = check_circuit_breaker(item, path_str, ctx, bytes_accounted)? {
+        return Ok(outcome);
+    }
+
+    if is_skippable_reparse(&inspection) {
+        let reason = "Skipped: reparse point (cloud/unknown)".to_string();
+        ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, path_str, 0, "Skipped", &reason, None,
-        )) {
-            // Do not lose the breaker reason when its Skipped-outcome write
-            // fails: carry it on the error so finalization records both.
-            return Err(CleanError::BreakerJournalFailure {
-                reason,
-                detail: err.to_string(),
-            });
-        }
-        return Ok(ProcessOutcome::aborted(reason));
+        ))?;
+        return Ok(ProcessOutcome::skipped(reason));
     }
 
-    // Cloud/other reparse tags must be skipped (Link Point allowed only as entry deletion).
-    match inspection.reparse {
-        ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
-            let reason = "Skipped: reparse point (cloud/unknown)".to_string();
-            ctx.journal.write_outcome(&journal::outcome_record(
-                &item.id, path_str, 0, "Skipped", &reason, None,
-            ))?;
-            return Ok(ProcessOutcome::skipped(reason));
-        }
-        ReparseTagClass::LinkPoint | ReparseTagClass::NotReparse => {}
+    match perform_delete(&handle, &inspection) {
+        Ok(()) => Ok(finish_delete_success(item, path_str, bytes_accounted, ctx)),
+        Err(e) => Ok(finish_delete_failure(item, path_str, e, ctx)),
     }
-
-    let delete_result = if inspection_is_directory(&inspection) {
-        delete_dir_handle(&handle)
-    } else {
-        // clear readonly via handle if needed (best-effort)
-        let _ = clear_readonly(&handle);
-        delete_file_handle(&handle)
-    };
-
-    match delete_result {
-        Ok(()) => {
-            *ctx.deleted_total = ctx.deleted_total.saturating_add(bytes_accounted);
-            let reported = ctx
-                .flags
-                .base_bytes_deleted
-                .unwrap_or(0)
-                .saturating_add(bytes_accounted);
-            // #135: journal own bytes only; `reported` keeps the full CleanReport total.
-            journal_deleted_outcome(ctx.journal, &item.id, path_str, bytes_accounted);
-            Ok(ProcessOutcome::Deleted(reported))
-        }
-        Err(e) => {
-            let reason = match e {
-                WinfsError::Win32 { code, .. } if sweeper_winfs::is_not_found(code) => {
-                    "Skipped: missing path".to_string()
-                }
-                WinfsError::Win32 { code, .. } if sweeper_winfs::is_lock_like_error(code) => {
-                    "Skipped: locked".to_string()
-                }
-                other => format!("Skipped: delete failed: {other}"),
-            };
-            ctx.journal
-                .write_outcome_best_effort(&journal::outcome_record(
-                    &item.id, path_str, 0, "Skipped", &reason, None,
-                ));
-            Ok(ProcessOutcome::skipped(reason))
-        }
-    }
-}
-
-/// Single definition of the fail-closed identity rule shared by the handle-level
-/// and root-level revalidation paths.
-const FILE_CHANGED_SINCE_PREVIEW: &str = "Skipped: file changed since preview";
-
-fn identity_matches(item: &ValidatedItem, observed: FileIdentity) -> bool {
-    item.expected_identity == Some(observed)
-}
-
-fn revalidate_handle(
-    item: &ValidatedItem,
-    requested_path: &str,
-    inspection: &sweeper_winfs::HandleInspection,
-    opts: &CleanOptions,
-    allow_delete_root: bool,
-    ignore_emptied_dir_age: bool,
-) -> Result<(), String> {
-    let final_path = strip_extended_prefix(&inspection.final_path);
-    let final_canon = CanonicalPath::parse_lexical(&final_path)
-        .map_err(|e| format!("Skipped: final path invalid: {e}"))?;
-    let target_root = CanonicalPath::parse_lexical(&item.target_root)
-        .map_err(|e| format!("Skipped: target root invalid: {e}"))?;
-
-    reject_confirmed_path_redirect(&final_canon, requested_path, &target_root)?;
-
-    // 1) Authorized source (allowlisted target, validated custom path, or opt-in Tier 3 conditional target).
-    match &item.source {
-        ValidatedSource::AllowlistedTarget { .. }
-        | ValidatedSource::CustomPath
-        | ValidatedSource::Tier3ProjectDirectory { .. }
-        | ValidatedSource::Tier3RecycleBin
-        | ValidatedSource::WholeCache { .. } => {}
-    }
-
-    // 2) Protected Path exclusion (Container & Subtree via canonical handle identity).
-    if policy::is_subtree_protected(&final_canon)
-        || policy::is_ancestor_of_subtree_protected(&final_canon)
-    {
-        return Err("Skipped: protected path".to_string());
-    }
-    if policy::is_protected_container_root(&final_canon) {
-        return Err("Skipped: protected container root".to_string());
-    }
-
-    // 3) Final path containment within Target root (and target root/ancestor itself is not a Link Point checked separately).
-    if !target_root.is_self_or_ancestor_of(&final_canon) {
-        return Err("aborted: handle escaped target root".to_string());
-    }
-    if final_canon.is_same_path(&target_root) {
-        if !(allow_delete_root && source_removes_root_after_contents(&item.source)) {
-            // Must not delete the target/custom/recycle-bin root itself.
-            return Err("Skipped: target root must not be deleted".to_string());
-        }
-    } else if path_has_link_point_ancestor(&final_canon, &target_root, true)
-        .map_err(|e| format!("Skipped: ancestor reparse check failed: {e}"))?
-    {
-        return Err("aborted: target root/ancestor link point detected".to_string());
-    }
-    // For root-deletion case, still ensure ancestors up to (but excluding) root were not link points in ensure_target_root_safe;
-    // and root itself must not be a link point (checked below/elsewhere).
-    if final_canon.is_same_path(&target_root)
-        && path_has_link_point_ancestor(&target_root, &root_parent_or_self(&target_root), false)
-            .map_err(|e| format!("Skipped: ancestor reparse check failed: {e}"))?
-    {
-        return Err("aborted: target root/ancestor link point detected".to_string());
-    }
-    // (ancestor link-point checks handled above)
-
-    // 4) Reparse tag checks.
-    match inspection.reparse {
-        ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
-            return Err("Skipped: reparse point (cloud/unknown)".to_string());
-        }
-        ReparseTagClass::LinkPoint => {
-            // Allowed to unlink only the link entry itself (no traversal). Ensure it is inside target.
-            // (Actual traversal prevention handled by never recursing into link entries.)
-        }
-        ReparseTagClass::NotReparse => {}
-    }
-
-    // 4a) Identity binding: the entry behind the confirmed path must still be
-    // the exact filesystem object observed when the item was validated.
-    // Child entries of a root-style item are separate selections, so this
-    // applies only when deleting the validated item itself. A required but
-    // missing identity fails closed.
-    if item.identity_required
-        && paths_equal_str(requested_path, &item.path)
-        && !identity_matches(item, inspection.identity)
-    {
-        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
-    }
-
-    // 5) Minimum Age check (exact boundary and future mtime treated as recent / Skipped).
-    // Whole-cache sources are exempt; otherwise only directories emptied this
-    // run are exempt, and the opened handle must still be a real directory.
-    if age_check_applies(item, inspection, ignore_emptied_dir_age) {
-        let mtime_secs = filetime_to_unix_secs(inspection.last_write_time);
-        let mtime = UNIX_EPOCH + Duration::from_secs(mtime_secs);
-        if mtime > opts.now {
-            return Err("Skipped: future mtime (treated as recent)".to_string());
-        }
-        if let Ok(age) = opts.now.duration_since(mtime) {
-            if age < opts.min_age {
-                return Err("Skipped: newer than minimum age".to_string());
-            }
-        } else {
-            return Err("Skipped: future mtime (treated as recent)".to_string());
-        }
-    }
-
-    Ok(())
-}
-
-/// Re-validate the bound filesystem identity of a root-style item before any of
-/// its children are deleted.
-///
-/// Root-style selections (`WholeCache`, `AllowlistedTarget`, `CustomPath`, and
-/// the Tier 3 roots) bind the identity of the root directory at preview time,
-/// but `clean_directory_contents` deletes each child as a separate entry and
-/// `revalidate_handle` only checks the binding when the entry being deleted is
-/// the item path itself. Without this check, a root deleted and recreated
-/// between Preview and Clean would have every file in the *new* directory
-/// permanently deleted. Fails closed: a required-but-missing binding, an
-/// unopenable/uncinspectable root, or any identity mismatch skips the whole
-/// item with zero deletions.
-fn revalidate_root_identity(item: &ValidatedItem) -> Result<(), String> {
-    if !item.identity_required {
-        return Ok(());
-    }
-    let handle = sweeper_winfs::open_for_inspection(Path::new(&item.path))
-        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
-    let inspection = sweeper_winfs::inspect_handle(&handle)
-        .map_err(|e| format!("Skipped: root identity inspection failed: {e}"))?;
-    if !identity_matches(item, inspection.identity) {
-        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
-    }
-    Ok(())
-}
-
-/// Reject a confirmed path whose handle-authoritative resolution no longer agrees
-/// with it (D1 / ADR 0003).
-///
-/// `inspection.final_path` resolves every component of the path used for the
-/// open, while `FILE_FLAG_OPEN_REPARSE_POINT` protects only the final component.
-/// An interior junction can therefore be traversed during the open and removed
-/// before this check, so an ancestor-only re-check would miss it: the handle
-/// then targets an unselected sibling that is still inside the target root.
-/// Comparing the two canonical paths (case-insensitive) closes that window. The
-/// ancestor re-check is defence in depth for a junction inserted after the open.
-/// The final component is excluded from the ancestor check so an item that is
-/// itself a Link Point can still be unlinked.
-fn reject_confirmed_path_redirect(
-    final_canon: &CanonicalPath,
-    requested_path: &str,
-    target_root: &CanonicalPath,
-) -> Result<(), String> {
-    let requested_canon = CanonicalPath::parse_lexical(requested_path)
-        .map_err(|e| format!("Skipped: requested path invalid: {e}"))?;
-    if !final_canon.is_same_path(&requested_canon) {
-        return Err("aborted: escape via handle final path divergence from confirmed path (link point traversed under target root)".to_string());
-    }
-    reject_case_distinct_sibling(final_canon, &requested_canon)?;
-    if path_has_link_point_ancestor(&requested_canon, target_root, true)
-        .map_err(|e| format!("Skipped: requested-path ancestor check failed: {e}"))?
-    {
-        return Err(
-            "aborted: requested-path ancestor link point detected under target root".to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn ensure_target_root_safe(target_root: &str) -> Result<(), String> {
-    let root = CanonicalPath::parse_lexical(target_root)
-        .map_err(|e| format!("Skipped: invalid target root: {e}"))?;
-    let handle = sweeper_winfs::open_for_inspection(Path::new(target_root))
-        .map_err(|e| format!("Skipped: cannot inspect target root: {e}"))?;
-    let inspection = sweeper_winfs::inspect_handle(&handle)
-        .map_err(|e| format!("Skipped: target root inspection failed: {e}"))?;
-    let final_path = strip_extended_prefix(&inspection.final_path);
-    let final_root = CanonicalPath::parse_lexical(&final_path)
-        .map_err(|e| format!("Skipped: target root final path invalid: {e}"))?;
-    if !final_root.is_same_path(&root) {
-        return Err("aborted: target root escaped or changed".to_string());
-    }
-    if matches!(inspection.reparse, ReparseTagClass::LinkPoint) {
-        return Err("aborted: target root is a link point".to_string());
-    }
-    // Also reject if any ancestor is link point.
-    if path_has_link_point_ancestor(&root, &root_parent_or_self(&root), false)
-        .map_err(|e| format!("Skipped: target root ancestor check failed: {e}"))?
-    {
-        return Err("aborted: target root ancestor is a link point".to_string());
-    }
-    Ok(())
-}
-
-fn root_parent_or_self(root: &CanonicalPath) -> CanonicalPath {
-    // For ancestor traversal helper boundary we can use drive root as boundary; easiest to compare against self in loop logic.
-    // Return root itself; helper treats equality boundary appropriately.
-    root.clone()
 }
 
 /// Maximum number of directory-level ancestor chains kept in the cache.
@@ -1834,43 +1401,6 @@ fn ancestor_chain_retained_cost() -> usize {
 #[cfg(test)]
 fn ancestor_chain_build_count() -> usize {
     ANCESTOR_CHAIN_BUILDS.with(|builds| builds.get())
-}
-
-fn path_has_link_point_ancestor(
-    path: &CanonicalPath,
-    _boundary_root: &CanonicalPath,
-    exclude_final_path: bool,
-) -> Result<bool, String> {
-    // A specific boundary root is considered by the callers; the full chain
-    // from the drive root is always inspected so no ancestor check is dropped.
-    // The chain is keyed by directory level: per-item checks use the item's
-    // parent directory (so siblings share one cached chain), while a check
-    // that must inspect `path` itself is already a directory level.
-    let directory_level = if exclude_final_path {
-        path.parent().unwrap_or_else(|| path.clone())
-    } else {
-        path.clone()
-    };
-    if ancestor_chain_cost(directory_level.segment_count()) > ANCESTOR_CHAIN_RETAINED_COST_BUDGET {
-        // Stream expensive chains instead of materialising every prefix; the
-        // ordinary cached path below is unchanged for affordable directories.
-        #[cfg(test)]
-        ANCESTOR_CHAIN_BUILDS.with(|builds| builds.set(builds.get() + 1));
-        return inspect_deep_ancestors(&directory_level);
-    }
-    with_ancestor_chain(&directory_level, |chain| {
-        for current in &chain.paths {
-            // `current` is always an ancestor directory, never the item itself:
-            // the chain stops at the parent level for per-item checks. Every
-            // ancestor is still opened and inspected here at deletion time.
-            match inspect_ancestor_prefix(current)? {
-                Some(true) => return Ok(true),
-                Some(false) => {}
-                None => return Ok(false),
-            }
-        }
-        Ok(false)
-    })
 }
 
 fn get_handle_logical_size(
@@ -2022,6 +1552,7 @@ pub fn validated_item_for_tests(
 
 #[cfg(test)]
 mod tests {
+    use super::revalidation::path_has_link_point_ancestor;
     use super::*;
     use tempfile::tempdir;
 

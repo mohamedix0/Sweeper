@@ -4,7 +4,7 @@ use crate::policy;
 use crate::remover::{capture_file_identity, ValidatedItem};
 use crate::scanner;
 use std::collections::{HashMap, HashSet};
-use sweeper_knowledge::{embedded_targets, Risk, Scope};
+use sweeper_knowledge::{embedded_targets, Risk, Scope, TargetDefinition};
 
 /// A single analyzer node selection converted for Preview/Clean routing.
 #[derive(Debug, Clone)]
@@ -45,129 +45,181 @@ pub fn build_analyzer_preview_items(
 
         validate_node_convertible(node)?;
 
-        if let Some(tid) = &node.target_id {
-            let target = embedded_targets()
-                .into_iter()
-                .find(|t| &t.id == tid)
-                .ok_or_else(|| format!("allowlist target missing for node {}: {tid}", node.id))?;
-            let target_roots = annotate::resolve_target_roots_for_def(&target);
-            let node_canon = CanonicalPath::parse_lexical(&node.path)
-                .map_err(|e| format!("selected node path invalid for conversion: {e}"))?;
-            let matching_root = target_roots
-                .iter()
-                .filter(|r| r.is_self_or_ancestor_of(&node_canon))
-                .max_by_key(|r| r.segment_count());
-            let validated_item = if matching_root
-                .as_ref()
-                .is_some_and(|r| r.is_same_path(&node_canon))
-            {
-                // Annotate marks a resolved target root itself as selectable.
-                // Route that selection through a root-style constructor instead of
-                // failing the inside-root check in `from_allowlisted_scan`.
-                if !node.is_dir {
-                    return Err(format!(
-                        "selected target root is not a directory: {}",
-                        node.path
-                    ));
-                }
-                let built = if target.scope == Scope::WholeCache {
-                    ValidatedItem::from_whole_cache_root(
-                        node.id.clone(),
-                        tid.clone(),
-                        node.path.clone(),
-                        node.size_bytes,
-                    )
-                } else {
-                    ValidatedItem::from_allowlisted_root(
-                        node.id.clone(),
-                        tid.clone(),
-                        node.path.clone(),
-                        node.size_bytes,
-                    )
-                };
-                built.map_err(|e| {
-                    format!("selected target root rejected by allowlist conversion: {e}")
-                })?
-            } else {
-                let target_root = matching_root.map(|r| r.to_string()).ok_or_else(|| {
-                    format!(
-                        "failed to resolve matching allowlist target root for {tid} and node {}",
-                        node.path
-                    )
-                })?;
-                ValidatedItem::from_allowlisted_scan(
-                    node.id.clone(),
-                    tid.clone(),
-                    target_root,
-                    node.path.clone(),
-                    node.size_bytes,
-                    None,
-                )
-                .map_err(|e| format!("selected node rejected by allowlist conversion: {e}"))?
-            };
-            let validated_item = validated_item
-                .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
-
-            out.push(AnalyzerPreviewItem {
-                selected_node_id: node.id.clone(),
-                validated_item,
-                group_id: tid.clone(),
-                group_name: if target.description.is_empty() {
-                    target.name.clone()
-                } else {
-                    target.description.clone()
-                },
-                size_bytes: node.size_bytes,
-                requires_typed_confirmation: false,
-            });
-            continue;
-        }
-
-        // Custom-path-root seam (contents-only semantics, typed confirmation required).
-        // Eligible Unknown selections (opt-in) and other non-target custom-path selections
-        // must route through `ValidatedItem::from_custom_path_root` and require typed confirmation.
-        if !node.is_dir {
-            return Err(format!(
-                "selected non-target node must be a directory custom-path root candidate: {}",
-                node.path
-            ));
-        }
-        let verdict = policy::validate_custom_path(&node.path);
-        if !verdict.allowed {
-            return Err(format!(
-                "selected custom-path candidate rejected: {} ({})",
-                node.path, verdict.reason
-            ));
-        }
-        if matches!(node.risk, Risk::Protected)
-            || annotate::is_vhdx_path(&node.path)
-            || node.is_link_point
-            || node.is_cloud_placeholder
-        {
-            return Err(format!(
-                "selected custom-path candidate rejected by safety policy: {}",
-                node.path
-            ));
-        }
-        let validated_item = ValidatedItem::from_custom_path_root(
-            node.id.clone(),
-            node.path.clone(),
-            node.size_bytes,
-        )
-        .map_err(|e| format!("selected custom-path candidate rejected: {e}"))?
-        .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
-
-        out.push(AnalyzerPreviewItem {
-            selected_node_id: node.id.clone(),
-            validated_item,
-            group_id: "custom-path".to_string(),
-            group_name: "Custom Path".to_string(),
-            size_bytes: node.size_bytes,
-            requires_typed_confirmation: true,
-        });
+        let item = if let Some(tid) = &node.target_id {
+            build_target_preview_item(node, tid)?
+        } else {
+            build_custom_path_preview_item(node)?
+        };
+        out.push(item);
     }
 
     Ok(out)
+}
+
+/// Deepest allowlist target root that contains the selected node.
+fn find_matching_root<'a>(
+    target_roots: &'a [CanonicalPath],
+    node_canon: &CanonicalPath,
+) -> Option<&'a CanonicalPath> {
+    target_roots
+        .iter()
+        .filter(|r| r.is_self_or_ancestor_of(node_canon))
+        .max_by_key(|r| r.segment_count())
+}
+
+/// Human-readable group name: description when present, otherwise the target name.
+fn target_group_name(target: &TargetDefinition) -> String {
+    if target.description.is_empty() {
+        target.name.clone()
+    } else {
+        target.description.clone()
+    }
+}
+
+/// Build the Preview item for an allowlist target selection.
+fn build_target_preview_item(
+    node: &AnalyzerNode,
+    tid: &String,
+) -> Result<AnalyzerPreviewItem, String> {
+    let target = embedded_targets()
+        .into_iter()
+        .find(|t| &t.id == tid)
+        .ok_or_else(|| format!("allowlist target missing for node {}: {tid}", node.id))?;
+    let target_roots = annotate::resolve_target_roots_for_def(&target);
+    let node_canon = CanonicalPath::parse_lexical(&node.path)
+        .map_err(|e| format!("selected node path invalid for conversion: {e}"))?;
+    let matching_root = find_matching_root(&target_roots, &node_canon);
+    let validated_item =
+        build_target_validated_item(node, tid, &target, matching_root, &node_canon)?
+            .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
+
+    Ok(AnalyzerPreviewItem {
+        selected_node_id: node.id.clone(),
+        validated_item,
+        group_id: tid.clone(),
+        group_name: target_group_name(&target),
+        size_bytes: node.size_bytes,
+        requires_typed_confirmation: false,
+    })
+}
+
+/// Decide between root-style and ordinary leaf construction for a target node.
+fn build_target_validated_item(
+    node: &AnalyzerNode,
+    tid: &String,
+    target: &TargetDefinition,
+    matching_root: Option<&CanonicalPath>,
+    node_canon: &CanonicalPath,
+) -> Result<ValidatedItem, String> {
+    if matching_root.is_some_and(|r| r.is_same_path(node_canon)) {
+        // Annotate marks a resolved target root itself as selectable.
+        // Route that selection through a root-style constructor instead of
+        // failing the inside-root check in `from_allowlisted_scan`.
+        build_cache_root_item(node, tid, target.scope)
+    } else {
+        build_allowlisted_leaf_item(node, tid, matching_root)
+    }
+}
+
+/// Build a selectable target root: whole-cache unit or contents-only allowlisted root.
+fn build_cache_root_item(
+    node: &AnalyzerNode,
+    tid: &String,
+    scope: Scope,
+) -> Result<ValidatedItem, String> {
+    if !node.is_dir {
+        return Err(format!(
+            "selected target root is not a directory: {}",
+            node.path
+        ));
+    }
+    let built = if scope == Scope::WholeCache {
+        ValidatedItem::from_whole_cache_root(
+            node.id.clone(),
+            tid.clone(),
+            node.path.clone(),
+            node.size_bytes,
+        )
+    } else {
+        ValidatedItem::from_allowlisted_root(
+            node.id.clone(),
+            tid.clone(),
+            node.path.clone(),
+            node.size_bytes,
+        )
+    };
+    built.map_err(|e| format!("selected target root rejected by allowlist conversion: {e}"))
+}
+
+/// Build the ordinary `ValidatedItem` for a node strictly inside an allowlist root.
+fn build_allowlisted_leaf_item(
+    node: &AnalyzerNode,
+    tid: &String,
+    matching_root: Option<&CanonicalPath>,
+) -> Result<ValidatedItem, String> {
+    let target_root = matching_root.map(|r| r.to_string()).ok_or_else(|| {
+        format!(
+            "failed to resolve matching allowlist target root for {tid} and node {}",
+            node.path
+        )
+    })?;
+    ValidatedItem::from_allowlisted_scan(
+        node.id.clone(),
+        tid.clone(),
+        target_root,
+        node.path.clone(),
+        node.size_bytes,
+        None,
+    )
+    .map_err(|e| format!("selected node rejected by allowlist conversion: {e}"))
+}
+
+/// Build the Preview item for a non-target custom-path selection (typed confirmation required).
+fn build_custom_path_preview_item(node: &AnalyzerNode) -> Result<AnalyzerPreviewItem, String> {
+    let validated_item = build_custom_path_validated_item(node)?
+        .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
+
+    Ok(AnalyzerPreviewItem {
+        selected_node_id: node.id.clone(),
+        validated_item,
+        group_id: "custom-path".to_string(),
+        group_name: "Custom Path".to_string(),
+        size_bytes: node.size_bytes,
+        requires_typed_confirmation: true,
+    })
+}
+
+/// Validate a non-target node as a custom-path root and construct its `ValidatedItem`.
+fn build_custom_path_validated_item(node: &AnalyzerNode) -> Result<ValidatedItem, String> {
+    if !node.is_dir {
+        return Err(format!(
+            "selected non-target node must be a directory custom-path root candidate: {}",
+            node.path
+        ));
+    }
+    let verdict = policy::validate_custom_path(&node.path);
+    if !verdict.allowed {
+        return Err(format!(
+            "selected custom-path candidate rejected: {} ({})",
+            node.path, verdict.reason
+        ));
+    }
+    if custom_path_rejected_by_safety_policy(node) {
+        return Err(format!(
+            "selected custom-path candidate rejected by safety policy: {}",
+            node.path
+        ));
+    }
+    ValidatedItem::from_custom_path_root(node.id.clone(), node.path.clone(), node.size_bytes)
+        .map_err(|e| format!("selected custom-path candidate rejected: {e}"))
+}
+
+/// Safety-policy rejection predicate for custom-path root candidates.
+fn custom_path_rejected_by_safety_policy(node: &AnalyzerNode) -> bool {
+    matches!(node.risk, Risk::Protected)
+        || annotate::is_vhdx_path(&node.path)
+        || node.is_link_point
+        || node.is_cloud_placeholder
 }
 
 /// Convert selected eligible Analyzer node IDs into validated scan items for Preview/Clean routing.

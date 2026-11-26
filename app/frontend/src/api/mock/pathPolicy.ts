@@ -102,6 +102,21 @@ function utf8ByteLength(text: string): number {
  */
 const DISALLOWED_UNICODE = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF\uFF0F\uFF3C\uFF1A\uFF0E]/u;
 
+/**
+ * Backend `lexical_parse` (paths.rs) rejects embedded verbatim/device markers
+ * and GLOBALROOT on separator-normalized text, before segment parsing. Folding
+ * with ASCII-only casing matches Rust `to_ascii_uppercase`.
+ */
+function hasForbiddenDeviceMarker(replaced: string): boolean {
+  const upperCheck = replaced.replace(/[a-z]/g, (c) => c.toUpperCase());
+  return upperCheck.includes('\\??\\') || upperCheck.includes('GLOBALROOT');
+}
+
+/** Replace forward slashes with the canonical Windows separator. */
+function normalizeSeparators(input: string): string {
+  return input.replace(/\//g, '\\');
+}
+
 /** Backend `is_reserved_dos_name` base names. */
 const RESERVED_DOS_NAMES: ReadonlySet<string> = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -154,12 +169,8 @@ export function parseMockPath(input: string): ParsedMockPath | null {
   if (!/^[A-Za-z]:[\\/]/.test(input)) return null;
   // Normalize separators once, then validate the raw structure. Empty or
   // malformed components are never filtered/trimmed into a valid-looking path.
-  const replaced = input.replace(/\//g, '\\');
-  // Backend `lexical_parse` (paths.rs) rejects embedded verbatim/device markers
-  // and GLOBALROOT on this separator-normalized text, before segment parsing.
-  // Fold with ASCII-only casing, matching Rust `to_ascii_uppercase`.
-  const upperCheck = replaced.replace(/[a-z]/g, (c) => c.toUpperCase());
-  if (upperCheck.includes('\\??\\') || upperCheck.includes('GLOBALROOT')) return null;
+  const replaced = normalizeSeparators(input);
+  if (hasForbiddenDeviceMarker(replaced)) return null;
   const drive = replaced.slice(0, 2);
   const rest = replaced.slice(3);
   if (hasInvalidRawSyntax({ replaced, rest })) return null;

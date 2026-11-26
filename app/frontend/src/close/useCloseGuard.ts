@@ -47,17 +47,28 @@ function applyDecisionCompletion(ctx: DecisionCompletionContext): void {
   }
 }
 
+// Decision delivery parameters bundled into one named value. The callbacks
+// below still depend on the individual (stable) setters, so passing an object
+// here does not churn the host subscription on every render.
+type DecisionDeliveryDeps = {
+  bridge: CloseBridge;
+  isDirty: () => boolean;
+  setClosePending: (value: boolean) => void;
+  setPromptOpen: (value: boolean) => void;
+  setError: (message: string | null) => void;
+};
+
 // Owns the generation id and decision delivery. The id lives in a ref so a late
 // answer always targets the request the user actually saw (#93). All callbacks
 // are stable for the hook's lifetime, so `deliver` does not re-subscribe the
 // host listener on every render.
-function useDecisionDelivery(
-  bridge: CloseBridge,
-  isDirty: () => boolean,
-  setClosePending: (value: boolean) => void,
-  setPromptOpen: (value: boolean) => void,
-  setError: (message: string | null) => void,
-) {
+function useDecisionDelivery({
+  bridge,
+  isDirty,
+  setClosePending,
+  setPromptOpen,
+  setError,
+}: DecisionDeliveryDeps) {
   const requestIdRef = useRef<string | null>(null);
   const lastApprovedRef = useRef(true);
 
@@ -244,13 +255,13 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
   const [closePending, setClosePending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { deliver, setRequestId, retryDelivery } = useDecisionDelivery(
+  const { deliver, setRequestId, retryDelivery } = useDecisionDelivery({
     bridge,
     isDirty,
     setClosePending,
     setPromptOpen,
     setError,
-  );
+  });
 
   useHostCloseHandshake({ bridge, isDirty, setRequestId, deliver, setError, setPromptOpen });
   useBeforeUnloadGuard(isDirty);
