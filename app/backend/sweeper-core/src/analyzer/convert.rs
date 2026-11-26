@@ -1,10 +1,10 @@
 use super::*;
 use crate::paths::CanonicalPath;
 use crate::policy;
-use crate::remover::ValidatedItem;
+use crate::remover::{capture_file_identity, ValidatedItem};
 use crate::scanner;
 use std::collections::{HashMap, HashSet};
-use sweeper_knowledge::{embedded_targets, Risk};
+use sweeper_knowledge::{embedded_targets, Risk, Scope};
 
 /// A single analyzer node selection converted for Preview/Clean routing.
 #[derive(Debug, Clone)]
@@ -53,26 +53,60 @@ pub fn build_analyzer_preview_items(
             let target_roots = annotate::resolve_target_roots_for_def(&target);
             let node_canon = CanonicalPath::parse_lexical(&node.path)
                 .map_err(|e| format!("selected node path invalid for conversion: {e}"))?;
-            let target_root = target_roots
+            let matching_root = target_roots
                 .iter()
-                .filter(|r| r.is_self_or_ancestor_of(&node_canon) && !r.is_same_path(&node_canon))
-                .max_by_key(|r| r.segment_count())
-                .map(|r| r.to_string())
-                .ok_or_else(|| {
+                .filter(|r| r.is_self_or_ancestor_of(&node_canon))
+                .max_by_key(|r| r.segment_count());
+            let validated_item = if matching_root
+                .as_ref()
+                .is_some_and(|r| r.is_same_path(&node_canon))
+            {
+                // Annotate marks a resolved target root itself as selectable.
+                // Route that selection through a root-style constructor instead of
+                // failing the inside-root check in `from_allowlisted_scan`.
+                if !node.is_dir {
+                    return Err(format!(
+                        "selected target root is not a directory: {}",
+                        node.path
+                    ));
+                }
+                let built = if target.scope == Scope::WholeCache {
+                    ValidatedItem::from_whole_cache_root(
+                        node.id.clone(),
+                        tid.clone(),
+                        node.path.clone(),
+                        node.size_bytes,
+                    )
+                } else {
+                    ValidatedItem::from_allowlisted_root(
+                        node.id.clone(),
+                        tid.clone(),
+                        node.path.clone(),
+                        node.size_bytes,
+                    )
+                };
+                built.map_err(|e| {
+                    format!("selected target root rejected by allowlist conversion: {e}")
+                })?
+            } else {
+                let target_root = matching_root.map(|r| r.to_string()).ok_or_else(|| {
                     format!(
                         "failed to resolve matching allowlist target root for {tid} and node {}",
                         node.path
                     )
                 })?;
-            let validated_item = ValidatedItem::from_allowlisted_scan(
-                node.id.clone(),
-                tid.clone(),
-                target_root,
-                node.path.clone(),
-                node.size_bytes,
-                None,
-            )
-            .map_err(|e| format!("selected node rejected by allowlist conversion: {e}"))?;
+                ValidatedItem::from_allowlisted_scan(
+                    node.id.clone(),
+                    tid.clone(),
+                    target_root,
+                    node.path.clone(),
+                    node.size_bytes,
+                    None,
+                )
+                .map_err(|e| format!("selected node rejected by allowlist conversion: {e}"))?
+            };
+            let validated_item = validated_item
+                .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
 
             out.push(AnalyzerPreviewItem {
                 selected_node_id: node.id.clone(),
@@ -120,7 +154,8 @@ pub fn build_analyzer_preview_items(
             node.path.clone(),
             node.size_bytes,
         )
-        .map_err(|e| format!("selected custom-path candidate rejected: {e}"))?;
+        .map_err(|e| format!("selected custom-path candidate rejected: {e}"))?
+        .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
 
         out.push(AnalyzerPreviewItem {
             selected_node_id: node.id.clone(),

@@ -413,7 +413,14 @@ export function App({ closeBridge }: { closeBridge?: CloseBridge } = {}) {
   return (
     <div className="app-shell">
       {close.error && !close.promptOpen && (
-        <p className="notice error close-error-notice" role="alert">{close.error}</p>
+        <p className="notice error close-error-notice" role="alert">
+          {close.error}
+          {close.canRetry && (
+            <button type="button" className="notice-dismiss" onClick={() => void close.retryDelivery()}>
+              Retry
+            </button>
+          )}
+        </p>
       )}
       <BootSettingsErrorNotice message={bootLoadError} onDismiss={dismissBootLoadError} />
       <AppSidebar

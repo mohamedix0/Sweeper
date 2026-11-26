@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use sweeper_knowledge::Risk;
-use sweeper_winfs::{self, ReparseTagClass, WinfsError};
+use sweeper_winfs::{self, FileIdentity, ReparseTagClass, WinfsError};
 
 use crate::journal::{self, JournalError, JournalWriter};
 use crate::paths::CanonicalPath;
@@ -101,6 +101,10 @@ pub struct ValidatedItem {
     pub(crate) source: ValidatedSource,
     /// Optional risk label for reporting.
     pub(crate) risk: Option<Risk>,
+    /// Volume serial + file index observed when this item was validated.
+    pub(crate) expected_identity: Option<FileIdentity>,
+    /// Whether moment-of-deletion identity binding is mandatory for this item.
+    pub(crate) identity_required: bool,
 }
 
 impl ValidatedItem {
@@ -126,6 +130,8 @@ impl ValidatedItem {
             mtime_unix_secs,
             source,
             risk,
+            expected_identity: None,
+            identity_required: false,
         }
     }
 
@@ -154,6 +160,16 @@ impl ValidatedItem {
         self.mtime_unix_secs
     }
 
+    /// Bind this item to the filesystem identity observed at validation time.
+    ///
+    /// `None` is recorded as a required-but-missing binding so moment-of-deletion
+    /// revalidation fails closed instead of deleting an unverified entry.
+    pub fn with_identity_binding(mut self, identity: Option<FileIdentity>) -> Self {
+        self.expected_identity = identity;
+        self.identity_required = true;
+        self
+    }
+
     /// Construct a validated allowlisted scan item for bridge-mediated clean execution.
     ///
     /// Performs basic lexical/path-policy checks (containment within target root, non-protected,
@@ -172,24 +188,14 @@ impl ValidatedItem {
         let target_root = target_root.into();
         let path = path.into();
 
-        let root = CanonicalPath::parse_lexical(&target_root)
-            .map_err(|e| format!("invalid target root: {e}"))?;
+        let root = Self::validated_allowlisted_root(&target_root, "target root")?;
         let item =
             CanonicalPath::parse_lexical(&path).map_err(|e| format!("invalid item path: {e}"))?;
 
-        if root.segment_count() < 3 {
-            return Err("target root depth < 3".to_string());
-        }
         if !root.is_self_or_ancestor_of(&item) || item.is_same_path(&root) {
             return Err(
                 "item path must be inside target root (and not the root itself)".to_string(),
             );
-        }
-        if policy::is_subtree_protected(&root)
-            || policy::is_ancestor_of_subtree_protected(&root)
-            || policy::is_protected_container_root(&root)
-        {
-            return Err("target root is protected".to_string());
         }
         if policy::is_subtree_protected(&item)
             || policy::is_ancestor_of_subtree_protected(&item)
@@ -207,7 +213,53 @@ impl ValidatedItem {
             mtime_unix_secs,
             source: ValidatedSource::AllowlistedTarget { target_id },
             risk: None,
+            expected_identity: None,
+            identity_required: false,
         })
+    }
+
+    /// Construct a validated allowlisted root item (contents-only; root kept).
+    ///
+    /// Used when an Analyzer selection resolves to the target root itself: the
+    /// root must pass the same depth/protected-path checks as an allowlisted
+    /// scan item, but `target_root` and `path` are the same directory so the
+    /// remover cleans its contents and keeps the root (Minimum Age applies).
+    pub fn from_allowlisted_root(
+        id: impl Into<String>,
+        target_id: impl Into<String>,
+        path: impl Into<String>,
+        size_bytes: u64,
+    ) -> Result<Self, String> {
+        let id = id.into();
+        let target_id = target_id.into();
+        let path = path.into();
+        let canon = Self::validated_allowlisted_root(&path, "allowlisted root")?;
+        Ok(Self::new_root_item(
+            id,
+            target_id.clone(),
+            canon.to_string(),
+            size_bytes,
+            None,
+            ValidatedSource::AllowlistedTarget { target_id },
+        ))
+    }
+
+    /// Shared depth/protected-path policy for allowlisted roots. Both the scan
+    /// path and the Analyzer-selected root path must use this one definition so
+    /// a future policy tightening cannot be applied to only one of them.
+    fn validated_allowlisted_root(path: &str, label: &str) -> Result<CanonicalPath, String> {
+        let canon =
+            CanonicalPath::parse_lexical(path).map_err(|e| format!("invalid {label}: {e}"))?;
+        if canon.segment_count() < 3 {
+            return Err(format!("{label} depth < 3"));
+        }
+        if policy::is_subtree_protected(&canon)
+            || policy::is_ancestor_of_subtree_protected(&canon)
+            || policy::is_protected_container_root(&canon)
+        {
+            return Err(format!("{label} is protected"));
+        }
+        Ok(canon)
     }
 
     /// Validate a root path with the strict Tier 3 root policy and return its
@@ -242,6 +294,8 @@ impl ValidatedItem {
             mtime_unix_secs,
             source,
             risk: Some(Risk::Caution),
+            expected_identity: None,
+            identity_required: false,
         }
     }
 
@@ -346,6 +400,16 @@ impl ValidatedItem {
             id, target_id, canon, size_bytes, None, source,
         ))
     }
+}
+
+/// Capture the stable filesystem identity (volume serial + file index) for a
+/// validated path, for binding into a [`ValidatedItem`] via
+/// [`ValidatedItem::with_identity_binding`].
+///
+/// `None` means no stable identity could be observed (missing/inaccessible
+/// path); a bound item with `None` is skipped at moment-of-deletion revalidation.
+pub fn capture_file_identity(path: &Path) -> Option<FileIdentity> {
+    crate::scanner::file_identity_for_path(path)
 }
 
 /// Clean execution options.
@@ -725,30 +789,31 @@ fn process_item(
     deleted_total: &mut u64,
     report: &mut CleanReport,
 ) -> Result<ProcessOutcome, CleanError> {
+    let mut ctx = CleanTraversalCtx::new(opts, journal, deleted_total, report);
     // Missing target root/custom path: zero deletions, parent untouched.
     let target_root_path = Path::new(&item.target_root);
     if !target_root_path.exists() {
-        journal.write_intent(&journal::intent_record(
+        ctx.journal.write_intent(&journal::intent_record(
             &item.id,
             &item.path,
             item.size_bytes,
             None,
         ))?;
         let reason = "Skipped: missing target root (zero deletions; parent untouched)".to_string();
-        journal.write_outcome(&journal::outcome_record(
+        ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, &item.path, 0, "Skipped", &reason, None,
         ))?;
         return Ok(ProcessOutcome::skipped(reason));
     }
     // Revalidate target root/ancestors are not link points at moment of deletion.
     if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-        journal.write_intent(&journal::intent_record(
+        ctx.journal.write_intent(&journal::intent_record(
             &item.id,
             &item.path,
             item.size_bytes,
             None,
         ))?;
-        journal.write_outcome(&journal::outcome_record(
+        ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, &item.path, 0, "Skipped", &reason, None,
         ))?;
         if reason.contains("escape")
@@ -763,14 +828,14 @@ fn process_item(
 
     let item_path = Path::new(&item.path);
     if !item_path.exists() {
-        journal.write_intent(&journal::intent_record(
+        ctx.journal.write_intent(&journal::intent_record(
             &item.id,
             &item.path,
             item.size_bytes,
             None,
         ))?;
         let reason = "Skipped: missing path".to_string();
-        journal.write_outcome(&journal::outcome_record(
+        ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, &item.path, 0, "Skipped", &reason, None,
         ))?;
         return Ok(ProcessOutcome::skipped(reason));
@@ -780,7 +845,20 @@ fn process_item(
     let is_root_itself = paths_equal_str(&item.path, &item.target_root);
     if is_root_itself {
         if item_path.is_dir() {
-            let contents = clean_directory_contents(item, opts, journal, deleted_total, report)?;
+            // Fail closed if the root was swapped since preview (see revalidate_root_identity).
+            if let Err(reason) = revalidate_root_identity(item) {
+                ctx.journal.write_intent(&journal::intent_record(
+                    &item.id,
+                    &item.path,
+                    item.size_bytes,
+                    None,
+                ))?;
+                ctx.journal.write_outcome(&journal::outcome_record(
+                    &item.id, &item.path, 0, "Skipped", &reason, None,
+                ))?;
+                return Ok(ProcessOutcome::skipped(reason));
+            }
+            let contents = clean_directory_contents(item, &mut ctx)?;
             let outcome = contents.outcome;
             if let ProcessOutcome::Deleted(bytes) = outcome {
                 // Tier 3 stale project directories and issue #41 whole-cache
@@ -798,9 +876,7 @@ fn process_item(
                         let result = delete_path_entry_allowing_root(
                             item,
                             &item.path,
-                            opts,
-                            journal,
-                            deleted_total,
+                            &mut ctx,
                             Some(bytes),
                             contents.root_mutated,
                         );
@@ -819,7 +895,7 @@ fn process_item(
                                     apply_process_outcome(
                                         item,
                                         ProcessOutcome::Deleted(bytes),
-                                        report,
+                                        &mut *ctx.report,
                                     );
                                 }
                                 Err(err)
@@ -840,20 +916,20 @@ fn process_item(
             return Ok(outcome);
         }
         // Do not delete root file unexpectedly.
-        journal.write_intent(&journal::intent_record(
+        ctx.journal.write_intent(&journal::intent_record(
             &item.id,
             &item.path,
             item.size_bytes,
             None,
         ))?;
         let reason = "Skipped: target root item".to_string();
-        journal.write_outcome(&journal::outcome_record(
+        ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, &item.path, 0, "Skipped", &reason, None,
         ))?;
         return Ok(ProcessOutcome::skipped(reason));
     }
 
-    delete_path_entry(item, &item.path, opts, journal, deleted_total)
+    delete_path_entry(item, &item.path, &mut ctx)
 }
 
 struct CleanContentsResult {
@@ -925,9 +1001,66 @@ impl ContentsState {
     }
 }
 
+/// Per-entry flags applied by the next `delete_path_entry_inner` call.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeleteEntryFlags {
+    /// Whether the item's own root directory may be removed after its contents.
+    allow_delete_root: bool,
+    /// Bytes already deleted by earlier children, carried into the root outcome.
+    base_bytes_deleted: Option<u64>,
+    /// Whether the entry is a directory emptied during this same traversal.
+    ignore_emptied_dir_age: bool,
+}
+
+/// Shared mutable state and per-entry flags threaded through the deletion chain.
+///
+/// Bundling these keeps the traversal helpers small and removes the long
+/// positional argument lists (and their lint suppressions) from the delete path.
+struct CleanTraversalCtx<'a> {
+    opts: &'a CleanOptions,
+    journal: &'a mut JournalWriter,
+    deleted_total: &'a mut u64,
+    report: &'a mut CleanReport,
+    flags: DeleteEntryFlags,
+}
+
+impl<'a> CleanTraversalCtx<'a> {
+    fn new(
+        opts: &'a CleanOptions,
+        journal: &'a mut JournalWriter,
+        deleted_total: &'a mut u64,
+        report: &'a mut CleanReport,
+    ) -> Self {
+        Self {
+            opts,
+            journal,
+            deleted_total,
+            report,
+            flags: DeleteEntryFlags::default(),
+        }
+    }
+
+    /// Delete one entry with the supplied per-entry flags.
+    fn delete_entry(
+        &mut self,
+        item: &ValidatedItem,
+        path_str: &str,
+        flags: DeleteEntryFlags,
+    ) -> Result<ProcessOutcome, CleanError> {
+        self.flags = flags;
+        delete_path_entry_inner(item, path_str, self)
+    }
+}
+
 /// A failed target-root recheck during traversal stops the whole clean.
 fn check_root(item: &ValidatedItem, state: &ContentsState) -> Option<CleanContentsResult> {
-    ensure_target_root_safe(&item.target_root)
+    if let Err(reason) = ensure_target_root_safe(&item.target_root) {
+        return Some(state.aborted(reason));
+    }
+    // A root swapped for a different real directory (no reparse point) passes
+    // the link-point check. Re-bind identity before each traversal batch so a
+    // mid-walk swap cannot delete children that were never previewed.
+    revalidate_root_identity(item)
         .err()
         .map(|reason| state.aborted(reason))
 }
@@ -954,20 +1087,22 @@ fn fail_after_partial<T>(
 /// reparse placeholder). A fatal write preserves already-completed deletions.
 fn journal_skip(
     item: &ValidatedItem,
-    journal: &mut JournalWriter,
+    ctx: &mut CleanTraversalCtx<'_>,
     path: &str,
     size: u64,
     reason: &str,
     state: &ContentsState,
-    report: &mut CleanReport,
 ) -> Result<(), CleanError> {
-    if let Err(err) = journal.write_intent(&journal::intent_record(&item.id, path, size, None)) {
-        return fail_after_partial(item, state, report, err);
+    if let Err(err) = ctx
+        .journal
+        .write_intent(&journal::intent_record(&item.id, path, size, None))
+    {
+        return fail_after_partial(item, state, &mut *ctx.report, err);
     }
-    if let Err(err) = journal.write_outcome(&journal::outcome_record(
+    if let Err(err) = ctx.journal.write_outcome(&journal::outcome_record(
         &item.id, path, 0, "Skipped", reason, None,
     )) {
-        return fail_after_partial(item, state, report, err);
+        return fail_after_partial(item, state, &mut *ctx.report, err);
     }
     Ok(())
 }
@@ -976,30 +1111,21 @@ fn journal_skip(
 ///
 /// Returns `Some(result)` only when the caller must stop (abort or the 120%
 /// circuit breaker). `mutated_dir` marks the directory whose contents changed.
-#[allow(clippy::too_many_arguments)]
 fn delete_and_apply(
     item: &ValidatedItem,
     path_str: &str,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
-    report: &mut CleanReport,
+    ctx: &mut CleanTraversalCtx<'_>,
     state: &mut ContentsState,
     mutated_dir: Option<&Path>,
     ignore_emptied_dir_age: bool,
 ) -> Result<Option<CleanContentsResult>, CleanError> {
-    let outcome = match delete_path_entry_with_options(
-        item,
-        path_str,
-        opts,
-        journal,
-        deleted_total,
-        false,
-        None,
+    let flags = DeleteEntryFlags {
         ignore_emptied_dir_age,
-    ) {
+        ..DeleteEntryFlags::default()
+    };
+    let outcome = match ctx.delete_entry(item, path_str, flags) {
         Ok(outcome) => outcome,
-        Err(err) => return fail_after_partial(item, state, report, err),
+        Err(err) => return fail_after_partial(item, state, &mut *ctx.report, err),
     };
     match outcome {
         ProcessOutcome::Deleted(bytes) => {
@@ -1008,7 +1134,7 @@ fn delete_and_apply(
             if let Some(dir) = mutated_dir {
                 state.mutated_dirs.insert(norm_path_key(dir));
             }
-            if circuit_breaker_exceeded(opts.preview_estimated_bytes, *deleted_total) {
+            if circuit_breaker_exceeded(ctx.opts.preview_estimated_bytes, *ctx.deleted_total) {
                 return Ok(Some(
                     state.aborted("aborted: 120% circuit breaker exceeded".to_string()),
                 ));
@@ -1023,13 +1149,9 @@ fn delete_and_apply(
 /// Classify and handle one enumerated entry: unlink link points (never
 /// traverse them), skip reparse placeholders, queue real child dirs, delete
 /// real files.
-#[allow(clippy::too_many_arguments)]
 fn apply_entry(
     item: &ValidatedItem,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
-    report: &mut CleanReport,
+    ctx: &mut CleanTraversalCtx<'_>,
     state: &mut ContentsState,
     stack: &mut Vec<PathBuf>,
     dir: &Path,
@@ -1040,10 +1162,7 @@ fn apply_entry(
         ReparseTagClass::LinkPoint => delete_and_apply(
             item,
             &ent.path.to_string_lossy(),
-            opts,
-            journal,
-            deleted_total,
-            report,
+            ctx,
             state,
             Some(dir),
             false,
@@ -1052,12 +1171,11 @@ fn apply_entry(
         ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
             journal_skip(
                 item,
-                journal,
+                ctx,
                 &ent.path.to_string_lossy(),
                 ent.size,
                 "Skipped: reparse point (cloud/unknown)",
                 state,
-                report,
             )?;
             Ok(None)
         }
@@ -1069,10 +1187,7 @@ fn apply_entry(
                 delete_and_apply(
                     item,
                     &ent.path.to_string_lossy(),
-                    opts,
-                    journal,
-                    deleted_total,
-                    report,
+                    ctx,
                     state,
                     Some(dir),
                     false,
@@ -1085,10 +1200,7 @@ fn apply_entry(
 /// Iteratively sweep files/link entries without following link points.
 fn sweep_entries(
     item: &ValidatedItem,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
-    report: &mut CleanReport,
+    ctx: &mut CleanTraversalCtx<'_>,
     state: &mut ContentsState,
     stack: &mut Vec<PathBuf>,
 ) -> Result<Option<CleanContentsResult>, CleanError> {
@@ -1100,15 +1212,7 @@ fn sweep_entries(
             Ok(entries) => entries,
             Err(e) => {
                 let reason = format!("Skipped: unreadable directory during contents clean: {e}");
-                journal_skip(
-                    item,
-                    journal,
-                    &dir.to_string_lossy(),
-                    0,
-                    &reason,
-                    state,
-                    report,
-                )?;
+                journal_skip(item, ctx, &dir.to_string_lossy(), 0, &reason, state)?;
                 return Ok(Some(state.skipped(reason)));
             }
         };
@@ -1117,17 +1221,7 @@ fn sweep_entries(
             state.postorder.push(dir.clone());
         }
         for ent in entries {
-            if let Some(result) = apply_entry(
-                item,
-                opts,
-                journal,
-                deleted_total,
-                report,
-                state,
-                stack,
-                &dir,
-                ent,
-            )? {
+            if let Some(result) = apply_entry(item, ctx, state, stack, &dir, ent)? {
                 return Ok(Some(result));
             }
         }
@@ -1138,10 +1232,7 @@ fn sweep_entries(
 /// Remove now-empty child directories bottom-up, revalidating safety each time.
 fn delete_empty_dirs(
     item: &ValidatedItem,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
-    report: &mut CleanReport,
+    ctx: &mut CleanTraversalCtx<'_>,
     state: &mut ContentsState,
 ) -> Result<Option<CleanContentsResult>, CleanError> {
     let postorder = std::mem::take(&mut state.postorder);
@@ -1161,10 +1252,7 @@ fn delete_empty_dirs(
         if let Some(result) = delete_and_apply(
             item,
             &dir.to_string_lossy(),
-            opts,
-            journal,
-            deleted_total,
-            report,
+            ctx,
             state,
             parent.as_deref(),
             ignore_emptied_dir_age,
@@ -1177,27 +1265,15 @@ fn delete_empty_dirs(
 
 fn clean_directory_contents(
     item: &ValidatedItem,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
-    report: &mut CleanReport,
+    ctx: &mut CleanTraversalCtx<'_>,
 ) -> Result<CleanContentsResult, CleanError> {
     let mut state = ContentsState::new(&item.path);
     let mut stack: Vec<PathBuf> = vec![PathBuf::from(&item.path)];
 
-    if let Some(result) = sweep_entries(
-        item,
-        opts,
-        journal,
-        deleted_total,
-        report,
-        &mut state,
-        &mut stack,
-    )? {
+    if let Some(result) = sweep_entries(item, ctx, &mut state, &mut stack)? {
         return Ok(result);
     }
-    if let Some(result) = delete_empty_dirs(item, opts, journal, deleted_total, report, &mut state)?
-    {
+    if let Some(result) = delete_empty_dirs(item, ctx, &mut state)? {
         return Ok(result);
     }
     // Represent contents-clean as a deleted summary for the root item context.
@@ -1225,80 +1301,37 @@ fn journal_deleted_outcome(
 fn delete_path_entry(
     item: &ValidatedItem,
     path_str: &str,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
+    ctx: &mut CleanTraversalCtx<'_>,
 ) -> Result<ProcessOutcome, CleanError> {
-    delete_path_entry_with_options(
-        item,
-        path_str,
-        opts,
-        journal,
-        deleted_total,
-        false,
-        None,
-        false,
-    )
+    ctx.delete_entry(item, path_str, DeleteEntryFlags::default())
 }
 
 fn delete_path_entry_allowing_root(
     item: &ValidatedItem,
     path_str: &str,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
+    ctx: &mut CleanTraversalCtx<'_>,
     base_bytes_deleted: Option<u64>,
     ignore_emptied_dir_age: bool,
 ) -> Result<ProcessOutcome, CleanError> {
-    delete_path_entry_with_options(
+    ctx.delete_entry(
         item,
         path_str,
-        opts,
-        journal,
-        deleted_total,
-        true,
-        base_bytes_deleted,
-        ignore_emptied_dir_age,
+        DeleteEntryFlags {
+            allow_delete_root: true,
+            base_bytes_deleted,
+            ignore_emptied_dir_age,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn delete_path_entry_with_options(
-    item: &ValidatedItem,
-    path_str: &str,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
-    allow_delete_root: bool,
-    base_bytes_deleted: Option<u64>,
-    ignore_emptied_dir_age: bool,
-) -> Result<ProcessOutcome, CleanError> {
-    delete_path_entry_inner(
-        item,
-        path_str,
-        opts,
-        journal,
-        deleted_total,
-        allow_delete_root,
-        base_bytes_deleted,
-        ignore_emptied_dir_age,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn delete_path_entry_inner(
     item: &ValidatedItem,
     path_str: &str,
-    opts: &CleanOptions,
-    journal: &mut JournalWriter,
-    deleted_total: &mut u64,
-    allow_delete_root: bool,
-    base_bytes_deleted: Option<u64>,
-    ignore_emptied_dir_age: bool,
+    ctx: &mut CleanTraversalCtx<'_>,
 ) -> Result<ProcessOutcome, CleanError> {
     let path = Path::new(path_str);
     // Intent before each deletion batch/item.
-    journal.write_intent(&journal::intent_record(
+    ctx.journal.write_intent(&journal::intent_record(
         &item.id,
         path_str,
         item.size_bytes,
@@ -1306,7 +1339,7 @@ fn delete_path_entry_inner(
     ))?;
 
     if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-        journal.write_outcome(&journal::outcome_record(
+        ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, path_str, 0, "Skipped", &reason, None,
         ))?;
         return Ok(if reason.contains("escape") || reason.contains("swapped") {
@@ -1314,6 +1347,16 @@ fn delete_path_entry_inner(
         } else {
             ProcessOutcome::skipped(reason)
         });
+    }
+
+    // Per-deletion identity recheck: a root swapped for a different real
+    // directory between traversal batches still passes the link-point check,
+    // so re-bind identity immediately before each unlink and abort the batch.
+    if let Err(reason) = revalidate_root_identity(item) {
+        ctx.journal.write_outcome(&journal::outcome_record(
+            &item.id, path_str, 0, "Skipped", &reason, None,
+        ))?;
+        return Ok(ProcessOutcome::aborted(reason));
     }
 
     let handle = match open_for_delete(path) {
@@ -1330,7 +1373,7 @@ fn delete_path_entry_inner(
             } else {
                 format!("Skipped: cannot open for delete: {e}")
             };
-            journal.write_outcome(&journal::outcome_record(
+            ctx.journal.write_outcome(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
             ))?;
             return Ok(ProcessOutcome::skipped(reason));
@@ -1341,7 +1384,7 @@ fn delete_path_entry_inner(
         Ok(i) => i,
         Err(e) => {
             let reason = format!("Skipped: handle inspection failed: {e}");
-            journal.write_outcome(&journal::outcome_record(
+            ctx.journal.write_outcome(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
             ))?;
             return Ok(ProcessOutcome::skipped(reason));
@@ -1353,11 +1396,11 @@ fn delete_path_entry_inner(
         item,
         path_str,
         &inspection,
-        opts,
-        allow_delete_root,
-        ignore_emptied_dir_age,
+        ctx.opts,
+        ctx.flags.allow_delete_root,
+        ctx.flags.ignore_emptied_dir_age,
     ) {
-        journal.write_outcome(&journal::outcome_record(
+        ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, path_str, 0, "Skipped", &reason, None,
         ))?;
         if reason.contains("escape")
@@ -1375,12 +1418,12 @@ fn delete_path_entry_inner(
         Err(_) => item.size_bytes,
     };
     if would_exceed_circuit_breaker(
-        opts.preview_estimated_bytes,
-        *deleted_total,
+        ctx.opts.preview_estimated_bytes,
+        *ctx.deleted_total,
         bytes_accounted,
     ) {
         let reason = "aborted: 120% circuit breaker exceeded".to_string();
-        if let Err(err) = journal.write_outcome(&journal::outcome_record(
+        if let Err(err) = ctx.journal.write_outcome(&journal::outcome_record(
             &item.id, path_str, 0, "Skipped", &reason, None,
         )) {
             // Do not lose the breaker reason when its Skipped-outcome write
@@ -1397,7 +1440,7 @@ fn delete_path_entry_inner(
     match inspection.reparse {
         ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
             let reason = "Skipped: reparse point (cloud/unknown)".to_string();
-            journal.write_outcome(&journal::outcome_record(
+            ctx.journal.write_outcome(&journal::outcome_record(
                 &item.id, path_str, 0, "Skipped", &reason, None,
             ))?;
             return Ok(ProcessOutcome::skipped(reason));
@@ -1415,12 +1458,14 @@ fn delete_path_entry_inner(
 
     match delete_result {
         Ok(()) => {
-            *deleted_total = deleted_total.saturating_add(bytes_accounted);
-            let reported = base_bytes_deleted
+            *ctx.deleted_total = ctx.deleted_total.saturating_add(bytes_accounted);
+            let reported = ctx
+                .flags
+                .base_bytes_deleted
                 .unwrap_or(0)
                 .saturating_add(bytes_accounted);
             // #135: journal own bytes only; `reported` keeps the full CleanReport total.
-            journal_deleted_outcome(journal, &item.id, path_str, bytes_accounted);
+            journal_deleted_outcome(ctx.journal, &item.id, path_str, bytes_accounted);
             Ok(ProcessOutcome::Deleted(reported))
         }
         Err(e) => {
@@ -1433,12 +1478,21 @@ fn delete_path_entry_inner(
                 }
                 other => format!("Skipped: delete failed: {other}"),
             };
-            journal.write_outcome_best_effort(&journal::outcome_record(
-                &item.id, path_str, 0, "Skipped", &reason, None,
-            ));
+            ctx.journal
+                .write_outcome_best_effort(&journal::outcome_record(
+                    &item.id, path_str, 0, "Skipped", &reason, None,
+                ));
             Ok(ProcessOutcome::skipped(reason))
         }
     }
+}
+
+/// Single definition of the fail-closed identity rule shared by the handle-level
+/// and root-level revalidation paths.
+const FILE_CHANGED_SINCE_PREVIEW: &str = "Skipped: file changed since preview";
+
+fn identity_matches(item: &ValidatedItem, observed: FileIdentity) -> bool {
+    item.expected_identity == Some(observed)
 }
 
 fn revalidate_handle(
@@ -1512,6 +1566,18 @@ fn revalidate_handle(
         ReparseTagClass::NotReparse => {}
     }
 
+    // 4a) Identity binding: the entry behind the confirmed path must still be
+    // the exact filesystem object observed when the item was validated.
+    // Child entries of a root-style item are separate selections, so this
+    // applies only when deleting the validated item itself. A required but
+    // missing identity fails closed.
+    if item.identity_required
+        && paths_equal_str(requested_path, &item.path)
+        && !identity_matches(item, inspection.identity)
+    {
+        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
+    }
+
     // 5) Minimum Age check (exact boundary and future mtime treated as recent / Skipped).
     // Whole-cache sources are exempt; otherwise only directories emptied this
     // run are exempt, and the opened handle must still be a real directory.
@@ -1530,6 +1596,32 @@ fn revalidate_handle(
         }
     }
 
+    Ok(())
+}
+
+/// Re-validate the bound filesystem identity of a root-style item before any of
+/// its children are deleted.
+///
+/// Root-style selections (`WholeCache`, `AllowlistedTarget`, `CustomPath`, and
+/// the Tier 3 roots) bind the identity of the root directory at preview time,
+/// but `clean_directory_contents` deletes each child as a separate entry and
+/// `revalidate_handle` only checks the binding when the entry being deleted is
+/// the item path itself. Without this check, a root deleted and recreated
+/// between Preview and Clean would have every file in the *new* directory
+/// permanently deleted. Fails closed: a required-but-missing binding, an
+/// unopenable/uncinspectable root, or any identity mismatch skips the whole
+/// item with zero deletions.
+fn revalidate_root_identity(item: &ValidatedItem) -> Result<(), String> {
+    if !item.identity_required {
+        return Ok(());
+    }
+    let handle = sweeper_winfs::open_for_inspection(Path::new(&item.path))
+        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
+    let inspection = sweeper_winfs::inspect_handle(&handle)
+        .map_err(|e| format!("Skipped: root identity inspection failed: {e}"))?;
+    if !identity_matches(item, inspection.identity) {
+        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
+    }
     Ok(())
 }
 

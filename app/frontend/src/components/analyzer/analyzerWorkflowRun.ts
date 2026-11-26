@@ -83,6 +83,8 @@ export async function runAnalyzerAction(args: RunAnalyzerArgs): Promise<void> {
   try {
     const res = await args.client.startAnalyzer(targetPath, (p) => {
       if (!args.isCurrent()) return;
+      // The client filters the global Tauri channel down to this run's session
+      // id, so every forwarded event belongs to this run; no local id latch.
       args.setRunningSessionId(p.sessionId);
       args.setProgress(p);
     });

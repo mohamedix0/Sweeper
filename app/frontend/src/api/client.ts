@@ -55,6 +55,8 @@ export type ScanProgress = ScanProgressEvent;
 
 export type AnalyzerProgressEvent = {
   sessionId: string;
+  /** True only for the run's start event; older/mock clients may omit it. */
+  isStart?: boolean;
   scannedDirs: string;
   scannedFiles: string;
   scannedBytes: string;
@@ -163,8 +165,31 @@ async function withCleanProgress<T>(previewToken: string, onProgress: ((e: Clean
 
 async function withAnalyzerProgress<T>(onProgress: ((e: AnalyzerProgressEvent) => void) | undefined, run: () => Promise<{ status: 'ok'; data: T } | { status: 'error'; error: ContractError }>): Promise<T> {
   let unlisten: (() => void) | null = null;
+  // The Tauri event channel is global, so a cancelled earlier run's final event
+  // can reach this listener. The backend tags the first event of a run with
+  // `isStart`, which carries the authoritative session id. Latch only on that
+  // marker; events arriving before it belong to an earlier run and are dropped.
+  // Once latched, events are forwarded live — buffering until the command
+  // resolves would freeze progress and make Stop a no-op for the whole walk.
+  let sessionId: string | null = null;
+  const heldBeforeStart: AnalyzerProgressEvent[] = [];
   try {
-    if (onProgress) unlisten = await events.analyzerProgressEvent.listen((event) => onProgress(event.payload as AnalyzerProgressEvent));
+    if (onProgress) unlisten = await events.analyzerProgressEvent.listen((event) => {
+      const payload = event.payload as AnalyzerProgressEvent;
+      if (sessionId === null) {
+        if (!payload.isStart) {
+          heldBeforeStart.push(payload);
+          return;
+        }
+        sessionId = payload.sessionId;
+        onProgress(payload);
+        for (const held of heldBeforeStart) {
+          if (held.sessionId === sessionId) onProgress(held);
+        }
+        return;
+      }
+      if (payload.sessionId === sessionId) onProgress(payload);
+    });
     return unwrap(await run());
   } finally { if (unlisten) unlisten(); }
 }

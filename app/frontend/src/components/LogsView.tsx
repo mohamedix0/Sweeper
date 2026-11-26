@@ -3,7 +3,7 @@ import type { SweeperClient } from '../api/client';
 import { LogsDetailsPane } from './logs/LogsDetailsPane';
 import { LogsEntryList } from './logs/LogsEntryList';
 import { LogsFilterBar } from './logs/LogsFilterBar';
-import { useLogsSelection } from './logs/useLogsSelection';
+import { useLogsSelectionModel } from './logs/useLogsSelectionModel';
 
 interface LogsViewProps {
   client: SweeperClient;
@@ -13,7 +13,7 @@ interface LogsViewProps {
 }
 
 export function LogsView(props: LogsViewProps) {
-  const w = useLogsSelection({ client: props.client, focusLogId: props.focusLogId, onFocusConsumed: props.onFocusConsumed });
+  const w = useLogsSelectionModel({ client: props.client, focusLogId: props.focusLogId, onFocusConsumed: props.onFocusConsumed });
   return (
     <div className="view-stack view-stack-fill">
       <header className="page-header" aria-label="Activity History header">

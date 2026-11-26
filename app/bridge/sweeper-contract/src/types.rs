@@ -120,6 +120,9 @@ pub struct SkippedReasonDto {
 pub struct AnalyzerProgressEvent {
     /// Analyzer session identifier.
     pub session_id: String,
+    /// True only for the initial event of a run; lets clients latch the
+    /// authoritative session id before any walk progress is emitted.
+    pub is_start: bool,
     /// Number of directories scanned/enumerated (decimal string).
     pub scanned_dirs: U64String,
     /// Number of files observed (decimal string).

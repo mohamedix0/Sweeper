@@ -12,6 +12,12 @@ function Harness({ deps }: { deps: CloseGuardDeps }) {
     <div>
       <output data-testid="prompt">{String(guard.promptOpen)}</output>
       <output data-testid="close-pending">{String(guard.closePending)}</output>
+      {guard.error && !guard.promptOpen && (
+        <p className="notice error close-error-notice" role="alert">
+          {guard.error}
+          {guard.canRetry && <button type="button" onClick={() => void guard.retryDelivery()}>Retry</button>}
+        </p>
+      )}
       {guard.promptOpen && (
         <CloseDraftDialog
           saving={guard.saving}
@@ -26,6 +32,18 @@ function Harness({ deps }: { deps: CloseGuardDeps }) {
 
 function depsOf(bridge: CloseBridge, dirty: boolean, flush: () => Promise<boolean>): CloseGuardDeps {
   return { bridge, isDirty: () => dirty, flushDraft: flush };
+}
+
+function failFirstDelivery(bridge: CloseBridge): CloseBridge {
+  let attempts = 0;
+  return {
+    ...bridge,
+    async resolveClose(approved, requestId) {
+      attempts += 1;
+      await bridge.resolveClose(approved, requestId);
+      if (attempts === 1) throw new Error('ipc down');
+    },
+  };
 }
 
 describe('window-close handshake (#93)', () => {
@@ -225,5 +243,64 @@ describe('window-close handshake (#93)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
     expect(screen.getByRole('alertdialog')).toBeInTheDocument();
     expect(screen.getByTestId('close-pending')).toHaveTextContent('false');
+  });
+
+  it('Retry re-delivers the same request id and decision after a failed clean close', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    const tracked = failFirstDelivery(bridge);
+    render(<Harness deps={depsOf(tracked, false, async () => true)} />);
+    act(() => bridge.requestHostClose('R1'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(bridge.decisions).toEqual([true, true]));
+    expect(bridge.decisionIds).toEqual(['R1', 'R1']);
+  });
+
+  it('a clean close with a failed delivery shows an error without reopening the dialog', async () => {
+    const bridge = fakeBridge();
+    const failing: CloseBridge = {
+      ...bridge,
+      resolveClose: vi.fn(async () => { throw new Error('ipc down'); }),
+    };
+    render(<Harness deps={depsOf(failing, false, async () => true)} />);
+    act(() => bridge.requestHostClose());
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByTestId('prompt')).toHaveTextContent('false');
+  });
+
+  it('a successful Retry clears the close error notice', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    const tracked = failFirstDelivery(bridge);
+    render(<Harness deps={depsOf(tracked, false, async () => true)} />);
+    act(() => bridge.requestHostClose('R2'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(bridge.decisionIds).toEqual(['R2', 'R2']);
+  });
+
+  it('Retry reopens the decision when the draft became dirty after a failed clean close', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    const failing: CloseBridge = { ...bridge, resolveClose: vi.fn(async () => { throw new Error('ipc down'); }) };
+    let dirty = false;
+    render(<Harness deps={{ bridge: failing, isDirty: () => dirty, flushDraft: async () => true }} />);
+    act(() => bridge.requestHostClose('R3'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    dirty = true;
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(failing.resolveClose).toHaveBeenCalledTimes(1);
   });
 });

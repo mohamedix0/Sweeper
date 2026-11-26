@@ -155,6 +155,11 @@ export function parseMockPath(input: string): ParsedMockPath | null {
   // Normalize separators once, then validate the raw structure. Empty or
   // malformed components are never filtered/trimmed into a valid-looking path.
   const replaced = input.replace(/\//g, '\\');
+  // Backend `lexical_parse` (paths.rs) rejects embedded verbatim/device markers
+  // and GLOBALROOT on this separator-normalized text, before segment parsing.
+  // Fold with ASCII-only casing, matching Rust `to_ascii_uppercase`.
+  const upperCheck = replaced.replace(/[a-z]/g, (c) => c.toUpperCase());
+  if (upperCheck.includes('\\??\\') || upperCheck.includes('GLOBALROOT')) return null;
   const drive = replaced.slice(0, 2);
   const rest = replaced.slice(3);
   if (hasInvalidRawSyntax({ replaced, rest })) return null;

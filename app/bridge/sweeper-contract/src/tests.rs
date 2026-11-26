@@ -114,6 +114,7 @@ fn execute_clean_response_serializes_skip_reason_counts() {
 fn sample_analyzer_progress_event() -> AnalyzerProgressEvent {
     AnalyzerProgressEvent {
         session_id: "a1".to_string(),
+        is_start: false,
         scanned_dirs: U64String(2),
         scanned_files: U64String(3),
         scanned_bytes: U64String(4),
@@ -125,8 +126,19 @@ fn sample_analyzer_progress_event() -> AnalyzerProgressEvent {
 fn analyzer_progress_event_serializes_u64_fields_as_strings() {
     let ev = serde_json::to_value(sample_analyzer_progress_event()).unwrap();
     assert_eq!(ev["sessionId"], serde_json::json!("a1"));
+    assert_eq!(ev["isStart"], serde_json::json!(false));
     assert_eq!(ev["scannedDirs"], serde_json::json!("2"));
     assert_eq!(ev["scannedFiles"], serde_json::json!("3"));
+}
+
+#[test]
+fn analyzer_progress_event_serializes_start_marker_as_boolean() {
+    let start = AnalyzerProgressEvent {
+        is_start: true,
+        ..sample_analyzer_progress_event()
+    };
+    let ev = serde_json::to_value(start).unwrap();
+    assert_eq!(ev["isStart"], serde_json::json!(true));
 }
 
 #[test]

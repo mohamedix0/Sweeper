@@ -157,3 +157,124 @@ fn gate_d_target_root_or_ancestor_swapped_to_junction_rejected_zero_deletions() 
     );
     assert_sentinel_intact(&sb);
 }
+
+/// t1 regression: a required-but-missing identity binding must fail closed.
+#[test]
+fn gate_d_root_identity_missing_skips_all_children() {
+    let sb = Sandbox::new();
+    let journal_dir = sb.create_dir("journal").unwrap();
+
+    let cache_root = sb.create_dir("cache_root").unwrap();
+    let child = cache_root.join("victim.txt");
+    write_file(&child, b"child victim");
+    set_filetime(&child, old_mtime_secs());
+    set_filetime(&cache_root, old_mtime_secs());
+
+    let root_canon = canonical_str(&cache_root);
+    let item = remover::validated_item_for_tests(
+        "root-identity-missing",
+        "test-target",
+        root_canon.clone(),
+        root_canon,
+        0,
+        Some(old_mtime_secs()),
+        ValidatedSource::CustomPath,
+    )
+    .with_identity_binding(None);
+
+    let report = clean_one(item, 1024, Duration::from_secs(3600), &journal_dir);
+
+    assert!(
+        report
+            .items
+            .iter()
+            .any(|r| r.reason.contains("Skipped: file changed since preview")),
+        "missing identity must be reported: {report:?}"
+    );
+    assert_eq!(report.bytes_freed, 0, "no bytes may be deleted: {report:?}");
+    assert_eq!(
+        report.skipped_count, 1,
+        "the whole root-style item must be skipped: {report:?}"
+    );
+    assert!(child.exists(), "child must survive a missing binding");
+    assert_sentinel_intact(&sb);
+}
+
+/// subA1 coverage: the root-identity recheck applies to every root-style
+/// selection, including sources that keep the root (`AllowlistedTarget`,
+/// `CustomPath`) and not just the ones that unlink it (`WholeCache`).
+#[test]
+fn gate_d_root_identity_recheck_applies_to_all_root_sources() {
+    let sb = Sandbox::new();
+    let journal_dir = sb.create_dir("journal").unwrap();
+
+    let other = sb.write_file("identity/source.txt", b"other").unwrap();
+    let stale_identity =
+        remover::capture_file_identity(&other).expect("other file must have a stable identity");
+
+    let sources: Vec<(&str, ValidatedSource)> = vec![
+        (
+            "whole-cache",
+            ValidatedSource::WholeCache {
+                target_id: "test-target".to_string(),
+            },
+        ),
+        (
+            "allowlisted",
+            ValidatedSource::AllowlistedTarget {
+                target_id: "test-target".to_string(),
+            },
+        ),
+        ("custom", ValidatedSource::CustomPath),
+    ];
+
+    for (label, source) in sources {
+        let root = sb.create_dir(format!("cache_{label}")).unwrap();
+        let child = root.join("victim.txt");
+        let nested_child = root.join("nested").join("nested_victim.txt");
+        write_file(&child, label.as_bytes());
+        write_file(&nested_child, label.as_bytes());
+        set_filetime(&child, old_mtime_secs());
+        set_filetime(&nested_child, old_mtime_secs());
+        set_filetime(&root, old_mtime_secs());
+
+        let root_canon = canonical_str(&root);
+        let item = remover::validated_item_for_tests(
+            format!("id-{label}"),
+            "test-target",
+            root_canon.clone(),
+            root_canon,
+            0,
+            Some(old_mtime_secs()),
+            source,
+        )
+        .with_identity_binding(Some(stale_identity));
+
+        let report = clean_one(item, 1024, Duration::from_secs(3600), &journal_dir);
+
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|r| r.reason.contains("Skipped: file changed since preview")),
+            "{label}: identity mismatch must be reported: {report:?}"
+        );
+        assert_eq!(
+            report.bytes_freed, 0,
+            "{label}: no bytes may be deleted: {report:?}"
+        );
+        assert_eq!(
+            report.skipped_count, 1,
+            "{label}: the whole root-style item must be skipped: {report:?}"
+        );
+        assert!(
+            child.exists(),
+            "{label}: child must survive identity mismatch"
+        );
+        assert!(
+            nested_child.exists(),
+            "{label}: nested child must survive identity mismatch"
+        );
+    }
+    assert_sentinel_intact(&sb);
+}

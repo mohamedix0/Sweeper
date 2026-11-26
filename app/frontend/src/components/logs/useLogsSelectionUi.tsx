@@ -39,8 +39,8 @@ export function useLogsDerived(args: { logs: LogMeta[]; selected: SelectedLog | 
   const selectedMeta = useMemo(() => findMeta(args.logs, args.selected), [args.logs, args.selected]);
   const auditRows = useMemo(() => {
     if (!args.selected) return [];
-    return parseAuditRows({ content: args.selected.content, meta: selectedMeta });
-  }, [args.selected, selectedMeta]);
+    return parseAuditRows(args.selected.content);
+  }, [args.selected]);
   const visibleAuditRows = useMemo(() => filterAuditRows(auditRows, args.outcomeFilter), [auditRows, args.outcomeFilter]);
   const selectedSummary = useMemo(() => {
     if (!selectedMeta) return null;

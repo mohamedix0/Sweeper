@@ -1,6 +1,6 @@
 import { Fragment } from 'react';
 import type { AuditRow, OutcomeFilter } from './logParsers';
-import { formatGroupBytes, groupSkippedRows } from './useLogsSelection';
+import { formatGroupBytes, groupSkippedRows } from './useLogsSelectionHelpers';
 
 function auditRowClass(input: { row: AuditRow; indented: boolean }): string {
   const base = input.row.kind === 'Category' ? 'audit-row-category' : 'audit-row-file';

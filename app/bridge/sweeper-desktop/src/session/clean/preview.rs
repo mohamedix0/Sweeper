@@ -5,7 +5,7 @@ use sweeper_contract::{
     U64String,
 };
 use sweeper_core::analyzer;
-use sweeper_core::remover::ValidatedItem;
+use sweeper_core::remover::{capture_file_identity, ValidatedItem};
 use sweeper_core::scanner::is_whole_cache_target_id;
 
 use super::super::mapping::sanitize_analyzer_build_msg;
@@ -237,7 +237,12 @@ impl SessionStore {
         item: &StoredItem,
         assembly: &mut ScanAssembly<'_>,
     ) -> Result<(), ContractError> {
-        let validated_item = Self::validate_scan_item(session, item)?;
+        // The display-only ScanItemDto does not carry the scanner's file
+        // identity, so bind the object observed at preview time. A missing
+        // identity is retained as a required-but-missing binding and fails
+        // closed during moment-of-deletion revalidation.
+        let validated_item = Self::validate_scan_item(session, item)?
+            .with_identity_binding(capture_file_identity(std::path::Path::new(&item.dto.path)));
         let size = item.dto.size.get();
         let entry = assembly
             .by_target
