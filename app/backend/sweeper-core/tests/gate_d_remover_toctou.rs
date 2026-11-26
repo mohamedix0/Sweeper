@@ -451,18 +451,17 @@ fn assert_no_external_bytes_freed(report: &CleanReport, context: &str, local_bud
 /// Concatenates the clean journal records so a test can check which paths were
 /// touched without depending on the per-run journal file name.
 fn read_clean_journal_text(journal_dir: &Path) -> String {
-    let mut all = String::new();
-    if let Ok(entries) = fs::read_dir(journal_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("clean-") && name.ends_with(".jsonl") {
-                if let Ok(text) = fs::read_to_string(entry.path()) {
-                    all.push_str(&text);
-                }
-            }
-        }
-    }
-    all
+    fs::read_dir(journal_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            name.starts_with("clean-") && name.ends_with(".jsonl")
+        })
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .collect()
 }
 
 /// Asserts that the queued child was handled inside the sandbox, that no
