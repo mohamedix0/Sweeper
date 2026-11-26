@@ -195,6 +195,24 @@ pub(super) fn revalidate_handle(req: &RevalidateRequest<'_>) -> Result<(), Strin
     )
 }
 
+/// Open the item's path, inspect the handle, and fail closed unless the observed
+/// identity still matches the preview identity.
+///
+/// This is the single open/inspect/compare sequence shared by
+/// [`verify_root_anchor`] and [`revalidate_root_identity`]. Both callers keep the
+/// same fail-closed rule and the exact error reasons; only their public return
+/// values differ.
+fn open_inspect_and_match_root_identity(item: &ValidatedItem) -> Result<SafeHandle, String> {
+    let handle = sweeper_winfs::open_for_inspection(Path::new(&item.path))
+        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
+    let inspection = sweeper_winfs::inspect_handle(&handle)
+        .map_err(|e| format!("Skipped: root identity inspection failed: {e}"))?;
+    if !identity_matches(item, inspection.identity) {
+        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
+    }
+    Ok(handle)
+}
+
 /// Open and verify an anchor handle for a root-style item's directory.
 ///
 /// The handle is held for the whole contents-clean batch. It gives the batch a
@@ -209,14 +227,7 @@ pub(super) fn verify_root_anchor(item: &ValidatedItem) -> Result<Option<SafeHand
     if !item.identity_required {
         return Ok(sweeper_winfs::open_for_inspection(Path::new(&item.path)).ok());
     }
-    let handle = sweeper_winfs::open_for_inspection(Path::new(&item.path))
-        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
-    let inspection = sweeper_winfs::inspect_handle(&handle)
-        .map_err(|e| format!("Skipped: root identity inspection failed: {e}"))?;
-    if !identity_matches(item, inspection.identity) {
-        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
-    }
-    Ok(Some(handle))
+    Ok(Some(open_inspect_and_match_root_identity(item)?))
 }
 
 /// Re-verify that the root path still resolves to the exact directory object
@@ -259,14 +270,7 @@ pub(super) fn revalidate_root_identity(item: &ValidatedItem) -> Result<(), Strin
     if !item.identity_required {
         return Ok(());
     }
-    let handle = sweeper_winfs::open_for_inspection(Path::new(&item.path))
-        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
-    let inspection = sweeper_winfs::inspect_handle(&handle)
-        .map_err(|e| format!("Skipped: root identity inspection failed: {e}"))?;
-    if !identity_matches(item, inspection.identity) {
-        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
-    }
-    Ok(())
+    open_inspect_and_match_root_identity(item).map(|_| ())
 }
 
 /// Reject a confirmed path whose handle-authoritative resolution no longer agrees

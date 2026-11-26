@@ -15,6 +15,7 @@ use crate::policy;
 
 use super::remover_whole_cache::whole_cache_partial_outcome;
 use super::revalidation::{ensure_target_root_safe, revalidate_root_identity, verify_root_anchor};
+use super::traversal::DeleteRootAllowingRootRequest;
 use super::{
     apply_process_outcome, clean_directory_contents, clear_readonly, delete_dir_handle,
     delete_file_handle, delete_path_entry_allowing_root, inspection_is_directory,
@@ -225,13 +226,13 @@ fn remove_root_after_contents(
     if !root_is_empty(fin.item_path) {
         return Ok(leftover_entries_outcome(fin.item, fin.bytes));
     }
-    let result = delete_path_entry_allowing_root(
-        fin.item,
-        &fin.item.path,
-        fin.ctx,
-        Some(fin.bytes),
-        fin.contents.root_mutated,
-    );
+    let result = delete_path_entry_allowing_root(DeleteRootAllowingRootRequest {
+        item: fin.item,
+        path_str: &fin.item.path,
+        ctx: &mut *fin.ctx,
+        base_bytes_deleted: Some(fin.bytes),
+        ignore_emptied_dir_age: fin.contents.root_mutated,
+    });
     match result {
         // Root was not deleted (Skipped/Aborted): carry the completed child
         // bytes instead of dropping them.

@@ -14,6 +14,69 @@ use crate::policy;
 use super::prechecks::is_protected_root;
 use super::{ValidatedItem, ValidatedSource};
 
+/// Named fields for the one place that assembles a `ValidatedItem`.
+///
+/// Every constructor funnels through [`ItemParts::build`], so the struct-literal
+/// assembly exists once instead of being duplicated across constructors.
+struct ItemParts {
+    id: String,
+    target_id: String,
+    target_root: String,
+    path: String,
+    size_bytes: u64,
+    mtime_unix_secs: Option<u64>,
+    source: ValidatedSource,
+    risk: Option<Risk>,
+}
+
+impl ItemParts {
+    /// The single private construction helper for `ValidatedItem`.
+    fn build(self) -> ValidatedItem {
+        ValidatedItem {
+            id: self.id,
+            target_id: self.target_id,
+            target_root: self.target_root,
+            path: self.path,
+            size_bytes: self.size_bytes,
+            mtime_unix_secs: self.mtime_unix_secs,
+            source: self.source,
+            risk: self.risk,
+            expected_identity: None,
+            identity_required: false,
+        }
+    }
+}
+
+/// Named inputs for a root-style item whose `target_root` and `path` are the
+/// same canonical directory.
+struct RootItemContext {
+    id: String,
+    target_id: String,
+    canon: String,
+    size_bytes: u64,
+    mtime_unix_secs: Option<u64>,
+    source: ValidatedSource,
+}
+
+/// Named inputs for the allowlisted-scan validation pipeline.
+struct AllowlistedScanInput {
+    id: String,
+    target_id: String,
+    target_root: String,
+    path: String,
+    size_bytes: u64,
+    mtime_unix_secs: Option<u64>,
+}
+
+/// Named inputs for the Tier 3 stale project-directory pipeline.
+struct Tier3ProjectDirectoryInput {
+    id: String,
+    logical_target_id: String,
+    path: String,
+    size_bytes: u64,
+    mtime_unix_secs: Option<u64>,
+}
+
 impl ValidatedItem {
     /// Crate-internal constructor for validated construction pipelines and test-support helpers.
     #[cfg(feature = "test-support")]
@@ -28,7 +91,7 @@ impl ValidatedItem {
         source: ValidatedSource,
         risk: Option<Risk>,
     ) -> Self {
-        Self {
+        ItemParts {
             id,
             target_id,
             target_root,
@@ -37,9 +100,8 @@ impl ValidatedItem {
             mtime_unix_secs,
             source,
             risk,
-            expected_identity: None,
-            identity_required: false,
         }
+        .build()
     }
 
     /// Item id.
@@ -90,10 +152,28 @@ impl ValidatedItem {
         size_bytes: u64,
         mtime_unix_secs: Option<u64>,
     ) -> Result<Self, String> {
-        let id = id.into();
-        let target_id = target_id.into();
-        let target_root = target_root.into();
-        let path = path.into();
+        Self::from_allowlisted_scan_input(AllowlistedScanInput {
+            id: id.into(),
+            target_id: target_id.into(),
+            target_root: target_root.into(),
+            path: path.into(),
+            size_bytes,
+            mtime_unix_secs,
+        })
+    }
+
+    /// Validation pipeline for allowlisted scan items. Takes a single named
+    /// context so the logic stays below the argument-count limit while the
+    /// public wrapper keeps its established signature.
+    fn from_allowlisted_scan_input(input: AllowlistedScanInput) -> Result<Self, String> {
+        let AllowlistedScanInput {
+            id,
+            target_id,
+            target_root,
+            path,
+            size_bytes,
+            mtime_unix_secs,
+        } = input;
 
         let root = Self::validated_allowlisted_root(&target_root, "target root")?;
         let item =
@@ -108,7 +188,7 @@ impl ValidatedItem {
             return Err("item path is protected".to_string());
         }
 
-        Ok(Self {
+        Ok(ItemParts {
             id,
             target_id: target_id.clone(),
             target_root,
@@ -117,9 +197,8 @@ impl ValidatedItem {
             mtime_unix_secs,
             source: ValidatedSource::AllowlistedTarget { target_id },
             risk: None,
-            expected_identity: None,
-            identity_required: false,
-        })
+        }
+        .build())
     }
 
     /// Construct a validated allowlisted root item (contents-only; root kept).
@@ -138,14 +217,14 @@ impl ValidatedItem {
         let target_id = target_id.into();
         let path = path.into();
         let canon = Self::validated_allowlisted_root(&path, "allowlisted root")?;
-        Ok(Self::new_root_item(
+        Ok(Self::new_root_item(RootItemContext {
             id,
-            target_id.clone(),
-            canon.to_string(),
+            target_id: target_id.clone(),
+            canon: canon.to_string(),
             size_bytes,
-            None,
-            ValidatedSource::AllowlistedTarget { target_id },
-        ))
+            mtime_unix_secs: None,
+            source: ValidatedSource::AllowlistedTarget { target_id },
+        }))
     }
 
     /// Shared depth/protected-path policy for allowlisted roots. Both the scan
@@ -178,26 +257,18 @@ impl ValidatedItem {
 
     /// Build a root-style item whose `target_root` and `path` are the same
     /// canonical directory. All root-style sources carry `Risk::Caution`.
-    fn new_root_item(
-        id: String,
-        target_id: String,
-        canon: String,
-        size_bytes: u64,
-        mtime_unix_secs: Option<u64>,
-        source: ValidatedSource,
-    ) -> Self {
-        Self {
-            id,
-            target_id,
-            target_root: canon.clone(),
-            path: canon,
-            size_bytes,
-            mtime_unix_secs,
-            source,
+    fn new_root_item(ctx: RootItemContext) -> Self {
+        ItemParts {
+            id: ctx.id,
+            target_id: ctx.target_id,
+            target_root: ctx.canon.clone(),
+            path: ctx.canon,
+            size_bytes: ctx.size_bytes,
+            mtime_unix_secs: ctx.mtime_unix_secs,
+            source: ctx.source,
             risk: Some(Risk::Caution),
-            expected_identity: None,
-            identity_required: false,
         }
+        .build()
     }
 
     /// Construct a validated custom-path root item (contents-only clean of the root directory).
@@ -218,14 +289,14 @@ impl ValidatedItem {
         let canon = CanonicalPath::parse_lexical(&path)
             .map_err(|e| format!("invalid custom path: {e}"))?
             .to_string();
-        Ok(Self::new_root_item(
+        Ok(Self::new_root_item(RootItemContext {
             id,
-            "custom-path".to_string(),
+            target_id: "custom-path".to_string(),
             canon,
             size_bytes,
-            None,
-            ValidatedSource::CustomPath,
-        ))
+            mtime_unix_secs: None,
+            source: ValidatedSource::CustomPath,
+        }))
     }
 
     /// Construct a validated Tier 3 recycle-bin root item (contents-only; root kept).
@@ -239,14 +310,14 @@ impl ValidatedItem {
         let id = id.into();
         let path = path.into();
         let canon = Self::validated_tier3_root(&path, "recycle bin path")?;
-        Ok(Self::new_root_item(
+        Ok(Self::new_root_item(RootItemContext {
             id,
-            "recycle-bin".to_string(),
+            target_id: "recycle-bin".to_string(),
             canon,
             size_bytes,
-            None,
-            ValidatedSource::Tier3RecycleBin,
-        ))
+            mtime_unix_secs: None,
+            source: ValidatedSource::Tier3RecycleBin,
+        }))
     }
 
     /// Construct a validated Tier 3 stale project directory item.
@@ -260,21 +331,40 @@ impl ValidatedItem {
         size_bytes: u64,
         mtime_unix_secs: Option<u64>,
     ) -> Result<Self, String> {
-        let id = id.into();
-        let logical_target_id = logical_target_id.into();
-        let path = path.into();
+        Self::from_tier3_project_directory_input(Tier3ProjectDirectoryInput {
+            id: id.into(),
+            logical_target_id: logical_target_id.into(),
+            path: path.into(),
+            size_bytes,
+            mtime_unix_secs,
+        })
+    }
+
+    /// Validation pipeline for stale project directories. Takes a single named
+    /// context so the logic stays below the argument-count limit while the
+    /// public wrapper keeps its established signature.
+    fn from_tier3_project_directory_input(
+        input: Tier3ProjectDirectoryInput,
+    ) -> Result<Self, String> {
+        let Tier3ProjectDirectoryInput {
+            id,
+            logical_target_id,
+            path,
+            size_bytes,
+            mtime_unix_secs,
+        } = input;
         let canon = Self::validated_tier3_root(&path, "stale project directory")?;
         let source = ValidatedSource::Tier3ProjectDirectory {
             target_id: logical_target_id.clone(),
         };
-        Ok(Self::new_root_item(
+        Ok(Self::new_root_item(RootItemContext {
             id,
-            logical_target_id,
+            target_id: logical_target_id,
             canon,
             size_bytes,
             mtime_unix_secs,
             source,
-        ))
+        }))
     }
 
     /// Construct a validated whole-cache root item (issue #41).
@@ -297,8 +387,13 @@ impl ValidatedItem {
         let source = ValidatedSource::WholeCache {
             target_id: target_id.clone(),
         };
-        Ok(Self::new_root_item(
-            id, target_id, canon, size_bytes, None, source,
-        ))
+        Ok(Self::new_root_item(RootItemContext {
+            id,
+            target_id,
+            canon,
+            size_bytes,
+            mtime_unix_secs: None,
+            source,
+        }))
     }
 }

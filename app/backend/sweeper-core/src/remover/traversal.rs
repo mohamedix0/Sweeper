@@ -196,28 +196,51 @@ pub(super) fn fail_after_partial<T>(
     Err(err.into())
 }
 
-/// Journal an intent plus a Skipped outcome for one entry (unreadable dir or
-/// reparse placeholder). A fatal write preserves already-completed deletions.
-fn journal_skip(
-    item: &ValidatedItem,
-    ctx: &mut CleanTraversalCtx<'_>,
-    path: &str,
+/// Named inputs for journaling one Skipped entry (unreadable directory or
+/// reparse placeholder).
+struct JournalSkipRequest<'a, 'b> {
+    item: &'a ValidatedItem,
+    ctx: &'a mut CleanTraversalCtx<'b>,
+    path: &'a str,
     size: u64,
-    reason: &str,
-    state: &ContentsState,
-) -> Result<(), CleanError> {
-    if let Err(err) = ctx
-        .journal
-        .write_intent(&journal::intent_record(&item.id, path, size, None))
-    {
-        return fail_after_partial(item, state, &mut *ctx.report, err);
-    }
-    if let Err(err) = ctx.journal.write_outcome(&journal::outcome_record(
-        &item.id, path, 0, "Skipped", reason, None,
+    reason: &'a str,
+    state: &'a ContentsState,
+}
+
+/// Journal an intent plus a Skipped outcome for one entry. A fatal write
+/// preserves already-completed deletions.
+fn journal_skip(req: JournalSkipRequest<'_, '_>) -> Result<(), CleanError> {
+    if let Err(err) = req.ctx.journal.write_intent(&journal::intent_record(
+        &req.item.id,
+        req.path,
+        req.size,
+        None,
     )) {
-        return fail_after_partial(item, state, &mut *ctx.report, err);
+        return fail_after_partial(req.item, req.state, &mut *req.ctx.report, err);
+    }
+    if let Err(err) = req.ctx.journal.write_outcome(&journal::outcome_record(
+        &req.item.id,
+        req.path,
+        0,
+        "Skipped",
+        req.reason,
+        None,
+    )) {
+        return fail_after_partial(req.item, req.state, &mut *req.ctx.report, err);
     }
     Ok(())
+}
+
+/// Named inputs for deleting one entry and folding its outcome into the
+/// traversal state.
+struct DeleteAndApplyRequest<'a, 'b> {
+    item: &'a ValidatedItem,
+    path_str: &'a str,
+    ctx: &'a mut CleanTraversalCtx<'b>,
+    state: &'a mut ContentsState,
+    /// Directory whose contents changed, if this entry is a file/link child.
+    mutated_dir: Option<&'a Path>,
+    ignore_emptied_dir_age: bool,
 }
 
 /// Delete one entry and fold its outcome into the traversal state.
@@ -225,71 +248,82 @@ fn journal_skip(
 /// Returns `Some(result)` only when the caller must stop (abort or the 120%
 /// circuit breaker). `mutated_dir` marks the directory whose contents changed.
 fn delete_and_apply(
-    item: &ValidatedItem,
-    path_str: &str,
-    ctx: &mut CleanTraversalCtx<'_>,
-    state: &mut ContentsState,
-    mutated_dir: Option<&Path>,
-    ignore_emptied_dir_age: bool,
+    req: DeleteAndApplyRequest<'_, '_>,
 ) -> Result<Option<CleanContentsResult>, CleanError> {
     let flags = DeleteEntryFlags {
-        ignore_emptied_dir_age,
+        ignore_emptied_dir_age: req.ignore_emptied_dir_age,
         ..DeleteEntryFlags::default()
     };
-    let outcome = match ctx.delete_entry(item, path_str, flags) {
+    let outcome = match req.ctx.delete_entry(req.item, req.path_str, flags) {
         Ok(outcome) => outcome,
-        Err(err) => return fail_after_partial(item, state, &mut *ctx.report, err),
+        Err(err) => return fail_after_partial(req.item, req.state, &mut *req.ctx.report, err),
     };
     match outcome {
         ProcessOutcome::Deleted(bytes) => {
-            state.deleted_bytes = state.deleted_bytes.saturating_add(bytes);
-            state.deleted_any = true;
-            if let Some(dir) = mutated_dir {
-                state.mutated_dirs.insert(norm_path_key(dir));
+            req.state.deleted_bytes = req.state.deleted_bytes.saturating_add(bytes);
+            req.state.deleted_any = true;
+            if let Some(dir) = req.mutated_dir {
+                req.state.mutated_dirs.insert(norm_path_key(dir));
             }
-            if circuit_breaker_exceeded(ctx.opts.preview_estimated_bytes, *ctx.deleted_total) {
+            if circuit_breaker_exceeded(
+                req.ctx.opts.preview_estimated_bytes,
+                *req.ctx.deleted_total,
+            ) {
                 return Ok(Some(
-                    state.aborted("aborted: 120% circuit breaker exceeded".to_string()),
+                    req.state
+                        .aborted("aborted: 120% circuit breaker exceeded".to_string()),
                 ));
             }
         }
-        ProcessOutcome::Aborted(reason, _) => return Ok(Some(state.aborted(reason))),
+        ProcessOutcome::Aborted(reason, _) => return Ok(Some(req.state.aborted(reason))),
         ProcessOutcome::Skipped(_, _) => {}
     }
     Ok(None)
 }
 
+/// Named inputs for classifying one enumerated directory entry.
+struct ApplyEntryRequest<'a, 'b> {
+    item: &'a ValidatedItem,
+    ctx: &'a mut CleanTraversalCtx<'b>,
+    state: &'a mut ContentsState,
+    stack: &'a mut Vec<PathBuf>,
+    dir: &'a Path,
+    ent: sweeper_winfs::DirEntry,
+}
+
 /// Classify and handle one enumerated entry: unlink link points (never
 /// traverse them), skip reparse placeholders, queue real child dirs, delete
 /// real files.
-fn apply_entry(
-    item: &ValidatedItem,
-    ctx: &mut CleanTraversalCtx<'_>,
-    state: &mut ContentsState,
-    stack: &mut Vec<PathBuf>,
-    dir: &Path,
-    ent: sweeper_winfs::DirEntry,
-) -> Result<Option<CleanContentsResult>, CleanError> {
+fn apply_entry(req: ApplyEntryRequest<'_, '_>) -> Result<Option<CleanContentsResult>, CleanError> {
+    let ApplyEntryRequest {
+        item,
+        ctx,
+        state,
+        stack,
+        dir,
+        ent,
+    } = req;
     match ent.reparse {
         // Unlink only the link entry itself.
-        ReparseTagClass::LinkPoint => delete_and_apply(
+        ReparseTagClass::LinkPoint => delete_and_apply(DeleteAndApplyRequest {
             item,
-            &ent.path.to_string_lossy(),
+            path_str: &ent.path.to_string_lossy(),
             ctx,
             state,
-            Some(dir),
-            false,
-        ),
+            mutated_dir: Some(dir),
+            ignore_emptied_dir_age: false,
+        }),
         // Cloud/unknown reparse points are always Skipped and never traversed.
         ReparseTagClass::CloudPlaceholder | ReparseTagClass::OtherReparse(_) => {
-            journal_skip(
+            let path = ent.path.to_string_lossy();
+            journal_skip(JournalSkipRequest {
                 item,
                 ctx,
-                &ent.path.to_string_lossy(),
-                ent.size,
-                "Skipped: reparse point (cloud/unknown)",
+                path: &path,
+                size: ent.size,
+                reason: "Skipped: reparse point (cloud/unknown)",
                 state,
-            )?;
+            })?;
             Ok(None)
         }
         ReparseTagClass::NotReparse => {
@@ -297,17 +331,128 @@ fn apply_entry(
                 stack.push(ent.path);
                 Ok(None)
             } else {
-                delete_and_apply(
+                delete_and_apply(DeleteAndApplyRequest {
                     item,
-                    &ent.path.to_string_lossy(),
+                    path_str: &ent.path.to_string_lossy(),
                     ctx,
                     state,
-                    Some(dir),
-                    false,
-                )
+                    mutated_dir: Some(dir),
+                    ignore_emptied_dir_age: false,
+                })
             }
         }
     }
+}
+
+/// Result of reading one directory during the file sweep.
+enum SweepDirRead {
+    Entries(Vec<sweeper_winfs::DirEntry>),
+    /// Directory was unreadable: a Skipped outcome was journaled and the sweep
+    /// must stop with this result.
+    Stop(CleanContentsResult),
+}
+
+/// Read one directory's entries, journaling a Skipped outcome when unreadable.
+fn read_sweep_dir(
+    item: &ValidatedItem,
+    ctx: &mut CleanTraversalCtx<'_>,
+    state: &ContentsState,
+    dir: &Path,
+) -> Result<SweepDirRead, CleanError> {
+    let entries = match sweeper_winfs::read_dir_entries(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            let reason = format!("Skipped: unreadable directory during contents clean: {e}");
+            let path = dir.to_string_lossy();
+            journal_skip(JournalSkipRequest {
+                item,
+                ctx,
+                path: &path,
+                size: 0,
+                reason: &reason,
+                state,
+            })?;
+            return Ok(SweepDirRead::Stop(state.skipped(reason)));
+        }
+    };
+    Ok(SweepDirRead::Entries(entries))
+}
+
+/// Named inputs for applying all entries read from one swept directory.
+struct ApplyEnumeratedEntriesRequest<'a, 'b> {
+    item: &'a ValidatedItem,
+    ctx: &'a mut CleanTraversalCtx<'b>,
+    state: &'a mut ContentsState,
+    stack: &'a mut Vec<PathBuf>,
+    dir: &'a Path,
+    entries: Vec<sweeper_winfs::DirEntry>,
+}
+
+/// Apply each enumerated entry until one asks the caller to stop.
+fn apply_enumerated_entries(
+    req: ApplyEnumeratedEntriesRequest<'_, '_>,
+) -> Result<Option<CleanContentsResult>, CleanError> {
+    let ApplyEnumeratedEntriesRequest {
+        item,
+        ctx,
+        state,
+        stack,
+        dir,
+        entries,
+    } = req;
+    for ent in entries {
+        let step = apply_entry(ApplyEntryRequest {
+            item,
+            ctx: &mut *ctx,
+            state: &mut *state,
+            stack: &mut *stack,
+            dir,
+            ent,
+        })?;
+        if step.is_some() {
+            return Ok(step);
+        }
+    }
+    Ok(None)
+}
+
+/// Named inputs for one iteration of the directory sweep.
+struct SweepDirRequest<'a, 'b> {
+    item: &'a ValidatedItem,
+    ctx: &'a mut CleanTraversalCtx<'b>,
+    state: &'a mut ContentsState,
+    stack: &'a mut Vec<PathBuf>,
+    dir: &'a Path,
+}
+
+/// Revalidate, read and process a single directory from the sweep stack.
+fn sweep_one_dir(req: SweepDirRequest<'_, '_>) -> Result<Option<CleanContentsResult>, CleanError> {
+    let SweepDirRequest {
+        item,
+        ctx,
+        state,
+        stack,
+        dir,
+    } = req;
+    if let Some(result) = check_root(item, state) {
+        return Ok(Some(result));
+    }
+    let entries = match read_sweep_dir(item, ctx, state, dir)? {
+        SweepDirRead::Entries(entries) => entries,
+        SweepDirRead::Stop(result) => return Ok(Some(result)),
+    };
+    // Only child directories (not the root itself) are deletion candidates.
+    if !paths_equal_str(&dir.to_string_lossy(), &item.path) {
+        state.postorder.push(dir.to_path_buf());
+    }
+    apply_enumerated_entries(ApplyEnumeratedEntriesRequest {
+        item,
+        ctx,
+        state,
+        stack,
+        dir,
+        entries,
+    })
 }
 
 /// Iteratively sweep files/link entries without following link points.
@@ -318,25 +463,14 @@ fn sweep_entries(
     stack: &mut Vec<PathBuf>,
 ) -> Result<Option<CleanContentsResult>, CleanError> {
     while let Some(dir) = stack.pop() {
-        if let Some(result) = check_root(item, state) {
+        if let Some(result) = sweep_one_dir(SweepDirRequest {
+            item,
+            ctx: &mut *ctx,
+            state: &mut *state,
+            stack: &mut *stack,
+            dir: &dir,
+        })? {
             return Ok(Some(result));
-        }
-        let entries = match sweeper_winfs::read_dir_entries(&dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                let reason = format!("Skipped: unreadable directory during contents clean: {e}");
-                journal_skip(item, ctx, &dir.to_string_lossy(), 0, &reason, state)?;
-                return Ok(Some(state.skipped(reason)));
-            }
-        };
-        // Only child directories (not the root itself) are deletion candidates.
-        if !paths_equal_str(&dir.to_string_lossy(), &item.path) {
-            state.postorder.push(dir.clone());
-        }
-        for ent in entries {
-            if let Some(result) = apply_entry(item, ctx, state, stack, &dir, ent)? {
-                return Ok(Some(result));
-            }
         }
     }
     Ok(None)
@@ -362,14 +496,14 @@ fn delete_empty_dirs(
         }
         let ignore_emptied_dir_age = state.mutated_dirs.contains(&norm_path_key(&dir));
         let parent = dir.parent().map(Path::to_path_buf);
-        if let Some(result) = delete_and_apply(
+        if let Some(result) = delete_and_apply(DeleteAndApplyRequest {
             item,
-            &dir.to_string_lossy(),
+            path_str: &dir.to_string_lossy(),
             ctx,
             state,
-            parent.as_deref(),
+            mutated_dir: parent.as_deref(),
             ignore_emptied_dir_age,
-        )? {
+        })? {
             return Ok(Some(result));
         }
     }
@@ -401,22 +535,49 @@ pub(super) fn delete_path_entry(
     ctx.delete_entry(item, path_str, DeleteEntryFlags::default())
 }
 
+/// Named inputs for a root-style deletion after its contents were cleaned.
+struct DeleteRootRequest<'a, 'b> {
+    item: &'a ValidatedItem,
+    path_str: &'a str,
+    ctx: &'a mut CleanTraversalCtx<'b>,
+    flags: DeleteEntryFlags,
+}
+
+/// Core root-style deletion; the positional entry point below only assembles
+/// the request, so the deletion chain itself has a single named-field argument.
+fn delete_root_entry(req: DeleteRootRequest<'_, '_>) -> Result<ProcessOutcome, CleanError> {
+    req.ctx.delete_entry(req.item, req.path_str, req.flags)
+}
+
+/// Named inputs for a root-style deletion that may remove the root itself.
+pub(super) struct DeleteRootAllowingRootRequest<'a, 'b> {
+    pub(super) item: &'a ValidatedItem,
+    pub(super) path_str: &'a str,
+    pub(super) ctx: &'a mut CleanTraversalCtx<'b>,
+    pub(super) base_bytes_deleted: Option<u64>,
+    pub(super) ignore_emptied_dir_age: bool,
+}
+
 pub(super) fn delete_path_entry_allowing_root(
-    item: &ValidatedItem,
-    path_str: &str,
-    ctx: &mut CleanTraversalCtx<'_>,
-    base_bytes_deleted: Option<u64>,
-    ignore_emptied_dir_age: bool,
+    req: DeleteRootAllowingRootRequest<'_, '_>,
 ) -> Result<ProcessOutcome, CleanError> {
-    ctx.delete_entry(
+    let DeleteRootAllowingRootRequest {
         item,
         path_str,
-        DeleteEntryFlags {
+        ctx,
+        base_bytes_deleted,
+        ignore_emptied_dir_age,
+    } = req;
+    delete_root_entry(DeleteRootRequest {
+        item,
+        path_str,
+        ctx,
+        flags: DeleteEntryFlags {
             allow_delete_root: true,
             base_bytes_deleted,
             ignore_emptied_dir_age,
         },
-    )
+    })
 }
 
 fn delete_path_entry_inner(
@@ -466,11 +627,7 @@ fn delete_path_entry_inner(
     }
 
     // Track actual deleted bytes for circuit breaker based on handle-observed file size (or item estimate).
-    let bytes_accounted = match get_handle_logical_size(&handle, &inspection) {
-        Ok(Some(sz)) => sz,
-        Ok(None) => item.size_bytes,
-        Err(_) => item.size_bytes,
-    };
+    let bytes_accounted = account_handle_size(&handle, &inspection, item.size_bytes);
     if let Some(outcome) = check_circuit_breaker(item, path_str, ctx, bytes_accounted)? {
         return Ok(outcome);
     }
@@ -486,6 +643,19 @@ fn delete_path_entry_inner(
     match perform_delete(&handle, &inspection) {
         Ok(()) => Ok(finish_delete_success(item, path_str, bytes_accounted, ctx)),
         Err(e) => Ok(finish_delete_failure(item, path_str, e, ctx)),
+    }
+}
+
+/// Resolve the handle-observed size, falling back to the item estimate. The
+/// fallback is unchanged from the original three-arm match.
+fn account_handle_size(
+    handle: &sweeper_winfs::SafeHandle,
+    inspection: &sweeper_winfs::HandleInspection,
+    fallback: u64,
+) -> u64 {
+    match get_handle_logical_size(handle, inspection) {
+        Ok(Some(size)) => size,
+        Ok(None) | Err(_) => fallback,
     }
 }
 

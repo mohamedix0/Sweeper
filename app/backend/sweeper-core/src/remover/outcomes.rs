@@ -111,6 +111,19 @@ pub(super) fn record_missing_statuses(
     report.items.extend(additions);
 }
 
+/// Named inputs for a post-abort skip. Bundling the seven parameters into one
+/// context keeps the recording logic below the argument-count limit while the
+/// public wrapper keeps its established signature.
+struct PostAbortSkipContext<'a, F> {
+    journal: &'a mut JournalWriter,
+    report: &'a mut CleanReport,
+    item: &'a ValidatedItem,
+    completed: &'a mut u64,
+    total_items: u64,
+    throttle: &'a mut CleanProgressThrottle,
+    on_progress: &'a mut F,
+}
+
 /// Record the skip of an item not processed because the batch already aborted,
 /// then emit its (throttled) progress update.
 #[allow(clippy::too_many_arguments)]
@@ -126,6 +139,33 @@ pub(super) fn record_post_abort_skip<F>(
 where
     F: FnMut(CleanProgress),
 {
+    record_post_abort_skip_inner(PostAbortSkipContext {
+        journal,
+        report,
+        item,
+        completed,
+        total_items,
+        throttle,
+        on_progress,
+    })
+}
+
+/// Inner recording path: takes a single named context instead of seven
+/// positional parameters. Journal writes, report accounting and progress
+/// emission are unchanged from the original implementation.
+fn record_post_abort_skip_inner<F>(ctx: PostAbortSkipContext<'_, F>) -> Result<(), CleanError>
+where
+    F: FnMut(CleanProgress),
+{
+    let PostAbortSkipContext {
+        journal,
+        report,
+        item,
+        completed,
+        total_items,
+        throttle,
+        on_progress,
+    } = ctx;
     let reason = report
         .abort_reason
         .clone()
