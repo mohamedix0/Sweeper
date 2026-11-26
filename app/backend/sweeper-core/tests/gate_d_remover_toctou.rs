@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_methods)] // Test-only setup/cleanup; production removal is enforced in core::remover.
 
 use std::fs;
+use std::path::Path;
 use std::process::Command; // kept for other tests; TOCTOU hot loop uses fast Win32/testkit APIs
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -11,12 +12,108 @@ use std::thread;
 use std::time::Duration;
 
 use sweeper_core::paths::CanonicalPath;
-use sweeper_core::remover::{self, CleanOptions, ValidatedSource};
+use sweeper_core::remover::{self, CleanOptions, CleanReport, ValidatedSource};
 use sweeper_testkit::{CanaryTree, Sandbox};
 use sweeper_winfs::ReparseTagClass;
 
 mod common;
 use common::*;
+
+/// Asserts that the clean report contains exactly one item row whose status and
+/// reason match the expected values.
+fn assert_single_item_status_and_reason(
+    report: &CleanReport,
+    context: &str,
+    status: &str,
+    reason_fragment: &str,
+) {
+    assert_eq!(
+        report.items.len(),
+        1,
+        "{context}: one item row expected: {report:?}"
+    );
+    assert_eq!(
+        report.items[0].status, status,
+        "{context}: unexpected item status: {report:?}"
+    );
+    assert!(
+        report.items[0].reason.contains(reason_fragment),
+        "{context}: item reason must mention {reason_fragment:?}: {report:?}"
+    );
+}
+
+/// Asserts that the sole item row accounts for zero deleted bytes.
+fn assert_single_item_zero_bytes(report: &CleanReport, context: &str) {
+    assert_eq!(
+        report.items[0].bytes_deleted, 0,
+        "{context}: item must account for zero deleted bytes: {report:?}"
+    );
+}
+
+/// Asserts that an empty root is finalized as exactly one zero-byte deletion.
+fn assert_single_item_deleted_zero_bytes(report: &CleanReport, context: &str) {
+    assert_eq!(
+        report.items.len(),
+        1,
+        "{context}: one item row expected: {report:?}"
+    );
+    assert_eq!(
+        report.items[0].status, "deleted",
+        "{context}: an empty root must remain a zero-byte deletion: {report:?}"
+    );
+    assert_eq!(
+        report.items[0].bytes_deleted, 0,
+        "{context}: empty root must delete zero bytes: {report:?}"
+    );
+}
+
+/// Asserts the report-level byte and skip totals.
+fn assert_clean_totals(report: &CleanReport, context: &str, bytes_freed: u64, skipped_count: u64) {
+    assert_eq!(
+        report.bytes_freed, bytes_freed,
+        "{context}: unexpected byte total: {report:?}"
+    );
+    assert_eq!(
+        report.skipped_count, skipped_count,
+        "{context}: unexpected skip count: {report:?}"
+    );
+}
+
+/// Asserts that no bytes were freed (without assuming a particular skip count).
+fn assert_no_bytes_freed(report: &CleanReport, context: &str) {
+    assert_eq!(
+        report.bytes_freed, 0,
+        "{context}: no bytes may be deleted: {report:?}"
+    );
+}
+
+/// Asserts that a root-style item was skipped because its identity binding was
+/// missing or stale, and that the whole item was skipped.
+fn assert_identity_mismatch_skipped(report: &CleanReport, context: &str) {
+    assert!(
+        report
+            .items
+            .iter()
+            .any(|r| r.reason.contains("Skipped: file changed since preview")),
+        "{context}: missing/stale identity must be reported: {report:?}"
+    );
+    assert_eq!(
+        report.skipped_count, 1,
+        "{context}: the whole root-style item must be skipped: {report:?}"
+    );
+}
+
+/// Asserts that each of the given victim paths still exists.
+fn assert_paths_survive<P: AsRef<Path>>(paths: &[P], context: &str) {
+    for path in paths {
+        let path = path.as_ref();
+        assert!(
+            path.exists(),
+            "{context}: victim must survive: {}",
+            path.display()
+        );
+    }
+}
 
 /// Stops and joins the swap worker on any exit path, including a panic from
 /// `execute_clean(...).unwrap()`. Dropping a `JoinHandle` would detach the
@@ -185,19 +282,9 @@ fn gate_d_root_identity_missing_skips_all_children() {
 
     let report = clean_one(item, 1024, Duration::from_secs(3600), &journal_dir);
 
-    assert!(
-        report
-            .items
-            .iter()
-            .any(|r| r.reason.contains("Skipped: file changed since preview")),
-        "missing identity must be reported: {report:?}"
-    );
-    assert_eq!(report.bytes_freed, 0, "no bytes may be deleted: {report:?}");
-    assert_eq!(
-        report.skipped_count, 1,
-        "the whole root-style item must be skipped: {report:?}"
-    );
-    assert!(child.exists(), "child must survive a missing binding");
+    assert_identity_mismatch_skipped(&report, "root-identity-missing");
+    assert_no_bytes_freed(&report, "root-identity-missing");
+    assert_paths_survive(&[&child], "root-identity-missing");
     assert_sentinel_intact(&sb);
 }
 
@@ -253,29 +340,9 @@ fn gate_d_root_identity_recheck_applies_to_all_root_sources() {
 
         let report = clean_one(item, 1024, Duration::from_secs(3600), &journal_dir);
 
-        assert!(
-            report
-                .items
-                .iter()
-                .any(|r| r.reason.contains("Skipped: file changed since preview")),
-            "{label}: identity mismatch must be reported: {report:?}"
-        );
-        assert_eq!(
-            report.bytes_freed, 0,
-            "{label}: no bytes may be deleted: {report:?}"
-        );
-        assert_eq!(
-            report.skipped_count, 1,
-            "{label}: the whole root-style item must be skipped: {report:?}"
-        );
-        assert!(
-            child.exists(),
-            "{label}: child must survive identity mismatch"
-        );
-        assert!(
-            nested_child.exists(),
-            "{label}: nested child must survive identity mismatch"
-        );
+        assert_identity_mismatch_skipped(&report, label);
+        assert_no_bytes_freed(&report, label);
+        assert_paths_survive(&[&child, &nested_child], label);
     }
     assert_sentinel_intact(&sb);
 }
@@ -295,22 +362,15 @@ fn skipped_young_file_reports_skipped_reason_not_zero_byte_deletion() {
     let journal_dir = sb.create_dir("journal").unwrap();
     let report = clean_one(item, 1024 * 1024, Duration::from_secs(3600), &journal_dir);
 
-    assert_eq!(report.items.len(), 1, "one item row expected: {report:?}");
-    assert_eq!(
-        report.items[0].status, "Skipped",
-        "a root with only a skipped file must not be reported as deleted: {report:?}"
+    assert_single_item_status_and_reason(
+        &report,
+        "skipped-young-file",
+        "Skipped",
+        "newer than minimum age",
     );
-    assert!(
-        report.items[0].reason.contains("newer than minimum age"),
-        "the skip reason must be preserved in the Clean result: {report:?}"
-    );
-    assert_eq!(report.items[0].bytes_deleted, 0);
-    assert_eq!(report.skipped_count, 1);
-    assert_eq!(report.bytes_freed, 0);
-    assert!(
-        young.exists(),
-        "the newer-than-minimum-age file must survive"
-    );
+    assert_single_item_zero_bytes(&report, "skipped-young-file");
+    assert_clean_totals(&report, "skipped-young-file", 0, 1);
+    assert_paths_survive(&[&young], "skipped-young-file");
     assert_sentinel_intact(&sb);
 }
 
@@ -325,17 +385,9 @@ fn empty_root_still_reports_deleted_with_zero_bytes() {
     let journal_dir = sb.create_dir("journal").unwrap();
     let report = clean_one(item, 1024 * 1024, Duration::from_secs(3600), &journal_dir);
 
-    assert_eq!(report.items.len(), 1, "one item row expected: {report:?}");
-    assert_eq!(
-        report.items[0].status, "deleted",
-        "an empty root must remain a zero-byte deletion: {report:?}"
-    );
-    assert_eq!(report.items[0].bytes_deleted, 0);
-    assert_eq!(report.skipped_count, 0);
-    assert!(
-        target_root.exists(),
-        "a CustomPath root is kept, not removed"
-    );
+    assert_single_item_deleted_zero_bytes(&report, "empty-root");
+    assert_clean_totals(&report, "empty-root", 0, 0);
+    assert_paths_survive(&[&target_root], "empty-root");
     assert_sentinel_intact(&sb);
 }
 
@@ -370,23 +422,12 @@ fn queued_directory_swapped_to_link_point_is_skipped_not_traversed() {
     // leak the override into other tests in this binary.
     sweeper_winfs::set_test_reparse_override(&child, None);
 
-    assert!(
-        victim.exists(),
-        "the child must not be enumerated or deleted: {report:?}"
-    );
+    assert_paths_survive(&[&victim], "queued-child");
     assert!(
         canary.verify().is_ok(),
         "canary behind the link must be intact"
     );
-    assert_eq!(report.items.len(), 1, "one item row expected: {report:?}");
-    assert_eq!(
-        report.items[0].status, "Skipped",
-        "the swapped queued directory must be reported as Skipped: {report:?}"
-    );
-    assert!(
-        report.items[0].reason.contains("link point"),
-        "the skip reason must name the Link Point: {report:?}"
-    );
-    assert_eq!(report.bytes_freed, 0);
+    assert_single_item_status_and_reason(&report, "queued-child", "Skipped", "link point");
+    assert_no_bytes_freed(&report, "queued-child");
     assert_sentinel_intact(&sb);
 }
