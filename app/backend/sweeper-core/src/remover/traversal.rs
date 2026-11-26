@@ -412,13 +412,15 @@ pub(super) fn queued_dir_skip_reason(reparse: ReparseTagClass, dir: &Path) -> Op
 
 /// Read one directory's entries, journaling a Skipped outcome when unreadable.
 ///
-/// The queued path is opened on a reparse-safe handle and its reparse tag
-/// inspected immediately before it is enumerated; the handle is held across the
-/// enumeration. A directory queued earlier as an ordinary child can otherwise
-/// be swapped for a junction before its turn, and name-based enumeration would
-/// then follow the Link Point outside the allowlisted root. Any interior-junction
-/// swap after this check is still caught by `revalidate_handle` when each
-/// enumerated child is deleted at the moment of deletion.
+/// The queued path is opened on a reparse-safe enumeration anchor whose share
+/// mode deliberately omits `FILE_SHARE_DELETE`, so the directory entry cannot be
+/// renamed or replaced while the handle is held. Its reparse tag is inspected
+/// before enumeration and the anchor stays alive across the name-based read: a
+/// directory queued earlier as an ordinary child can otherwise be swapped for a
+/// junction in that window, and name-based enumeration would follow the Link
+/// Point outside the allowlisted root. Any in-place reparse change is caught by
+/// the anchor inspection; interior-junction swaps on children are still caught
+/// by `revalidate_handle` at the moment of deletion.
 fn read_sweep_dir(
     item: &ValidatedItem,
     ctx: &mut CleanTraversalCtx<'_>,
@@ -426,7 +428,7 @@ fn read_sweep_dir(
     dir: &Path,
 ) -> Result<SweepDirRead, CleanError> {
     let path = dir.to_string_lossy().to_string();
-    let handle = match sweeper_winfs::open_for_inspection(dir) {
+    let handle = match sweeper_winfs::open_for_enumeration(dir) {
         Ok(handle) => handle,
         Err(e) => {
             let reason =
@@ -485,8 +487,9 @@ fn read_sweep_dir(
             return Ok(SweepDirRead::Stop(state.skipped(reason)));
         }
     };
-    // Hold the inspected handle until enumeration completes so the verified
-    // directory object stays open for the whole check/enumerate sequence.
+    // Release the enumeration anchor only after the name-based read finishes:
+    // its held DELETE access plus denied delete share is what blocks a queued
+    // entry swap between the reparse check above and `read_dir_entries`.
     drop(handle);
     Ok(SweepDirRead::Entries(entries))
 }

@@ -431,3 +431,140 @@ fn queued_directory_swapped_to_link_point_is_skipped_not_traversed() {
     assert_no_bytes_freed(&report, "queued-child");
     assert_sentinel_intact(&sb);
 }
+
+/// Asserts that the external canary manifest is unchanged after the clean.
+fn assert_canary_intact(canary: &CanaryTree, context: &str) {
+    assert!(
+        canary.verify().is_ok(),
+        "{context}: external canary must remain intact"
+    );
+}
+
+/// Asserts that no bytes outside the known in-sandbox files were accounted as freed.
+fn assert_no_external_bytes_freed(report: &CleanReport, context: &str, local_budget: u64) {
+    assert!(
+        report.bytes_freed <= local_budget,
+        "{context}: only in-sandbox local bytes may be freed: {report:?}"
+    );
+}
+
+/// Concatenates the clean journal records so a test can check which paths were
+/// touched without depending on the per-run journal file name.
+fn read_clean_journal_text(journal_dir: &Path) -> String {
+    let mut all = String::new();
+    if let Ok(entries) = fs::read_dir(journal_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("clean-") && name.ends_with(".jsonl") {
+                if let Ok(text) = fs::read_to_string(entry.path()) {
+                    all.push_str(&text);
+                }
+            }
+        }
+    }
+    all
+}
+
+/// Asserts that the queued child was handled inside the sandbox, that no
+/// journal path pointed into the canary, and that any abort was the safety
+/// guard stopping a link-point traversal (not an escape that freed canary data).
+fn assert_queued_path_safe(report: &CleanReport, journal_dir: &Path, child: &Path, context: &str) {
+    let text = read_clean_journal_text(journal_dir);
+    let child_name = child.file_name().unwrap().to_string_lossy().to_string();
+    let child_handled = text.contains(&child_name) || !child.join("victim.txt").exists();
+    let no_canary_target = !text.to_ascii_lowercase().contains("canary");
+    let safe_abort = !report.aborted
+        || report
+            .abort_reason
+            .as_deref()
+            .map(|r| r.contains("link point") || r.contains("divergence"))
+            .unwrap_or(false);
+    assert!(
+        child_handled && no_canary_target && safe_abort,
+        "{context}: queued child must be skipped/untouched with no canary target: {report:?}"
+    );
+}
+
+/// Regression for the race called out on PR #190: an ordinary child queued for
+/// bottom-up traversal is swapped for a REAL junction to an external canary
+/// while the clean runs. The enumeration anchor denies delete share so the
+/// entry cannot be replaced between the reparse check and the name-based read,
+/// and a child already swapped to a link point must be Skipped on its handle.
+/// No bytes behind the junction may be freed and the canary must stay intact.
+#[test]
+fn gate_d_queued_child_real_junction_swap_cannot_free_external_bytes() {
+    const LOCAL_BYTES: &[u8] = b"local-old";
+    const VICTIM_BYTES: &[u8] = b"child-victim";
+    let local_budget = (LOCAL_BYTES.len() + VICTIM_BYTES.len()) as u64;
+
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("real_swap_root").unwrap();
+    let journal_dir = sb.create_dir("journal").unwrap();
+
+    // An old, legitimately deletable local file in the contents root.
+    let local = target_root.join("local_old.txt");
+    write_file(&local, LOCAL_BYTES);
+    set_filetime(&local, old_mtime_secs());
+    set_filetime(&target_root, old_mtime_secs());
+
+    // A queued child directory holding an old local victim.
+    let child = target_root.join("queued_child");
+    fs::create_dir_all(&child).unwrap();
+    let victim = child.join("victim.txt");
+    write_file(&victim, VICTIM_BYTES);
+    set_filetime(&victim, old_mtime_secs());
+    set_filetime(&child, old_mtime_secs());
+
+    // External canary made "old" so a wrong traversal would actually delete it.
+    let canary = CanaryTree::seed_external("gate_d_queued_child_real_swap").unwrap();
+    for rel in ["root.txt", "nested/file.txt", "nested/data.bin"] {
+        set_filetime(&canary.root().join(rel), old_mtime_secs());
+    }
+
+    // Background worker alternates the queued child between an ordinary
+    // directory and a real junction to the canary. Only `remove_dir` (never
+    // `remove_dir_all`) is used on the link path so the worker itself can never
+    // delete canary contents.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let child_bg = child.clone();
+    let canary_root = canary.root().to_path_buf();
+    let old_ft = sweeper_testkit::filetime_from_unix_secs(old_mtime_secs());
+    let handle = thread::spawn(move || {
+        while !stop_bg.load(Ordering::Relaxed) {
+            let victim_bg = child_bg.join("victim.txt");
+            // Restore ordinary-directory state with an old local victim.
+            let _ = fs::remove_file(&victim_bg);
+            let _ = fs::remove_dir(&child_bg);
+            let _ = fs::create_dir_all(&child_bg);
+            let _ = fs::write(&victim_bg, VICTIM_BYTES);
+            let _ = sweeper_testkit::set_last_write_time(&victim_bg, old_ft);
+
+            // Swap the queued entry to a junction pointing at the canary.
+            let _ = fs::remove_file(&victim_bg);
+            let _ = fs::remove_dir(&child_bg);
+            let _ = sweeper_testkit::create_junction(&child_bg, &canary_root);
+        }
+    });
+    let worker = WorkerGuard::new(stop, handle);
+
+    let item = make_item("queued-real-swap", &target_root, &target_root, 1024);
+    let report = remover::execute_clean(
+        vec![item],
+        CleanOptions {
+            preview_estimated_bytes: 1024 * 1024,
+            min_age: Duration::from_secs(3600),
+            now: now(),
+            journal_base_dir: Some(journal_dir.clone()),
+        },
+    )
+    .unwrap();
+
+    // Stop and join the worker before any integrity assertion.
+    drop(worker);
+
+    assert_canary_intact(&canary, "queued-real-swap");
+    assert_no_external_bytes_freed(&report, "queued-real-swap", local_budget);
+    assert_queued_path_safe(&report, &journal_dir, &child, "queued-real-swap");
+    assert_sentinel_intact(&sb);
+}

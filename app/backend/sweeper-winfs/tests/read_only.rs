@@ -2,8 +2,8 @@ use std::path::Path;
 
 use sweeper_testkit::{create_file_symlink, create_junction, CanaryTree, Sandbox};
 use sweeper_winfs::{
-    env_var, get_file_identity, get_final_path, open_for_inspection, read_dir_entries,
-    ReparseTagClass,
+    env_var, get_file_identity, get_final_path, inspect_reparse_point, open_for_enumeration,
+    open_for_inspection, read_dir_entries, ReparseTagClass,
 };
 
 #[cfg(windows)]
@@ -32,6 +32,38 @@ fn open_handle_does_not_follow_junction() {
         .any(|e| normalize_path(&e.path).ends_with("junction_link")));
     canary.verify().expect("external canary must remain intact");
     drop(handle);
+}
+
+/// The enumeration anchor deliberately omits `FILE_SHARE_DELETE`, so the pinned
+/// directory entry cannot be removed or renamed while the handle is alive. This
+/// is what closes the check-then-enumerate race: a swap cannot replace the
+/// verified entry between inspection and the name-based `read_dir_entries` call.
+// Test-only setup/teardown deletion; production removal stays confined to core::remover.
+#[allow(clippy::disallowed_methods)]
+#[cfg(windows)]
+#[test]
+fn enumeration_anchor_blocks_directory_swap_until_dropped() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.create_dir("anchor_pinned").expect("pinned dir");
+    let anchor = open_for_enumeration(&dir).expect("enumeration anchor");
+
+    // The anchor is still a usable reparse-safe inspection handle.
+    let reparse = inspect_reparse_point(&anchor).expect("inspect anchor");
+    assert!(matches!(reparse, ReparseTagClass::NotReparse));
+
+    // The anchor holds DELETE access while denying delete share, so the swap
+    // opener's share mode conflicts and removal fails with a sharing violation.
+    let blocked = std::fs::remove_dir(&dir);
+    let code = blocked.unwrap_err().raw_os_error().unwrap_or(0) as u32;
+    assert!(
+        sweeper_winfs::is_sharing_violation(code),
+        "removal must fail with a sharing violation while the anchor is held (code {code})"
+    );
+
+    // Once the anchor is gone the same removal succeeds.
+    drop(anchor);
+    std::fs::remove_dir(&dir).expect("removal must succeed after the anchor is dropped");
+    assert!(!dir.exists());
 }
 
 #[cfg(windows)]

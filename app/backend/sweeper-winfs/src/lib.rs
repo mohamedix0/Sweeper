@@ -279,6 +279,46 @@ pub fn open_for_inspection(path: &Path) -> Result<SafeHandle> {
     Ok(SafeHandle(handle))
 }
 
+/// Open a directory handle that pins the entry for race-safe enumeration.
+///
+/// Uses `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS` and share
+/// flags `FILE_SHARE_READ | FILE_SHARE_WRITE` that deliberately omit
+/// `FILE_SHARE_DELETE`. The handle requests `DELETE | FILE_READ_ATTRIBUTES`:
+/// Windows' directory-removal and rename APIs do not honour a denied
+/// `FILE_SHARE_DELETE` on a handle that holds no DELETE access, so holding
+/// DELETE access is required to actually pin the entry against rename or
+/// replacement for the whole check-then-enumerate window. That access is never
+/// used to mark the object for deletion; it only conflicts with other openers'
+/// share modes. `FILE_FLAG_OPEN_REPARSE_POINT` keeps a link point bound to the
+/// entry itself instead of following it into an out-of-scope target.
+pub fn open_for_enumeration(path: &Path) -> Result<SafeHandle> {
+    let wide = to_wide(path);
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+    // Minimal access that actually pins the entry: DELETE conflicts with a
+    // second opener's share mode, FILE_READ_ATTRIBUTES supports FSCTL/metadata
+    // inspection. No data access is requested and no delete disposition is set.
+    let access = DELETE_ACCESS | FILE_READ_ATTRIBUTES_ACCESS;
+    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer valid for the call. The handle denies
+    // delete share while holding DELETE access, which makes concurrent rename/removal fail with
+    // a sharing violation. `OPEN_EXISTING` never creates an object and
+    // `FILE_FLAG_OPEN_REPARSE_POINT` prevents following link points.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            flags,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(last_error("CreateFileW(open_for_enumeration)"));
+    }
+    Ok(SafeHandle(handle))
+}
+
 /// Open a file or directory handle for handle-based deletion without following reparse points.
 ///
 /// Uses `FILE_FLAG_OPEN_REPARSE_POINT` and `FILE_FLAG_BACKUP_SEMANTICS`, requests
