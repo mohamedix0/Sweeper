@@ -1,7 +1,7 @@
 use super::*;
 use crate::paths::CanonicalPath;
 use crate::policy;
-use crate::remover::{capture_file_identity, ValidatedItem};
+use crate::remover::{capture_file_identity, AllowlistedScanInput, ValidatedItem};
 use crate::scanner;
 use std::collections::{HashMap, HashSet};
 use sweeper_knowledge::{embedded_targets, Risk, Scope, TargetDefinition};
@@ -177,14 +177,14 @@ fn build_allowlisted_leaf_item(
             node.path
         )
     })?;
-    ValidatedItem::from_allowlisted_scan(
-        node.id.clone(),
-        tid.clone(),
+    ValidatedItem::from_allowlisted_scan(AllowlistedScanInput {
+        id: node.id.clone(),
+        target_id: tid.clone(),
         target_root,
-        node.path.clone(),
-        node.size_bytes,
-        None,
-    )
+        path: node.path.clone(),
+        size_bytes: node.size_bytes,
+        mtime_unix_secs: None,
+    })
     .map_err(|e| format!("selected node rejected by allowlist conversion: {e}"))
 }
 

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use sweeper_core::journal;
-use sweeper_core::remover::{self, CleanOptions, CleanReport};
+use sweeper_core::remover::{self, CleanOptions, CleanReport, Tier3ProjectDirectoryInput};
 use sweeper_testkit::Sandbox;
 
 mod common;
@@ -218,13 +218,13 @@ fn accounting_tier3_root_removal_failure_preserves_child_deletion() {
     set_filetime(&child, old_mtime_secs());
     set_filetime(&stale_dir, old_mtime_secs());
 
-    let item = remover::ValidatedItem::from_tier3_project_directory(
-        "stale-target",
-        "stale-rust-target",
-        canonical_str(&stale_dir),
-        9,
-        Some(old_mtime_secs()),
-    )
+    let item = remover::ValidatedItem::from_tier3_project_directory(Tier3ProjectDirectoryInput {
+        id: "stale-target".to_string(),
+        logical_target_id: "stale-rust-target".to_string(),
+        path: canonical_str(&stale_dir),
+        size_bytes: 9,
+        mtime_unix_secs: Some(old_mtime_secs()),
+    })
     .unwrap();
     let journal_dir = sb.create_dir("journal").unwrap();
 

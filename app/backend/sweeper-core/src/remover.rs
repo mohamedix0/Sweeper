@@ -31,6 +31,11 @@ mod traversal;
 #[cfg(test)]
 mod tests;
 
+// Public named-field inputs for the constructor entry points, re-exported from
+// the private `constructors` module so bridge and integration-test callers can
+// name them.
+pub use constructors::{AllowlistedScanInput, Tier3ProjectDirectoryInput};
+
 // Internal names from the submodules, re-exported into this module so the
 // existing `super::X` import paths in the submodules keep working unchanged.
 #[cfg(test)]
@@ -48,7 +53,7 @@ use clean_progress::{
 use outcomes::{
     apply_process_outcome, journal_deleted_outcome, new_clean_report, record_post_abort_skip,
     root_outcome_with_child_bytes, source_removes_root_after_contents, stop_after_journal_failure,
-    ProcessOutcome,
+    PostAbortSkipContext, ProcessOutcome,
 };
 use prechecks::{handle_root_contents, precheck_process_item, write_skip};
 #[cfg(test)]
@@ -260,15 +265,15 @@ where
 
     for (index, item) in items.iter().enumerate() {
         if report.aborted {
-            if let Err(err) = record_post_abort_skip(
-                &mut journal,
-                &mut report,
+            if let Err(err) = record_post_abort_skip(PostAbortSkipContext {
+                journal: &mut journal,
+                report: &mut report,
                 item,
-                &mut completed,
+                completed: &mut completed,
                 total_items,
-                &mut progress_throttle,
-                &mut on_progress,
-            ) {
+                throttle: &mut progress_throttle,
+                on_progress: &mut on_progress,
+            }) {
                 return Ok(stop_and_flush(report, err, &items[index..], &mut FailureProgress {
                     journal: &mut journal, throttle: &mut progress_throttle, on_progress: &mut on_progress,
                     item, completed, total_items,
@@ -444,14 +449,14 @@ pub fn validated_item_for_tests(
     mtime_unix_secs: Option<u64>,
     source: ValidatedSource,
 ) -> ValidatedItem {
-    ValidatedItem::new_internal(
-        id.into(),
-        target_id.into(),
-        target_root.into(),
-        path.into(),
+    ValidatedItem::new_internal(constructors::ItemParts {
+        id: id.into(),
+        target_id: target_id.into(),
+        target_root: target_root.into(),
+        path: path.into(),
         size_bytes,
         mtime_unix_secs,
         source,
-        None,
-    )
+        risk: None,
+    })
 }

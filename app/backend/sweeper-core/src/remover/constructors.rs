@@ -17,16 +17,17 @@ use super::{ValidatedItem, ValidatedSource};
 /// Named fields for the one place that assembles a `ValidatedItem`.
 ///
 /// Every constructor funnels through [`ItemParts::build`], so the struct-literal
-/// assembly exists once instead of being duplicated across constructors.
-struct ItemParts {
-    id: String,
-    target_id: String,
-    target_root: String,
-    path: String,
-    size_bytes: u64,
-    mtime_unix_secs: Option<u64>,
-    source: ValidatedSource,
-    risk: Option<Risk>,
+/// assembly exists once instead of being duplicated across constructors. This
+/// is also the single named-field argument accepted by `new_internal`.
+pub(crate) struct ItemParts {
+    pub(crate) id: String,
+    pub(crate) target_id: String,
+    pub(crate) target_root: String,
+    pub(crate) path: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) mtime_unix_secs: Option<u64>,
+    pub(crate) source: ValidatedSource,
+    pub(crate) risk: Option<Risk>,
 }
 
 impl ItemParts {
@@ -59,49 +60,48 @@ struct RootItemContext {
 }
 
 /// Named inputs for the allowlisted-scan validation pipeline.
-struct AllowlistedScanInput {
-    id: String,
-    target_id: String,
-    target_root: String,
-    path: String,
-    size_bytes: u64,
-    mtime_unix_secs: Option<u64>,
+///
+/// This is the single named-field argument of
+/// [`ValidatedItem::from_allowlisted_scan`].
+pub struct AllowlistedScanInput {
+    /// Stable item id.
+    pub id: String,
+    /// Owning allowlisted target id.
+    pub target_id: String,
+    /// Canonical allowlist root that must contain `path`.
+    pub target_root: String,
+    /// Canonical item path to validate.
+    pub path: String,
+    /// Estimated logical size in bytes.
+    pub size_bytes: u64,
+    /// Last write time as unix seconds (if known).
+    pub mtime_unix_secs: Option<u64>,
 }
 
 /// Named inputs for the Tier 3 stale project-directory pipeline.
-struct Tier3ProjectDirectoryInput {
-    id: String,
-    logical_target_id: String,
-    path: String,
-    size_bytes: u64,
-    mtime_unix_secs: Option<u64>,
+///
+/// This is the single named-field argument of
+/// [`ValidatedItem::from_tier3_project_directory`].
+pub struct Tier3ProjectDirectoryInput {
+    /// Stable item id.
+    pub id: String,
+    /// Logical target id (e.g. `stale-rust-target`).
+    pub logical_target_id: String,
+    /// Canonical stale `target/` or `node_modules/` directory to remove.
+    pub path: String,
+    /// Estimated logical size in bytes.
+    pub size_bytes: u64,
+    /// Last write time as unix seconds (if known).
+    pub mtime_unix_secs: Option<u64>,
 }
 
 impl ValidatedItem {
     /// Crate-internal constructor for validated construction pipelines and test-support helpers.
+    ///
+    /// Takes a single named-field context instead of a long positional list.
     #[cfg(feature = "test-support")]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_internal(
-        id: String,
-        target_id: String,
-        target_root: String,
-        path: String,
-        size_bytes: u64,
-        mtime_unix_secs: Option<u64>,
-        source: ValidatedSource,
-        risk: Option<Risk>,
-    ) -> Self {
-        ItemParts {
-            id,
-            target_id,
-            target_root,
-            path,
-            size_bytes,
-            mtime_unix_secs,
-            source,
-            risk,
-        }
-        .build()
+    pub(crate) fn new_internal(parts: ItemParts) -> Self {
+        parts.build()
     }
 
     /// Item id.
@@ -144,28 +144,7 @@ impl ValidatedItem {
     /// Performs basic lexical/path-policy checks (containment within target root, non-protected,
     /// canonical lexical parsing). Moment-of-deletion handle-based revalidation remains mandatory
     /// inside the remover.
-    pub fn from_allowlisted_scan(
-        id: impl Into<String>,
-        target_id: impl Into<String>,
-        target_root: impl Into<String>,
-        path: impl Into<String>,
-        size_bytes: u64,
-        mtime_unix_secs: Option<u64>,
-    ) -> Result<Self, String> {
-        Self::from_allowlisted_scan_input(AllowlistedScanInput {
-            id: id.into(),
-            target_id: target_id.into(),
-            target_root: target_root.into(),
-            path: path.into(),
-            size_bytes,
-            mtime_unix_secs,
-        })
-    }
-
-    /// Validation pipeline for allowlisted scan items. Takes a single named
-    /// context so the logic stays below the argument-count limit while the
-    /// public wrapper keeps its established signature.
-    fn from_allowlisted_scan_input(input: AllowlistedScanInput) -> Result<Self, String> {
+    pub fn from_allowlisted_scan(input: AllowlistedScanInput) -> Result<Self, String> {
         let AllowlistedScanInput {
             id,
             target_id,
@@ -324,28 +303,7 @@ impl ValidatedItem {
     ///
     /// `path` is the stale `target/` or `node_modules/` directory to remove. `target_root` is the
     /// same directory and may be deleted after its contents are safely cleaned (unlike custom paths).
-    pub fn from_tier3_project_directory(
-        id: impl Into<String>,
-        logical_target_id: impl Into<String>,
-        path: impl Into<String>,
-        size_bytes: u64,
-        mtime_unix_secs: Option<u64>,
-    ) -> Result<Self, String> {
-        Self::from_tier3_project_directory_input(Tier3ProjectDirectoryInput {
-            id: id.into(),
-            logical_target_id: logical_target_id.into(),
-            path: path.into(),
-            size_bytes,
-            mtime_unix_secs,
-        })
-    }
-
-    /// Validation pipeline for stale project directories. Takes a single named
-    /// context so the logic stays below the argument-count limit while the
-    /// public wrapper keeps its established signature.
-    fn from_tier3_project_directory_input(
-        input: Tier3ProjectDirectoryInput,
-    ) -> Result<Self, String> {
+    pub fn from_tier3_project_directory(input: Tier3ProjectDirectoryInput) -> Result<Self, String> {
         let Tier3ProjectDirectoryInput {
             id,
             logical_target_id,

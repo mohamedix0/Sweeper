@@ -111,49 +111,22 @@ pub(super) fn record_missing_statuses(
     report.items.extend(additions);
 }
 
-/// Named inputs for a post-abort skip. Bundling the seven parameters into one
-/// context keeps the recording logic below the argument-count limit while the
-/// public wrapper keeps its established signature.
-struct PostAbortSkipContext<'a, F> {
-    journal: &'a mut JournalWriter,
-    report: &'a mut CleanReport,
-    item: &'a ValidatedItem,
-    completed: &'a mut u64,
-    total_items: u64,
-    throttle: &'a mut CleanProgressThrottle,
-    on_progress: &'a mut F,
+/// Named inputs for a post-abort skip. This is the single named-field argument
+/// of [`record_post_abort_skip`]; journal writes, report accounting and
+/// progress emission are unchanged from the original positional form.
+pub(super) struct PostAbortSkipContext<'a, F> {
+    pub(super) journal: &'a mut JournalWriter,
+    pub(super) report: &'a mut CleanReport,
+    pub(super) item: &'a ValidatedItem,
+    pub(super) completed: &'a mut u64,
+    pub(super) total_items: u64,
+    pub(super) throttle: &'a mut CleanProgressThrottle,
+    pub(super) on_progress: &'a mut F,
 }
 
 /// Record the skip of an item not processed because the batch already aborted,
 /// then emit its (throttled) progress update.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn record_post_abort_skip<F>(
-    journal: &mut JournalWriter,
-    report: &mut CleanReport,
-    item: &ValidatedItem,
-    completed: &mut u64,
-    total_items: u64,
-    throttle: &mut CleanProgressThrottle,
-    on_progress: &mut F,
-) -> Result<(), CleanError>
-where
-    F: FnMut(CleanProgress),
-{
-    record_post_abort_skip_inner(PostAbortSkipContext {
-        journal,
-        report,
-        item,
-        completed,
-        total_items,
-        throttle,
-        on_progress,
-    })
-}
-
-/// Inner recording path: takes a single named context instead of seven
-/// positional parameters. Journal writes, report accounting and progress
-/// emission are unchanged from the original implementation.
-fn record_post_abort_skip_inner<F>(ctx: PostAbortSkipContext<'_, F>) -> Result<(), CleanError>
+pub(super) fn record_post_abort_skip<F>(ctx: PostAbortSkipContext<'_, F>) -> Result<(), CleanError>
 where
     F: FnMut(CleanProgress),
 {

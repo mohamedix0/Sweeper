@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sweeper_core::analyzer::{
     analyze_path, build_analyzer_preview_items, AnalyzerNode, AnalyzerOptions, AnalyzerResult,
 };
-use sweeper_core::remover::{self, CleanOptions, ValidatedItem};
+use sweeper_core::remover::{self, CleanOptions, Tier3ProjectDirectoryInput, ValidatedItem};
 use sweeper_core::scanner::{self, ScanSettingsOptions};
 use sweeper_core::settings::{self, SweeperSettings, MAX_MIN_AGE_HOURS};
 use sweeper_knowledge::Risk;
@@ -791,21 +791,21 @@ fn tier3_clean_removes_stale_dirs_and_recycle_contents_only() {
         vec![
             ValidatedItem::from_tier3_recycle_bin_root("rb", canon_str(&recycle), rb.total_bytes)
                 .unwrap(),
-            ValidatedItem::from_tier3_project_directory(
-                "rust-target",
-                "stale-rust-target",
-                canon_str(&rust_target),
-                stale_rust.total_bytes,
-                Some(old_mtime_secs()),
-            )
+            ValidatedItem::from_tier3_project_directory(Tier3ProjectDirectoryInput {
+                id: "rust-target".to_string(),
+                logical_target_id: "stale-rust-target".to_string(),
+                path: canon_str(&rust_target),
+                size_bytes: stale_rust.total_bytes,
+                mtime_unix_secs: Some(old_mtime_secs()),
+            })
             .unwrap(),
-            ValidatedItem::from_tier3_project_directory(
-                "node-modules",
-                "stale-node-modules",
-                canon_str(&node_modules),
-                stale_nm.total_bytes,
-                Some(old_mtime_secs()),
-            )
+            ValidatedItem::from_tier3_project_directory(Tier3ProjectDirectoryInput {
+                id: "node-modules".to_string(),
+                logical_target_id: "stale-node-modules".to_string(),
+                path: canon_str(&node_modules),
+                size_bytes: stale_nm.total_bytes,
+                mtime_unix_secs: Some(old_mtime_secs()),
+            })
             .unwrap(),
         ]
     };
