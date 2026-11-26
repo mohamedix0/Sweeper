@@ -1,5 +1,7 @@
 //! Unit tests for the remover orchestration and its extracted helpers.
 
+use std::path::Path;
+
 use sweeper_winfs::ReparseTagClass;
 use tempfile::tempdir;
 
@@ -8,6 +10,7 @@ use super::ancestors::{
     ANCESTOR_PREFIX_CHECKS,
 };
 use super::revalidation::path_has_link_point_ancestor;
+use super::traversal::queued_dir_skip_reason;
 use super::*;
 
 #[test]
@@ -282,6 +285,71 @@ fn contents_result_carries_deleted_any() {
     assert!(state.deleted().deleted_any);
     assert!(state.aborted("stop".into()).deleted_any);
     assert!(state.skipped("skip".into()).deleted_any);
+}
+
+#[test]
+fn contents_final_outcome_preserves_first_skip_reason_without_deletions() {
+    // A root whose only entry was skipped must not be reported as a
+    // zero-byte deletion, and the first skip reason must survive.
+    let mut state = ContentsState::new("C:\\A\\B\\C");
+    state.record_skipped("Skipped: newer than minimum age".into());
+    state.record_skipped("Skipped: locked".into());
+    let result = state.final_outcome();
+    assert!(!result.deleted_any);
+    assert!(
+        matches!(result.outcome, ProcessOutcome::Skipped(ref reason, 0) if reason == "Skipped: newer than minimum age"),
+        "the first skip reason must be preserved for the traversal summary"
+    );
+}
+
+#[test]
+fn empty_contents_finalize_as_deleted_zero() {
+    // A genuinely empty root records no skip reason and stays a Deleted(0).
+    let state = ContentsState::new("C:\\A\\B\\C");
+    let result = state.final_outcome();
+    assert!(!result.deleted_any);
+    assert!(
+        matches!(result.outcome, ProcessOutcome::Deleted(0)),
+        "an empty root must still finalize as a zero-byte deletion"
+    );
+}
+
+#[test]
+fn completed_deletion_wins_over_recorded_skip_reason() {
+    // A zero-byte file is still a deletion; `deleted_any`, not the byte count,
+    // decides whether a skip reason may replace the Deleted outcome.
+    let mut state = ContentsState::new("C:\\A\\B\\C");
+    state.record_skipped("Skipped: newer than minimum age".into());
+    state.deleted_any = true;
+    let result = state.final_outcome();
+    assert!(result.deleted_any);
+    assert!(matches!(result.outcome, ProcessOutcome::Deleted(0)));
+}
+
+#[test]
+fn queued_dir_handle_check_flags_link_point_and_unknown_reparse() {
+    let dir = Path::new("C:\\A\\B\\C\\child");
+    let reason = queued_dir_skip_reason(ReparseTagClass::LinkPoint, dir)
+        .expect("a Link Point must be flagged before enumeration");
+    assert!(
+        reason.contains("link point"),
+        "the skip reason must name the Link Point: {reason}"
+    );
+
+    assert!(
+        queued_dir_skip_reason(ReparseTagClass::NotReparse, dir).is_none(),
+        "an ordinary directory must remain enumerable"
+    );
+    assert!(
+        queued_dir_skip_reason(ReparseTagClass::CloudPlaceholder, dir)
+            .expect("a cloud placeholder must never be traversed")
+            .contains("reparse point")
+    );
+    assert!(
+        queued_dir_skip_reason(ReparseTagClass::OtherReparse(0xE000_0001), dir)
+            .expect("an unknown reparse point must never be traversed")
+            .contains("reparse point")
+    );
 }
 
 #[test]

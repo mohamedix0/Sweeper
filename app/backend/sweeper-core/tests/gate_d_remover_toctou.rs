@@ -13,6 +13,7 @@ use std::time::Duration;
 use sweeper_core::paths::CanonicalPath;
 use sweeper_core::remover::{self, CleanOptions, ValidatedSource};
 use sweeper_testkit::{CanaryTree, Sandbox};
+use sweeper_winfs::ReparseTagClass;
 
 mod common;
 use common::*;
@@ -276,5 +277,116 @@ fn gate_d_root_identity_recheck_applies_to_all_root_sources() {
             "{label}: nested child must survive identity mismatch"
         );
     }
+    assert_sentinel_intact(&sb);
+}
+
+/// A root whose only file is newer than Minimum Age must report Skipped with
+/// the preserved reason, not a fabricated `deleted` row with zero bytes.
+#[test]
+fn skipped_young_file_reports_skipped_reason_not_zero_byte_deletion() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("young_target").unwrap();
+    let young = target_root.join("young.txt");
+    write_file(&young, b"recent");
+    // Deliberately leave the file at its current (recent) mtime. The item's
+    // own mtime binding is old, but Minimum Age checks the opened child handle.
+
+    let item = make_item("young-file", &target_root, &target_root, 1024);
+    let journal_dir = sb.create_dir("journal").unwrap();
+    let report = clean_one(item, 1024 * 1024, Duration::from_secs(3600), &journal_dir);
+
+    assert_eq!(report.items.len(), 1, "one item row expected: {report:?}");
+    assert_eq!(
+        report.items[0].status, "Skipped",
+        "a root with only a skipped file must not be reported as deleted: {report:?}"
+    );
+    assert!(
+        report.items[0].reason.contains("newer than minimum age"),
+        "the skip reason must be preserved in the Clean result: {report:?}"
+    );
+    assert_eq!(report.items[0].bytes_deleted, 0);
+    assert_eq!(report.skipped_count, 1);
+    assert_eq!(report.bytes_freed, 0);
+    assert!(
+        young.exists(),
+        "the newer-than-minimum-age file must survive"
+    );
+    assert_sentinel_intact(&sb);
+}
+
+/// A genuinely empty root has no skipped entry and must still finalize as a
+/// zero-byte deletion (distinct from the skipped-file case above).
+#[test]
+fn empty_root_still_reports_deleted_with_zero_bytes() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("empty_target").unwrap();
+
+    let item = make_item("empty-root", &target_root, &target_root, 1024);
+    let journal_dir = sb.create_dir("journal").unwrap();
+    let report = clean_one(item, 1024 * 1024, Duration::from_secs(3600), &journal_dir);
+
+    assert_eq!(report.items.len(), 1, "one item row expected: {report:?}");
+    assert_eq!(
+        report.items[0].status, "deleted",
+        "an empty root must remain a zero-byte deletion: {report:?}"
+    );
+    assert_eq!(report.items[0].bytes_deleted, 0);
+    assert_eq!(report.skipped_count, 0);
+    assert!(
+        target_root.exists(),
+        "a CustomPath root is kept, not removed"
+    );
+    assert_sentinel_intact(&sb);
+}
+
+/// A child queued as an ordinary directory can be swapped for a Link Point
+/// before its turn to be enumerated. The queued path must be inspected on a
+/// reparse-safe handle first; when it is a Link Point the directory is Skipped
+/// and never enumerated, so nothing behind it is deleted.
+#[test]
+fn queued_directory_swapped_to_link_point_is_skipped_not_traversed() {
+    let sb = Sandbox::new();
+    let target_root = sb.create_dir("swap_target").unwrap();
+    let child = target_root.join("queued_child");
+    std::fs::create_dir_all(&child).unwrap();
+    let victim = child.join("victim.txt");
+    write_file(&victim, b"must survive");
+    set_filetime(&victim, old_mtime_secs());
+    set_filetime(&child, old_mtime_secs());
+
+    let canary = CanaryTree::seed_external("gate_d_queued_child_link").unwrap();
+
+    // Enumeration of the parent sees an ordinary directory (the test hook only
+    // changes handle inspection), so the child is queued. Inspection of that
+    // queued directory then observes a Link Point, modelling a swap to a
+    // junction that happened after enumeration and before traversal.
+    sweeper_winfs::set_test_reparse_override(&child, Some(ReparseTagClass::LinkPoint));
+
+    let item = make_item("queued-child", &target_root, &target_root, 1024);
+    let journal_dir = sb.create_dir("journal").unwrap();
+    let report = clean_one(item, 1024 * 1024, Duration::from_secs(3600), &journal_dir);
+
+    // Clear the global test hook before asserting so a failed assertion cannot
+    // leak the override into other tests in this binary.
+    sweeper_winfs::set_test_reparse_override(&child, None);
+
+    assert!(
+        victim.exists(),
+        "the child must not be enumerated or deleted: {report:?}"
+    );
+    assert!(
+        canary.verify().is_ok(),
+        "canary behind the link must be intact"
+    );
+    assert_eq!(report.items.len(), 1, "one item row expected: {report:?}");
+    assert_eq!(
+        report.items[0].status, "Skipped",
+        "the swapped queued directory must be reported as Skipped: {report:?}"
+    );
+    assert!(
+        report.items[0].reason.contains("link point"),
+        "the skip reason must name the Link Point: {report:?}"
+    );
+    assert_eq!(report.bytes_freed, 0);
     assert_sentinel_intact(&sb);
 }

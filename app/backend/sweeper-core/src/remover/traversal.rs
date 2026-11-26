@@ -53,6 +53,10 @@ pub(super) struct ContentsState {
     postorder: Vec<PathBuf>,
     /// Normalized key of the contents root.
     root_key: String,
+    /// First reason an entry was skipped. Kept so a root whose work was
+    /// entirely skipped reports Skipped instead of a fabricated `Deleted(0)`.
+    /// A genuinely empty root records nothing here.
+    skipped_reason: Option<String>,
 }
 
 impl ContentsState {
@@ -63,7 +67,31 @@ impl ContentsState {
             mutated_dirs: std::collections::HashSet::new(),
             postorder: Vec::new(),
             root_key: norm_path_key(Path::new(root)),
+            skipped_reason: None,
         }
+    }
+
+    /// Record the first skip reason. Later skips never overwrite it.
+    pub(super) fn record_skipped(&mut self, reason: String) {
+        if self.skipped_reason.is_none() {
+            self.skipped_reason = Some(reason);
+        }
+    }
+
+    /// Final outcome for the contents root.
+    ///
+    /// When no entry was deleted but an entry was skipped, the root must be
+    /// reported as Skipped with that reason. `deleted_any` (not a zero byte
+    /// count) distinguishes this from a zero-byte file that was really removed:
+    /// a genuinely empty root has no skip reason and still finalizes as
+    /// `Deleted(0)`.
+    pub(super) fn final_outcome(&self) -> CleanContentsResult {
+        if !self.deleted_any {
+            if let Some(reason) = &self.skipped_reason {
+                return self.skipped(reason.clone());
+            }
+        }
+        self.deleted()
     }
 
     fn root_mutated(&self) -> bool {
@@ -204,7 +232,7 @@ struct JournalSkipRequest<'a, 'b> {
     path: &'a str,
     size: u64,
     reason: &'a str,
-    state: &'a ContentsState,
+    state: &'a mut ContentsState,
 }
 
 /// Journal an intent plus a Skipped outcome for one entry. A fatal write
@@ -216,7 +244,7 @@ fn journal_skip(req: JournalSkipRequest<'_, '_>) -> Result<(), CleanError> {
         req.size,
         None,
     )) {
-        return fail_after_partial(req.item, req.state, &mut *req.ctx.report, err);
+        return fail_after_partial(req.item, &*req.state, &mut *req.ctx.report, err);
     }
     if let Err(err) = req.ctx.journal.write_outcome(&journal::outcome_record(
         &req.item.id,
@@ -226,8 +254,11 @@ fn journal_skip(req: JournalSkipRequest<'_, '_>) -> Result<(), CleanError> {
         req.reason,
         None,
     )) {
-        return fail_after_partial(req.item, req.state, &mut *req.ctx.report, err);
+        return fail_after_partial(req.item, &*req.state, &mut *req.ctx.report, err);
     }
+    // Keep the skip reason for root finalization: a root whose entries were all
+    // skipped must not be reported as a zero-byte deletion.
+    req.state.record_skipped(req.reason.to_string());
     Ok(())
 }
 
@@ -276,7 +307,7 @@ fn delete_and_apply(
             }
         }
         ProcessOutcome::Aborted(reason, _) => return Ok(Some(req.state.aborted(reason))),
-        ProcessOutcome::Skipped(_, _) => {}
+        ProcessOutcome::Skipped(reason, _) => req.state.record_skipped(reason),
     }
     Ok(None)
 }
@@ -350,20 +381,99 @@ enum SweepDirRead {
     /// Directory was unreadable: a Skipped outcome was journaled and the sweep
     /// must stop with this result.
     Stop(CleanContentsResult),
+    /// The queued directory is no longer an ordinary directory (it became a
+    /// Link Point, a cloud/unknown reparse point, or its resolved path moved).
+    /// It was journaled as Skipped and must never be enumerated by name.
+    Skip,
+}
+
+/// Decide whether a queued directory's inspected handle is still safe to
+/// enumerate. Opening with `FILE_FLAG_OPEN_REPARSE_POINT` keeps the handle bound
+/// to the link entry itself, so a swap to a junction/symlink is visible as a
+/// Link Point on the handle instead of being silently followed into its target.
+/// Only the reparse tag is read here: resolving the handle's full path for every
+/// directory would be quadratic on deep trees. Interior junction redirects are
+/// still rejected when each child is deleted, where `revalidate_handle`
+/// compares the child's handle final path with its confirmed path.
+pub(super) fn queued_dir_skip_reason(reparse: ReparseTagClass, dir: &Path) -> Option<String> {
+    let path = dir.to_string_lossy();
+    if reparse.is_link_point() {
+        return Some(format!(
+            "Skipped: queued directory became a link point during contents clean: {path}"
+        ));
+    }
+    if !matches!(reparse, ReparseTagClass::NotReparse) {
+        return Some(format!(
+            "Skipped: reparse point (cloud/unknown) on queued directory during contents clean: {path}"
+        ));
+    }
+    None
 }
 
 /// Read one directory's entries, journaling a Skipped outcome when unreadable.
+///
+/// The queued path is opened on a reparse-safe handle and its reparse tag
+/// inspected immediately before it is enumerated; the handle is held across the
+/// enumeration. A directory queued earlier as an ordinary child can otherwise
+/// be swapped for a junction before its turn, and name-based enumeration would
+/// then follow the Link Point outside the allowlisted root. Any interior-junction
+/// swap after this check is still caught by `revalidate_handle` when each
+/// enumerated child is deleted at the moment of deletion.
 fn read_sweep_dir(
     item: &ValidatedItem,
     ctx: &mut CleanTraversalCtx<'_>,
-    state: &ContentsState,
+    state: &mut ContentsState,
     dir: &Path,
 ) -> Result<SweepDirRead, CleanError> {
+    let path = dir.to_string_lossy().to_string();
+    let handle = match sweeper_winfs::open_for_inspection(dir) {
+        Ok(handle) => handle,
+        Err(e) => {
+            let reason =
+                format!("Skipped: cannot inspect queued directory during contents clean: {e}");
+            journal_skip(JournalSkipRequest {
+                item,
+                ctx,
+                path: &path,
+                size: 0,
+                reason: &reason,
+                state,
+            })?;
+            return Ok(SweepDirRead::Skip);
+        }
+    };
+    let reparse = match sweeper_winfs::inspect_reparse_point(&handle) {
+        Ok(reparse) => reparse,
+        Err(e) => {
+            let reason =
+                format!("Skipped: queued directory inspection failed during contents clean: {e}");
+            journal_skip(JournalSkipRequest {
+                item,
+                ctx,
+                path: &path,
+                size: 0,
+                reason: &reason,
+                state,
+            })?;
+            return Ok(SweepDirRead::Skip);
+        }
+    };
+    if let Some(reason) = queued_dir_skip_reason(reparse, dir) {
+        journal_skip(JournalSkipRequest {
+            item,
+            ctx,
+            path: &path,
+            size: 0,
+            reason: &reason,
+            state,
+        })?;
+        return Ok(SweepDirRead::Skip);
+    }
+
     let entries = match sweeper_winfs::read_dir_entries(dir) {
         Ok(entries) => entries,
         Err(e) => {
             let reason = format!("Skipped: unreadable directory during contents clean: {e}");
-            let path = dir.to_string_lossy();
             journal_skip(JournalSkipRequest {
                 item,
                 ctx,
@@ -375,6 +485,9 @@ fn read_sweep_dir(
             return Ok(SweepDirRead::Stop(state.skipped(reason)));
         }
     };
+    // Hold the inspected handle until enumeration completes so the verified
+    // directory object stays open for the whole check/enumerate sequence.
+    drop(handle);
     Ok(SweepDirRead::Entries(entries))
 }
 
@@ -440,6 +553,10 @@ fn sweep_one_dir(req: SweepDirRequest<'_, '_>) -> Result<Option<CleanContentsRes
     let entries = match read_sweep_dir(item, ctx, state, dir)? {
         SweepDirRead::Entries(entries) => entries,
         SweepDirRead::Stop(result) => return Ok(Some(result)),
+        // The queued directory became a Link Point (or otherwise unsafe): it
+        // was journaled as Skipped and must not be enumerated or queued for
+        // bottom-up removal. Siblings continue to be swept.
+        SweepDirRead::Skip => return Ok(None),
     };
     // Only child directories (not the root itself) are deletion candidates.
     if !paths_equal_str(&dir.to_string_lossy(), &item.path) {
@@ -523,8 +640,9 @@ pub(super) fn clean_directory_contents(
     if let Some(result) = delete_empty_dirs(item, ctx, &mut state)? {
         return Ok(result);
     }
-    // Represent contents-clean as a deleted summary for the root item context.
-    Ok(state.deleted())
+    // An entirely skipped root is not a zero-byte deletion. A genuinely empty
+    // root (no skipped entry) still finalizes as Deleted with zero bytes.
+    Ok(state.final_outcome())
 }
 
 pub(super) fn delete_path_entry(

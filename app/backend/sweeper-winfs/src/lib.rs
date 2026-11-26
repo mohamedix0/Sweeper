@@ -1089,6 +1089,12 @@ fn test_reparse_override_for_path(path: &str) -> Option<ReparseTagClass> {
 }
 
 fn test_reparse_override_for_handle(handle: &SafeHandle) -> Option<ReparseTagClass> {
+    // Fast path: resolving a handle's final path walks every path component and
+    // is expensive on deep trees. When no override is registered the lookup
+    // below can only return None, so skip the resolution entirely.
+    if test_reparse_override_map().lock().ok()?.is_empty() {
+        return None;
+    }
     let path = get_final_path(handle).ok()?;
     test_reparse_override_for_path(&path)
 }
