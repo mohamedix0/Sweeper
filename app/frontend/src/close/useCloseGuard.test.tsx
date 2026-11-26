@@ -260,6 +260,51 @@ describe('window-close handshake (#93)', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
+  it('a second Retry cannot start a new approval while one is still in flight', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    let attempts = 0;
+    let finishRetry!: (approved: boolean) => void;
+    const tracked: CloseBridge = {
+      ...bridge,
+      resolveClose(approved, requestId) {
+        attempts += 1;
+        // The initial clean-close delivery fails once to expose the Retry button.
+        if (attempts === 1) return Promise.reject(new Error('ipc down'));
+        // Hold the first Retry open so a second click races the pending approval.
+        if (attempts === 2) {
+          return new Promise<void>((resolve) => {
+            finishRetry = () => {
+              void bridge.resolveClose(approved, requestId);
+              resolve();
+            };
+          });
+        }
+        return bridge.resolveClose(approved, requestId);
+      },
+    };
+    render(<Harness deps={depsOf(tracked, false, async () => true)} />);
+    act(() => bridge.requestHostClose('R1'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    // The first Retry is in flight; draft controls stay locked from approval intent.
+    await waitFor(() => expect(screen.getByTestId('close-pending')).toHaveTextContent('true'));
+    expect(attempts).toBe(2);
+
+    // A second Retry while the first is pending must be a no-op: no second
+    // approval is sent and closePending is not cleared during the wait.
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(attempts).toBe(2);
+    expect(bridge.decisionIds).toEqual([]);
+    expect(screen.getByTestId('close-pending')).toHaveTextContent('true');
+
+    // Once the first Retry settles, its approval is recorded.
+    finishRetry(true);
+    await waitFor(() => expect(bridge.decisionIds).toEqual(['R1']));
+  });
+
   it('a clean close with a failed delivery shows an error without reopening the dialog', async () => {
     const bridge = fakeBridge();
     const failing: CloseBridge = {

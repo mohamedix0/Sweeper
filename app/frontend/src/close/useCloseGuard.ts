@@ -71,6 +71,11 @@ function useDecisionDelivery({
 }: DecisionDeliveryDeps) {
   const requestIdRef = useRef<string | null>(null);
   const lastApprovedRef = useRef(true);
+  // A decision for the current request must not be sent again while its
+  // previous resolveClose is still pending. A rejection of the first would
+  // otherwise clear closePending and unlock draft controls during the second
+  // approval's wait, and two IPCs could race the same generation (#4711254151).
+  const deliveryInFlightRef = useRef(false);
 
   const lockClose = useCallback(() => setClosePending(true), [setClosePending]);
   const onDelivered = useCallback(() => {
@@ -96,6 +101,13 @@ function useDecisionDelivery({
     async (approved: boolean) => {
       const requestId = requestIdRef.current;
       if (!requestId) return;
+      // Guard against a second approval (e.g. a repeated Retry click) starting
+      // while this request's resolveClose is still in flight. Without this the
+      // first rejection unlocks draft controls during the second approval's
+      // wait. Sequential retry after a single failed approval is unchanged: the
+      // guard is released as soon as the in-flight call settles (#4711254151).
+      if (deliveryInFlightRef.current) return;
+      deliveryInFlightRef.current = true;
       lastApprovedRef.current = approved;
       // Lock draft controls at approval *intent*, before awaiting the IPC call:
       // Rust blocks that call until in-flight Cleans settle, and no edit may land
@@ -113,6 +125,8 @@ function useDecisionDelivery({
         applyDecisionCompletion({ ...completion, succeeded: true });
       } catch {
         applyDecisionCompletion({ ...completion, succeeded: false });
+      } finally {
+        deliveryInFlightRef.current = false;
       }
     },
     [bridge, lockClose, onDelivered, onDeliveryFailed],

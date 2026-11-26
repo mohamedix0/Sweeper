@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
-use sweeper_winfs::{self, FileIdentity, HandleInspection, ReparseTagClass};
+use sweeper_winfs::{self, FileIdentity, HandleInspection, ReparseTagClass, SafeHandle};
 
 use crate::paths::CanonicalPath;
 use crate::policy;
@@ -125,8 +125,8 @@ fn check_identity_binding(
 }
 
 /// 5) Minimum Age check (exact boundary and future mtime treated as recent /
-/// Skipped). Whole-cache sources are exempt; otherwise only directories emptied
-/// this run are exempt, and the opened handle must still be a real directory.
+///    Skipped). Whole-cache sources are exempt; otherwise only directories emptied
+///    this run are exempt, and the opened handle must still be a real directory.
 fn check_minimum_age(
     item: &ValidatedItem,
     inspection: &HandleInspection,
@@ -148,34 +148,99 @@ fn check_minimum_age(
     }
 }
 
+/// All inputs to [`revalidate_handle`] bundled into one context value.
+///
+/// The checks themselves are unchanged; grouping the six inputs keeps the
+/// public helper at a single argument and avoids long positional argument
+/// lists at every call site.
+pub(super) struct RevalidateRequest<'a> {
+    pub(super) item: &'a ValidatedItem,
+    pub(super) requested_path: &'a str,
+    pub(super) inspection: &'a HandleInspection,
+    pub(super) opts: &'a CleanOptions,
+    pub(super) allow_delete_root: bool,
+    pub(super) ignore_emptied_dir_age: bool,
+}
+
 /// Moment-of-deletion re-validation on the opened handle.
-pub(super) fn revalidate_handle(
-    item: &ValidatedItem,
-    requested_path: &str,
-    inspection: &HandleInspection,
-    opts: &CleanOptions,
-    allow_delete_root: bool,
-    ignore_emptied_dir_age: bool,
-) -> Result<(), String> {
-    let final_path = strip_extended_prefix(&inspection.final_path);
+pub(super) fn revalidate_handle(req: &RevalidateRequest<'_>) -> Result<(), String> {
+    let final_path = strip_extended_prefix(&req.inspection.final_path);
     let final_canon = CanonicalPath::parse_lexical(&final_path)
         .map_err(|e| format!("Skipped: final path invalid: {e}"))?;
-    let target_root = CanonicalPath::parse_lexical(&item.target_root)
+    let target_root = CanonicalPath::parse_lexical(&req.item.target_root)
         .map_err(|e| format!("Skipped: target root invalid: {e}"))?;
 
-    reject_confirmed_path_redirect(&final_canon, requested_path, &target_root)?;
+    reject_confirmed_path_redirect(&final_canon, req.requested_path, &target_root)?;
     // 1) Authorized source.
-    ensure_authorized_source(&item.source);
+    ensure_authorized_source(&req.item.source);
     // 2) Protected Path exclusion.
     reject_protected_path(&final_canon)?;
     // 3) Final path containment and link-point ancestors.
-    check_root_containment(&final_canon, &target_root, allow_delete_root, &item.source)?;
+    check_root_containment(
+        &final_canon,
+        &target_root,
+        req.allow_delete_root,
+        &req.item.source,
+    )?;
     // 4) Reparse tag checks.
-    reject_cloud_reparse(inspection)?;
+    reject_cloud_reparse(req.inspection)?;
     // 4a) Fail-closed identity binding.
-    check_identity_binding(item, requested_path, inspection)?;
+    check_identity_binding(req.item, req.requested_path, req.inspection)?;
     // 5) Minimum Age.
-    check_minimum_age(item, inspection, opts, ignore_emptied_dir_age)
+    check_minimum_age(
+        req.item,
+        req.inspection,
+        req.opts,
+        req.ignore_emptied_dir_age,
+    )
+}
+
+/// Open and verify an anchor handle for a root-style item's directory.
+///
+/// The handle is held for the whole contents-clean batch. It gives the batch a
+/// stable, handle-authoritative identity for the root: after a child is opened
+/// we can re-check the root path against this handle (see
+/// [`revalidate_batch_root`]) so a swap before the child open is caught and a
+/// swap after it cannot redirect the already-open child. Identity verification
+/// uses the same fail-closed rule and error strings as
+/// [`revalidate_root_identity`]. `None` means no anchor could be obtained for
+/// an unbound item, which keeps the original no-op behaviour for that case.
+pub(super) fn verify_root_anchor(item: &ValidatedItem) -> Result<Option<SafeHandle>, String> {
+    if !item.identity_required {
+        return Ok(sweeper_winfs::open_for_inspection(Path::new(&item.path)).ok());
+    }
+    let handle = sweeper_winfs::open_for_inspection(Path::new(&item.path))
+        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
+    let inspection = sweeper_winfs::inspect_handle(&handle)
+        .map_err(|e| format!("Skipped: root identity inspection failed: {e}"))?;
+    if !identity_matches(item, inspection.identity) {
+        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
+    }
+    Ok(Some(handle))
+}
+
+/// Re-verify that the root path still resolves to the exact directory object
+/// held in `anchor`.
+///
+/// This runs *after* a child handle is opened and before that handle is
+/// deleted. A root swapped before the child open is detected here because the
+/// path now resolves to a different identity; a swap after this check is
+/// harmless because the child handle already refers to the right entry. This
+/// closes the check-then-open window that a dropped root handle leaves open.
+pub(super) fn revalidate_batch_root(
+    item: &ValidatedItem,
+    anchor: &SafeHandle,
+) -> Result<(), String> {
+    let expected = sweeper_winfs::get_file_identity(anchor)
+        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
+    let current = sweeper_winfs::open_for_inspection(Path::new(&item.path))
+        .map_err(|e| format!("Skipped: cannot inspect root identity: {e}"))?;
+    let observed = sweeper_winfs::get_file_identity(&current)
+        .map_err(|e| format!("Skipped: root identity inspection failed: {e}"))?;
+    if observed != expected {
+        return Err(FILE_CHANGED_SINCE_PREVIEW.to_string());
+    }
+    Ok(())
 }
 
 /// Re-validate the bound filesystem identity of a root-style item before any of

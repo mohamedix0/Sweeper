@@ -89,9 +89,15 @@ fn build_target_preview_item(
     let node_canon = CanonicalPath::parse_lexical(&node.path)
         .map_err(|e| format!("selected node path invalid for conversion: {e}"))?;
     let matching_root = find_matching_root(&target_roots, &node_canon);
-    let validated_item =
-        build_target_validated_item(node, tid, &target, matching_root, &node_canon)?
-            .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
+    let request = TargetValidatedItemRequest {
+        node,
+        tid,
+        target: &target,
+        matching_root,
+        node_canon: &node_canon,
+    };
+    let validated_item = build_target_validated_item(&request)?
+        .with_identity_binding(capture_file_identity(std::path::Path::new(&node.path)));
 
     Ok(AnalyzerPreviewItem {
         selected_node_id: node.id.clone(),
@@ -103,28 +109,36 @@ fn build_target_preview_item(
     })
 }
 
+/// Inputs needed to route an allowlist target node to its validated-item constructor.
+struct TargetValidatedItemRequest<'a> {
+    node: &'a AnalyzerNode,
+    tid: &'a String,
+    target: &'a TargetDefinition,
+    matching_root: Option<&'a CanonicalPath>,
+    node_canon: &'a CanonicalPath,
+}
+
 /// Decide between root-style and ordinary leaf construction for a target node.
 fn build_target_validated_item(
-    node: &AnalyzerNode,
-    tid: &String,
-    target: &TargetDefinition,
-    matching_root: Option<&CanonicalPath>,
-    node_canon: &CanonicalPath,
+    request: &TargetValidatedItemRequest<'_>,
 ) -> Result<ValidatedItem, String> {
-    if matching_root.is_some_and(|r| r.is_same_path(node_canon)) {
+    if request
+        .matching_root
+        .is_some_and(|r| r.is_same_path(request.node_canon))
+    {
         // Annotate marks a resolved target root itself as selectable.
         // Route that selection through a root-style constructor instead of
         // failing the inside-root check in `from_allowlisted_scan`.
-        build_cache_root_item(node, tid, target.scope)
+        build_cache_root_item(request.node, request.tid, request.target.scope)
     } else {
-        build_allowlisted_leaf_item(node, tid, matching_root)
+        build_allowlisted_leaf_item(request.node, request.tid, request.matching_root)
     }
 }
 
 /// Build a selectable target root: whole-cache unit or contents-only allowlisted root.
 fn build_cache_root_item(
     node: &AnalyzerNode,
-    tid: &String,
+    tid: &str,
     scope: Scope,
 ) -> Result<ValidatedItem, String> {
     if !node.is_dir {
@@ -136,14 +150,14 @@ fn build_cache_root_item(
     let built = if scope == Scope::WholeCache {
         ValidatedItem::from_whole_cache_root(
             node.id.clone(),
-            tid.clone(),
+            tid.to_owned(),
             node.path.clone(),
             node.size_bytes,
         )
     } else {
         ValidatedItem::from_allowlisted_root(
             node.id.clone(),
-            tid.clone(),
+            tid.to_owned(),
             node.path.clone(),
             node.size_bytes,
         )

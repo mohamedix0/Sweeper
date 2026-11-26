@@ -81,6 +81,15 @@ const hasSegment = (segments: readonly PathSegment[], name: PathSegment): boolea
 /** Raw, separator-normalized path text split into drive prefix and post-drive remainder. */
 type RawPath = { readonly replaced: string; readonly rest: string };
 
+/**
+ * Split the post-drive remainder into segments. The bare drive root (`C:\`)
+ * has an empty remainder and therefore no segments; empty components in any
+ * other remainder are rejected earlier by `hasInvalidRawSyntax`.
+ */
+function parseSegmentsFromRest(rest: string): readonly PathSegment[] {
+  return rest === '' ? [] : rest.split('\\').map(seg);
+}
+
 /** Backend `lexical_parse` syntax checks that must run before normalization. */
 function hasInvalidRawSyntax({ replaced, rest }: RawPath): boolean {
   // Empty components are EmptySegment errors (`C:\a\\b`, `C:\a\b\`). A bare
@@ -174,8 +183,7 @@ export function parseMockPath(input: string): ParsedMockPath | null {
   const drive = replaced.slice(0, 2);
   const rest = replaced.slice(3);
   if (hasInvalidRawSyntax({ replaced, rest })) return null;
-  const parts = rest === '' ? [] : rest.split('\\');
-  const segments: readonly PathSegment[] = parts.map(seg);
+  const segments: readonly PathSegment[] = parseSegmentsFromRest(rest);
   if (hasInvalidSegment(segments)) return null;
   const normalized = segments.length
     ? [drive.toUpperCase(), ...segments.map((s) => s.text)].join('\\')

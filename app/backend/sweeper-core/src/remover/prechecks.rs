@@ -14,7 +14,7 @@ use crate::paths::CanonicalPath;
 use crate::policy;
 
 use super::remover_whole_cache::whole_cache_partial_outcome;
-use super::revalidation::{ensure_target_root_safe, revalidate_root_identity};
+use super::revalidation::{ensure_target_root_safe, revalidate_root_identity, verify_root_anchor};
 use super::{
     apply_process_outcome, clean_directory_contents, clear_readonly, delete_dir_handle,
     delete_file_handle, delete_path_entry_allowing_root, inspection_is_directory,
@@ -127,66 +127,116 @@ pub(super) fn handle_root_contents(
     item_path: &Path,
     ctx: &mut CleanTraversalCtx<'_>,
 ) -> Result<ProcessOutcome, CleanError> {
-    // Fail closed if the root was swapped since preview.
-    if let Err(reason) = revalidate_root_identity(item) {
-        return write_skip(item, &item.path, &reason, ctx);
-    }
+    // Fail closed if the root was swapped since preview, and hold the verified
+    // root handle for the whole batch. Without the held handle the root could be
+    // swapped between this check and the child `open_for_delete` calls (TOCTOU).
+    let root_anchor = match verify_root_anchor(item) {
+        Ok(anchor) => anchor,
+        Err(reason) => return write_skip(item, &item.path, &reason, ctx),
+    };
+    ctx.set_root_anchor(root_anchor);
     let contents = clean_directory_contents(item, ctx)?;
+    // Release the verified root handle before removing the root itself on a
+    // separate delete handle.
+    drop(ctx.take_root_anchor());
     if let ProcessOutcome::Deleted(bytes) = &contents.outcome {
-        return remove_root_after_contents(item, item_path, *bytes, &contents, ctx);
+        let mut fin = RootFinalization {
+            item,
+            item_path,
+            bytes: *bytes,
+            contents: &contents,
+            ctx,
+        };
+        return remove_root_after_contents(&mut fin);
     }
     Ok(contents.outcome)
 }
 
-fn remove_root_after_contents(
-    item: &ValidatedItem,
-    item_path: &Path,
+/// Inputs for finalizing a root-style item after its contents were cleaned.
+///
+/// Bundling them keeps the finalization entry point at one argument and lets
+/// the decision branches live in small, auditable helpers.
+struct RootFinalization<'a, 'b> {
+    item: &'a ValidatedItem,
+    item_path: &'a Path,
     bytes: u64,
-    contents: &CleanContentsResult,
-    ctx: &mut CleanTraversalCtx<'_>,
+    contents: &'a CleanContentsResult,
+    ctx: &'a mut CleanTraversalCtx<'b>,
+}
+
+/// Final root safety check after the children were deleted. An abort here keeps
+/// the completed child bytes instead of reporting zero.
+fn root_safety_outcome(item: &ValidatedItem, bytes: u64) -> Option<ProcessOutcome> {
+    ensure_target_root_safe(&item.target_root)
+        .err()
+        .map(|reason| ProcessOutcome::Aborted(reason, bytes))
+}
+
+/// Whether the cleaned root now holds no entries.
+fn root_is_empty(item_path: &Path) -> bool {
+    sweeper_winfs::read_dir_entries(item_path)
+        .map(|v| v.is_empty())
+        .unwrap_or(false)
+}
+
+/// Outcome when leftover entries remain in the root after the content sweep.
+///
+/// A whole-cache is all-or-nothing (leftovers mean it was not fully cleaned, so
+/// report Skipped with the already-deleted bytes). Tier 3 project directories
+/// keep their existing Deleted outcome.
+fn leftover_entries_outcome(item: &ValidatedItem, bytes: u64) -> ProcessOutcome {
+    if matches!(item.source, ValidatedSource::WholeCache { .. }) {
+        whole_cache_partial_outcome(bytes)
+    } else {
+        ProcessOutcome::Deleted(bytes)
+    }
+}
+
+/// Finalize a failed root-removal attempt, preserving already-completed child
+/// deletions when an entry actually was deleted.
+fn finish_root_delete_failure(
+    fin: &mut RootFinalization<'_, '_>,
+    err: CleanError,
+) -> Result<ProcessOutcome, CleanError> {
+    // Child deletions already completed even though the final root-removal
+    // intent could not be journaled. An already-empty root did no work, so only
+    // report a partial deletion when an entry was actually deleted.
+    if fin.contents.deleted_any {
+        apply_process_outcome(
+            fin.item,
+            ProcessOutcome::Deleted(fin.bytes),
+            &mut *fin.ctx.report,
+        );
+    }
+    Err(err)
+}
+
+fn remove_root_after_contents(
+    fin: &mut RootFinalization<'_, '_>,
 ) -> Result<ProcessOutcome, CleanError> {
     // Tier 3 stale project directories and issue #41 whole-cache targets remove
     // the now-cleaned directory root itself.
-    if !source_removes_root_after_contents(&item.source) {
-        return Ok(ProcessOutcome::Deleted(bytes));
+    if !source_removes_root_after_contents(&fin.item.source) {
+        return Ok(ProcessOutcome::Deleted(fin.bytes));
     }
-    if let Err(reason) = ensure_target_root_safe(&item.target_root) {
-        // The final root safety check aborted after the children were deleted;
-        // keep their bytes instead of reporting zero.
-        return Ok(ProcessOutcome::Aborted(reason, bytes));
+    if let Some(outcome) = root_safety_outcome(fin.item, fin.bytes) {
+        return Ok(outcome);
     }
-    let root_empty = sweeper_winfs::read_dir_entries(item_path)
-        .map(|v| v.is_empty())
-        .unwrap_or(false);
-    if !root_empty {
-        // A whole-cache is all-or-nothing. Leftover entries (for example a
-        // locked file) mean it was NOT fully cleaned, so report Skipped while
-        // still accounting for bytes already deleted. Tier 3 project directories
-        // keep their existing Deleted outcome.
-        return Ok(
-            if matches!(item.source, ValidatedSource::WholeCache { .. }) {
-                whole_cache_partial_outcome(bytes)
-            } else {
-                ProcessOutcome::Deleted(bytes)
-            },
-        );
+    if !root_is_empty(fin.item_path) {
+        return Ok(leftover_entries_outcome(fin.item, fin.bytes));
     }
-    let result =
-        delete_path_entry_allowing_root(item, &item.path, ctx, Some(bytes), contents.root_mutated);
+    let result = delete_path_entry_allowing_root(
+        fin.item,
+        &fin.item.path,
+        fin.ctx,
+        Some(fin.bytes),
+        fin.contents.root_mutated,
+    );
     match result {
         // Root was not deleted (Skipped/Aborted): carry the completed child
         // bytes instead of dropping them.
-        Ok(root_outcome) => Ok(root_outcome_with_child_bytes(root_outcome, bytes)),
-        Err(err) => {
-            // Child deletions already completed even though the final
-            // root-removal intent could not be journaled. An already-empty root
-            // did no work, so only report a partial deletion when an entry was
-            // actually deleted.
-            if contents.deleted_any {
-                apply_process_outcome(item, ProcessOutcome::Deleted(bytes), &mut *ctx.report);
-            }
-            Err(err)
-        }
+        Ok(root_outcome) => Ok(root_outcome_with_child_bytes(root_outcome, fin.bytes)),
+        Err(err) => finish_root_delete_failure(fin, err),
     }
 }
 

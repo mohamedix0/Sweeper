@@ -4,19 +4,23 @@ import type { AnalyzerProgressEvent, StartAnalyzerResult } from './client';
 type ProgressListener = (event: { payload: AnalyzerProgressEvent }) => void;
 
 const h = vi.hoisted(() => {
-  let emit: ((payload: AnalyzerProgressEvent) => void) | null = null;
+  let listener: ProgressListener | null = null;
   let finish: ((result: StartAnalyzerResult) => void) | null = null;
-  const unlisten = vi.fn();
+  // Mimic Tauri's real unlisten: detach the registered callback so later
+  // emissions on the global channel are not delivered to this listener.
+  const unlisten = vi.fn(() => {
+    listener = null;
+  });
   return {
     unlisten,
     listen: vi.fn(async (cb: ProgressListener) => {
-      emit = (payload) => cb({ payload });
+      listener = cb;
       return unlisten;
     }),
     invoke: vi.fn((_args: { root: string | null }) => new Promise<{ status: 'ok'; data: StartAnalyzerResult }>((resolve) => {
       finish = (result) => resolve({ status: 'ok', data: result });
     })),
-    emit: (payload: AnalyzerProgressEvent) => emit?.(payload),
+    emit: (payload: AnalyzerProgressEvent) => listener?.({ payload }),
     finish: (result: StartAnalyzerResult) => finish?.(result),
   };
 });
@@ -66,7 +70,9 @@ describe('startAnalyzer progress session isolation', () => {
     h.emit(progress('an-A', '8'));
     h.emit(progress('an-B', '2'));
 
-    expect(received.map((e) => e.sessionId)).toEqual(['an-B', 'an-B']);
+    // The listener was detached by unlisten, so neither post-completion
+    // emission reaches the callback — not even the matching session.
+    expect(received.map((e) => e.sessionId)).toEqual(['an-B']);
     expect(h.unlisten).toHaveBeenCalledTimes(1);
   });
 
