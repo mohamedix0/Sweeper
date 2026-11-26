@@ -22,6 +22,7 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 mod walk;
+pub use walk::file_identity_for_path;
 
 pub use allowlist::evaluate_redirected_temp_candidate;
 pub use gate_e::gate_e_violations;

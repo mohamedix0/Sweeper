@@ -13,8 +13,12 @@ export type CloseGuardState = {
   /** True from an approved decision through process exit: draft controls lock. */
   closePending: boolean;
   error: string | null;
+  /** True only when a failed delivery left a request id that can be re-sent. */
+  canRetry: boolean;
   cancel: () => void;
   saveAndClose: () => Promise<void>;
+  /** Retry a failed close: reopen the decision if the draft is dirty, else re-deliver the same request id. */
+  retryDelivery: () => Promise<void>;
 };
 
 const SAVE_FAILED_MESSAGE =
@@ -43,17 +47,35 @@ function applyDecisionCompletion(ctx: DecisionCompletionContext): void {
   }
 }
 
+// Decision delivery parameters bundled into one named value. The callbacks
+// below still depend on the individual (stable) setters, so passing an object
+// here does not churn the host subscription on every render.
+type DecisionDeliveryDeps = {
+  bridge: CloseBridge;
+  isDirty: () => boolean;
+  setClosePending: (value: boolean) => void;
+  setPromptOpen: (value: boolean) => void;
+  setError: (message: string | null) => void;
+};
+
 // Owns the generation id and decision delivery. The id lives in a ref so a late
 // answer always targets the request the user actually saw (#93). All callbacks
 // are stable for the hook's lifetime, so `deliver` does not re-subscribe the
 // host listener on every render.
-function useDecisionDelivery(
-  bridge: CloseBridge,
-  setClosePending: (value: boolean) => void,
-  setPromptOpen: (value: boolean) => void,
-  setError: (message: string | null) => void,
-) {
+function useDecisionDelivery({
+  bridge,
+  isDirty,
+  setClosePending,
+  setPromptOpen,
+  setError,
+}: DecisionDeliveryDeps) {
   const requestIdRef = useRef<string | null>(null);
+  const lastApprovedRef = useRef(true);
+  // A decision for the current request must not be sent again while its
+  // previous resolveClose is still pending. A rejection of the first would
+  // otherwise clear closePending and unlock draft controls during the second
+  // approval's wait, and two IPCs could race the same generation (#4711254151).
+  const deliveryInFlightRef = useRef(false);
 
   const lockClose = useCallback(() => setClosePending(true), [setClosePending]);
   const onDelivered = useCallback(() => {
@@ -62,19 +84,31 @@ function useDecisionDelivery(
   }, [setPromptOpen, setError]);
   const onDeliveryFailed = useCallback(
     (approved: boolean) => {
-      // Keep the id so the user can re-deliver; never leave Rust silently
-      // pending. Surface the failure, reopen the prompt and unlock controls.
+      // Keep the id so the same decision can be re-delivered; never leave Rust
+      // silently pending. Surface the failure and unlock controls.
       if (approved) setClosePending(false);
       setError(CLOSE_DELIVERY_ERROR);
-      setPromptOpen(true);
+      // Re-sample the draft at failure time: a dirty-at-arrival request may have
+      // been saved and flushed by saveAndClose before its IPC failed, and a
+      // clean-at-arrival request may have been edited while controls were
+      // unlocked. Reopen only when the draft is actually dirty now.
+      if (isDirty()) setPromptOpen(true);
     },
-    [setClosePending, setError, setPromptOpen],
+    [isDirty, setClosePending, setError, setPromptOpen],
   );
 
   const deliver = useCallback(
     async (approved: boolean) => {
       const requestId = requestIdRef.current;
       if (!requestId) return;
+      // Guard against a second approval (e.g. a repeated Retry click) starting
+      // while this request's resolveClose is still in flight. Without this the
+      // first rejection unlocks draft controls during the second approval's
+      // wait. Sequential retry after a single failed approval is unchanged: the
+      // guard is released as soon as the in-flight call settles (#4711254151).
+      if (deliveryInFlightRef.current) return;
+      deliveryInFlightRef.current = true;
+      lastApprovedRef.current = approved;
       // Lock draft controls at approval *intent*, before awaiting the IPC call:
       // Rust blocks that call until in-flight Cleans settle, and no edit may land
       // during that wait (#93).
@@ -91,6 +125,8 @@ function useDecisionDelivery(
         applyDecisionCompletion({ ...completion, succeeded: true });
       } catch {
         applyDecisionCompletion({ ...completion, succeeded: false });
+      } finally {
+        deliveryInFlightRef.current = false;
       }
     },
     [bridge, lockClose, onDelivered, onDeliveryFailed],
@@ -100,7 +136,14 @@ function useDecisionDelivery(
     requestIdRef.current = requestId;
   }, []);
 
-  return { deliver, setRequestId };
+  // Retry uses the generation id still held after a failed delivery, so Rust
+  // sees the same request rather than an unrelated new decision.
+  const retryDelivery = useCallback(async () => {
+    if (!requestIdRef.current) return;
+    await deliver(lastApprovedRef.current);
+  }, [deliver]);
+
+  return { deliver, setRequestId, retryDelivery };
 }
 
 // Handshake callbacks/state bundled into one named value. The effect below
@@ -128,9 +171,10 @@ function useHostCloseHandshake({
   useEffect(
     () =>
       bridge.onHostCloseRequest((requestId) => {
+        const dirtyAtArrival = isDirty();
         setRequestId(requestId);
         setError(null);
-        if (!isDirty()) {
+        if (!dirtyAtArrival) {
           // Clean close: no dialog, no save round trip beyond the handshake.
           void deliver(true);
           return;
@@ -225,12 +269,13 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
   const [closePending, setClosePending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { deliver, setRequestId } = useDecisionDelivery(
+  const { deliver, setRequestId, retryDelivery } = useDecisionDelivery({
     bridge,
+    isDirty,
     setClosePending,
     setPromptOpen,
     setError,
-  );
+  });
 
   useHostCloseHandshake({ bridge, isDirty, setRequestId, deliver, setError, setPromptOpen });
   useBeforeUnloadGuard(isDirty);
@@ -243,5 +288,28 @@ export function useCloseGuard({ bridge, isDirty, flushDraft }: CloseGuardDeps): 
     setError,
   });
 
-  return { promptOpen, saving, closePending, error, cancel, saveAndClose };
+  // The original approval may be stale: after a failed clean-close delivery the
+  // error notice leaves the settings view editable. Re-sample dirtiness before
+  // re-delivering so a post-failure edit cannot be silently lost on exit.
+  const retryWithDirtyCheck = useCallback(async () => {
+    // Registration-failure notices have no pending decision to re-deliver.
+    if (error !== CLOSE_DELIVERY_ERROR) return;
+    if (isDirty()) {
+      setError(null);
+      setPromptOpen(true);
+      return;
+    }
+    await retryDelivery();
+  }, [error, isDirty, setError, setPromptOpen, retryDelivery]);
+
+  return {
+    promptOpen,
+    saving,
+    closePending,
+    error,
+    canRetry: error === CLOSE_DELIVERY_ERROR,
+    cancel,
+    saveAndClose,
+    retryDelivery: retryWithDirtyCheck,
+  };
 }

@@ -2,13 +2,9 @@ import { render, screen } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { describe, expect, it } from 'vitest';
 import type { ScanItemDto, TargetScanResultDto } from '../../contract/bindings';
-import { SCAN_RESULTS_HINT_TEXT, ScanResultsSection } from './ScanResultsSection';
+import { ScanResultsSection } from './ScanResultsSection';
 
 type Props = ComponentProps<typeof ScanResultsSection>;
-
-it('the sparse-results completion hint does not point "below" itself', () => {
-  expect(SCAN_RESULTS_HINT_TEXT).toBe("That's everything found — review your selection");
-});
 
 function item(id: string, targetId: string): ScanItemDto {
   return {
@@ -85,7 +81,7 @@ describe('ScanResultsSection contextual empty-state', () => {
 
     const hint = screen.getByRole('status', { name: 'Scan results complete' });
     expect(hint).toBeInTheDocument();
-    expect(hint).toHaveTextContent(SCAN_RESULTS_HINT_TEXT);
+    expect(hint).toHaveTextContent("That's everything found — review your selection");
 
     // The hint lives inside the results pane, after the last target row.
     const list = document.querySelector('.scan-results-shell .target-list');

@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   COMPACT_SELECTION_THRESHOLD,
@@ -36,6 +34,8 @@ describe('T3 compact preview selection', () => {
     const wire = await preparePreviewSelection(selected);
     expect(wire.length).toBeLessThanOrEqual(8);
     expect(wire.length).toBeLessThan(COMPACT_SELECTION_THRESHOLD);
+    expect(wire).toHaveLength(1); // one compact descriptor token, not a giant joined key
+    expect(wire[0]!.length).toBeLessThan(1024);
 
     const expanded = expandPreviewSelectionIds(wire);
     expect(expanded.length).toBe(selected.size);
@@ -113,12 +113,6 @@ describe('T3 compact preview selection', () => {
   function totalSeen(samples: Array<[number, number]>, total: number): boolean {
     return samples.some(([done, t]) => t === total && done === total);
   }
-
-  it('never builds a giant NUL-joined selection key in the view source', () => {
-    const source = readFileSync(resolve(__dirname, 'components/ScanAndPreviewView.tsx'), 'utf8');
-    expect(source).not.toMatch(/join\(['"]\\u0000['"]\)/);
-    expect(source).not.toMatch(/join\(['"]\u0000['"]\)/);
-  });
 });
 
 describe('T3 bounded explanation resolution', () => {

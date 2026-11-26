@@ -1,7 +1,9 @@
 //! Elevation status, elevated relaunch, and single-instance handoff orchestration.
 //!
 //! Default implementations call `sweeper_core::elevation` (safe wrappers over `sweeper-winfs`).
-//! Tests inject fakes to avoid real UAC prompts and OS mutex side effects.
+//! Tests inject fakes for elevation checks/relaunch to avoid real UAC prompts;
+//! single-instance acquisition is called directly (an OS mutex is unavoidable
+//! for the startup handoff and has no fake consumer).
 
 use std::fmt;
 use std::sync::Mutex;
@@ -19,12 +21,6 @@ pub trait ElevationProvider: Send + Sync + fmt::Debug {
     fn relaunch(&self) -> Result<RelaunchOutcome, String>;
 }
 
-/// Abstraction over acquiring the single-instance mutex (DI seam).
-pub trait SingleInstanceProvider: Send + Sync + fmt::Debug {
-    /// Acquire the per-user single-instance guard, waiting up to `timeout_ms`.
-    fn acquire(&self, timeout_ms: u32) -> Result<SingleInstanceGuard, String>;
-}
-
 /// Real provider using Win32-backed `sweeper_core::elevation` primitives.
 #[derive(Debug, Clone, Default)]
 pub struct RealElevationProvider;
@@ -36,16 +32,6 @@ impl ElevationProvider for RealElevationProvider {
 
     fn relaunch(&self) -> Result<RelaunchOutcome, String> {
         elevation::relaunch_current_exe_elevated().map_err(|e| e.to_string())
-    }
-}
-
-/// Real single-instance provider.
-#[derive(Debug, Clone, Default)]
-pub struct RealSingleInstanceProvider;
-
-impl SingleInstanceProvider for RealSingleInstanceProvider {
-    fn acquire(&self, timeout_ms: u32) -> Result<SingleInstanceGuard, String> {
-        elevation::acquire_single_instance(timeout_ms).map_err(|e| e.to_string())
     }
 }
 
@@ -253,5 +239,5 @@ pub fn default_exit(code: i32) {
 /// Convenience: acquire real single-instance guard with bounded retry suitable for startup.
 pub fn acquire_startup_single_instance() -> Result<SingleInstanceGuard, String> {
     // Bounded wait to hand off from a standard instance that is relaunching elevated.
-    RealSingleInstanceProvider.acquire(15_000)
+    elevation::acquire_single_instance(15_000).map_err(|e| e.to_string())
 }

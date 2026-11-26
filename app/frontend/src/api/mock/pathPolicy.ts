@@ -81,6 +81,15 @@ const hasSegment = (segments: readonly PathSegment[], name: PathSegment): boolea
 /** Raw, separator-normalized path text split into drive prefix and post-drive remainder. */
 type RawPath = { readonly replaced: string; readonly rest: string };
 
+/**
+ * Split the post-drive remainder into segments. The bare drive root (`C:\`)
+ * has an empty remainder and therefore no segments; empty components in any
+ * other remainder are rejected earlier by `hasInvalidRawSyntax`.
+ */
+function parseSegmentsFromRest(rest: string): readonly PathSegment[] {
+  return rest === '' ? [] : rest.split('\\').map(seg);
+}
+
 /** Backend `lexical_parse` syntax checks that must run before normalization. */
 function hasInvalidRawSyntax({ replaced, rest }: RawPath): boolean {
   // Empty components are EmptySegment errors (`C:\a\\b`, `C:\a\b\`). A bare
@@ -101,6 +110,21 @@ function utf8ByteLength(text: string): number {
  * The ranges mirror `sweeper-core::paths::check_disallowed_unicode` exactly.
  */
 const DISALLOWED_UNICODE = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF\uFF0F\uFF3C\uFF1A\uFF0E]/u;
+
+/**
+ * Backend `lexical_parse` (paths.rs) rejects embedded verbatim/device markers
+ * and GLOBALROOT on separator-normalized text, before segment parsing. Folding
+ * with ASCII-only casing matches Rust `to_ascii_uppercase`.
+ */
+function hasForbiddenDeviceMarker(replaced: string): boolean {
+  const upperCheck = replaced.replace(/[a-z]/g, (c) => c.toUpperCase());
+  return upperCheck.includes('\\??\\') || upperCheck.includes('GLOBALROOT');
+}
+
+/** Replace forward slashes with the canonical Windows separator. */
+function normalizeSeparators(input: string): string {
+  return input.replace(/\//g, '\\');
+}
 
 /** Backend `is_reserved_dos_name` base names. */
 const RESERVED_DOS_NAMES: ReadonlySet<string> = new Set([
@@ -154,12 +178,12 @@ export function parseMockPath(input: string): ParsedMockPath | null {
   if (!/^[A-Za-z]:[\\/]/.test(input)) return null;
   // Normalize separators once, then validate the raw structure. Empty or
   // malformed components are never filtered/trimmed into a valid-looking path.
-  const replaced = input.replace(/\//g, '\\');
+  const replaced = normalizeSeparators(input);
+  if (hasForbiddenDeviceMarker(replaced)) return null;
   const drive = replaced.slice(0, 2);
   const rest = replaced.slice(3);
   if (hasInvalidRawSyntax({ replaced, rest })) return null;
-  const parts = rest === '' ? [] : rest.split('\\');
-  const segments: readonly PathSegment[] = parts.map(seg);
+  const segments: readonly PathSegment[] = parseSegmentsFromRest(rest);
   if (hasInvalidSegment(segments)) return null;
   const normalized = segments.length
     ? [drive.toUpperCase(), ...segments.map((s) => s.text)].join('\\')

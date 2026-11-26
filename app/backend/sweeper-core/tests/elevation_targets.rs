@@ -257,19 +257,19 @@ fn build_validated_items(
     elev: &sweeper_core::scanner::TargetScanResult,
     root_canon: &str,
 ) -> Vec<sweeper_core::remover::ValidatedItem> {
-    use sweeper_core::remover::ValidatedItem;
+    use sweeper_core::remover::{AllowlistedScanInput, ValidatedItem};
     elev.items
         .iter()
         .filter(|i| i.age_eligible)
         .map(|i| {
-            ValidatedItem::from_allowlisted_scan(
-                i.id.clone(),
-                "windows-temp",
-                root_canon.to_string(),
-                i.path.clone(),
-                i.size,
-                Some(i.mtime_unix_secs),
-            )
+            ValidatedItem::from_allowlisted_scan(AllowlistedScanInput {
+                id: i.id.clone(),
+                target_id: "windows-temp".to_string(),
+                target_root: root_canon.to_string(),
+                path: i.path.clone(),
+                size_bytes: i.size,
+                mtime_unix_secs: Some(i.mtime_unix_secs),
+            })
             .unwrap()
         })
         .collect()

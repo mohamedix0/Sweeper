@@ -187,7 +187,7 @@ All matching resolves the opened handle via `GetFinalPathNameByHandle` and compa
 | `validate_custom_path` | `path` | Verdict + reason (no side effects) |
 | `list_logs` / `read_log` | Log ID | Log metadata / entries |
 
-- **Version pins:** Tauri `2.x` (`tauri` pinned in `Cargo.lock` and built with `--locked`) and `tauri-specta = "=2.0.0-rc.29"` (verify exact compatible patch/RC at Phase 2 lock).
+- **Version pins:** Tauri `2.x` (`tauri` pinned in `Cargo.lock` and built with `--locked`) and `tauri-specta = "=2.0.0-rc.21"` with `specta = "=2.0.0-rc.22"` and `specta-typescript = "=0.0.9"` (as pinned in `app/bridge/sweeper-contract/Cargo.toml`, the source of truth for exact compatible versions).
 - **Type generation & serialization:** All DTOs and command signatures live in `sweeper-contract` and export to `frontend/src/contract/` via `tauri-specta`. Generated TS files are committed, and CI fails on any diff. All `u64` byte counts and file IDs serialize as decimal `string` in TypeScript (`specta` string serialization) to avoid JSON `BigInt` incompatibility and JS `Number.MAX_SAFE_INTEGER` precision loss.
 - **Capabilities & Isolation:** Every command is declared in the Tauri app manifest with explicit scoped permissions; no `fs` or `shell` plugins.
 - **Browser hardening:** Strict CSP (`default-src 'self'`, no `'unsafe-eval'`, no `'unsafe-inline'`), `security.freezePrototype: true`, and Tauri **Isolation pattern** for IPC validation.

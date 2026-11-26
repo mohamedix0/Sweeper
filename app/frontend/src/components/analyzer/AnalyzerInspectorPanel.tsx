@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AnalyzerNodeDto } from '../../contract/bindings';
 import { normalizeDisplayPath } from '../../utils/format';
 import { CleanSummaryBlock, ExplanationUnavailableNotice, InspectorMetaGrid, InspectorTitleRow, PathActions, PathWell, PreviewBreakdownBlock, TYPED_CONFIRMATION_PHRASE, copyText, type ExplainState, type PreviewResult } from '../cleanShared';
@@ -150,6 +150,16 @@ function SummarySlot(props: { summary: ExecuteCleanResponse | null; onOpenLog: (
 
 export function AnalyzerInspectorPanel(props: AnalyzerInspectorProps) {
   const [copiedVhdxCmd, setCopiedVhdxCmd] = useState(false);
+  const copyResetTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+        copyResetTimerRef.current = null;
+      }
+    },
+    [],
+  );
   const node = props.inspectedNode;
   let selectable = false;
   let status: ReturnType<typeof analyzerStatusText> | null = null;
@@ -162,7 +172,11 @@ export function AnalyzerInspectorPanel(props: AnalyzerInspectorProps) {
   function copyVhdxCommand(cmd: string) {
     void copyText({ text: cmd }).then(() => {
       setCopiedVhdxCmd(true);
-      window.setTimeout(() => setCopiedVhdxCmd(false), 1500);
+      if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current);
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopiedVhdxCmd(false);
+        copyResetTimerRef.current = null;
+      }, 1500);
     });
   }
   const calloutItems = deriveCalloutItemsFromSelection({

@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -21,18 +19,6 @@ describe('Sweeper frontend', () => {
   beforeEach(() => {
     window.localStorage.clear();
     document.documentElement.dataset.theme = 'dark';
-  });
-
-  it('does not advertise an unused Activity-log refresh capability (L2, #148)', () => {
-    // useLogData used to build and return a `refresh` callback that no caller
-    // ever invoked. Keep it removed so the code stops advertising a capability
-    // it does not wire up. The real refresh worker must remain: the mount and
-    // focus paths rely on it to load the Activity list (#148 narrow scope only).
-    const source = readFileSync(resolve(__dirname, 'components/logs/useLogsSelectionModel.tsx'), 'utf8');
-    expect(source).not.toMatch(/\bconst\s+refresh\s*=/);
-    expect(source).not.toMatch(/\brefresh\s*,/);
-    expect(source).not.toMatch(/cancelled:\s*\(\)\s*=>\s*false/);
-    expect(source).toMatch(/refreshLogs\(/);
   });
 
   it('renders Activity History list and opens a selected log entry', async () => {

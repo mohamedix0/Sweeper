@@ -5,7 +5,9 @@ use sweeper_contract::{
     U64String,
 };
 use sweeper_core::analyzer;
-use sweeper_core::remover::ValidatedItem;
+use sweeper_core::remover::{
+    capture_file_identity, AllowlistedScanInput, Tier3ProjectDirectoryInput, ValidatedItem,
+};
 use sweeper_core::scanner::is_whole_cache_target_id;
 
 use super::super::mapping::sanitize_analyzer_build_msg;
@@ -237,7 +239,12 @@ impl SessionStore {
         item: &StoredItem,
         assembly: &mut ScanAssembly<'_>,
     ) -> Result<(), ContractError> {
-        let validated_item = Self::validate_scan_item(session, item)?;
+        // The display-only ScanItemDto does not carry the scanner's file
+        // identity, so bind the object observed at preview time. A missing
+        // identity is retained as a required-but-missing binding and fails
+        // closed during moment-of-deletion revalidation.
+        let validated_item = Self::validate_scan_item(session, item)?
+            .with_identity_binding(capture_file_identity(std::path::Path::new(&item.dto.path)));
         let size = item.dto.size.get();
         let entry = assembly
             .by_target
@@ -278,14 +285,14 @@ impl SessionStore {
                 reason: "selected item is not within a resolved target root".to_string(),
             }
         })?;
-        ValidatedItem::from_allowlisted_scan(
-            item.dto.id.clone(),
-            item.target_id.clone(),
+        ValidatedItem::from_allowlisted_scan(AllowlistedScanInput {
+            id: item.dto.id.clone(),
+            target_id: item.target_id.clone(),
             target_root,
-            item.dto.path.clone(),
-            item.dto.size.get(),
-            Some(item.dto.mtime_unix_secs.get()),
-        )
+            path: item.dto.path.clone(),
+            size_bytes: item.dto.size.get(),
+            mtime_unix_secs: Some(item.dto.mtime_unix_secs.get()),
+        })
         .map_err(|_| ContractError::InvalidInput {
             reason: "selected item failed validation".to_string(),
         })
@@ -324,13 +331,13 @@ impl SessionStore {
             item.target_id.as_str(),
             "stale-rust-target" | "stale-node-modules"
         ) {
-            return ValidatedItem::from_tier3_project_directory(
-                item.dto.id.clone(),
-                item.target_id.clone(),
-                item.dto.path.clone(),
-                item.dto.size.get(),
-                Some(item.dto.mtime_unix_secs.get()),
-            )
+            return ValidatedItem::from_tier3_project_directory(Tier3ProjectDirectoryInput {
+                id: item.dto.id.clone(),
+                logical_target_id: item.target_id.clone(),
+                path: item.dto.path.clone(),
+                size_bytes: item.dto.size.get(),
+                mtime_unix_secs: Some(item.dto.mtime_unix_secs.get()),
+            })
             .map_err(|_| ContractError::InvalidInput {
                 reason: "selected item failed validation".to_string(),
             });

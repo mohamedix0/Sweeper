@@ -9,7 +9,7 @@ This runbook separates **automated release evidence** (Gates A–G, mutation sco
 
 Sweeper's safety model is deny-by-default and defense-in-depth (validated `Allowlist` / `Custom Path`s, non-disableable `Protected Path`s, handle-based moment-of-deletion re-validation, `Link Point`s never followed, cloud placeholders always `Skipped`, ID-only deletion IPC, and bounded `ScanSession` / `preview_token` lifetimes). Automated tests and CI **must not** perform live deletion on real user/system paths.
 
-Automated checks therefore stop at **sentinel sandboxes / isolated temp fixtures** (`sweeper-testkit` canary + sentinel harness, `cargo test` integration suites, fuzz/mutation targets) and **mock-backend frontend/E2E runs** (Vitest + Playwright against the Vite dev server with `VITE_SWEEPER_BACKEND=mock`, as configured in `app/frontend/playwright.config.ts`).
+Automated checks therefore stop at **sentinel sandboxes / isolated temp fixtures** (`sweeper-testkit` canary + sentinel harness, `cargo test` integration suites, fuzz/mutation targets) and **mock-backend frontend/E2E runs** (Vitest + Playwright against the Vite dev server, where mock mode is selected at runtime by `shouldUseMockBackend()` in `app/frontend/src/api/client.ts`: `VITE_SWEEPER_MOCK` is `'1'` or `'true'`, `MODE === 'test'`, or no Tauri runtime is present).
 
 The following remain **human-gated** on a real Windows machine because they require operator judgment, real filesystem state, and/or release credentials that must never enter the repository or CI logs:
 - **Gate H.3:** Real-machine read-only `Scan` inspection (including `Risk`, byte sizes, `Protected`/`Unknown` behavior, and elevation-gated target visibility) before any real `Clean`.
@@ -31,7 +31,7 @@ CI job: `.github/workflows/ci.yml` → `gate-a-and-backend` (Windows, Rust `1.99
 | Gate A static & privacy checks | `powershell -ExecutionPolicy Bypass -File scripts/gate-a-check.ps1` (bans deletion primitives outside allowed modules, enforces bridge dependency/privacy-scrub rules, fails on forbidden local paths/PII patterns in tracked files) |
 | Clippy (workspace, deny warnings) | `cargo clippy --manifest-path app/Cargo.toml --workspace --all-targets --locked -- -D warnings` |
 | Rust dependency/license/advisory checks | `cargo deny check` (from `app/`) and `cargo audit` (from `app/`) |
-| Frontend dependency audit (high) | `pnpm --dir app/frontend audit --audit-level=high` (run in `gate-g-frontend` in CI) |
+| Frontend dependency audit (high) | `node scripts/check-audit.mjs` from `app/frontend` (run in `gate-g-frontend` in CI): wraps `pnpm audit --json` and fails closed on any high/critical advisory (no advisories exempted) |
 | Frontend type/lint gates | `pnpm --dir app/frontend run typecheck` and `pnpm --dir app/frontend run lint` (run in `gate-g-frontend` in CI) |
 
 Local preflight minimum (before broader test runs): `scripts/gate-a-check.ps1`, `cargo fmt --check`, and `cargo clippy` as above.
@@ -47,14 +47,14 @@ CI job: `.github/workflows/ci.yml` → `gate-g-frontend` (Windows, Node 24, pnpm
 | Step | Command (from repo root unless noted) |
 |---|---|
 | Install | `pnpm --dir app/frontend install --frozen-lockfile` |
-| Dependency audit | `pnpm --dir app/frontend audit --audit-level=high` |
+| Dependency audit | `node scripts/check-audit.mjs` from `app/frontend` (wraps `pnpm audit --json`; fails on any high/critical advisory, none exempted) |
 | Typecheck | `pnpm --dir app/frontend run typecheck` |
 | Lint | `pnpm --dir app/frontend run lint` |
 | Unit/component tests (Vitest) | `pnpm --dir app/frontend run test` (`vitest run`) |
 | Production build | `pnpm --dir app/frontend run build` (`tsc --noEmit && vite build`) |
 | E2E (Playwright) | `pnpm --dir app/frontend run test:e2e` (`playwright test`) |
 
-Playwright is configured in `app/frontend/playwright.config.ts` to use the installed Microsoft Edge channel (`channel: "msedge"`), headless mode, base URL `http://127.0.0.1:4173`, and a Vite dev server command that forces mock backend mode (`VITE_SWEEPER_BACKEND=mock`). CI must not download Playwright browsers.
+Playwright is configured in `app/frontend/playwright.config.ts` to use the installed Microsoft Edge channel (`channel: "msedge"`), headless mode, base URL `http://127.0.0.1:4173`, and a Vite dev server command (`pnpm exec vite --host 127.0.0.1 --port 4173 --strictPort`) that sets no backend env vars; mock backend mode is selected at runtime by `shouldUseMockBackend()` in `app/frontend/src/api/client.ts` (`VITE_SWEEPER_MOCK === '1'` / `'true'`, `MODE === 'test'`, or absence of the Tauri runtime). CI must not download Playwright browsers.
 
 ### Mutation Gate — H.2 (`mutation-gate`)
 CI job: `.github/workflows/ci.yml` → `mutation-gate` (Windows, Rust `1.99.1`, `CARGO_TARGET_DIR=${{ github.workspace }}/app/target`).
@@ -92,7 +92,7 @@ CI requires **both** `.exe` artifacts plus `SHA256SUMS.txt` and uploads `target/
 - [ ] **Run as standard user first (default, non-elevated):** Launch Sweeper without elevation and perform a read-only `Scan` (default tiers as configured). Confirm the UI/preview data reflects `Scan` results only (no `Clean`).
 - [ ] **Inspect discovered items:** Review each listed `Target`/item for expected identity, description, `Risk` badge (`Safe` / `Caution` / `Unknown` / `Protected` where surfaced), and reported byte counts/sizes. Spot-check obviously incorrect sizes or unexpected paths before proceeding.
 - [ ] **Verify protection behavior:** Confirm `Protected Path`s and non-selectable/protected items are not presented as cleanable. Confirm `Unknown` items are not selectable unless explicitly allowed by settings and gated flows (not part of first-clean). Confirm any items that should be `Skipped` by policy are not misclassified as cleanable.
-- [ ] **Review Tier 3 / elevation-gated targets (read-only):** If evaluating Phase 6 elevation behavior, run an **elevated** read-only `Scan`/inspection and confirm only the audited elevation-requiring `Target`s are unlocked for consideration when elevation is enabled: `windows-temp`, `windows-update-download-cache`, `windows-prefetch`, and `programdata-package-cache` (all `Tier3`, `Caution`, `requires_elevation=true` in `app/backend/sweeper-knowledge/allowlist.toml`). Confirm they display `"Requires administrator"` / elevation gating in the UI where applicable and that no other protections are weakened.
+- [ ] **Review Tier 3 / elevation-gated targets (read-only):** If evaluating Phase 6 elevation behavior, enable **both** `enable_elevation_targets` ("Allow system-wide Windows caches (Admin)") and `enable_tier3` ("Deep Cleanup") in settings, run an **elevated** read-only `Scan`/inspection, and confirm only the audited elevation-requiring `Target`s are unlocked for consideration. All eight `requires_elevation = true` targets in `app/backend/sweeper-knowledge/allowlist.toml` are (all `Tier3`, `Caution`): `windows-temp`, `windows-update-download-cache`, `windows-prefetch`, `programdata-package-cache`, `windows-delivery-optimization-cache`, `programdata-wer-report-archive`, `programdata-wer-report-queue`, and `windows-defender-scan-history`. The scanner gates every `requires_elevation = true` target on a single `elev_ok` flag (`app/backend/sweeper-core/src/scanner/mod.rs`), which stays true only when the process is elevated **and** `enable_tier3` **and** `enable_elevation_targets` are both enabled. Enabling `enable_elevation_targets` alone does **not** unlock the eight: with `enable_tier3 = false`, `elev_ok` is false and all eight are excluded from the scan. Confirm the settings UI reflects both prerequisites ("Deep Cleanup enabled" / "Administrator required" chips), that the unlocked targets display elevation gating where applicable, and that no other protections are weakened.
 - [ ] **No unexpected selection state:** Ensure nothing outside the intended reviewed set is preselected and that no `Custom Path` or `Unknown` selection is included for the first live clean.
 - [ ] **Stop condition:** If any classification, size, path, or gating looks wrong, **do not proceed to H.4**. Capture evidence (screenshots/log IDs if applicable) and investigate before any real `Clean`.
 

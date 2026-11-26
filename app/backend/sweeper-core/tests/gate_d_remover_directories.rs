@@ -4,7 +4,7 @@
 use std::fs;
 use std::time::Duration;
 
-use sweeper_core::remover::{self, CleanOptions};
+use sweeper_core::remover::{self, CleanOptions, Tier3ProjectDirectoryInput};
 use sweeper_testkit::Sandbox;
 
 mod common;
@@ -32,13 +32,13 @@ fn gate_d_tier3_project_directory_removed_after_ntfs_mtime_bump_on_emptied_dirs(
     }
 
     let stale_canon = canonical_str(&stale_dir);
-    let item = remover::ValidatedItem::from_tier3_project_directory(
-        "stale-target",
-        "stale-rust-target",
-        stale_canon.clone(),
-        7,
-        Some(old_mtime_secs()),
-    )
+    let item = remover::ValidatedItem::from_tier3_project_directory(Tier3ProjectDirectoryInput {
+        id: "stale-target".to_string(),
+        logical_target_id: "stale-rust-target".to_string(),
+        path: stale_canon.clone(),
+        size_bytes: 7,
+        mtime_unix_secs: Some(old_mtime_secs()),
+    })
     .unwrap();
     let journal_dir = sb.create_dir("journal").unwrap();
     let clean_now = now();

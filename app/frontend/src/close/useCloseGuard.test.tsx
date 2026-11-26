@@ -12,6 +12,12 @@ function Harness({ deps }: { deps: CloseGuardDeps }) {
     <div>
       <output data-testid="prompt">{String(guard.promptOpen)}</output>
       <output data-testid="close-pending">{String(guard.closePending)}</output>
+      {guard.error && !guard.promptOpen && (
+        <p className="notice error close-error-notice" role="alert">
+          {guard.error}
+          {guard.canRetry && <button type="button" onClick={() => void guard.retryDelivery()}>Retry</button>}
+        </p>
+      )}
       {guard.promptOpen && (
         <CloseDraftDialog
           saving={guard.saving}
@@ -26,6 +32,18 @@ function Harness({ deps }: { deps: CloseGuardDeps }) {
 
 function depsOf(bridge: CloseBridge, dirty: boolean, flush: () => Promise<boolean>): CloseGuardDeps {
   return { bridge, isDirty: () => dirty, flushDraft: flush };
+}
+
+function failFirstDelivery(bridge: CloseBridge): CloseBridge {
+  let attempts = 0;
+  return {
+    ...bridge,
+    async resolveClose(approved, requestId) {
+      attempts += 1;
+      await bridge.resolveClose(approved, requestId);
+      if (attempts === 1) throw new Error('ipc down');
+    },
+  };
 }
 
 describe('window-close handshake (#93)', () => {
@@ -225,5 +243,96 @@ describe('window-close handshake (#93)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
     expect(screen.getByRole('alertdialog')).toBeInTheDocument();
     expect(screen.getByTestId('close-pending')).toHaveTextContent('false');
+  });
+
+  it('Retry re-delivers the same request id and decision and clears the close error notice', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    const tracked = failFirstDelivery(bridge);
+    render(<Harness deps={depsOf(tracked, false, async () => true)} />);
+    act(() => bridge.requestHostClose('R1'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(bridge.decisions).toEqual([true, true]));
+    expect(bridge.decisionIds).toEqual(['R1', 'R1']);
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
+  it('a second Retry cannot start a new approval while one is still in flight', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    let attempts = 0;
+    let finishRetry!: (approved: boolean) => void;
+    const tracked: CloseBridge = {
+      ...bridge,
+      resolveClose(approved, requestId) {
+        attempts += 1;
+        // The initial clean-close delivery fails once to expose the Retry button.
+        if (attempts === 1) return Promise.reject(new Error('ipc down'));
+        // Hold the first Retry open so a second click races the pending approval.
+        if (attempts === 2) {
+          return new Promise<void>((resolve) => {
+            finishRetry = () => {
+              void bridge.resolveClose(approved, requestId);
+              resolve();
+            };
+          });
+        }
+        return bridge.resolveClose(approved, requestId);
+      },
+    };
+    render(<Harness deps={depsOf(tracked, false, async () => true)} />);
+    act(() => bridge.requestHostClose('R1'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    // The first Retry is in flight; draft controls stay locked from approval intent.
+    await waitFor(() => expect(screen.getByTestId('close-pending')).toHaveTextContent('true'));
+    expect(attempts).toBe(2);
+
+    // A second Retry while the first is pending must be a no-op: no second
+    // approval is sent and closePending is not cleared during the wait.
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(attempts).toBe(2);
+    expect(bridge.decisionIds).toEqual([]);
+    expect(screen.getByTestId('close-pending')).toHaveTextContent('true');
+
+    // Once the first Retry settles, its approval is recorded.
+    finishRetry(true);
+    await waitFor(() => expect(bridge.decisionIds).toEqual(['R1']));
+  });
+
+  it('a clean close with a failed delivery shows an error without reopening the dialog', async () => {
+    const bridge = fakeBridge();
+    const failing: CloseBridge = {
+      ...bridge,
+      resolveClose: vi.fn(async () => { throw new Error('ipc down'); }),
+    };
+    render(<Harness deps={depsOf(failing, false, async () => true)} />);
+    act(() => bridge.requestHostClose());
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByTestId('prompt')).toHaveTextContent('false');
+  });
+
+  it('Retry reopens the decision when the draft became dirty after a failed clean close', async () => {
+    const user = userEvent.setup();
+    const bridge = fakeBridge();
+    const failing: CloseBridge = { ...bridge, resolveClose: vi.fn(async () => { throw new Error('ipc down'); }) };
+    let dirty = false;
+    render(<Harness deps={{ bridge: failing, isDirty: () => dirty, flushDraft: async () => true }} />);
+    act(() => bridge.requestHostClose('R3'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be delivered/i);
+    dirty = true;
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(failing.resolveClose).toHaveBeenCalledTimes(1);
   });
 });

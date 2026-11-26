@@ -1,4 +1,5 @@
-﻿use std::sync::Arc;
+﻿use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use sweeper_contract::{AnalyzerProgressEvent, ContractError, StartAnalyzerResponse, U64String};
 use sweeper_core::analyzer::{self, AnalyzerProgress};
@@ -30,9 +31,14 @@ where
 {
     let cb = on_progress?;
     let sid = session_id.to_string();
+    // The first emission is the explicit start event below; mark it so clients
+    // can latch the authoritative session id before any walk progress arrives.
+    let started = AtomicBool::new(false);
     Some(Arc::new(move |p: AnalyzerProgress| {
+        let is_start = !started.swap(true, Ordering::Relaxed);
         cb(AnalyzerProgressEvent {
             session_id: sid.clone(),
+            is_start,
             scanned_dirs: U64String(p.scanned_dirs),
             scanned_files: U64String(p.scanned_files),
             scanned_bytes: U64String(p.scanned_bytes),

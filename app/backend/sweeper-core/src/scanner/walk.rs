@@ -323,7 +323,7 @@ pub(super) fn build_scan_item(
     }
 }
 
-pub(super) fn file_identity_for_path(path: &Path) -> Option<FileIdentity> {
+pub fn file_identity_for_path(path: &Path) -> Option<FileIdentity> {
     sweeper_winfs::open_for_inspection(path)
         .and_then(|h| sweeper_winfs::get_file_identity(&h))
         .ok()

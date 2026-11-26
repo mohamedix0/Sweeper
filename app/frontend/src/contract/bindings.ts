@@ -155,7 +155,7 @@ async resetPendingClose() : Promise<Result<null, ContractError>> {
 export const events = __makeEvents__<{
 scanProgressEvent: { kind: "started"; session_id: string } | { kind: "progress"; session_id: string; completed_targets: number; total_targets: number; current_target_id: string | null; current_target_name: string | null; scanned_items: string; scanned_bytes: string } | { kind: "cancelled"; session_id: string } | { kind: "completed"; session_id: string } | { kind: "failed"; session_id: string; error: ContractError },
 cleanProgressEvent: { previewToken: string; targetId: string; completedItems: string; totalItems: string; bytesFreedSoFar: string; status: string },
-analyzerProgressEvent: { sessionId: string; scannedDirs: string; scannedFiles: string; scannedBytes: string; currentPath: string | null },
+analyzerProgressEvent: { sessionId: string; isStart: boolean; scannedDirs: string; scannedFiles: string; scannedBytes: string; currentPath: string | null },
 closeRequestedByHost: { requestId: string }
 }>({
 scanProgressEvent: "ScanProgressEvent",

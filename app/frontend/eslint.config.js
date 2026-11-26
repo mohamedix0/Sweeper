@@ -2,6 +2,15 @@ import tsParser from '@typescript-eslint/parser';
 import tsPlugin from '@typescript-eslint/eslint-plugin';
 import reactHooks from 'eslint-plugin-react-hooks';
 
+// Gate A policy shared by the global config and any file-scoped override that
+// replaces `no-restricted-syntax` for a specific file.
+const COMMON_RESTRICTED_SYNTAX = [
+  {
+    selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+    message: 'dangerouslySetInnerHTML is forbidden by Static Gate A frontend policy.',
+  },
+];
+
 export default [
   {
     files: ['**/*.{ts,tsx}'],
@@ -40,16 +49,27 @@ export default [
           message: 'Use JSX; dynamic element creation is restricted in this codebase.',
         },
       ],
-      'no-restricted-syntax': [
-        'error',
-        {
-          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
-          message: 'dangerouslySetInnerHTML is forbidden by Static Gate A frontend policy.',
-        },
-      ],
+      'no-restricted-syntax': ['error', ...COMMON_RESTRICTED_SYNTAX],
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
       '@typescript-eslint/no-explicit-any': 'off',
+    },
+  },
+  {
+    files: ['src/components/logs/useLogsSelectionModel.tsx'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...COMMON_RESTRICTED_SYNTAX,
+        {
+          selector: "VariableDeclarator[id.name='refresh']",
+          message: 'The Activity-log model must not declare an unused `refresh` capability (#148).',
+        },
+        {
+          selector: "Property[key.name='refresh']",
+          message: 'The Activity-log model must not expose an unused `refresh` capability (#148).',
+        },
+      ],
     },
   },
   {
